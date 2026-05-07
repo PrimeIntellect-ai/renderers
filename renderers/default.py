@@ -110,7 +110,9 @@ class DefaultRenderer:
             reasoning_parser, tokenizer, get_reasoning_parser
         )
         self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
+        self._preserve_thinking_between_tool_calls = (
+            preserve_thinking_between_tool_calls
+        )
 
     @property
     def supports_tools(self) -> bool:

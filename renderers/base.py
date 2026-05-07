@@ -462,9 +462,7 @@ def create_renderer(
         "reasoning_parser=<name> to enable structured output parsing.",
         model_name or "<unnamed tokenizer>",
     )
-    return RENDERER_REGISTRY["default"](
-        tokenizer, **default_kwargs, **preserve_kwargs
-    )
+    return RENDERER_REGISTRY["default"](tokenizer, **default_kwargs, **preserve_kwargs)
 
 
 # ---------------------------------------------------------------------------

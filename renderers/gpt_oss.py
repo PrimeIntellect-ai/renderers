@@ -157,7 +157,9 @@ class GptOssRenderer:
         self._knowledge_cutoff = knowledge_cutoff
         self._model_identity = model_identity
         self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
+        self._preserve_thinking_between_tool_calls = (
+            preserve_thinking_between_tool_calls
+        )
 
         # Cache special-token IDs for the bridge / generation-prompt path.
         self._start = self._token_id("<|start|>")

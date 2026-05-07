@@ -60,7 +60,9 @@ class GLM45Renderer:
         self._tokenizer = tokenizer
         self._enable_thinking = enable_thinking
         self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
+        self._preserve_thinking_between_tool_calls = (
+            preserve_thinking_between_tool_calls
+        )
 
         self._gmask = self._token_id("[gMASK]")
         self._sop = self._token_id("<sop>")

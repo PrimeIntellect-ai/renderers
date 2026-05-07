@@ -48,7 +48,9 @@ class KimiK2Renderer:
         self._tokenizer = tokenizer
         self._enable_thinking = enable_thinking
         self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
+        self._preserve_thinking_between_tool_calls = (
+            preserve_thinking_between_tool_calls
+        )
 
         self._im_user = self._token_id("<|im_user|>")
         self._im_assistant = self._token_id("<|im_assistant|>")

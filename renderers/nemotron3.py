@@ -86,7 +86,9 @@ class Nemotron3Renderer:
         self._tokenizer = tokenizer
         self._enable_thinking = enable_thinking
         self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
+        self._preserve_thinking_between_tool_calls = (
+            preserve_thinking_between_tool_calls
+        )
 
         # Look up special token IDs from the tokenizer (not hardcoded).
         # <|endoftext|> is optional: Nemotron-3 Nano / Super tokenizers ship

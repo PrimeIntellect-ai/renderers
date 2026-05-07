@@ -147,7 +147,9 @@ def test_should_preserve_past_thinking_classification():
     )
 
 
-def test_preserve_flags_default_unchanged(model_name, tokenizer, renderer_name, renderer):
+def test_preserve_flags_default_unchanged(
+    model_name, tokenizer, renderer_name, renderer
+):
     # A renderer constructed with both flags explicitly ``False`` must
     # produce byte-identical output to one constructed with the defaults.
     bare = renderer.render_ids(CONVERSATION)
@@ -162,15 +164,17 @@ def test_preserve_flags_default_unchanged(model_name, tokenizer, renderer_name, 
     )
 
 
-def test_preserve_all_thinking_grows_or_no_op(model_name, tokenizer, renderer_name, renderer):
+def test_preserve_all_thinking_grows_or_no_op(
+    model_name, tokenizer, renderer_name, renderer
+):
     from renderers.default import DefaultRenderer
 
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
     default = renderer.render_ids(CONVERSATION)
-    preserved = _make(
-        tokenizer, renderer_name, preserve_all_thinking=True
-    ).render_ids(CONVERSATION)
+    preserved = _make(tokenizer, renderer_name, preserve_all_thinking=True).render_ids(
+        CONVERSATION
+    )
 
     if model_name in NO_OP_MODELS:
         assert preserved == default, (
@@ -185,7 +189,9 @@ def test_preserve_all_thinking_grows_or_no_op(model_name, tokenizer, renderer_na
         )
 
 
-def test_preserve_between_tool_calls_strict_subset(model_name, tokenizer, renderer_name, renderer):
+def test_preserve_between_tool_calls_strict_subset(
+    model_name, tokenizer, renderer_name, renderer
+):
     """``preserve_thinking_between_tool_calls`` is strictly weaker than
     ``preserve_all_thinking``: token count satisfies default <= between <= all."""
     from renderers.default import DefaultRenderer
@@ -196,9 +202,9 @@ def test_preserve_between_tool_calls_strict_subset(model_name, tokenizer, render
     between = _make(
         tokenizer, renderer_name, preserve_thinking_between_tool_calls=True
     ).render_ids(CONVERSATION)
-    all_ = _make(
-        tokenizer, renderer_name, preserve_all_thinking=True
-    ).render_ids(CONVERSATION)
+    all_ = _make(tokenizer, renderer_name, preserve_all_thinking=True).render_ids(
+        CONVERSATION
+    )
     assert len(default) <= len(between) <= len(all_), (
         f"{model_name}: expected default <= between <= all, "
         f"got {len(default)} <= {len(between)} <= {len(all_)}"
@@ -224,7 +230,9 @@ LIVE_TOOL_CYCLE = [
 ]
 
 
-def test_preserve_btc_on_live_cycle_matches_all(model_name, tokenizer, renderer_name, renderer):
+def test_preserve_btc_on_live_cycle_matches_all(
+    model_name, tokenizer, renderer_name, renderer
+):
     """In a live tool cycle (no trailing user), every past-asst sits in
     the current tool-bearing segment. ``preserve_thinking_between_tool_calls``
     should preserve all of their thinking — same set of asst messages as
@@ -238,9 +246,9 @@ def test_preserve_btc_on_live_cycle_matches_all(model_name, tokenizer, renderer_
     btc = _make(
         tokenizer, renderer_name, preserve_thinking_between_tool_calls=True
     ).render_ids(LIVE_TOOL_CYCLE)
-    all_ = _make(
-        tokenizer, renderer_name, preserve_all_thinking=True
-    ).render_ids(LIVE_TOOL_CYCLE)
+    all_ = _make(tokenizer, renderer_name, preserve_all_thinking=True).render_ids(
+        LIVE_TOOL_CYCLE
+    )
     assert btc == all_, (
         f"{model_name}: in a live tool cycle btc must match preserve_all "
         f"(got len(btc)={len(btc)}, len(all)={len(all_)})"
@@ -316,9 +324,9 @@ def test_preserve_all_thinking_emits_every_asst_reasoning(
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
 
-    ids = _make(
-        tokenizer, renderer_name, preserve_all_thinking=True
-    ).render_ids(TWO_BLOCK_CONV, tools=TWO_BLOCK_TOOLS)
+    ids = _make(tokenizer, renderer_name, preserve_all_thinking=True).render_ids(
+        TWO_BLOCK_CONV, tools=TWO_BLOCK_TOOLS
+    )
     text = tokenizer.decode(ids)
 
     if model_name in NEVER_PRESERVES_MODELS:

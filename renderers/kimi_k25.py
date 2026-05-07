@@ -519,7 +519,9 @@ class KimiK25Renderer:
         self._tokenizer = tokenizer
         self._enable_thinking = enable_thinking
         self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
+        self._preserve_thinking_between_tool_calls = (
+            preserve_thinking_between_tool_calls
+        )
 
         # Core structural tokens — all must be single special tokens in the vocab
         self._im_user = self._token_id("<|im_user|>")

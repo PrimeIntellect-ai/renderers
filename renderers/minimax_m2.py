@@ -66,7 +66,9 @@ class MiniMaxM2Renderer:
         self._tokenizer = tokenizer
         self._default_system = default_system
         self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
+        self._preserve_thinking_between_tool_calls = (
+            preserve_thinking_between_tool_calls
+        )
 
         self._bos = self._token_id("]~!b[")
         self._role = self._token_id("]~b]")

@@ -54,7 +54,9 @@ class DeepSeekV3Renderer:
         self._tokenizer = tokenizer
         self._enable_thinking = enable_thinking
         self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
+        self._preserve_thinking_between_tool_calls = (
+            preserve_thinking_between_tool_calls
+        )
 
         # ── BOS / EOS ────────────────────────────────────────────────
         self._bos = self._get_special_token(f"begin{_US}of{_US}sentence")

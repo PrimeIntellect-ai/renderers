@@ -425,3 +425,39 @@ def test_create_renderer_records_flag_state(model_name, renderer_name, tokenizer
         )
         assert btc_on._preserve_all_thinking is False
         assert btc_on._preserve_thinking_between_tool_calls is True
+
+
+# ---------------------------------------------------------------------------
+# Regression: legacy chat-template-kwarg pass-throughs are gone
+# ---------------------------------------------------------------------------
+
+
+def test_glm5_constructor_rejects_clear_thinking():
+    """``clear_thinking`` was a chat-template-kwarg pass-through. It is
+    superseded by the renderer-agnostic ``preserve_all_thinking`` override
+    and must no longer be accepted by the constructor — its default-True
+    semantics are now baked into the render gate."""
+    from transformers import AutoTokenizer
+
+    from renderers.glm5 import GLM5Renderer
+
+    tok = AutoTokenizer.from_pretrained("zai-org/GLM-5", trust_remote_code=True)
+    with pytest.raises(TypeError):
+        GLM5Renderer(tok, clear_thinking=True)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        GLM5Renderer(tok, clear_thinking=False)  # type: ignore[call-arg]
+
+
+def test_qwen36_constructor_rejects_preserve_thinking():
+    """``preserve_thinking`` on Qwen3.6 was a chat-template-kwarg
+    pass-through. It is superseded by the renderer-agnostic
+    ``preserve_all_thinking`` override and must no longer be accepted by
+    the constructor — its default-False semantics are now inherited from
+    Qwen3.5's render gate."""
+    from transformers import AutoTokenizer
+
+    from renderers.qwen36 import Qwen36Renderer
+
+    tok = AutoTokenizer.from_pretrained("Qwen/Qwen3.6-35B-A3B", trust_remote_code=True)
+    with pytest.raises(TypeError):
+        Qwen36Renderer(tok, preserve_thinking=True)  # type: ignore[call-arg]

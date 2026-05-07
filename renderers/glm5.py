@@ -58,13 +58,11 @@ class GLM5Renderer:
         tokenizer: PreTrainedTokenizer,
         *,
         enable_thinking: bool = True,
-        clear_thinking: bool = True,
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
     ):
         self._tokenizer = tokenizer
         self._enable_thinking = enable_thinking
-        self._clear_thinking = clear_thinking
         self._preserve_all_thinking = preserve_all_thinking
         self._preserve_thinking_between_tool_calls = (
             preserve_thinking_between_tool_calls
@@ -343,8 +341,14 @@ class GLM5Renderer:
 
         emit_special(self._assistant, msg_idx)
 
+        # Chat-template default: keep ``<think>`` only on the in-flight cycle
+        # (post-last-user). Past-cycle assistants drop their reasoning.
+        # ``preserve_thinking`` is the override output of
+        # ``should_preserve_past_thinking`` — it adds historical assistants
+        # back when the renderer was constructed with
+        # ``preserve_all_thinking=True``.
         include_thinking = (
-            (not self._clear_thinking or msg_idx > last_user_index) or preserve_thinking
+            msg_idx > last_user_index or preserve_thinking
         ) and reasoning_content
 
         if include_thinking:

@@ -48,6 +48,41 @@ _TOOLS_INSTRUCTIONS = (
 )
 
 
+def _detect_enable_thinking_default(tokenizer: PreTrainedTokenizer) -> bool:
+    """Probe the tokenizer's chat template to learn its ``enable_thinking``
+    default polarity at the generation-prompt boundary.
+
+    The Qwen3.5 family ships two template variants that differ only in the
+    polarity of the gated branch:
+
+    * Big sizes (4B / 9B / 35B-A3B / 122B-A10B / 397B-A17B) emit an open
+      ``<think>\\n`` by default and the empty ``<think>\\n\\n</think>\\n\\n``
+      block when ``enable_thinking`` is explicitly false.
+    * Small sizes (0.8B / 2B) flip the polarity — they emit the empty
+      block by default and the open ``<think>\\n`` only when
+      ``enable_thinking`` is explicitly true.
+
+    A one-shot ``apply_chat_template`` call with no flag and a minimal
+    user message reveals which variant is in use: the empty-block tail
+    ends with ``</think>``, the open-think tail does not. Failing the
+    probe (no chat_template, exotic config) falls back to the big-model
+    default of True, which matches every entry in
+    ``MODEL_RENDERER_MAP`` that routes to ``qwen3.5`` without explicit
+    polarity awareness.
+    """
+    try:
+        out = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "x"}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    except Exception:
+        return True
+    if not isinstance(out, str):
+        return True
+    return not out.rstrip().endswith("</think>")
+
+
 class Qwen35Renderer:
     """Deterministic message → token renderer for Qwen3.5 models."""
 
@@ -55,11 +90,13 @@ class Qwen35Renderer:
         self,
         tokenizer: PreTrainedTokenizer,
         *,
-        enable_thinking: bool = True,
+        enable_thinking: bool | None = None,
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
     ):
         self._tokenizer = tokenizer
+        if enable_thinking is None:
+            enable_thinking = _detect_enable_thinking_default(tokenizer)
         self._enable_thinking = enable_thinking
         self._preserve_all_thinking = preserve_all_thinking
         self._preserve_thinking_between_tool_calls = (

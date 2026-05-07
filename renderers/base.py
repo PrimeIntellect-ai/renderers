@@ -263,10 +263,23 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3-32B": "qwen3",
     "Qwen/Qwen3-30B-A3B": "qwen3",
     "Qwen/Qwen3-235B-A22B": "qwen3",
-    # Qwen3.5.
+    # Qwen3.5. All seven sizes share the same renderer. The 4B / 9B /
+    # 35B-A3B / 122B-A10B / 397B-A17B chat template defaults
+    # ``enable_thinking=true`` (open ``<think>\n`` at the gen prompt);
+    # the smaller 0.8B / 2B variants flip the polarity (default
+    # ``enable_thinking=false``, empty ``<think>\n\n</think>\n\n``).
+    # ``Qwen35Renderer`` auto-detects polarity from the tokenizer's
+    # chat_template at construction, so all seven sizes are
+    # token-for-token parity-tested against their own
+    # ``apply_chat_template`` — including with
+    # ``add_generation_prompt=True``.
+    "Qwen/Qwen3.5-0.8B": "qwen3.5",
+    "Qwen/Qwen3.5-2B": "qwen3.5",
+    "Qwen/Qwen3.5-4B": "qwen3.5",
     "Qwen/Qwen3.5-9B": "qwen3.5",
     "Qwen/Qwen3.5-35B-A3B": "qwen3.5",
     "Qwen/Qwen3.5-122B-A10B": "qwen3.5",
+    "Qwen/Qwen3.5-397B-A17B": "qwen3.5",
     # Qwen3.6.
     "Qwen/Qwen3.6-35B-A3B": "qwen3.6",
     # Qwen3-VL.

@@ -54,9 +54,13 @@ class GLM45Renderer:
         tokenizer: PreTrainedTokenizer,
         *,
         enable_thinking: bool = True,
+        preserve_all_thinking: bool = False,
+        preserve_thinking_between_tool_calls: bool = False,
     ):
         self._tokenizer = tokenizer
         self._enable_thinking = enable_thinking
+        self._preserve_all_thinking = preserve_all_thinking
+        self._preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
 
         self._gmask = self._token_id("[gMASK]")
         self._sop = self._token_id("<sop>")
@@ -115,8 +119,6 @@ class GLM45Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
@@ -169,8 +171,8 @@ class GLM45Renderer:
                 preserve_thinking = should_preserve_past_thinking(
                     messages,
                     i,
-                    preserve_all_thinking=preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                    preserve_all_thinking=self._preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=self._preserve_thinking_between_tool_calls,
                 )
                 self._render_assistant(
                     msg,
@@ -203,15 +205,11 @@ class GLM45Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
     ) -> list[int]:
         return self.render(
             messages,
             tools=tools,
             add_generation_prompt=add_generation_prompt,
-            preserve_all_thinking=preserve_all_thinking,
-            preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
         ).token_ids
 
     def parse_response(self, token_ids: list[int]) -> ParsedResponse:

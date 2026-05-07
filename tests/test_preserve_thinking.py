@@ -1,8 +1,13 @@
 """Smoke coverage for the ``preserve_*_thinking`` override flags.
 
+Flags are constructor-only (``create_renderer(..., preserve_all_thinking=True)``)
+and stored as instance attributes — there is no call-site ``render`` /
+``render_ids`` override. Each test that wants a non-default flag builds
+a fresh renderer for that configuration via ``_make`` below.
+
 Two invariants per renderer:
 
-1. Default render (both flags ``False``) is byte-identical to the existing
+1. Default render (no flags) is byte-identical to the existing
    ``apply_chat_template`` parity baseline — covered exhaustively elsewhere.
 2. Setting either flag never *removes* tokens compared to the default and,
    for renderers whose template would drop past-asst thinking, actually
@@ -18,7 +23,14 @@ from __future__ import annotations
 
 import pytest
 
+from renderers import create_renderer
 from renderers.base import should_preserve_past_thinking
+
+
+def _make(tokenizer, renderer_name, **flags):
+    """Build a fresh renderer with the given preserve_*_thinking flags
+    bound at construction. Reuses the cached tokenizer fixture."""
+    return create_renderer(tokenizer, renderer=renderer_name, **flags)
 
 
 # Renderers whose template doesn't drop past-asst thinking or has no
@@ -135,27 +147,30 @@ def test_should_preserve_past_thinking_classification():
     )
 
 
-def test_preserve_flags_default_unchanged(model_name, tokenizer, renderer):
-    # Calling render with the flags explicitly off must be byte-identical
-    # to the bare call (defaults).
+def test_preserve_flags_default_unchanged(model_name, tokenizer, renderer_name, renderer):
+    # A renderer constructed with both flags explicitly ``False`` must
+    # produce byte-identical output to one constructed with the defaults.
     bare = renderer.render_ids(CONVERSATION)
-    explicit_off = renderer.render_ids(
-        CONVERSATION,
+    explicit_off = _make(
+        tokenizer,
+        renderer_name,
         preserve_all_thinking=False,
         preserve_thinking_between_tool_calls=False,
-    )
+    ).render_ids(CONVERSATION)
     assert bare == explicit_off, (
         f"{model_name}: explicit flags=False must equal bare default render"
     )
 
 
-def test_preserve_all_thinking_grows_or_no_op(model_name, tokenizer, renderer):
+def test_preserve_all_thinking_grows_or_no_op(model_name, tokenizer, renderer_name, renderer):
     from renderers.default import DefaultRenderer
 
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
     default = renderer.render_ids(CONVERSATION)
-    preserved = renderer.render_ids(CONVERSATION, preserve_all_thinking=True)
+    preserved = _make(
+        tokenizer, renderer_name, preserve_all_thinking=True
+    ).render_ids(CONVERSATION)
 
     if model_name in NO_OP_MODELS:
         assert preserved == default, (
@@ -170,7 +185,7 @@ def test_preserve_all_thinking_grows_or_no_op(model_name, tokenizer, renderer):
         )
 
 
-def test_preserve_between_tool_calls_strict_subset(model_name, tokenizer, renderer):
+def test_preserve_between_tool_calls_strict_subset(model_name, tokenizer, renderer_name, renderer):
     """``preserve_thinking_between_tool_calls`` is strictly weaker than
     ``preserve_all_thinking``: token count satisfies default <= between <= all."""
     from renderers.default import DefaultRenderer
@@ -178,10 +193,12 @@ def test_preserve_between_tool_calls_strict_subset(model_name, tokenizer, render
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
     default = renderer.render_ids(CONVERSATION)
-    between = renderer.render_ids(
-        CONVERSATION, preserve_thinking_between_tool_calls=True
-    )
-    all_ = renderer.render_ids(CONVERSATION, preserve_all_thinking=True)
+    between = _make(
+        tokenizer, renderer_name, preserve_thinking_between_tool_calls=True
+    ).render_ids(CONVERSATION)
+    all_ = _make(
+        tokenizer, renderer_name, preserve_all_thinking=True
+    ).render_ids(CONVERSATION)
     assert len(default) <= len(between) <= len(all_), (
         f"{model_name}: expected default <= between <= all, "
         f"got {len(default)} <= {len(between)} <= {len(all_)}"
@@ -207,7 +224,7 @@ LIVE_TOOL_CYCLE = [
 ]
 
 
-def test_preserve_btc_on_live_cycle_matches_all(model_name, tokenizer, renderer):
+def test_preserve_btc_on_live_cycle_matches_all(model_name, tokenizer, renderer_name, renderer):
     """In a live tool cycle (no trailing user), every past-asst sits in
     the current tool-bearing segment. ``preserve_thinking_between_tool_calls``
     should preserve all of their thinking — same set of asst messages as
@@ -218,10 +235,12 @@ def test_preserve_btc_on_live_cycle_matches_all(model_name, tokenizer, renderer)
 
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
-    btc = renderer.render_ids(
-        LIVE_TOOL_CYCLE, preserve_thinking_between_tool_calls=True
-    )
-    all_ = renderer.render_ids(LIVE_TOOL_CYCLE, preserve_all_thinking=True)
+    btc = _make(
+        tokenizer, renderer_name, preserve_thinking_between_tool_calls=True
+    ).render_ids(LIVE_TOOL_CYCLE)
+    all_ = _make(
+        tokenizer, renderer_name, preserve_all_thinking=True
+    ).render_ids(LIVE_TOOL_CYCLE)
     assert btc == all_, (
         f"{model_name}: in a live tool cycle btc must match preserve_all "
         f"(got len(btc)={len(btc)}, len(all)={len(all_)})"
@@ -287,7 +306,7 @@ NEVER_PRESERVES_MODELS = {
 
 
 def test_preserve_all_thinking_emits_every_asst_reasoning(
-    model_name, tokenizer, renderer
+    model_name, tokenizer, renderer_name, renderer
 ):
     """``preserve_all_thinking=True`` must surface every past-asst's
     ``reasoning_content`` in the decoded output — for renderers that
@@ -297,9 +316,9 @@ def test_preserve_all_thinking_emits_every_asst_reasoning(
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
 
-    ids = renderer.render_ids(
-        TWO_BLOCK_CONV, tools=TWO_BLOCK_TOOLS, preserve_all_thinking=True
-    )
+    ids = _make(
+        tokenizer, renderer_name, preserve_all_thinking=True
+    ).render_ids(TWO_BLOCK_CONV, tools=TWO_BLOCK_TOOLS)
     text = tokenizer.decode(ids)
 
     if model_name in NEVER_PRESERVES_MODELS:
@@ -316,7 +335,9 @@ def test_preserve_all_thinking_emits_every_asst_reasoning(
             )
 
 
-def test_preserve_btc_emits_current_block_reasoning(model_name, tokenizer, renderer):
+def test_preserve_btc_emits_current_block_reasoning(
+    model_name, tokenizer, renderer_name, renderer
+):
     """``preserve_thinking_between_tool_calls=True`` must surface the
     current (post-last-user) tool block's reasoning. Older blocks fall
     back to template default, which varies per renderer — no universal
@@ -326,11 +347,9 @@ def test_preserve_btc_emits_current_block_reasoning(model_name, tokenizer, rende
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
 
-    ids = renderer.render_ids(
-        TWO_BLOCK_CONV,
-        tools=TWO_BLOCK_TOOLS,
-        preserve_thinking_between_tool_calls=True,
-    )
+    ids = _make(
+        tokenizer, renderer_name, preserve_thinking_between_tool_calls=True
+    ).render_ids(TWO_BLOCK_CONV, tools=TWO_BLOCK_TOOLS)
     text = tokenizer.decode(ids)
 
     if model_name in NEVER_PRESERVES_MODELS:
@@ -349,88 +368,52 @@ def test_preserve_btc_emits_current_block_reasoning(model_name, tokenizer, rende
 
 def test_default_renderer_raises_on_flags():
     """``DefaultRenderer`` falls back to apply_chat_template with no
-    selective re-emit pathway, so it must raise rather than silently ignore."""
+    selective re-emit pathway, so constructing one with either flag set
+    must raise — fail fast, before any render is attempted."""
     from transformers import AutoTokenizer
-
-    from renderers import create_renderer
 
     tok = AutoTokenizer.from_pretrained(
         "Qwen/Qwen2.5-0.5B-Instruct", trust_remote_code=True
     )
-    renderer = create_renderer(tok, renderer="default")
+    # No flags → constructs cleanly.
+    create_renderer(tok, renderer="default")
+    # Either flag set → raises at construction.
     with pytest.raises(NotImplementedError):
-        renderer.render_ids(CONVERSATION, preserve_all_thinking=True)
+        create_renderer(tok, renderer="default", preserve_all_thinking=True)
     with pytest.raises(NotImplementedError):
-        renderer.render_ids(CONVERSATION, preserve_thinking_between_tool_calls=True)
+        create_renderer(
+            tok, renderer="default", preserve_thinking_between_tool_calls=True
+        )
 
 
 # ---------------------------------------------------------------------------
-# Construction-time defaults via create_renderer(...) kwargs
+# Construction-time configuration is discoverable via instance attributes
 # ---------------------------------------------------------------------------
 
 
-def test_create_renderer_binds_preserve_all_thinking_default(
-    model_name, renderer_name, tokenizer
-):
-    """``create_renderer(..., preserve_all_thinking=True)`` should make a
-    bare ``render_ids`` call behave as if the flag were passed explicitly."""
-    from renderers import create_renderer
+def test_create_renderer_records_flag_state(model_name, renderer_name, tokenizer):
+    """Each renderer exposes the bound flag state via ``_preserve_*``
+    attributes — useful for downstream code (pool cache keys, logging,
+    test assertions) that needs to confirm what was constructed."""
     from renderers.default import DefaultRenderer
 
-    bound = create_renderer(
-        tokenizer,
-        renderer=renderer_name,
-        preserve_all_thinking=True,
-    )
-    if isinstance(bound, DefaultRenderer):
-        with pytest.raises(NotImplementedError):
-            bound.render_ids(CONVERSATION)
-        return
+    bare = create_renderer(tokenizer, renderer=renderer_name)
+    assert bare._preserve_all_thinking is False
+    assert bare._preserve_thinking_between_tool_calls is False
 
-    bound_ids = bound.render_ids(CONVERSATION)
-    unbound = create_renderer(tokenizer, renderer=renderer_name)
-    explicit_ids = unbound.render_ids(CONVERSATION, preserve_all_thinking=True)
-    assert bound_ids == explicit_ids, (
-        f"{model_name}: bound default must equal explicit kwarg "
-        f"(bound={len(bound_ids)}, explicit={len(explicit_ids)})"
-    )
-    assert bound._preserve_all_thinking is True
-    assert bound._preserve_thinking_between_tool_calls is False
+    if not isinstance(bare, DefaultRenderer):
+        # DefaultRenderer raises at construction with either flag set —
+        # covered by ``test_default_renderer_raises_on_flags``.
+        all_on = create_renderer(
+            tokenizer, renderer=renderer_name, preserve_all_thinking=True
+        )
+        assert all_on._preserve_all_thinking is True
+        assert all_on._preserve_thinking_between_tool_calls is False
 
-
-def test_create_renderer_no_flags_is_zero_cost(renderer_name, tokenizer):
-    """When no flags are bound, attributes record the False bindings and
-    ``render_ids`` is unchanged from the underlying impl."""
-    from renderers import create_renderer
-
-    r = create_renderer(tokenizer, renderer=renderer_name)
-    assert r._preserve_all_thinking is False
-    assert r._preserve_thinking_between_tool_calls is False
-
-
-def test_create_renderer_btc_default_matches_explicit(
-    model_name, renderer_name, tokenizer
-):
-    """``preserve_thinking_between_tool_calls`` bound at construction
-    must match the explicit-kwarg call."""
-    from renderers import create_renderer
-    from renderers.default import DefaultRenderer
-
-    bound = create_renderer(
-        tokenizer,
-        renderer=renderer_name,
-        preserve_thinking_between_tool_calls=True,
-    )
-    if isinstance(bound, DefaultRenderer):
-        with pytest.raises(NotImplementedError):
-            bound.render_ids(CONVERSATION)
-        return
-
-    bound_ids = bound.render_ids(CONVERSATION)
-    unbound = create_renderer(tokenizer, renderer=renderer_name)
-    explicit_ids = unbound.render_ids(
-        CONVERSATION, preserve_thinking_between_tool_calls=True
-    )
-    assert bound_ids == explicit_ids, (
-        f"{model_name}: bound btc default must equal explicit kwarg"
-    )
+        btc_on = create_renderer(
+            tokenizer,
+            renderer=renderer_name,
+            preserve_thinking_between_tool_calls=True,
+        )
+        assert btc_on._preserve_all_thinking is False
+        assert btc_on._preserve_thinking_between_tool_calls is True

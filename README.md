@@ -98,6 +98,36 @@ with pool.checkout() as r:
 
 Each slot owns its own tokenizer copy. Construction fans out across a thread pool.
 
+### Preserving past reasoning (constructor-only overrides)
+
+`create_renderer` and `create_renderer_pool` accept two flags:
+
+```python
+preserve_all_thinking: bool = False
+preserve_thinking_between_tool_calls: bool = False
+```
+
+Both are **constructor-only** — they configure the renderer instance once, are stored as `_preserve_all_thinking` / `_preserve_thinking_between_tool_calls` attributes for introspection, and are *not* accepted as call-site kwargs on `render` / `render_ids`. To run the same conversation through different configurations, build a different renderer (or a different pool).
+
+Defaults preserve byte-identity with each model's chat template. Flipping a flag at construction restores `reasoning_content` the template would otherwise drop:
+
+- `preserve_all_thinking=True` — every past assistant's reasoning is kept, including ones from prior tool cycles.
+- `preserve_thinking_between_tool_calls=True` — reasoning is kept on assistants in the in-flight A-T-...-A tool cycle when the template would drop them mid-cycle (a no-op for the current renderer line-up — every shipped renderer's template already keeps in-flight reasoning — but the override stays available for any future renderer that doesn't).
+
+**Why deviate from the template default?** The canonical case is *compaction*. A workflow that wants the model to summarize a long trajectory injects a `user` turn — something like *"Summarize the work so far so I can continue in a fresh context"* — and asks for a fresh assistant turn. As soon as that user turn lands, every prior assistant is in a "past cycle" by template-default rules, so its `reasoning_content` is dropped before the summarizer ever sees it. The model writes a summary based only on the surface answers it produced, not the reasoning it produced them with — usually noticeably worse.
+
+```python
+# Compaction prompt — keep reasoning_content visible end-to-end so the
+# summarizer doesn't lose the trajectory's "why".
+compactor = create_renderer(tok, renderer="auto", preserve_all_thinking=True)
+prompt_ids = compactor.render_ids(history + [{
+    "role": "user",
+    "content": "Summarise the work so far in 5 bullets.",
+}], add_generation_prompt=True)
+```
+
+These flags only ever *add* tokens vs the template default — they restore reasoning the template would have dropped, never strip reasoning the template would have kept. Bit-level parity with `apply_chat_template` (the suite that anchors §3 below) is unchanged when both flags are `False`.
+
 ---
 
 ## 2. The bridge (the core contract)
@@ -164,7 +194,9 @@ The `</parameter>\n` vanishes on re-render. Extension property broken at the clo
 
 ### d. Thinking stripped from non-latest assistant turns
 
-Some chat templates strip `<think>…</think>` blocks out of prior assistant turns when re-rendering history. The rollout's recorded stream has the thinking content; the next turn's re-rendered prompt does not. Applies across the Qwen3-series under certain message shapes.
+Some chat templates strip `<think>…</think>` blocks out of prior assistant turns when re-rendering history. The rollout's recorded stream has the thinking content; the next turn's re-rendered prompt does not. Applies across the Qwen3-series and GLM-series under certain message shapes.
+
+This is fine for the extension-property bridge (which never re-renders prior turns), but it does affect any *first-time* re-render — most notably **compaction**, where a trajectory is replayed from scratch with a new `user` turn asking the model to summarise. By template default, the prior assistants' reasoning is gone before the summariser sees it. Build the renderer with `create_renderer(..., preserve_all_thinking=True)` — see §1 *Preserving past reasoning (constructor-only overrides)* — to keep reasoning visible end-to-end on those flows.
 
 ### e. Max-seq-len truncation zeroing the anchor
 

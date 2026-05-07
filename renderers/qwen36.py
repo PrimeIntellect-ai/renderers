@@ -32,8 +32,15 @@ class Qwen36Renderer(Qwen35Renderer):
         *,
         enable_thinking: bool = True,
         preserve_thinking: bool = False,
+        preserve_all_thinking: bool = False,
+        preserve_thinking_between_tool_calls: bool = False,
     ):
-        super().__init__(tokenizer, enable_thinking=enable_thinking)
+        super().__init__(
+            tokenizer,
+            enable_thinking=enable_thinking,
+            preserve_all_thinking=preserve_all_thinking,
+            preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+        )
         self._preserve_thinking = preserve_thinking
 
     def _should_render_thinking(self, msg_idx: int, last_query_index: int) -> bool:

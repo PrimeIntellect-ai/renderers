@@ -127,6 +127,8 @@ class GptOssRenderer:
         conversation_start_date: str | None = None,
         knowledge_cutoff: str | None = None,
         model_identity: str | None = None,
+        preserve_all_thinking: bool = False,
+        preserve_thinking_between_tool_calls: bool = False,
     ):
         """Initialise the renderer.
 
@@ -154,6 +156,8 @@ class GptOssRenderer:
         )
         self._knowledge_cutoff = knowledge_cutoff
         self._model_identity = model_identity
+        self._preserve_all_thinking = preserve_all_thinking
+        self._preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
 
         # Cache special-token IDs for the bridge / generation-prompt path.
         self._start = self._token_id("<|start|>")
@@ -186,8 +190,6 @@ class GptOssRenderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
@@ -256,8 +258,8 @@ class GptOssRenderer:
                 should_preserve_past_thinking(
                     messages,
                     i,
-                    preserve_all_thinking=preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                    preserve_all_thinking=self._preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=self._preserve_thinking_between_tool_calls,
                 )
             )
             for hm in self._to_harmony_messages(
@@ -296,15 +298,11 @@ class GptOssRenderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
     ) -> list[int]:
         return self.render(
             messages,
             tools=tools,
             add_generation_prompt=add_generation_prompt,
-            preserve_all_thinking=preserve_all_thinking,
-            preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
         ).token_ids
 
     def parse_response(self, token_ids: list[int]) -> ParsedResponse:

@@ -39,11 +39,10 @@ _BRIDGE_MODELS = [
 
 @lru_cache(maxsize=None)
 def _load(model_name: str, renderer_name: str):
-    from transformers import AutoTokenizer
-
     from renderers import create_renderer
+    from renderers.base import load_tokenizer
 
-    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tok = load_tokenizer(model_name)
     return tok, create_renderer(tok, renderer=renderer_name)
 
 

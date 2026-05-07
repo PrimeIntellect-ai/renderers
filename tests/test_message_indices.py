@@ -95,13 +95,10 @@ def test_kimi_k2_unknown_role_message_indices():
     with the post-normalisation index ``i=2`` — out of range for a
     caller list of length 2.
     """
-    from transformers import AutoTokenizer
-
     from renderers import create_renderer
+    from renderers.base import load_tokenizer
 
-    tok = AutoTokenizer.from_pretrained(
-        "moonshotai/Kimi-K2-Instruct", trust_remote_code=True
-    )
+    tok = load_tokenizer("moonshotai/Kimi-K2-Instruct")
     renderer = create_renderer(tok, renderer="auto")
 
     msgs = [

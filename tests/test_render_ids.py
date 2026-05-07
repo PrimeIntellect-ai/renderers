@@ -11,7 +11,7 @@ template. See ``test_gpt_oss_harmony_parity.py`` for harmony parity coverage.
 from functools import lru_cache
 
 from renderers import create_renderer
-from transformers import AutoTokenizer
+from renderers.base import load_tokenizer
 
 
 def _expected(tokenizer, messages, **kwargs):
@@ -337,9 +337,7 @@ def test_multi_step_tool_cycle(model_name, tokenizer, renderer):
 
 @lru_cache
 def _qwen3_vl():
-    tokenizer = AutoTokenizer.from_pretrained(
-        "Qwen/Qwen3-VL-4B-Instruct", trust_remote_code=True
-    )
+    tokenizer = load_tokenizer("Qwen/Qwen3-VL-4B-Instruct")
     renderer = create_renderer(tokenizer, renderer="auto")
     return tokenizer, renderer
 
@@ -354,9 +352,7 @@ def test_qwen3_vl_auto_renderer():
 
 @lru_cache
 def _kimi_k25():
-    tokenizer = AutoTokenizer.from_pretrained(
-        "moonshotai/Kimi-K2.5", trust_remote_code=True
-    )
+    tokenizer = load_tokenizer("moonshotai/Kimi-K2.5")
     renderer = create_renderer(tokenizer, renderer="auto")
     return tokenizer, renderer
 
@@ -369,9 +365,7 @@ def test_kimi_k2_inline_think_tags_render_verbatim():
     splitting out ``<think>...</think>`` and then discarded the extracted
     reasoning, producing tokens that disagreed with ``apply_chat_template``.
     """
-    tokenizer = AutoTokenizer.from_pretrained(
-        "moonshotai/Kimi-K2-Instruct", trust_remote_code=True
-    )
+    tokenizer = load_tokenizer("moonshotai/Kimi-K2-Instruct")
     renderer = create_renderer(tokenizer, renderer="auto")
     msgs = [
         {"role": "user", "content": "hi"},

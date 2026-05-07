@@ -299,6 +299,57 @@ MODEL_RENDERER_MAP: dict[str, str] = {
 }
 
 
+# Models whose tokenizer requires ``trust_remote_code=True`` AND a pinned
+# revision. Empirical audit (2026-05-07) confirms only the Moonshot
+# Kimi-K2 family ships an ``auto_map.AutoTokenizer`` entry that runs
+# repo-supplied Python on every ``AutoTokenizer.from_pretrained`` call —
+# every other model in ``MODEL_RENDERER_MAP`` loads cleanly without it.
+#
+# Pinning the revision keeps the trust narrow: even with
+# ``trust_remote_code=True``, transformers downloads / executes the
+# tokenizer Python from this exact commit only. A future malicious push
+# to the Moonshot HF repo doesn't auto-propagate to anyone using
+# ``create_renderer_pool``. Bump these SHAs deliberately, with review.
+TRUSTED_REVISIONS: dict[str, str] = {
+    "moonshotai/Kimi-K2-Instruct": "fd1984e2b7a3350dbf7305fe73a4ede25c14de50",
+    "moonshotai/Kimi-K2.5": "4d01dfe0332d63057c186e0b262165819efb6611",
+    "moonshotai/Kimi-K2.6": "2755962d07cb42aa2d988a35bcb65cd4a9c2de82",
+}
+
+
+def load_tokenizer(model_name_or_path: str):
+    """Load a tokenizer with the renderers-package security policy.
+
+    Default: ``trust_remote_code=False`` — the safe choice for every
+    model in ``MODEL_RENDERER_MAP`` *except* the Kimi-K2 family.
+
+    Models listed in ``TRUSTED_REVISIONS`` load with
+    ``trust_remote_code=True`` AND ``revision=<pinned sha>`` — required
+    because their tokenizer config has an ``auto_map.AutoTokenizer``
+    entry pointing at a repo-supplied Python class
+    (``tokenization_kimi.TikTokenTokenizer``). Pinning the revision
+    means transformers executes only the reviewed commit's code, not
+    whatever ``HEAD`` points at when the call fires.
+
+    Unknown / fine-tuned model paths fall through to
+    ``trust_remote_code=False``. Callers who legitimately need to load
+    a custom-code tokenizer outside this allow-list should call
+    ``AutoTokenizer.from_pretrained`` themselves and pass the result to
+    ``create_renderer`` (which doesn't load tokenizers — only
+    ``create_renderer_pool`` does).
+    """
+    from transformers import AutoTokenizer
+
+    revision = TRUSTED_REVISIONS.get(model_name_or_path)
+    if revision is not None:
+        return AutoTokenizer.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=True,
+            revision=revision,
+        )
+    return AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=False)
+
+
 def _populate_registry():
     if RENDERER_REGISTRY:
         return
@@ -359,14 +410,14 @@ def create_renderer_pool(
     are forwarded to each pooled renderer's constructor — every slot in
     the pool shares one configuration. To run with a different
     configuration, build a different pool.
+
+    Tokenizers load via ``load_tokenizer`` — see its docstring for the
+    ``trust_remote_code`` policy (default off; Moonshot Kimi-K2 family
+    opts in with a pinned ``revision``).
     """
 
     def factory() -> Renderer:
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name_or_path, trust_remote_code=True
-        )
+        tokenizer = load_tokenizer(tokenizer_name_or_path)
         return create_renderer(
             tokenizer,
             renderer=renderer,

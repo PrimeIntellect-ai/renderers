@@ -378,11 +378,9 @@ def test_default_renderer_raises_on_flags():
     """``DefaultRenderer`` falls back to apply_chat_template with no
     selective re-emit pathway, so constructing one with either flag set
     must raise — fail fast, before any render is attempted."""
-    from transformers import AutoTokenizer
+    from renderers.base import load_tokenizer
 
-    tok = AutoTokenizer.from_pretrained(
-        "Qwen/Qwen2.5-0.5B-Instruct", trust_remote_code=True
-    )
+    tok = load_tokenizer("Qwen/Qwen2.5-0.5B-Instruct")
     # No flags → constructs cleanly.
     create_renderer(tok, renderer="default")
     # Either flag set → raises at construction.
@@ -437,11 +435,10 @@ def test_glm5_constructor_rejects_clear_thinking():
     superseded by the renderer-agnostic ``preserve_all_thinking`` override
     and must no longer be accepted by the constructor — its default-True
     semantics are now baked into the render gate."""
-    from transformers import AutoTokenizer
-
+    from renderers.base import load_tokenizer
     from renderers.glm5 import GLM5Renderer
 
-    tok = AutoTokenizer.from_pretrained("zai-org/GLM-5", trust_remote_code=True)
+    tok = load_tokenizer("zai-org/GLM-5")
     with pytest.raises(TypeError):
         GLM5Renderer(tok, clear_thinking=True)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
@@ -454,10 +451,9 @@ def test_qwen36_constructor_rejects_preserve_thinking():
     ``preserve_all_thinking`` override and must no longer be accepted by
     the constructor — its default-False semantics are now inherited from
     Qwen3.5's render gate."""
-    from transformers import AutoTokenizer
-
+    from renderers.base import load_tokenizer
     from renderers.qwen36 import Qwen36Renderer
 
-    tok = AutoTokenizer.from_pretrained("Qwen/Qwen3.6-35B-A3B", trust_remote_code=True)
+    tok = load_tokenizer("Qwen/Qwen3.6-35B-A3B")
     with pytest.raises(TypeError):
         Qwen36Renderer(tok, preserve_thinking=True)  # type: ignore[call-arg]

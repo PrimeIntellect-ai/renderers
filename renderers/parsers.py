@@ -345,7 +345,7 @@ TOOL_PARSERS: dict[str, type] = {
     "qwen3": Qwen3ToolParser,
     "qwen3.5": Qwen35ToolParser,
     "glm": GlmToolParser,
-    "deepseek_v3": DeepSeekV3ToolParser,
+    "deepseek-v3": DeepSeekV3ToolParser,
 }
 
 REASONING_PARSERS: dict[str, type] = {

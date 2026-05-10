@@ -283,32 +283,32 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # Qwen3.6.
     "Qwen/Qwen3.6-35B-A3B": "qwen3.6",
     # Qwen3-VL.
-    "Qwen/Qwen3-VL-4B-Instruct": "qwen3_vl",
-    "Qwen/Qwen3-VL-8B-Instruct": "qwen3_vl",
-    "Qwen/Qwen3-VL-30B-A3B-Instruct": "qwen3_vl",
+    "Qwen/Qwen3-VL-4B-Instruct": "qwen3-vl",
+    "Qwen/Qwen3-VL-8B-Instruct": "qwen3-vl",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": "qwen3-vl",
     # GLM-5 family (GLM-4.7 reuses the GLM-5 template).
-    "zai-org/GLM-5": "glm5",
-    "zai-org/GLM-4.7-Flash": "glm5",
-    "zai-org/GLM-5.1": "glm5.1",
+    "zai-org/GLM-5": "glm-5",
+    "zai-org/GLM-4.7-Flash": "glm-5",
+    "zai-org/GLM-5.1": "glm-5.1",
     # GLM-4.5.
-    "THUDM/GLM-4.5-Air": "glm4.5",
-    "zai-org/GLM-4.5-Air": "glm4.5",
+    "THUDM/GLM-4.5-Air": "glm-4.5",
+    "zai-org/GLM-4.5-Air": "glm-4.5",
     # MiniMax.
     "MiniMaxAI/MiniMax-M2": "minimax-m2",
     "MiniMaxAI/MiniMax-M2.5": "minimax-m2",
     # DeepSeek V3.
-    "deepseek-ai/DeepSeek-V3": "deepseek_v3",
-    "deepseek-ai/DeepSeek-V3-Base": "deepseek_v3",
+    "deepseek-ai/DeepSeek-V3": "deepseek-v3",
+    "deepseek-ai/DeepSeek-V3-Base": "deepseek-v3",
     # Kimi K2 (K2.5 and K2.6 share the K2.5 template, distinct from K2).
-    "moonshotai/Kimi-K2-Instruct": "kimi_k2",
-    "moonshotai/Kimi-K2.5": "kimi_k25",
-    "moonshotai/Kimi-K2.6": "kimi_k25",
+    "moonshotai/Kimi-K2-Instruct": "kimi-k2",
+    "moonshotai/Kimi-K2.5": "kimi-k2.5",
+    "moonshotai/Kimi-K2.6": "kimi-k2.5",
     # Nemotron 3.
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nemotron3",
-    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nemotron3",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nemotron-3",
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nemotron-3",
     # GPT-OSS.
-    "openai/gpt-oss-20b": "gpt_oss",
-    "openai/gpt-oss-120b": "gpt_oss",
+    "openai/gpt-oss-20b": "gpt-oss",
+    "openai/gpt-oss-120b": "gpt-oss",
 }
 
 
@@ -384,18 +384,18 @@ def _populate_registry():
         {
             "default": DefaultRenderer,
             "qwen3": Qwen3Renderer,
-            "qwen3_vl": Qwen3VLRenderer,
+            "qwen3-vl": Qwen3VLRenderer,
             "qwen3.5": Qwen35Renderer,
             "qwen3.6": Qwen36Renderer,
-            "glm5": GLM5Renderer,
-            "glm5.1": GLM51Renderer,
-            "glm4.5": GLM45Renderer,
+            "glm-5": GLM5Renderer,
+            "glm-5.1": GLM51Renderer,
+            "glm-4.5": GLM45Renderer,
             "minimax-m2": MiniMaxM2Renderer,
-            "deepseek_v3": DeepSeekV3Renderer,
-            "kimi_k2": KimiK2Renderer,
-            "kimi_k25": KimiK25Renderer,
-            "nemotron3": Nemotron3Renderer,
-            "gpt_oss": GptOssRenderer,
+            "deepseek-v3": DeepSeekV3Renderer,
+            "kimi-k2": KimiK2Renderer,
+            "kimi-k2.5": KimiK25Renderer,
+            "nemotron-3": Nemotron3Renderer,
+            "gpt-oss": GptOssRenderer,
         }
     )
 
@@ -456,9 +456,10 @@ def create_renderer(
 
     Args:
         tokenizer: HuggingFace tokenizer instance.
-        renderer: Renderer name ('qwen3', 'qwen3_vl', 'qwen3.5', 'glm5', 'glm4.5',
-                  'minimax-m2', 'deepseek_v3', 'kimi_k2', 'kimi_k25', 'nemotron3',
-                  'gpt_oss', 'default') or 'auto' to detect from model name.
+        renderer: Renderer name ('qwen3', 'qwen3-vl', 'qwen3.5', 'qwen3.6',
+                  'glm-5', 'glm-5.1', 'glm-4.5', 'minimax-m2', 'deepseek-v3',
+                  'kimi-k2', 'kimi-k2.5', 'nemotron-3', 'gpt-oss', 'default')
+                  or 'auto' to detect from model name.
         tool_parser: Name of a tool parser registered in ``renderers.parsers``.
                   Only consumed by DefaultRenderer. Model-specific renderers
                   have their own parsing wired in.

@@ -19,7 +19,7 @@ def test_registries_nonempty():
     assert "qwen3" in TOOL_PARSERS
     assert "qwen3.5" in TOOL_PARSERS
     assert "glm" in TOOL_PARSERS
-    assert "deepseek_v3" in TOOL_PARSERS
+    assert "deepseek-v3" in TOOL_PARSERS
     assert "think" in REASONING_PARSERS
 
 

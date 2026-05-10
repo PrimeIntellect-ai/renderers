@@ -33,7 +33,7 @@ _BRIDGE_MODELS = [
     ("moonshotai/Kimi-K2-Instruct", "auto"),
     ("moonshotai/Kimi-K2.5", "auto"),
     ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
-    ("openai/gpt-oss-20b", "gpt_oss"),
+    ("openai/gpt-oss-20b", "gpt-oss"),
 ]
 
 

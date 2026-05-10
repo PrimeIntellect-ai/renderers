@@ -2,7 +2,7 @@
 
 Programmable chat templates for LLM training and inference. A renderer turns a model's chat template into a Python object that can render messages → token ids, parse completion ids → structured assistant messages, and extend a multi-turn rollout without re-rendering model-sampled history.
 
-Built for RL training at Prime Intellect — used in [verifiers](https://github.com/PrimeIntellect-ai/verifiers) and `prime-rl`. Standalone on PyPI.
+Standalone on PyPI, and portable across training and inference stacks (transformers, vLLM, SGLang, Tinker). Initially developed for RL training with [verifiers](https://github.com/PrimeIntellect-ai/verifiers) and `prime-rl` at Prime Intellect.
 
 ## Install
 

@@ -32,8 +32,15 @@ from renderers.qwen3 import Qwen3Renderer
 from renderers.qwen3_vl import Qwen3VLRenderer
 from renderers.qwen35 import Qwen35Renderer
 from renderers.qwen36 import Qwen36Renderer
+from renderers.diagnostics import (
+    BridgeDiagnostic,
+    BridgeFailureReason,
+    diagnose_bridge,
+)
 
 __all__ = [
+    "BridgeDiagnostic",
+    "BridgeFailureReason",
     "Content",
     "ContentPart",
     "DeepSeekV3Renderer",
@@ -64,6 +71,7 @@ __all__ = [
     "build_trajectory_step",
     "create_renderer",
     "create_renderer_pool",
+    "diagnose_bridge",
     "reject_assistant_in_extension",
     "trim_to_turn_close",
 ]

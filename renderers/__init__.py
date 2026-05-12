@@ -1,3 +1,11 @@
+try:
+    from renderers._version import __version__
+except ImportError:
+    # Source checkout without a built artifact (e.g. editable install
+    # before the first ``uv build`` populates ``_version.py``). Real
+    # installs always have it.
+    __version__ = "0+unknown"
+
 from renderers.base import (
     Content,
     ContentPart,
@@ -73,6 +81,7 @@ __all__ = [
     "ToolCallFunction",
     "ToolSpec",
     "VideoPart",
+    "__version__",
     "build_training_sample",
     "build_trajectory_step",
     "create_renderer",

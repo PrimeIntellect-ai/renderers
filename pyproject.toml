@@ -1,10 +1,14 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "renderers"
-version = "0.1.7"
+# Derived from git tags by hatch-vcs (see [tool.hatch.version] below).
+# Untagged commits get PEP 440 dev versions like ``0.1.8.dev3+g4c877be4``
+# so any commit is uniquely installable; tagged commits get clean
+# release versions like ``0.1.8``.
+dynamic = ["version"]
 description = "Chat template renderers — deterministic message-to-token conversion for LLM training"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -19,6 +23,18 @@ dependencies = [
     # (which also uses it) and saves us mirroring a 330-line Jinja template.
     "openai-harmony>=0.0.8",
 ]
+
+[tool.hatch.version]
+source = "vcs"
+# Tags look like ``renderers-v0.1.8`` (prefix matches the publish.yml
+# release contract); strip the prefix to get a PEP 440 version.
+raw-options = { tag_regex = '^renderers-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+.*)$' }
+
+[tool.hatch.build.hooks.vcs]
+# Write the resolved version to a Python file so it can be inspected
+# at runtime via ``renderers.__version__`` without re-parsing the
+# wheel metadata.
+version-file = "renderers/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["renderers"]

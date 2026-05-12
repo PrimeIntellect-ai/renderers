@@ -7,7 +7,7 @@ Runs against every (model, renderer) pair.
 from functools import lru_cache
 
 from renderers import create_renderer
-from renderers.base import load_tokenizer
+from renderers.base import ToolCallParseStatus, load_tokenizer
 
 
 @lru_cache
@@ -62,18 +62,26 @@ def test_qwen3_vl_parse_json_tool_call():
     parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
 
     assert parsed.content == "Need a tool."
-    assert parsed.tool_calls == [
-        {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}
-    ]
+    assert len(parsed.tool_calls) == 1
+    tc = parsed.tool_calls[0]
+    assert tc.status == ToolCallParseStatus.OK
+    assert tc.name == "get_weather"
+    assert tc.arguments == {"city": "Paris"}
 
 
-def test_qwen3_vl_malformed_tool_call_falls_back_to_content():
-    """When <tool_call>...</tool_call> contains malformed JSON, match
-    vLLM's hermes_tool_parser behavior: preserve the raw tokens as
-    content rather than returning empty content + empty tool_calls.
-    Without this, the orchestrator raises EmptyModelResponseError and
-    wastes inference compute on retries — diverging from main's
-    behavior on hermes tool envs (Qwen3, etc.).
+def test_qwen3_vl_malformed_tool_call_surfaces_as_invalid_json():
+    """A malformed ``<tool_call>`` block lands as a non-OK ``ParsedToolCall``
+    rather than getting silently merged back into ``content``.
+
+    Before the per-call status redesign, the parser mirrored vLLM's
+    hermes parser and stuffed the raw block into ``content`` to avoid
+    downstream ``EmptyModelResponseError``. That hid the malformed signal
+    from verifiers — they couldn't tell "model wrote prose" from "model
+    tried a tool call and produced broken JSON." Now the failed attempt
+    is preserved with ``status=INVALID_JSON`` and ``raw`` text, which
+    also satisfies the EmptyModelResponseError prevention contract: the
+    response is non-empty (it has a tool-call attempt) without lying
+    about what kind of output the model produced.
     """
     tokenizer, renderer = _qwen3_vl()
     # Note the trailing comma — malformed JSON
@@ -83,13 +91,8 @@ def test_qwen3_vl_malformed_tool_call_falls_back_to_content():
     )
     parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
 
-    # Parser must not collapse response: either content has the raw
-    # tokens OR there's at least a tool_call attempt. Concretely, we
-    # want content to be non-empty so the caller doesn't raise
-    # EmptyModelResponseError.
-    assert parsed.tool_calls is None, "Malformed JSON should not parse as a tool call"
-    assert parsed.content, (
-        "Malformed tool_call should fall back to raw content, not empty "
-        "(else caller raises EmptyModelResponseError)"
-    )
-    assert "get_weather" in parsed.content
+    assert len(parsed.tool_calls) == 1
+    tc = parsed.tool_calls[0]
+    assert tc.status == ToolCallParseStatus.INVALID_JSON
+    assert "get_weather" in tc.raw
+    assert tc.token_span is not None

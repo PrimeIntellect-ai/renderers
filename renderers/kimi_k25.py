@@ -31,8 +31,10 @@ from renderers.base import (
     Message,
     MultiModalData,
     ParsedResponse,
+    ParsedToolCall,
     PlaceholderRange,
     RenderedTokens,
+    ToolCallParseStatus,
     ToolSpec,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
@@ -453,7 +455,7 @@ def _parse_kimi_k2_response(
             return ParsedResponse(
                 content="",
                 reasoning_content=after_open.strip() or None,
-                tool_calls=None,
+                tool_calls=[],
             )
     elif "</think>" in text:
         # Sampler stripped the prefilled <think> open tag — see
@@ -463,34 +465,45 @@ def _parse_kimi_k2_response(
         reasoning = before.strip("\n") or None
         text = after.strip("\n")
 
-    # Extract tool calls section
-    tool_calls: list[dict[str, Any]] | None = None
+    # Extract tool calls section. ``token_span`` stays ``None`` here — this
+    # parser walks decoded text rather than token ids, so we can't cheaply
+    # map back to token offsets. Callers that need spans should use a
+    # token-id parser (see ``parsing.parse_kimi_k2``); this branch only
+    # serves the K2.5 text-tag flow.
+    tool_calls: list[ParsedToolCall] = []
     tc_match = _TOOL_CALLS_SECTION_RE.search(text)
     if tc_match:
         text = text[: tc_match.start()]
         tool_section = (
             tc_match.group(1) if tc_match.group(1) is not None else tc_match.group(2)
         )
-        parsed_calls = []
         for m in _TOOL_CALL_RE.finditer(tool_section):
             tool_id = m.group(1).strip()
             args_str = m.group(2).strip()
-            # Extract function name from "functions.name:index" format
             name_part = tool_id.split(":", 1)[0]
             func_name = name_part.split(".", 1)[1] if "." in name_part else name_part
+            arguments: dict[str, Any] | str
+            invalid_json = False
             try:
                 arguments = json.loads(args_str)
             except json.JSONDecodeError:
-                arguments = args_str  # preserve raw string if invalid JSON
-            parsed_calls.append(
-                {
-                    "type": "function",
-                    "id": tool_id,
-                    "function": {"name": func_name, "arguments": arguments},
-                }
+                arguments = args_str
+                invalid_json = True
+            if not func_name:
+                status = ToolCallParseStatus.MISSING_NAME
+            elif invalid_json:
+                status = ToolCallParseStatus.INVALID_JSON
+            else:
+                status = ToolCallParseStatus.OK
+            tool_calls.append(
+                ParsedToolCall(
+                    raw=m.group(0),
+                    name=func_name or None,
+                    arguments=arguments,
+                    status=status,
+                    id=tool_id or None,
+                )
             )
-        if parsed_calls:
-            tool_calls = parsed_calls
 
     return ParsedResponse(
         content=text.strip(),

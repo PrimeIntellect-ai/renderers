@@ -19,7 +19,14 @@ from typing import Any, cast
 import numpy as np
 from openai import AsyncOpenAI, BadRequestError
 
-from renderers.base import Message, MultiModalData, Renderer, RendererPool, ToolSpec
+from renderers.base import (
+    Message,
+    MultiModalData,
+    Renderer,
+    RendererPool,
+    ToolCallParseStatus,
+    ToolSpec,
+)
 
 _request_logger = logging.getLogger("renderers.client")
 
@@ -162,11 +169,17 @@ async def generate(
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
-    # when we extracted tool calls client-side, so OpenAI-compatible agent
-    # loops continue past the tool turn instead of treating the response as
-    # final.
+    # when we extracted at least one well-formed tool call client-side, so
+    # OpenAI-compatible agent loops continue past the tool turn instead of
+    # treating the response as final. Malformed attempts (INVALID_JSON,
+    # UNCLOSED_BLOCK, ...) don't qualify — those still surface on
+    # ``parsed.tool_calls`` so verifiers can inspect them, but they don't
+    # trigger the tool-loop continuation.
     finish_reason = choice.get("finish_reason")
-    if parsed.tool_calls and finish_reason == "stop":
+    ok_tool_calls = [
+        tc for tc in parsed.tool_calls if tc.status == ToolCallParseStatus.OK
+    ]
+    if ok_tool_calls and finish_reason == "stop":
         finish_reason = "tool_calls"
 
     return {

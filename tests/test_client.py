@@ -3,7 +3,12 @@ import base64
 
 import numpy as np
 
-from renderers.base import ParsedResponse, RenderedTokens
+from renderers.base import (
+    ParsedResponse,
+    ParsedToolCall,
+    RenderedTokens,
+    ToolCallParseStatus,
+)
 from renderers.client import generate
 
 
@@ -30,12 +35,12 @@ class _FakeRenderer:
             content="done",
             reasoning_content="think",
             tool_calls=[
-                {
-                    "function": {
-                        "name": "echo",
-                        "arguments": {"text": "hello"},
-                    }
-                }
+                ParsedToolCall(
+                    raw='{"name": "echo", "arguments": {"text": "hello"}}',
+                    name="echo",
+                    arguments={"text": "hello"},
+                    status=ToolCallParseStatus.OK,
+                )
             ],
         )
 
@@ -111,26 +116,59 @@ def test_generate_builds_request_body_and_parses_response():
         },
     }
     # finish_reason promoted from "stop" → "tool_calls" because the renderer
-    # extracted tool calls client-side.
-    assert result == {
-        "request_id": "gen-test",
-        "prompt_ids": [1, 2, 3],
-        "completion_ids": [7, 8],
-        "completion_logprobs": [-0.1, -0.2],
-        "content": "done",
-        "reasoning_content": "think",
-        "tool_calls": [
-            {
-                "function": {
-                    "name": "echo",
-                    "arguments": {"text": "hello"},
-                }
-            }
-        ],
-        "finish_reason": "tool_calls",
-        "routed_experts": [[[1]], [[2]]],
-        "multi_modal_data": None,
-    }
+    # extracted at least one well-formed tool call client-side.
+    assert result["finish_reason"] == "tool_calls"
+    assert result["content"] == "done"
+    assert result["reasoning_content"] == "think"
+    assert result["prompt_ids"] == [1, 2, 3]
+    assert result["completion_ids"] == [7, 8]
+    assert result["completion_logprobs"] == [-0.1, -0.2]
+    assert result["routed_experts"] == [[[1]], [[2]]]
+    assert result["multi_modal_data"] is None
+    assert result["request_id"] == "gen-test"
+    assert len(result["tool_calls"]) == 1
+    tc = result["tool_calls"][0]
+    assert tc.name == "echo"
+    assert tc.arguments == {"text": "hello"}
+    assert tc.status == ToolCallParseStatus.OK
+
+
+class _MalformedToolRenderer(_FakeRenderer):
+    """Returns only a malformed tool-call attempt — finish_reason must stay "stop"."""
+
+    def parse_response(self, completion_ids: list[int]) -> ParsedResponse:
+        return ParsedResponse(
+            content="",
+            reasoning_content=None,
+            tool_calls=[
+                ParsedToolCall(
+                    raw='{"name": "echo", broken',
+                    status=ToolCallParseStatus.INVALID_JSON,
+                )
+            ],
+        )
+
+
+def test_generate_does_not_promote_finish_reason_for_malformed_tool_calls():
+    """A malformed tool-call attempt must NOT promote finish_reason to
+    "tool_calls" — only well-formed (status=OK) calls qualify. The
+    malformed attempt is still preserved in ``tool_calls`` for verifier
+    inspection, but the agent loop should not treat the turn as a
+    successful tool invocation.
+    """
+    client = _FakeClient()
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=_MalformedToolRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+        )
+    )
+    assert result["finish_reason"] == "stop"
+    assert len(result["tool_calls"]) == 1
+    assert result["tool_calls"][0].status == ToolCallParseStatus.INVALID_JSON
 
 
 class _NoRenderRenderer(_FakeRenderer):

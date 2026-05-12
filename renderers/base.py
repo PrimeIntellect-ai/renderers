@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import logging
 import queue
 import threading
@@ -160,13 +161,74 @@ class RenderedTokens:
     multi_modal_data: "MultiModalData | None" = None
 
 
+class ToolCallParseStatus(str, enum.Enum):
+    """Per-attempt outcome of parsing a single ``<tool_call>`` block.
+
+    The renderer parser's job is JSON-syntax → ``dict`` (the parser-level
+    contract). Schema validation — required fields, argument types, tool
+    name lookup — is the *tool*'s job and is intentionally not done here.
+    See ``ParsedToolCall.status`` for what each value means.
+
+    Diverges from vLLM/SGLang on purpose. Both engines collapse parse
+    failures into either a single ``tools_called: bool`` (vLLM) or silent
+    drops (SGLang), with no way to express "the model emitted three
+    parallel tool calls and the second was malformed." Renderers expose
+    that information because verifier / RL-loss code needs it for
+    schema-adherence rubrics and selective token masking — use cases the
+    inference engines don't serve.
+    """
+
+    OK = "ok"
+    INVALID_JSON = "invalid_json"  # body wasn't valid JSON
+    UNCLOSED_BLOCK = "unclosed_block"  # opening delim hit EOS / stop
+    MISSING_NAME = "missing_name"  # parsed structurally, but no function name
+    MALFORMED_STRUCTURE = "malformed_structure"  # format-specific shape error
+
+
+@dataclass
+class ParsedToolCall:
+    """A single ``<tool_call>`` block as the renderer parsed it.
+
+    One record per *attempt* — successful and malformed calls both land
+    here, distinguished by ``status``. Ordering is preserved across the
+    response, so ``[OK, INVALID_JSON, OK]`` is a faithful record of "the
+    model emitted three parallel calls; the second was broken."
+
+    ``token_span`` is a half-open ``[start, end)`` slice into the
+    completion's stripped token id stream (i.e. ``token_ids`` after
+    ``_strip_stop_tokens``); some text-based parsers can't cheaply
+    recover token offsets and leave it ``None``. Useful for trainer-side
+    selective loss masking: zero the mask over the spans of non-OK
+    entries to avoid reinforcing malformed structures.
+
+    ``raw`` is the decoded text of the block as the model emitted it
+    (before any JSON normalization). Always populated — for failed
+    attempts it's the only way to see what actually went wrong.
+    """
+
+    raw: str
+    name: str | None = None
+    arguments: dict[str, Any] | str | None = None
+    token_span: tuple[int, int] | None = None
+    status: ToolCallParseStatus = ToolCallParseStatus.OK
+    id: str | None = None  # native tool-call id when the format carries one (Kimi K2)
+
+
 @dataclass
 class ParsedResponse:
-    """Result of parsing completion tokens back into a structured message."""
+    """Result of parsing completion tokens back into a structured message.
+
+    ``tool_calls`` is a list of every parse attempt — successful and
+    malformed alike. Filter with ``[tc for tc in r.tool_calls if
+    tc.status == ToolCallParseStatus.OK]`` to get only the calls that
+    came out clean. Empty list = the model didn't emit any tool calls
+    (different from "tried and failed entirely", which produces a list
+    with non-OK entries).
+    """
 
     content: str
     reasoning_content: str | None = None
-    tool_calls: list[dict[str, Any]] | None = None
+    tool_calls: list[ParsedToolCall] = field(default_factory=list)
 
 
 @dataclass

@@ -158,8 +158,8 @@ def test_roundtrip_reasoning_and_content(rt_model, rt_tokenizer, rt_renderer):
 
 
 def _maybe_skip_tool_calls(renderer_name: str) -> None:
-    """DefaultRenderer without a tool_parser configured always returns
-    tool_calls=None. That's a documented limitation, not a bug — skip."""
+    """DefaultRenderer without a tool_parser configured always returns an
+    empty tool_calls list. That's a documented limitation, not a bug — skip."""
     if renderer_name == "default":
         pytest.skip(
             "DefaultRenderer requires an explicit tool_parser to parse tool "
@@ -194,11 +194,9 @@ def test_roundtrip_single_tool_call(
     assert parsed.tool_calls, f"{rt_model}: tool_calls lost, got {parsed.tool_calls!r}"
     assert len(parsed.tool_calls) == 1
     tc = parsed.tool_calls[0]
-    assert tc["function"]["name"] == "get_weather", (
-        f"{rt_model}: name mangled, got {tc!r}"
-    )
-    assert _normalize_args(tc["function"]["arguments"]) == {"city": "Tokyo"}, (
-        f"{rt_model}: args mangled, got {tc['function']['arguments']!r}"
+    assert tc.name == "get_weather", f"{rt_model}: name mangled, got {tc!r}"
+    assert _normalize_args(tc.arguments) == {"city": "Tokyo"}, (
+        f"{rt_model}: args mangled, got {tc.arguments!r}"
     )
 
 
@@ -235,19 +233,15 @@ def test_roundtrip_multiple_tool_calls(
     completion_ids = _extract_assistant_tokens(rt_renderer, PROMPT, msg)
     parsed = rt_renderer.parse_response(completion_ids)
 
-    assert parsed.tool_calls is not None and len(parsed.tool_calls) == 2, (
+    assert len(parsed.tool_calls) == 2, (
         f"{rt_model}: expected 2 tool_calls, got {parsed.tool_calls!r}"
     )
-    names = [tc["function"]["name"] for tc in parsed.tool_calls]
+    names = [tc.name for tc in parsed.tool_calls]
     assert names == ["get_weather", "get_time"], (
         f"{rt_model}: names/order wrong, got {names}"
     )
-    assert _normalize_args(parsed.tool_calls[0]["function"]["arguments"]) == {
-        "city": "Tokyo"
-    }
-    assert _normalize_args(parsed.tool_calls[1]["function"]["arguments"]) == {
-        "zone": "JST"
-    }
+    assert _normalize_args(parsed.tool_calls[0].arguments) == {"city": "Tokyo"}
+    assert _normalize_args(parsed.tool_calls[1].arguments) == {"zone": "JST"}
 
 
 # ── byte-exact re-render invariant ─────────────────────────────────────

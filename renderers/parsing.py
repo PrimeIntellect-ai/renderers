@@ -29,6 +29,14 @@ def _find(ids: list[int], target: int, start: int = 0) -> int:
     return -1
 
 
+def _find_any(ids: list[int], targets: set[int], start: int = 0) -> int:
+    """Find first index in ids whose value is in targets, or -1."""
+    for i in range(start, len(ids)):
+        if ids[i] in targets:
+            return i
+    return -1
+
+
 def _find_all(ids: list[int], target: int) -> list[int]:
     """Find all indices of target in ids."""
     return [i for i, t in enumerate(ids) if t == target]
@@ -705,6 +713,46 @@ def parse_minimax(
 # ── Kimi K2: <|tool_calls_section_begin|> ... <|tool_calls_section_end|> ────
 
 
+def parse_kimi_k2_section(
+    tokenizer,
+    ids: list[int],
+    *,
+    tool_calls_section_begin_ids: set[int],
+    tool_calls_section_end_ids: set[int],
+    tool_call_begin_id: int,
+    tool_call_argument_begin_id: int,
+    tool_call_end_id: int,
+) -> tuple[list[int], list[ParsedToolCall]]:
+    """Split ``ids`` into ``(content_before_section, tool_calls)`` by finding
+    the Kimi-style tool-call section delimiters.
+
+    Accepts *sets* of begin/end token IDs so callers can express models with
+    multiple delimiter variants (K2.5 has both plural ``<|tool_calls_section_*|>``
+    and singular ``<|tool_call_section_*|>`` forms, though only the plural form
+    is in the special-token vocab in practice). Returns the content ids ahead
+    of the section and a list of ``ParsedToolCall`` covering every attempted
+    block inside it; an unclosed section is still walked to whatever the model
+    emitted before EOS. Returns ``(ids, [])`` when no section is present.
+    """
+    section_start = _find_any(ids, tool_calls_section_begin_ids)
+    if section_start == -1:
+        return list(ids), []
+    content_ids = ids[:section_start]
+    section_end = _find_any(ids, tool_calls_section_end_ids, section_start + 1)
+    if section_end == -1:
+        section_end = len(ids)
+    section_ids = ids[section_start + 1 : section_end]
+    tool_calls = _parse_kimi_k2_tool_calls(
+        tokenizer,
+        section_ids,
+        tool_call_begin_id,
+        tool_call_argument_begin_id,
+        tool_call_end_id,
+        section_offset=section_start + 1,
+    )
+    return content_ids, tool_calls
+
+
 def parse_kimi_k2(
     tokenizer,
     token_ids: list[int],
@@ -724,24 +772,15 @@ def parse_kimi_k2(
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
-    section_start = _find(ids, tool_calls_section_begin_id)
-    tool_calls: list[ParsedToolCall] = []
-    if section_start != -1:
-        content_ids = ids[:section_start]
-        section_end = _find(ids, tool_calls_section_end_id, section_start + 1)
-        if section_end == -1:
-            section_end = len(ids)
-        section_ids = ids[section_start + 1 : section_end]
-        tool_calls = _parse_kimi_k2_tool_calls(
-            tokenizer,
-            section_ids,
-            tool_call_begin_id,
-            tool_call_argument_begin_id,
-            tool_call_end_id,
-            section_offset=section_start + 1,
-        )
-    else:
-        content_ids = ids
+    content_ids, tool_calls = parse_kimi_k2_section(
+        tokenizer,
+        ids,
+        tool_calls_section_begin_ids={tool_calls_section_begin_id},
+        tool_calls_section_end_ids={tool_calls_section_end_id},
+        tool_call_begin_id=tool_call_begin_id,
+        tool_call_argument_begin_id=tool_call_argument_begin_id,
+        tool_call_end_id=tool_call_end_id,
+    )
 
     text = _decode(tokenizer, content_ids)
     reasoning: str | None = None

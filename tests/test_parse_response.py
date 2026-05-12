@@ -96,3 +96,42 @@ def test_qwen3_vl_malformed_tool_call_surfaces_as_invalid_json():
     assert tc.status == ToolCallParseStatus.INVALID_JSON
     assert "get_weather" in tc.raw
     assert tc.token_span is not None
+
+
+@lru_cache
+def _kimi_k25():
+    tokenizer = load_tokenizer("moonshotai/Kimi-K2.5")
+    renderer = create_renderer(tokenizer, renderer="auto")
+    return tokenizer, renderer
+
+
+def test_kimi_k25_tool_call_carries_token_span():
+    """K2.5 was the lone parser without token spans before — its inline
+    text-walking implementation couldn't cheaply map regex hits back to
+    token offsets. We now walk token IDs via ``parse_kimi_k2_section`` for
+    the special-token path; spans must round-trip and point at a sensible
+    range within the original input token_ids.
+    """
+    tokenizer, renderer = _kimi_k25()
+    # K2.5 tool-call wire shape: section + per-call special tokens.
+    text = (
+        "<|tool_calls_section_begin|>"
+        "<|tool_call_begin|>functions.get_weather:0"
+        "<|tool_call_argument_begin|>"
+        '{"city": "Tokyo"}'
+        "<|tool_call_end|>"
+        "<|tool_calls_section_end|>"
+    )
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    parsed = renderer.parse_response(token_ids)
+
+    assert len(parsed.tool_calls) == 1
+    tc = parsed.tool_calls[0]
+    assert tc.status == ToolCallParseStatus.OK
+    assert tc.name == "get_weather"
+    assert tc.arguments == {"city": "Tokyo"}
+    assert tc.token_span is not None
+    start, end = tc.token_span
+    assert 0 <= start < end <= len(token_ids), (
+        f"span {tc.token_span} out of range for {len(token_ids)} input tokens"
+    )

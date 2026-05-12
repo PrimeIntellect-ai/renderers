@@ -31,6 +31,24 @@ CUDA_VISIBLE_DEVICES=1 uv run --script examples/sglang/multiturn_generate_sglang
 The SGLang script uses `input_ids`, so SGLang does not apply a chat template.
 It leaves `openai-harmony` at SGLang's pinned version for dependency resolution.
 
+### SGLang HTTP Recipe (online)
+
+For a token-in/token-out HTTP path against an already-running SGLang server:
+
+```bash
+sglang serve --model-path Qwen/Qwen3.5-4B \
+  --host 0.0.0.0 --port 30000 --tensor-parallel-size 1 --trust-remote-code &
+
+uv run python examples/sglang/online_multiturn_sglang.py \
+    --base-url http://localhost:30000 --model Qwen/Qwen3.5-4B
+```
+
+The HTTP recipe posts `input_ids` to `/generate`; streaming is intentionally
+unsupported because `parse_response`/`bridge_to_next_turn` require the full
+completion. The source-checkout command above uses the local `renderers`
+package; the PEP 723 `uv run --script` form requires a published package that
+satisfies the script header.
+
 ## Transformers Multi-Turn Recipe
 
 ```bash

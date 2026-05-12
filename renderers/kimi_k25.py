@@ -621,7 +621,7 @@ class KimiK25Renderer:
         img_proc = proc.image_processor
         # Kimi's vision processor takes a media-dict shape, not raw PIL.
         media_item = {"type": "image", "image": pil}
-        out = img_proc.preprocess([media_item], return_tensors="pt")
+        out = img_proc.preprocess([media_item], return_tensors="np")
         # Patch count via the processor's own calculator (matches the
         # model's per-patch attention count); kept for debugging.
         num_patches = int(img_proc.media_tokens_calculator(media_item))

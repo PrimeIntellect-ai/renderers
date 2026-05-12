@@ -357,7 +357,7 @@ class Qwen3VLRenderer:
             out, num_image_tokens = cached
             return pil, out, num_image_tokens, h
         proc = self._get_processor()
-        out = proc.image_processor(images=[pil], return_tensors="pt")
+        out = proc.image_processor(images=[pil], return_tensors="np")
         grid_thw = out["image_grid_thw"][0]
         merge_size = proc.image_processor.merge_size
         num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)

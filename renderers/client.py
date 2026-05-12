@@ -263,8 +263,15 @@ def _build_qwen_vl_features(
 
     image_items = mm_data.mm_items.get("image") or []
     if image_items:
-        pixel_values = torch.cat([it["pixel_values"] for it in image_items], dim=0)
-        image_grid_thw = torch.cat([it["image_grid_thw"] for it in image_items], dim=0)
+        # mm_items now ship numpy arrays (the renderer is torch-free);
+        # convert at this vLLM-glue boundary where torch is already a
+        # hard dependency.
+        pixel_values = torch.cat(
+            [torch.as_tensor(it["pixel_values"]) for it in image_items], dim=0
+        )
+        image_grid_thw = torch.cat(
+            [torch.as_tensor(it["image_grid_thw"]) for it in image_items], dim=0
+        )
         hf_inputs = BatchFeature(
             data={"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}
         )

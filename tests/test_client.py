@@ -29,8 +29,12 @@ class _FakeRenderer:
     def get_stop_token_ids(self):
         return [99]
 
-    def parse_response(self, completion_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self, completion_ids: list[int], *, tools=None
+    ) -> ParsedResponse:
         assert completion_ids == [7, 8]
+        # Stores tools so tests can assert the client plumbed them through.
+        self._last_parse_tools = tools
         return ParsedResponse(
             content="done",
             reasoning_content="think",
@@ -85,11 +89,12 @@ class _FakeClient:
 
 def test_generate_builds_request_body_and_parses_response():
     client = _FakeClient()
+    renderer = _FakeRenderer()
 
     result = asyncio.run(
         generate(
             client=client,
-            renderer=_FakeRenderer(),
+            renderer=renderer,
             messages=[{"role": "user", "content": "hi"}],
             model="test-model",
             tools=[{"type": "function", "function": {"name": "echo"}}],
@@ -97,6 +102,12 @@ def test_generate_builds_request_body_and_parses_response():
             cache_salt="ckpt-42",
         )
     )
+
+    # The client must plumb `tools` through to parse_response so XML-style
+    # parsers can preserve declared-string args verbatim.
+    assert renderer._last_parse_tools == [
+        {"type": "function", "function": {"name": "echo"}}
+    ]
 
     assert len(client.calls) == 1
     # /inference/v1/generate is mounted at the server root, so we post to
@@ -136,7 +147,9 @@ def test_generate_builds_request_body_and_parses_response():
 class _MalformedToolRenderer(_FakeRenderer):
     """Returns only a malformed tool-call attempt — finish_reason must stay "stop"."""
 
-    def parse_response(self, completion_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self, completion_ids: list[int], *, tools=None
+    ) -> ParsedResponse:
         return ParsedResponse(
             content="",
             reasoning_content=None,

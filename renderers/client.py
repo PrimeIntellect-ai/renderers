@@ -150,7 +150,7 @@ async def generate(
     completion_ids = choice.get("token_ids") or []
 
     parsed = await _maybe_offload(
-        renderer, lambda: renderer.parse_response(completion_ids)
+        renderer, lambda: renderer.parse_response(completion_ids, tools=tools)
     )
 
     # ChatCompletionLogProbs flatten: {"content": [{"logprob": ...}, ...]}

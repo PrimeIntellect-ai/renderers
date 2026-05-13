@@ -37,15 +37,15 @@ import pytest
 
 
 # (HuggingFace model name, renderer name). Two controls (JSON-shaped
-# parsers that already preserve string types) + three XML-style parsers
-# that currently corrupt them. Laguna-XS.2 (PR #21) has the same bug;
-# add it here when it merges.
+# parsers that already preserve string types) + four XML-style parsers
+# that currently corrupt them.
 _MODELS = [
     ("Qwen/Qwen3-8B", "auto"),  # hermes JSON  — control, expected to pass
     ("moonshotai/Kimi-K2-Instruct", "auto"),  # section JSON — control, expected to pass
     ("Qwen/Qwen3.5-9B", "auto"),  # XML — currently fails
     ("zai-org/GLM-5", "auto"),  # XML — currently fails
     ("MiniMaxAI/MiniMax-M2.5", "auto"),  # XML — currently fails
+    ("poolside/Laguna-XS.2", "auto"),  # XML — currently fails
 ]
 
 

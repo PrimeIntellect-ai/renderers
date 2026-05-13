@@ -1,3 +1,11 @@
+try:
+    from renderers._version import __version__
+except ImportError:
+    # Source checkout without a built artifact (e.g. editable install
+    # before the first ``uv build`` populates ``_version.py``). Real
+    # installs always have it.
+    __version__ = "0+unknown"
+
 from renderers.base import (
     Content,
     ContentPart,
@@ -7,6 +15,7 @@ from renderers.base import (
     MultiModalData,
     MultimodalRenderer,
     ParsedResponse,
+    ParsedToolCall,
     PlaceholderRange,
     RenderedConversation,
     RenderedTokens,
@@ -16,6 +25,7 @@ from renderers.base import (
     ThinkingPart,
     ToolCall,
     ToolCallFunction,
+    ToolCallParseStatus,
     ToolSpec,
     VideoPart,
     build_training_sample,
@@ -60,6 +70,7 @@ __all__ = [
     "MultimodalRenderer",
     "Nemotron3Renderer",
     "ParsedResponse",
+    "ParsedToolCall",
     "PlaceholderRange",
     "Qwen3Renderer",
     "Qwen3VLRenderer",
@@ -73,8 +84,10 @@ __all__ = [
     "ThinkingPart",
     "ToolCall",
     "ToolCallFunction",
+    "ToolCallParseStatus",
     "ToolSpec",
     "VideoPart",
+    "__version__",
     "build_training_sample",
     "build_trajectory_step",
     "create_renderer",

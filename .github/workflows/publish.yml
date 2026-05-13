@@ -41,6 +41,10 @@ jobs:
             TAG="$PUSHED_REF"
           fi
 
+          # The package version is derived from this tag by hatch-vcs
+          # at build time (see [tool.hatch.version] in pyproject.toml).
+          # We only need to validate the tag shape — there's no
+          # ``project.version`` field to cross-check anymore.
           case "$TAG" in
             renderers-v*) ;;
             *)
@@ -48,21 +52,6 @@ jobs:
               exit 1
               ;;
           esac
-
-          VERSION="${TAG#renderers-v}"
-          FILE_VERSION=$(python - <<'PY'
-          import tomllib
-          from pathlib import Path
-          with Path('pyproject.toml').open('rb') as f:
-              data = tomllib.load(f)
-          print(data['project']['version'])
-          PY
-          )
-
-          if [ "$FILE_VERSION" != "$VERSION" ]; then
-            echo "Version mismatch: tag requests '$VERSION' but pyproject.toml defines '$FILE_VERSION'" >&2
-            exit 1
-          fi
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 

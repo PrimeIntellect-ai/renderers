@@ -26,7 +26,6 @@ Main properties:
 from __future__ import annotations
 
 import json
-from typing import Any, assert_never
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
@@ -214,8 +213,6 @@ class LagunaXS2Renderer:
                     )
                 case "tool":
                     emit_text("<tool_response>\n" + content + "\n</tool_response>\n", i)
-                case unexpected_role:
-                    assert_never(unexpected_role)
 
         # ── Generation prompt ─────────────────────────────────────────
         if add_generation_prompt:

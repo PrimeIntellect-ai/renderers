@@ -4,7 +4,7 @@ These test that parse_response never crashes and returns sensible results
 even with adversarial or truncated model output.
 """
 
-from renderers.base import ParsedResponse
+from renderers.base import ParsedResponse, ParsedToolCall
 
 
 # ── Truncation ───────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ def test_content_only_no_thinking(model_name, tokenizer, renderer):
     ids = tokenizer.encode(text, add_special_tokens=False)
     parsed = renderer.parse_response(ids)
     assert "Hello" in parsed.content
-    assert parsed.tool_calls is None
+    assert parsed.tool_calls == []
 
 
 # ── Tool call edge cases ─────────────────────────────────────────────
@@ -128,11 +128,17 @@ def test_reasoning_is_string_or_none(model_name, tokenizer, renderer):
     assert parsed.reasoning_content is None or isinstance(parsed.reasoning_content, str)
 
 
-def test_tool_calls_is_list_or_none(model_name, tokenizer, renderer):
-    """tool_calls must be list or None, never empty list."""
+def test_tool_calls_is_list_of_parsed_tool_call(model_name, tokenizer, renderer):
+    """tool_calls is always a (possibly empty) list of ParsedToolCall — never None.
+
+    Empty list = "model did not emit any tool calls". A list with non-OK
+    entries = "model tried and the parser caught the failure"; those are
+    deliberately preserved so verifier / RL-loss code can see them. This
+    replaces the older list-or-None convention.
+    """
     text = "Hello!"
     ids = tokenizer.encode(text, add_special_tokens=False)
     parsed = renderer.parse_response(ids)
-    assert parsed.tool_calls is None or (
-        isinstance(parsed.tool_calls, list) and len(parsed.tool_calls) > 0
-    )
+    assert isinstance(parsed.tool_calls, list)
+    for tc in parsed.tool_calls:
+        assert isinstance(tc, ParsedToolCall)

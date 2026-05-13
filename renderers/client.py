@@ -19,7 +19,14 @@ from typing import Any, cast
 import numpy as np
 from openai import AsyncOpenAI, BadRequestError
 
-from renderers.base import Message, MultiModalData, Renderer, RendererPool, ToolSpec
+from renderers.base import (
+    Message,
+    MultiModalData,
+    Renderer,
+    RendererPool,
+    ToolCallParseStatus,
+    ToolSpec,
+)
 
 _request_logger = logging.getLogger("renderers.client")
 
@@ -162,11 +169,17 @@ async def generate(
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
-    # when we extracted tool calls client-side, so OpenAI-compatible agent
-    # loops continue past the tool turn instead of treating the response as
-    # final.
+    # when we extracted at least one well-formed tool call client-side, so
+    # OpenAI-compatible agent loops continue past the tool turn instead of
+    # treating the response as final. Malformed attempts (INVALID_JSON,
+    # UNCLOSED_BLOCK, ...) don't qualify — those still surface on
+    # ``parsed.tool_calls`` so verifiers can inspect them, but they don't
+    # trigger the tool-loop continuation.
     finish_reason = choice.get("finish_reason")
-    if parsed.tool_calls and finish_reason == "stop":
+    ok_tool_calls = [
+        tc for tc in parsed.tool_calls if tc.status == ToolCallParseStatus.OK
+    ]
+    if ok_tool_calls and finish_reason == "stop":
         finish_reason = "tool_calls"
 
     return {
@@ -263,8 +276,15 @@ def _build_qwen_vl_features(
 
     image_items = mm_data.mm_items.get("image") or []
     if image_items:
-        pixel_values = torch.cat([it["pixel_values"] for it in image_items], dim=0)
-        image_grid_thw = torch.cat([it["image_grid_thw"] for it in image_items], dim=0)
+        # mm_items now ship numpy arrays (the renderer is torch-free);
+        # convert at this vLLM-glue boundary where torch is already a
+        # hard dependency.
+        pixel_values = torch.cat(
+            [torch.as_tensor(it["pixel_values"]) for it in image_items], dim=0
+        )
+        image_grid_thw = torch.cat(
+            [torch.as_tensor(it["image_grid_thw"]) for it in image_items], dim=0
+        )
         hf_inputs = BatchFeature(
             data={"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}
         )

@@ -174,7 +174,7 @@ class DefaultRenderer:
             content_ids, tool_calls = self._tool_parser.extract(list(token_ids))
         else:
             content_ids = list(token_ids)
-            tool_calls = None
+            tool_calls = []
 
         # 2. Decode (keep special tokens so a downstream reasoning parser can
         #    still see things like <think>/</think> when they're tokens).

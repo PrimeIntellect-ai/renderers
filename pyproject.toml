@@ -1,12 +1,18 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "renderers"
-version = "0.1.7"
+# Derived from git tags by hatch-vcs (see [tool.hatch.version] below).
+# Untagged commits get PEP 440 dev versions like ``0.1.8.dev3+g4c877be4``
+# so any commit is uniquely installable; tagged commits get clean
+# release versions like ``0.1.8``.
+dynamic = ["version"]
 description = "Chat template renderers — deterministic message-to-token conversion for LLM training"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "numpy",
@@ -19,6 +25,25 @@ dependencies = [
     # (which also uses it) and saves us mirroring a 330-line Jinja template.
     "openai-harmony>=0.0.8",
 ]
+
+[tool.hatch.version]
+source = "vcs"
+# Tags look like ``renderers-v0.1.8`` (prefix matches the publish.yml
+# release contract); strip the prefix to get a PEP 440 version. The
+# regex accepts any PEP 440-valid suffix after the prefix so we can
+# tag pre-releases like ``renderers-v0.2.0rc1`` later if needed.
+tag-pattern = '^renderers-v(?P<version>.+)$'
+# Used when building from a context without VCS metadata (e.g. an
+# sdist consumed by a downstream that doesn't ship .git). Real
+# builds from a checkout get the resolved version; this fallback
+# only fires when the resolver has nothing to go on.
+fallback-version = "0.0.0"
+
+[tool.hatch.build.hooks.vcs]
+# Write the resolved version to a Python file so it can be inspected
+# at runtime via ``renderers.__version__`` without re-parsing the
+# wheel metadata.
+version-file = "renderers/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["renderers"]

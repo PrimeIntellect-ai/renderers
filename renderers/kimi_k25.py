@@ -31,13 +31,16 @@ from renderers.base import (
     Message,
     MultiModalData,
     ParsedResponse,
+    ParsedToolCall,
     PlaceholderRange,
     RenderedTokens,
+    ToolCallParseStatus,
     ToolSpec,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
     trim_to_turn_close,
 )
+from renderers.parsing import parse_kimi_k2_section
 from renderers.qwen3_vl import (
     _image_hash,
     _is_image_part,
@@ -420,12 +423,27 @@ def _parse_kimi_k2_response(
     stop_ids: set[int],
     think_open_ids: list[int],
     think_close_ids: list[int],
+    tool_calls_section_begin_id: int | None,
+    tool_calls_section_end_id: int | None,
+    tool_call_begin_id: int | None,
+    tool_call_argument_begin_id: int | None,
+    tool_call_end_id: int | None,
 ) -> ParsedResponse:
     """Parse Kimi K2/K2.5 completion tokens.
 
-    Strips the stop token, decodes to text, then extracts:
-    - reasoning from ``<think>...</think>`` blocks
-    - tool calls from ``<|tool_calls_section_begin|>...<|tool_calls_section_end|>``
+    Primary path: walk token IDs via :func:`parse_kimi_k2_section`. That gives
+    every ``ParsedToolCall`` a ``token_span`` pointing back into the
+    (stop-stripped) input — what the trainer needs for selective loss masking.
+
+    Fallback path: regex on decoded text. Only used when none of the section
+    delimiters appear as special tokens, which in practice means the model
+    emitted the literal ``<|tool_call_section_begin|>`` string (the singular
+    variant is *not* in the K2.5 special-token vocab — confirmed by tokenizer
+    probe). Spans stay ``None`` here since text positions don't cheaply map
+    back to token offsets across BPE.
+
+    ``<think>...</think>`` is always text-extracted from the content slice
+    (K2.5 emits them as plain text, not special tokens).
     """
     # Strip stop token
     ids = list(token_ids)
@@ -434,13 +452,79 @@ def _parse_kimi_k2_response(
             ids = ids[:i]
             break
 
-    # Decode all tokens (including any special tokens that are text-like)
-    text = tokenizer.decode(ids, skip_special_tokens=False) if ids else ""
+    # Token-ID path — produces spans. Only run if every relevant special
+    # token resolved at init (i.e. is in the tokenizer's vocab).
+    tool_calls: list[ParsedToolCall] = []
+    have_special_tokens = (
+        tool_calls_section_begin_id is not None
+        and tool_calls_section_end_id is not None
+        and tool_call_begin_id is not None
+        and tool_call_argument_begin_id is not None
+        and tool_call_end_id is not None
+    )
+    if have_special_tokens:
+        content_ids, tool_calls = parse_kimi_k2_section(
+            tokenizer,
+            ids,
+            tool_calls_section_begin_ids={tool_calls_section_begin_id},
+            tool_calls_section_end_ids={tool_calls_section_end_id},
+            tool_call_begin_id=tool_call_begin_id,
+            tool_call_argument_begin_id=tool_call_argument_begin_id,
+            tool_call_end_id=tool_call_end_id,
+        )
+        text = (
+            tokenizer.decode(content_ids, skip_special_tokens=False)
+            if content_ids
+            else ""
+        )
+    else:
+        text = tokenizer.decode(ids, skip_special_tokens=False) if ids else ""
 
-    # Extract reasoning from <think>...</think>. Partition on <think> first so
-    # any tokens BEFORE the open tag (e.g. the assistant role tag, when the
-    # caller slices the completion to include the prompt's gen-prompt-equivalent)
-    # don't leak into reasoning_content.
+    # Fallback path: model emitted literal-text section delimiters (singular
+    # variant) rather than special tokens. Spans unavailable here.
+    if not tool_calls:
+        tc_match = _TOOL_CALLS_SECTION_RE.search(text)
+        if tc_match:
+            text = text[: tc_match.start()]
+            tool_section = (
+                tc_match.group(1)
+                if tc_match.group(1) is not None
+                else tc_match.group(2)
+            )
+            for m in _TOOL_CALL_RE.finditer(tool_section):
+                tool_id = m.group(1).strip()
+                args_str = m.group(2).strip()
+                name_part = tool_id.split(":", 1)[0]
+                func_name = (
+                    name_part.split(".", 1)[1] if "." in name_part else name_part
+                )
+                arguments: dict[str, Any] | str
+                invalid_json = False
+                try:
+                    arguments = json.loads(args_str)
+                except json.JSONDecodeError:
+                    arguments = args_str
+                    invalid_json = True
+                if not func_name:
+                    status = ToolCallParseStatus.MISSING_NAME
+                elif invalid_json:
+                    status = ToolCallParseStatus.INVALID_JSON
+                else:
+                    status = ToolCallParseStatus.OK
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=m.group(0),
+                        name=func_name or None,
+                        arguments=arguments,
+                        status=status,
+                        id=tool_id or None,
+                    )
+                )
+
+    # Extract reasoning from <think>...</think> in the content text. Partition
+    # on <think> first so any tokens BEFORE the open tag (e.g. the assistant
+    # role tag, when the caller slices the completion to include the prompt's
+    # gen-prompt-equivalent) don't leak into reasoning_content.
     reasoning: str | None = None
     if "<think>" in text:
         _, _, after_open = text.partition("<think>")
@@ -449,11 +533,12 @@ def _parse_kimi_k2_response(
             reasoning = reasoning_raw.strip("\n") or None
             text = text.strip("\n")
         else:
-            # Truncated reasoning (no closing tag)
+            # Truncated reasoning (no closing tag) — discard any partial
+            # tool-call attempts since the model never finished thinking.
             return ParsedResponse(
                 content="",
                 reasoning_content=after_open.strip() or None,
-                tool_calls=None,
+                tool_calls=[],
             )
     elif "</think>" in text:
         # Sampler stripped the prefilled <think> open tag — see
@@ -462,35 +547,6 @@ def _parse_kimi_k2_response(
         before, _, after = text.partition("</think>")
         reasoning = before.strip("\n") or None
         text = after.strip("\n")
-
-    # Extract tool calls section
-    tool_calls: list[dict[str, Any]] | None = None
-    tc_match = _TOOL_CALLS_SECTION_RE.search(text)
-    if tc_match:
-        text = text[: tc_match.start()]
-        tool_section = (
-            tc_match.group(1) if tc_match.group(1) is not None else tc_match.group(2)
-        )
-        parsed_calls = []
-        for m in _TOOL_CALL_RE.finditer(tool_section):
-            tool_id = m.group(1).strip()
-            args_str = m.group(2).strip()
-            # Extract function name from "functions.name:index" format
-            name_part = tool_id.split(":", 1)[0]
-            func_name = name_part.split(".", 1)[1] if "." in name_part else name_part
-            try:
-                arguments = json.loads(args_str)
-            except json.JSONDecodeError:
-                arguments = args_str  # preserve raw string if invalid JSON
-            parsed_calls.append(
-                {
-                    "type": "function",
-                    "id": tool_id,
-                    "function": {"name": func_name, "arguments": arguments},
-                }
-            )
-        if parsed_calls:
-            tool_calls = parsed_calls
 
     return ParsedResponse(
         content=text.strip(),
@@ -621,7 +677,7 @@ class KimiK25Renderer:
         img_proc = proc.image_processor
         # Kimi's vision processor takes a media-dict shape, not raw PIL.
         media_item = {"type": "image", "image": pil}
-        out = img_proc.preprocess([media_item], return_tensors="pt")
+        out = img_proc.preprocess([media_item], return_tensors="np")
         # Patch count via the processor's own calculator (matches the
         # model's per-patch attention count); kept for debugging.
         num_patches = int(img_proc.media_tokens_calculator(media_item))
@@ -853,16 +909,33 @@ class KimiK25Renderer:
         if self._endoftext is not None:
             stop_ids.add(self._endoftext)
 
-        # Restore the synthetic <think> prefill if it was stripped by the sampler
+        # Restore the synthetic <think> prefill if it was stripped by the
+        # sampler. ``parse`` then walks ``normalized``, so any token_span we
+        # emit is in the *normalized* frame. We track the prepend offset and
+        # shift spans back so they refer to the caller's ``token_ids``.
         normalized = self._normalize_response_tokens(list(token_ids))
+        prepend_offset = len(normalized) - len(token_ids)
 
-        return _parse_kimi_k2_response(
+        parsed = _parse_kimi_k2_response(
             self._tokenizer,
             normalized,
             stop_ids=stop_ids,
             think_open_ids=self._think_open_ids,
             think_close_ids=self._think_close_ids,
+            tool_calls_section_begin_id=self._tool_calls_section_begin,
+            tool_calls_section_end_id=self._tool_calls_section_end,
+            tool_call_begin_id=self._tool_call_begin,
+            tool_call_argument_begin_id=self._tool_call_argument_begin,
+            tool_call_end_id=self._tool_call_end,
         )
+
+        if prepend_offset:
+            for tc in parsed.tool_calls:
+                if tc.token_span is not None:
+                    start, end = tc.token_span
+                    tc.token_span = (start - prepend_offset, end - prepend_offset)
+
+        return parsed
 
     def get_stop_token_ids(self) -> list[int]:
         stop = [self._im_end]

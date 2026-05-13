@@ -904,7 +904,12 @@ class KimiK25Renderer:
             add_generation_prompt=add_generation_prompt,
         ).token_ids
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,  # noqa: ARG002 — section-JSON wire format quotes strings, schema not needed
+    ) -> ParsedResponse:
         stop_ids: set[int] = {self._im_end}
         if self._endoftext is not None:
             stop_ids.add(self._endoftext)

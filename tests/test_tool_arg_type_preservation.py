@@ -1,30 +1,19 @@
-"""Regression: XML-style tool parsers lose string type for JSON-looking values.
+"""Tool-arg string-type preservation across renderers.
 
-When the model emits a tool call whose argument is a string that happens
-to look like JSON (e.g. ``"true"``, ``"42"``, ``"[1,2,3]"``), every
-XML-style parser (Qwen3.5, GLM, MiniMax, Laguna) re-parses the value via
-``json.loads`` and returns a bool / int / list instead of the original
-string. The chat template's ``<arg_value>X</arg_value>`` form has no
-quoting to distinguish the two on the wire, so the tool schema is the
-only disambiguating signal — and the renderer parsers don't see it.
+XML-style chat templates (Qwen3.5, GLM, MiniMax, Laguna) render tool-call
+argument values verbatim inside ``<arg_value>X</arg_value>`` tags with
+no quoting, so a value of ``true`` could be either a bool or the string
+``"true"``. Without the tool schema, the parser has no signal to choose
+between them and defaults to ``json.loads`` — which silently corrupts
+string args that look like JSON.
 
-vLLM / SGLang's reference parsers (e.g. ``vllm/glm45_tool_parser.py``)
-overlay the tool schema to apply ``json.loads`` ONLY to parameters whose
-declared type is not ``string``. The renderers library currently does
-not; the JSON-/section-style parsers (Qwen3 hermes, Kimi K2, DeepSeek)
-sidestep the bug because their wire format quotes strings.
+This test passes the tool schema to ``parse_response`` so the parser can
+preserve declared-string params verbatim, matching vLLM / SGLang's
+reference parsers (e.g. ``vllm/glm45_tool_parser.py``). The hermes-JSON
+(Qwen3) and section-JSON (Kimi K2) parsers sidestep the bug because
+their wire format quotes strings; both serve as controls.
 
-These tests fail loudly against current main — they're the
-specification for the fix, not documentation of accepted behavior. CI
-should be red until ``parse_response`` is schema-aware.
-
-Originally raised by Robin (Poolside) on PR #21:
-
-    > Tool call parsing for all XML-like parsers may corrupt string
-    > parameter values if they happen to be valid JSON strings, e.g.
-    > "true" -> True (str -> bool), same for lists, objs etc. vLLM
-    > parsers "solve" this by passing the tools definition into the
-    > parsers.
+Originally raised by Robin (Poolside) on PR #21.
 """
 
 from __future__ import annotations
@@ -36,16 +25,16 @@ from typing import Any
 import pytest
 
 
-# (HuggingFace model name, renderer name). Two controls (JSON-shaped
-# parsers that already preserve string types) + four XML-style parsers
-# that currently corrupt them.
+# (HuggingFace model name, renderer name). Two JSON-shaped controls
+# (string types already preserved by the wire format) + four XML-style
+# parsers that rely on the schema to preserve them.
 _MODELS = [
-    ("Qwen/Qwen3-8B", "auto"),  # hermes JSON  — control, expected to pass
-    ("moonshotai/Kimi-K2-Instruct", "auto"),  # section JSON — control, expected to pass
-    ("Qwen/Qwen3.5-9B", "auto"),  # XML — currently fails
-    ("zai-org/GLM-5", "auto"),  # XML — currently fails
-    ("MiniMaxAI/MiniMax-M2.5", "auto"),  # XML — currently fails
-    ("poolside/Laguna-XS.2", "auto"),  # XML — currently fails
+    ("Qwen/Qwen3-8B", "auto"),  # hermes JSON  — control
+    ("moonshotai/Kimi-K2-Instruct", "auto"),  # section JSON — control
+    ("Qwen/Qwen3.5-9B", "auto"),  # XML
+    ("zai-org/GLM-5", "auto"),  # XML
+    ("MiniMaxAI/MiniMax-M2.5", "auto"),  # XML
+    ("poolside/Laguna-XS.2", "auto"),  # XML
 ]
 
 
@@ -78,15 +67,34 @@ PROMPT = [
 ]
 
 
-# Each entry: a single-key arguments dict whose value is a STRING that
-# happens to be valid JSON of another type. The bug surfaces when the
-# parser silently coerces the string into the encoded type.
+# Each case: a single ``x`` argument whose value is a STRING that
+# happens to be valid JSON of another type. With a schema declaring
+# ``x: string``, the parser must return the string verbatim.
 JSON_LOOKING_STRING_ARGS = [
-    pytest.param({"flag": "true"}, id="string-bool"),
-    pytest.param({"n": "42"}, id="string-int"),
+    pytest.param({"x": "true"}, id="string-bool"),
+    pytest.param({"x": "42"}, id="string-int"),
     pytest.param({"x": "null"}, id="string-null"),
     pytest.param({"x": "[1,2,3]"}, id="string-array"),
     pytest.param({"x": '{"k": 1}'}, id="string-object"),
+]
+
+
+# Tool schema with the single string-typed parameter exercised by every
+# case above. Passed to both ``render`` (so the system prompt declares
+# the tool) and ``parse_response`` (so the parser preserves the type).
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "f",
+            "description": "Test tool with one string parameter.",
+            "parameters": {
+                "type": "object",
+                "properties": {"x": {"type": "string"}},
+                "required": ["x"],
+            },
+        },
+    }
 ]
 
 
@@ -101,9 +109,9 @@ def _normalize_args(args: Any) -> Any:
     return args
 
 
-def _extract_assistant_tokens(renderer, prompt, assistant_msg):
-    prompt_ids = renderer.render_ids(prompt, add_generation_prompt=False)
-    full_ids = renderer.render_ids(prompt + [assistant_msg])
+def _extract_assistant_tokens(renderer, prompt, assistant_msg, *, tools=None):
+    prompt_ids = renderer.render_ids(prompt, tools=tools, add_generation_prompt=False)
+    full_ids = renderer.render_ids(prompt + [assistant_msg], tools=tools)
     return full_ids[len(prompt_ids) :]
 
 
@@ -121,8 +129,8 @@ def test_string_arg_preserves_type(model, renderer_name, renderer, args):
             }
         ],
     }
-    completion_ids = _extract_assistant_tokens(renderer, PROMPT, msg)
-    parsed = renderer.parse_response(completion_ids)
+    completion_ids = _extract_assistant_tokens(renderer, PROMPT, msg, tools=TOOLS)
+    parsed = renderer.parse_response(completion_ids, tools=TOOLS)
 
     assert parsed.tool_calls, f"{model}: parser returned no tool_calls"
     got = _normalize_args(parsed.tool_calls[0].arguments)

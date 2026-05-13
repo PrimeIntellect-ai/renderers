@@ -214,7 +214,12 @@ class GLM45Renderer:
             add_generation_prompt=add_generation_prompt,
         ).token_ids
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,
+    ) -> ParsedResponse:
         return parse_glm(
             self._tokenizer,
             token_ids,
@@ -227,6 +232,7 @@ class GLM45Renderer:
             arg_key_end_id=self._arg_key_end,
             arg_value_id=self._arg_value,
             arg_value_end_id=self._arg_value_end,
+            tools=tools,
         )
 
     def get_stop_token_ids(self) -> list[int]:

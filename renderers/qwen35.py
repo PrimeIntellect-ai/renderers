@@ -487,7 +487,12 @@ class Qwen35Renderer:
             add_generation_prompt=add_generation_prompt,
         ).token_ids
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,
+    ) -> ParsedResponse:
         return parse_qwen35(
             self._tokenizer,
             token_ids,
@@ -496,6 +501,7 @@ class Qwen35Renderer:
             think_end_id=self._think_end,
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
+            tools=tools,
         )
 
     def get_stop_token_ids(self) -> list[int]:

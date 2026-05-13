@@ -223,7 +223,12 @@ class MiniMaxM2Renderer:
             add_generation_prompt=add_generation_prompt,
         ).token_ids
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,
+    ) -> ParsedResponse:
         return parse_minimax(
             self._tokenizer,
             token_ids,
@@ -232,6 +237,7 @@ class MiniMaxM2Renderer:
             think_end_id=self._think_end,
             tool_call_id=self._tool_call_tok,
             tool_call_end_id=self._tool_call_end_tok,
+            tools=tools,
         )
 
     def get_stop_token_ids(self) -> list[int]:

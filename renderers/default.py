@@ -167,7 +167,12 @@ class DefaultRenderer:
             messages, tools=tools, add_generation_prompt=add_generation_prompt
         )
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,  # noqa: ARG002 — DefaultRenderer relies on configured tool_parser, schema not consulted here
+    ) -> ParsedResponse:
         # 1. Extract tool calls while we still have token ids (most formats
         #    use special-token delimiters, so id-level matching is reliable).
         if self._tool_parser is not None:

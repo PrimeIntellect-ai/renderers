@@ -221,7 +221,12 @@ class DeepSeekV3Renderer:
             add_generation_prompt=add_generation_prompt,
         ).token_ids
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,  # noqa: ARG002 — args land in a ```json fence, schema not needed
+    ) -> ParsedResponse:
         return parse_deepseek_v3(
             self._tokenizer,
             token_ids,

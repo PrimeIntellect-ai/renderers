@@ -17,8 +17,78 @@ failure) — see ``ToolCallParseStatus`` docstring for the rationale.
 from __future__ import annotations
 
 import json
+from typing import Any
 
-from renderers.base import ParsedResponse, ParsedToolCall, ToolCallParseStatus
+from renderers.base import ParsedResponse, ParsedToolCall, ToolCallParseStatus, ToolSpec
+
+
+# ── Schema-aware argument coercion ──────────────────────────────────
+#
+# XML-style tool-call formats render argument values verbatim inside
+# ``<arg_value>`` tags with no quoting. ``true`` and the string
+# ``"true"`` produce identical wire bytes; without the tool schema, the
+# parser has no signal to distinguish them and defaults to
+# ``json.loads`` (the historical behavior). When the caller passes
+# ``tools=[...]``, parsers consult the per-parameter declared type to
+# keep string args verbatim, matching vLLM / SGLang reference parsers.
+
+
+def _build_param_type_index(
+    tools: list[ToolSpec] | None,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Map tool name → param name → param JSON-schema fragment.
+
+    Accepts both flat ``ToolSpec`` (``{name, description, parameters}``)
+    and the OpenAI envelope (``{"type": "function", "function": {...}}``)
+    so callers can pass either shape.
+    """
+    if not tools:
+        return {}
+    index: dict[str, dict[str, dict[str, Any]]] = {}
+    for tool in tools:
+        spec = tool.get("function", tool) if isinstance(tool, dict) else None
+        if not isinstance(spec, dict):
+            continue
+        name = spec.get("name")
+        if not isinstance(name, str):
+            continue
+        params = spec.get("parameters") or {}
+        props = params.get("properties") if isinstance(params, dict) else None
+        if isinstance(props, dict):
+            index[name] = {k: v for k, v in props.items() if isinstance(v, dict)}
+    return index
+
+
+def _coerce_arg_value(
+    text: str, param_schema: dict[str, Any] | None
+) -> tuple[Any, bool]:
+    """Coerce a raw ``<arg_value>`` body to its declared type.
+
+    Returns ``(value, used_json_fallback)``. The boolean is ``True`` only
+    when ``json.loads`` was attempted and raised, so the caller knows
+    whether to flag ``INVALID_JSON``. Returning a string verbatim
+    because the schema declared ``type: "string"`` is NOT a fallback.
+
+    Rule (matches vLLM / SGLang reference parsers):
+
+    - If the param's declared ``type`` is ``"string"`` (or single-element
+      ``["string"]``), return ``text`` verbatim — never ``json.loads``.
+    - Anything else (no schema, non-string scalar, object, array, or
+      union types that include non-string): try ``json.loads`` and fall
+      back to raw ``text`` on parse failure.
+
+    Union types that include ``"string"`` alongside other types still
+    attempt ``json.loads`` first so an explicit integer / bool can
+    parse; the string branch only wins as the fallback.
+    """
+    if param_schema is not None:
+        declared = param_schema.get("type")
+        if declared == "string" or declared == ["string"]:
+            return text, False
+    try:
+        return json.loads(text), False
+    except (json.JSONDecodeError, ValueError):
+        return text, True
 
 
 def _find(ids: list[int], target: int, start: int = 0) -> int:
@@ -160,6 +230,7 @@ def parse_qwen35(
     think_end_id: int,
     tool_call_id: int,
     tool_call_end_id: int,
+    tools: list[ToolSpec] | None = None,
 ) -> ParsedResponse:
     """Parse Qwen3.5 completion tokens. XML-style tool calls, token-level thinking."""
     ids = _strip_stop_tokens(token_ids, stop_ids)
@@ -192,6 +263,7 @@ def parse_qwen35(
             tool_call_id,
             tool_call_end_id,
             section_offset=parse_offset + tc_start,
+            param_index=_build_param_type_index(tools),
         )
     else:
         content_text = _decode(tokenizer, ids).strip()
@@ -210,6 +282,7 @@ def _parse_xml_tool_calls(
     tc_end_id: int,
     *,
     section_offset: int,
+    param_index: dict[str, dict[str, dict[str, Any]]],
 ) -> list[ParsedToolCall]:
     """Parse Qwen3.5-style XML tool calls from token IDs."""
     import re
@@ -244,6 +317,7 @@ def _parse_xml_tool_calls(
                 continue
 
             name = name_match.group(1)
+            params = param_index.get(name, {})
             arguments: dict = {}
             any_json_fallback = False
             for pm in re.finditer(
@@ -251,11 +325,11 @@ def _parse_xml_tool_calls(
             ):
                 arg_name = pm.group(1)
                 arg_value = pm.group(2).strip()
-                try:
-                    arguments[arg_name] = json.loads(arg_value)
-                except (json.JSONDecodeError, ValueError):
-                    arguments[arg_name] = arg_value
-                    any_json_fallback = True
+                value, used_fallback = _coerce_arg_value(
+                    arg_value, params.get(arg_name)
+                )
+                arguments[arg_name] = value
+                any_json_fallback = any_json_fallback or used_fallback
             tool_calls.append(
                 ParsedToolCall(
                     raw=block_text,
@@ -291,6 +365,7 @@ def parse_glm(
     arg_key_end_id: int,
     arg_value_id: int,
     arg_value_end_id: int,
+    tools: list[ToolSpec] | None = None,
 ) -> ParsedResponse:
     """Parse GLM completion tokens. Token-level thinking + arg_key/arg_value tool calls."""
     ids = _strip_stop_tokens(token_ids, stop_ids)
@@ -325,6 +400,7 @@ def parse_glm(
             arg_value_id,
             arg_value_end_id,
             section_offset=parse_offset + tc_start,
+            param_index=_build_param_type_index(tools),
         )
     else:
         content_text = _decode(tokenizer, ids).strip()
@@ -347,6 +423,7 @@ def _parse_glm_tool_calls(
     ave_id,
     *,
     section_offset: int,
+    param_index: dict[str, dict[str, dict[str, Any]]],
 ) -> list[ParsedToolCall]:
     """Parse GLM-style tool calls: name + arg_key/arg_value pairs, all by token ID."""
     tool_calls: list[ParsedToolCall] = []
@@ -375,6 +452,7 @@ def _parse_glm_tool_calls(
                 arguments: dict = {}
             else:
                 name = _decode(tokenizer, block[:first_ak]).strip()
+                params = param_index.get(name, {})
                 arguments = {}
                 j = first_ak
                 while j < len(block):
@@ -393,11 +471,11 @@ def _parse_glm_tool_calls(
                             structure_broke = True
                             break
                         val_text = _decode(tokenizer, block[av + 1 : ave]).strip()
-                        try:
-                            arguments[key] = json.loads(val_text)
-                        except (json.JSONDecodeError, ValueError):
-                            arguments[key] = val_text
-                            any_json_fallback = True
+                        value, used_fallback = _coerce_arg_value(
+                            val_text, params.get(key)
+                        )
+                        arguments[key] = value
+                        any_json_fallback = any_json_fallback or used_fallback
                         j = ave + 1
                     else:
                         j += 1
@@ -439,6 +517,7 @@ def parse_laguna_xs2(
     think_end_id: int,
     tool_call_id: int,
     tool_call_end_id: int,
+    tools: list[ToolSpec] | None = None,
 ) -> ParsedResponse:
     """Parse Laguna-XS.2 completion tokens.
 
@@ -479,6 +558,7 @@ def parse_laguna_xs2(
             tool_call_id,
             tool_call_end_id,
             section_offset=parse_offset + tc_start,
+            param_index=_build_param_type_index(tools),
         )
     else:
         content_text = _decode(tokenizer, ids).strip("\n")
@@ -497,6 +577,7 @@ def _parse_laguna_xs2_tool_calls(
     tc_end_id: int,
     *,
     section_offset: int,
+    param_index: dict[str, dict[str, dict[str, Any]]],
 ) -> list[ParsedToolCall]:
     """Parse Laguna-XS.2 tool calls.
 
@@ -538,6 +619,7 @@ def _parse_laguna_xs2_tool_calls(
                 name = block_text.strip()
                 args_section = ""
 
+            params = param_index.get(name, {})
             arguments: dict = {}
             any_json_fallback = False
             for m in re.finditer(
@@ -547,11 +629,9 @@ def _parse_laguna_xs2_tool_calls(
             ):
                 k = m.group(1).strip()
                 v = m.group(2).strip()
-                try:
-                    arguments[k] = json.loads(v)
-                except (json.JSONDecodeError, ValueError):
-                    arguments[k] = v
-                    any_json_fallback = True
+                value, used_fallback = _coerce_arg_value(v, params.get(k))
+                arguments[k] = value
+                any_json_fallback = any_json_fallback or used_fallback
 
             if not name:
                 status = ToolCallParseStatus.MISSING_NAME
@@ -753,11 +833,13 @@ def parse_minimax(
     think_end_id: int,
     tool_call_id: int,
     tool_call_end_id: int,
+    tools: list[ToolSpec] | None = None,
 ) -> ParsedResponse:
     """Parse MiniMax M2 completion tokens."""
     import re
 
     ids = _strip_stop_tokens(token_ids, stop_ids)
+    param_index = _build_param_type_index(tools)
 
     reasoning = None
     parse_offset = 0
@@ -820,6 +902,7 @@ def parse_minimax(
                     for invoke_match in invokes:
                         name = invoke_match.group(1)
                         body = invoke_match.group(2)
+                        params = param_index.get(name, {})
                         arguments: dict = {}
                         any_json_fallback = False
                         for pm in re.finditer(
@@ -829,11 +912,11 @@ def parse_minimax(
                         ):
                             pname = pm.group(1)
                             pval = pm.group(2).strip()
-                            try:
-                                arguments[pname] = json.loads(pval)
-                            except (json.JSONDecodeError, ValueError):
-                                arguments[pname] = pval
-                                any_json_fallback = True
+                            value, used_fallback = _coerce_arg_value(
+                                pval, params.get(pname)
+                            )
+                            arguments[pname] = value
+                            any_json_fallback = any_json_fallback or used_fallback
                         tool_calls.append(
                             ParsedToolCall(
                                 raw=block_text,

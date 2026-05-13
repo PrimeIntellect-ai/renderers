@@ -297,8 +297,23 @@ class Renderer(Protocol):
         """Render messages to token IDs (without attribution metadata)."""
         ...
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
-        """Parse completion tokens back into a structured message."""
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,
+    ) -> ParsedResponse:
+        """Parse completion tokens back into a structured message.
+
+        ``tools`` is the same list passed to ``render`` for this turn.
+        XML-style formats (Qwen3.5, GLM, MiniMax, Laguna) render argument
+        values verbatim inside ``<arg_value>`` tags with no quoting, so
+        a value like ``true`` is ambiguous between bool and the string
+        ``"true"``. When ``tools`` is supplied, the parser consults each
+        parameter's declared JSON-schema type to preserve string args
+        verbatim. Without ``tools``, parsers fall back to the historical
+        ``json.loads``-with-text-fallback behavior.
+        """
         ...
 
     def get_stop_token_ids(self) -> list[int]:

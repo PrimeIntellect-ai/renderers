@@ -43,6 +43,7 @@ from renderers.glm45 import GLM45Renderer
 from renderers.gpt_oss import GptOssRenderer
 from renderers.kimi_k2 import KimiK2Renderer
 from renderers.kimi_k25 import KimiK25Renderer
+from renderers.laguna_xs2 import LagunaXS2Renderer
 from renderers.minimax_m2 import MiniMaxM2Renderer
 from renderers.nemotron3 import Nemotron3Renderer
 from renderers.qwen3 import Qwen3Renderer
@@ -61,6 +62,7 @@ __all__ = [
     "ImagePart",
     "KimiK2Renderer",
     "KimiK25Renderer",
+    "LagunaXS2Renderer",
     "MULTIMODAL_MODELS",
     "Message",
     "MiniMaxM2Renderer",

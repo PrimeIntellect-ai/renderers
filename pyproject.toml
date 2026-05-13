@@ -11,6 +11,8 @@ name = "renderers"
 dynamic = ["version"]
 description = "Chat template renderers — deterministic message-to-token conversion for LLM training"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "numpy",

@@ -141,3 +141,7 @@ uv run pytest
 ```
 
 Round-trip parity (render → parse → original) and token-level parity against `apply_chat_template` are tested per renderer. End-to-end validation runs against Reverse-Text, Wordle, OpenCode-Math, and RLM-SWE environments.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).

@@ -432,6 +432,27 @@ def is_multimodal(r: object) -> bool:
     return cached
 
 
+def _resolve_pool_init_workers(size: int) -> int:
+    """Resolve the worker count used to populate a ``RendererPool``.
+
+    Defaults to 1 (serial). Opt into parallel construction via the
+    ``RENDERERS_POOL_INIT_WORKERS`` env var; the resolved value is clamped
+    to ``[1, min(size, 8)]``. Invalid values fall back to 1.
+    """
+    import os
+
+    raw = os.environ.get("RENDERERS_POOL_INIT_WORKERS")
+    if raw is None:
+        return 1
+    try:
+        requested = int(raw)
+    except ValueError:
+        return 1
+    if requested < 1:
+        return 1
+    return min(requested, size, 8)
+
+
 class RendererPool:
     """Pool of Renderer instances that itself satisfies the Renderer protocol.
 
@@ -450,9 +471,14 @@ class RendererPool:
     Construction parallelism for ``size > 1``: ``AutoTokenizer.from_pretrained``
     takes hundreds of ms per call (JSON parse + Rust tokenizer build + HF
     cache lookup), so populating a 32-slot pool serially costs ~10-15s on
-    startup and shows up directly as a step-0 stall. We fan the factory out
-    across a short-lived thread pool; the GIL-bound Python portion stops
-    scaling past ~8 workers, so we clamp there.
+    startup and shows up directly as a step-0 stall. Default is serial
+    construction (``workers=1``); under concurrent ``from_pretrained`` we have
+    observed intermittent ``NotImplementedError`` raised from the transformers
+    Python tokenizer fallback path during pool init for some models (rare but
+    catastrophic — it poisons the pool). Set the env var
+    ``RENDERERS_POOL_INIT_WORKERS`` to opt back into parallel construction;
+    the GIL-bound Python portion stops scaling past ~8 workers, so we still
+    clamp the resolved value there.
     """
 
     def __init__(self, factory: Callable[[], Renderer], size: int):
@@ -471,10 +497,14 @@ class RendererPool:
             self._sole = None
             self._lock = None
             self._pool = queue.Queue(maxsize=size)
-            workers = min(size, 8)
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                for renderer in executor.map(lambda _: factory(), range(size)):
-                    self._pool.put(renderer)
+            workers = _resolve_pool_init_workers(size)
+            if workers == 1:
+                for _ in range(size):
+                    self._pool.put(factory())
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    for renderer in executor.map(lambda _: factory(), range(size)):
+                        self._pool.put(renderer)
             # Peek without removing — safe at construction time before any
             # checkout has been served.
             sample = self._pool.queue[0]

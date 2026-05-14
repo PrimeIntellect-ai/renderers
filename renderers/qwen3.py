@@ -107,24 +107,27 @@ class Qwen3Renderer:
 
         tokens: list[int] = []
         indices: list[int] = []
+        sampled: list[bool] = []
 
-        def emit_ids(ids: list[int], msg_idx: int) -> None:
+        def emit_ids(ids: list[int], msg_idx: int, *, is_sampled: bool) -> None:
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
+            sampled.extend([is_sampled] * len(ids))
 
-        def emit_special(token_id: int, msg_idx: int) -> None:
+        def emit_special(token_id: int, msg_idx: int, *, is_sampled: bool) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
+            sampled.append(is_sampled)
 
-        def emit_text(text: str, msg_idx: int) -> None:
-            emit_ids(self._encode(text), msg_idx)
+        def emit_text(text: str, msg_idx: int, *, is_sampled: bool) -> None:
+            emit_ids(self._encode(text), msg_idx, is_sampled=is_sampled)
 
         # ── 1. System + tools ───────────────────────────────────────
         first_is_system = messages[0].get("role") == "system"
 
         if tools:
             sys_idx = 0 if first_is_system else -1
-            emit_special(self._im_start, sys_idx)
+            emit_special(self._im_start, sys_idx, is_sampled=False)
             tool_text = "system\n"
             if first_is_system:
                 tool_text += (messages[0].get("content") or "") + "\n\n"
@@ -132,14 +135,16 @@ class Qwen3Renderer:
             for tool in tools:
                 tool_text += "\n" + json.dumps(tool, ensure_ascii=False)
             tool_text += _TOOLS_FOOTER
-            emit_text(tool_text, sys_idx)
-            emit_special(self._im_end, sys_idx)
-            emit_text("\n", sys_idx)
+            emit_text(tool_text, sys_idx, is_sampled=False)
+            emit_special(self._im_end, sys_idx, is_sampled=False)
+            emit_text("\n", sys_idx, is_sampled=False)
         elif first_is_system:
-            emit_special(self._im_start, 0)
-            emit_text("system\n" + (messages[0].get("content") or ""), 0)
-            emit_special(self._im_end, 0)
-            emit_text("\n", 0)
+            emit_special(self._im_start, 0, is_sampled=False)
+            emit_text(
+                "system\n" + (messages[0].get("content") or ""), 0, is_sampled=False
+            )
+            emit_special(self._im_end, 0, is_sampled=False)
+            emit_text("\n", 0, is_sampled=False)
 
         # ── 2. Compute last_query_index ─────────────────────────────
         last_qi = self._last_query_index(messages)
@@ -153,16 +158,16 @@ class Qwen3Renderer:
             if role == "system":
                 if i == 0:
                     continue
-                emit_special(self._im_start, i)
-                emit_text(role + "\n" + content, i)
-                emit_special(self._im_end, i)
-                emit_text("\n", i)
+                emit_special(self._im_start, i, is_sampled=False)
+                emit_text(role + "\n" + content, i, is_sampled=False)
+                emit_special(self._im_end, i, is_sampled=False)
+                emit_text("\n", i, is_sampled=False)
 
             elif role == "user":
-                emit_special(self._im_start, i)
-                emit_text("user\n" + content, i)
-                emit_special(self._im_end, i)
-                emit_text("\n", i)
+                emit_special(self._im_start, i, is_sampled=False)
+                emit_text("user\n" + content, i, is_sampled=False)
+                emit_special(self._im_end, i, is_sampled=False)
+                emit_text("\n", i, is_sampled=False)
 
             elif role == "assistant":
                 preserve_thinking = should_preserve_past_thinking(
@@ -189,12 +194,14 @@ class Qwen3Renderer:
 
         # ── 4. Generation prompt ────────────────────────────────────
         if add_generation_prompt:
-            emit_special(self._im_start, -1)
-            emit_text("assistant\n", -1)
+            emit_special(self._im_start, -1, is_sampled=False)
+            emit_text("assistant\n", -1, is_sampled=False)
             if not self._enable_thinking:
-                emit_text("<think>\n\n</think>\n\n", -1)
+                emit_text("<think>\n\n</think>\n\n", -1, is_sampled=False)
 
-        return RenderedTokens(token_ids=tokens, message_indices=indices)
+        return RenderedTokens(
+            token_ids=tokens, message_indices=indices, sampled_mask=sampled
+        )
 
     def render_ids(
         self,
@@ -209,7 +216,12 @@ class Qwen3Renderer:
             add_generation_prompt=add_generation_prompt,
         ).token_ids
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,  # noqa: ARG002 — hermes wire format quotes strings, schema not needed
+    ) -> ParsedResponse:
         return parse_qwen3(
             self._tokenizer,
             token_ids,
@@ -228,7 +240,7 @@ class Qwen3Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
-    ) -> list[int] | None:
+    ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids
             or not new_messages
@@ -247,10 +259,20 @@ class Qwen3Renderer:
 
         ext: list[int] = []
 
-        def emit_special(token_id: int, _msg_idx: int = -1) -> None:
+        # Bridge output is consumed as the next turn's prompt — the
+        # caller blanket-masks it via ``prompt_mask=[False]*N``, so we
+        # don't track sampled_mask here. Local helpers accept the kwarg
+        # for signature compatibility with ``_render_tool`` and ignore
+        # it; the returned ``RenderedTokens`` leaves ``sampled_mask``
+        # empty.
+        def emit_special(
+            token_id: int, _msg_idx: int = -1, *, is_sampled: bool = False
+        ) -> None:
             ext.append(token_id)
 
-        def emit_text(text: str, _msg_idx: int = -1) -> None:
+        def emit_text(
+            text: str, _msg_idx: int = -1, *, is_sampled: bool = False
+        ) -> None:
             ext.extend(self._encode(text))
 
         # Trailing ``\n`` after the turn-close token. ``render()`` emits this
@@ -287,7 +309,7 @@ class Qwen3Renderer:
         if not self._enable_thinking:
             emit_text("<think>\n\n</think>\n\n", -1)
 
-        return previous_ids + ext
+        return RenderedTokens(token_ids=previous_ids + ext)
 
     def _render_assistant(
         self,
@@ -313,11 +335,20 @@ class Qwen3Renderer:
             reasoning_content = reasoning_content.rstrip("\n")
             content = after.lstrip("\n")
 
-        emit_special(self._im_start, msg_idx)
+        # ``<|im_start|>assistant\n`` is template-injected scaffolding —
+        # at inference the chat template emits these as the generation
+        # prompt and the model never samples them. Marking the role tag
+        # as ``is_sampled=False`` keeps the SFT loss mask aligned with
+        # what the model would actually have produced.
+        emit_special(self._im_start, msg_idx, is_sampled=False)
+        emit_text("assistant\n", msg_idx, is_sampled=False)
 
-        # Build the full text between <|im_start|> and <|im_end|> with tool call
-        # special tokens interspersed. We must keep text segments contiguous to
-        # preserve BPE merges (e.g., ".\n" is a single token in Qwen3).
+        # Build the model-sampled portion (think block + content + tool
+        # calls). Text segments stay contiguous within each is_sampled
+        # span to preserve BPE merges (e.g., ".\n" is a single token in
+        # Qwen3); the only split we introduce here is at ``\n`` after the
+        # role tag, which the existing renderer already treats as a
+        # token boundary (cf. ``_render_tool``).
         tool_calls = msg.get("tool_calls") or []
 
         emit_in_template_window = msg_idx > last_query_index and (
@@ -325,17 +356,17 @@ class Qwen3Renderer:
         )
         emit_via_override = preserve_thinking and bool(reasoning_content)
         if emit_in_template_window or emit_via_override:
-            prefix = (
-                "assistant\n<think>\n"
+            body = (
+                "<think>\n"
                 + reasoning_content.strip("\n")
                 + "\n</think>\n\n"
                 + content.lstrip("\n")
             )
         else:
-            prefix = "assistant\n" + content
+            body = content
 
         if not tool_calls:
-            emit_text(prefix, msg_idx)
+            emit_text(body, msg_idx, is_sampled=True)
         else:
             for tc_idx, tc in enumerate(tool_calls):
                 func = tc.get("function") or tc
@@ -350,19 +381,23 @@ class Qwen3Renderer:
                 # Text before this tool_call (includes separator)
                 if tc_idx == 0:
                     separator = "\n" if content else ""
-                    emit_text(prefix + separator, msg_idx)
+                    emit_text(body + separator, msg_idx, is_sampled=True)
                 else:
-                    emit_text("\n", msg_idx)
+                    emit_text("\n", msg_idx, is_sampled=True)
 
-                emit_special(self._tool_call, msg_idx)
+                emit_special(self._tool_call, msg_idx, is_sampled=True)
                 emit_text(
                     '\n{"name": "' + name + '", "arguments": ' + args_str + "}\n",
                     msg_idx,
+                    is_sampled=True,
                 )
-                emit_special(self._tool_call_end, msg_idx)
+                emit_special(self._tool_call_end, msg_idx, is_sampled=True)
 
-        emit_special(self._im_end, msg_idx)
-        emit_text("\n", msg_idx)
+        # ``<|im_end|>`` is the model's stop signal — it samples this to
+        # end its turn, so it is part of the sampled stream. The trailing
+        # ``\n`` is template-appended between turns and never sampled.
+        emit_special(self._im_end, msg_idx, is_sampled=True)
+        emit_text("\n", msg_idx, is_sampled=False)
 
     def _render_tool(
         self,
@@ -373,20 +408,23 @@ class Qwen3Renderer:
         emit_special,
         emit_text,
     ) -> None:
+        # Tool messages are conversation history injected by the runtime
+        # between assistant turns — the model never samples any of these
+        # tokens, so every emission is is_sampled=False.
         prev_is_tool = msg_idx > 0 and messages[msg_idx - 1]["role"] == "tool"
         next_is_tool = (
             msg_idx + 1 < len(messages) and messages[msg_idx + 1]["role"] == "tool"
         )
 
         if not prev_is_tool:
-            emit_special(self._im_start, msg_idx)
-            emit_text("user", msg_idx)
+            emit_special(self._im_start, msg_idx, is_sampled=False)
+            emit_text("user", msg_idx, is_sampled=False)
 
-        emit_text("\n", msg_idx)
-        emit_special(self._tool_response, msg_idx)
-        emit_text("\n" + content + "\n", msg_idx)
-        emit_special(self._tool_response_end, msg_idx)
+        emit_text("\n", msg_idx, is_sampled=False)
+        emit_special(self._tool_response, msg_idx, is_sampled=False)
+        emit_text("\n" + content + "\n", msg_idx, is_sampled=False)
+        emit_special(self._tool_response_end, msg_idx, is_sampled=False)
 
         if not next_is_tool:
-            emit_special(self._im_end, msg_idx)
-            emit_text("\n", msg_idx)
+            emit_special(self._im_end, msg_idx, is_sampled=False)
+            emit_text("\n", msg_idx, is_sampled=False)

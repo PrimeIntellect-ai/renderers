@@ -33,7 +33,7 @@ _BRIDGE_MODELS = [
     ("moonshotai/Kimi-K2-Instruct", "auto"),
     ("moonshotai/Kimi-K2.5", "auto"),
     ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
-    ("openai/gpt-oss-20b", "gpt_oss"),
+    ("openai/gpt-oss-20b", "gpt-oss"),
 ]
 
 
@@ -111,12 +111,13 @@ def test_bridge_extends_prev_verbatim_on_clean_stop(br_renderer, br_model):
         prev_prompt, prev_completion, new_messages
     )
     assert bridged is not None, f"{br_model}: bridge returned None on clean stop"
+    bridged_ids = bridged.token_ids
 
     prev = prev_prompt + prev_completion
-    assert bridged[: len(prev)] == prev, (
+    assert bridged_ids[: len(prev)] == prev, (
         f"{br_model}: bridged does NOT extend prev_prompt + prev_completion"
     )
-    assert len(bridged) > len(prev), (
+    assert len(bridged_ids) > len(prev), (
         f"{br_model}: bridge did not emit any extension tokens"
     )
 
@@ -162,11 +163,12 @@ def test_bridge_synthesises_close_on_truncation(br_renderer, br_model):
     assert bridged is not None, (
         f"{br_model}: bridge returned None on truncation; expected synth-close"
     )
+    bridged_ids = bridged.token_ids
     prev_trunc = prev_prompt + prev_completion_trunc
-    assert bridged[: len(prev_trunc)] == prev_trunc, (
+    assert bridged_ids[: len(prev_trunc)] == prev_trunc, (
         f"{br_model}: truncated-prior bridge did not keep prev tokens verbatim"
     )
-    assert len(bridged) > len(prev_trunc), (
+    assert len(bridged_ids) > len(prev_trunc), (
         f"{br_model}: synth-close produced no extra tokens"
     )
 
@@ -181,7 +183,7 @@ def test_bridge_extension_includes_new_message_text(
         prev_prompt, prev_completion, new_messages
     )
     assert bridged is not None
-    ext = bridged[len(prev_prompt) + len(prev_completion) :]
+    ext = bridged.token_ids[len(prev_prompt) + len(prev_completion) :]
     decoded = br_tokenizer.decode(ext, skip_special_tokens=False)
     assert "HELLO_SENTINEL_XYZ" in decoded, (
         f"{br_model}: new-message content missing from extension; got {decoded!r}"

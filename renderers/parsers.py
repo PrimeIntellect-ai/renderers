@@ -19,6 +19,8 @@ import json
 import re
 from typing import Protocol, runtime_checkable
 
+from renderers.base import ParsedToolCall, ToolCallParseStatus
+
 
 # ── Shared helpers ───────────────────────────────────────────────────
 
@@ -54,15 +56,17 @@ def _token_id(tokenizer, token: str) -> int | None:
 class ToolParser(Protocol):
     """Extracts tool calls from completion token ids.
 
-    ``extract`` returns a tuple ``(content_ids, tool_calls)`` where
-    ``content_ids`` is the remaining content token ids with the tool-call
-    section removed, and ``tool_calls`` is a list of
-    ``{"function": {"name": str, "arguments": dict | str}}`` dicts or
-    ``None`` when no tool call was found.
+    ``extract`` returns ``(content_ids, tool_calls)`` where ``content_ids``
+    is the remaining content token ids with the tool-call section removed,
+    and ``tool_calls`` is a list of :class:`ParsedToolCall` records — one
+    per attempted block. Empty list = the model emitted no tool calls;
+    callers filter by ``status == OK`` for the clean subset.
     """
 
     def __init__(self, tokenizer): ...
-    def extract(self, token_ids: list[int]) -> tuple[list[int], list[dict] | None]: ...
+    def extract(
+        self, token_ids: list[int]
+    ) -> tuple[list[int], list[ParsedToolCall]]: ...
 
 
 @runtime_checkable
@@ -87,14 +91,14 @@ class Qwen3ToolParser:
         self._tc_id = _token_id(tokenizer, "<tool_call>")
         self._tc_end_id = _token_id(tokenizer, "</tool_call>")
 
-    def extract(self, ids: list[int]) -> tuple[list[int], list[dict] | None]:
+    def extract(self, ids: list[int]) -> tuple[list[int], list[ParsedToolCall]]:
         if self._tc_id is None:
-            return ids, None
+            return ids, []
         tc_start = _find(ids, self._tc_id)
         if tc_start == -1:
-            return ids, None
+            return ids, []
         content_ids = ids[:tc_start]
-        tool_calls: list[dict] = []
+        tool_calls: list[ParsedToolCall] = []
         i = tc_start
         while i < len(ids):
             if ids[i] == self._tc_id:
@@ -103,25 +107,52 @@ class Qwen3ToolParser:
                     if self._tc_end_id is not None
                     else -1
                 )
+                unclosed = end == -1
                 if end == -1:
                     end = len(ids)
                 tc_text = _decode(self._tokenizer, ids[i + 1 : end]).strip()
+                span = (i, end + (0 if unclosed else 1))
+                if unclosed:
+                    tool_calls.append(
+                        ParsedToolCall(
+                            raw=tc_text,
+                            token_span=span,
+                            status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                        )
+                    )
+                    break
                 try:
                     parsed = json.loads(tc_text)
-                    tool_calls.append(
-                        {
-                            "function": {
-                                "name": parsed.get("name", ""),
-                                "arguments": parsed.get("arguments", {}),
-                            }
-                        }
-                    )
                 except json.JSONDecodeError:
-                    pass
+                    tool_calls.append(
+                        ParsedToolCall(
+                            raw=tc_text,
+                            token_span=span,
+                            status=ToolCallParseStatus.INVALID_JSON,
+                        )
+                    )
+                else:
+                    name = parsed.get("name", "") if isinstance(parsed, dict) else ""
+                    arguments = (
+                        parsed.get("arguments", {}) if isinstance(parsed, dict) else {}
+                    )
+                    tool_calls.append(
+                        ParsedToolCall(
+                            raw=tc_text,
+                            name=name or None,
+                            arguments=arguments,
+                            token_span=span,
+                            status=(
+                                ToolCallParseStatus.MISSING_NAME
+                                if not name
+                                else ToolCallParseStatus.OK
+                            ),
+                        )
+                    )
                 i = end + 1
             else:
                 i += 1
-        return content_ids, (tool_calls or None)
+        return content_ids, tool_calls
 
 
 class Qwen35ToolParser:
@@ -132,13 +163,13 @@ class Qwen35ToolParser:
         self._tc_id = _token_id(tokenizer, "<tool_call>")
         self._tc_end_id = _token_id(tokenizer, "</tool_call>")
 
-    def extract(self, ids: list[int]) -> tuple[list[int], list[dict] | None]:
+    def extract(self, ids: list[int]) -> tuple[list[int], list[ParsedToolCall]]:
         if self._tc_id is None:
-            return ids, None
+            return ids, []
         tc_start = _find(ids, self._tc_id)
         if tc_start == -1:
-            return ids, None
-        tool_calls: list[dict] = []
+            return ids, []
+        tool_calls: list[ParsedToolCall] = []
         i = tc_start
         while i < len(ids):
             if ids[i] == self._tc_id:
@@ -148,30 +179,60 @@ class Qwen35ToolParser:
                     else -1
                 )
                 if end == -1:
+                    raw = _decode(self._tokenizer, ids[i + 1 :])
+                    tool_calls.append(
+                        ParsedToolCall(
+                            raw=raw,
+                            token_span=(i, len(ids)),
+                            status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                        )
+                    )
                     break
                 block_text = _decode(self._tokenizer, ids[i + 1 : end])
+                span = (i, end + 1)
                 name_match = re.search(r"<function=([^>]+)>", block_text)
-                if name_match:
-                    name = name_match.group(1)
-                    arguments: dict = {}
-                    for pm in re.finditer(
-                        r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>",
-                        block_text,
-                        re.DOTALL,
-                    ):
-                        arg_name = pm.group(1)
-                        arg_value = pm.group(2).strip()
-                        try:
-                            arguments[arg_name] = json.loads(arg_value)
-                        except (json.JSONDecodeError, ValueError):
-                            arguments[arg_name] = arg_value
+                if not name_match:
                     tool_calls.append(
-                        {"function": {"name": name, "arguments": arguments}}
+                        ParsedToolCall(
+                            raw=block_text,
+                            token_span=span,
+                            status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+                        )
                     )
+                    i = end + 1
+                    continue
+                name = name_match.group(1)
+                arguments: dict = {}
+                any_json_fallback = False
+                for pm in re.finditer(
+                    r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>",
+                    block_text,
+                    re.DOTALL,
+                ):
+                    arg_name = pm.group(1)
+                    arg_value = pm.group(2).strip()
+                    try:
+                        arguments[arg_name] = json.loads(arg_value)
+                    except (json.JSONDecodeError, ValueError):
+                        arguments[arg_name] = arg_value
+                        any_json_fallback = True
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=block_text,
+                        name=name,
+                        arguments=arguments,
+                        token_span=span,
+                        status=(
+                            ToolCallParseStatus.INVALID_JSON
+                            if any_json_fallback
+                            else ToolCallParseStatus.OK
+                        ),
+                    )
+                )
                 i = end + 1
             else:
                 i += 1
-        return ids[:tc_start], (tool_calls or None)
+        return ids[:tc_start], tool_calls
 
 
 class GlmToolParser:
@@ -186,13 +247,13 @@ class GlmToolParser:
         self._av_id = _token_id(tokenizer, "<arg_value>")
         self._ave_id = _token_id(tokenizer, "</arg_value>")
 
-    def extract(self, ids: list[int]) -> tuple[list[int], list[dict] | None]:
+    def extract(self, ids: list[int]) -> tuple[list[int], list[ParsedToolCall]]:
         if self._tc_id is None:
-            return ids, None
+            return ids, []
         tc_start = _find(ids, self._tc_id)
         if tc_start == -1:
-            return ids, None
-        tool_calls: list[dict] = []
+            return ids, []
+        tool_calls: list[ParsedToolCall] = []
         i = tc_start
         while i < len(ids):
             if ids[i] == self._tc_id:
@@ -202,9 +263,21 @@ class GlmToolParser:
                     else -1
                 )
                 if end == -1:
+                    raw = _decode(self._tokenizer, ids[i + 1 :])
+                    tool_calls.append(
+                        ParsedToolCall(
+                            raw=raw,
+                            token_span=(i, len(ids)),
+                            status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                        )
+                    )
                     break
                 block = ids[i + 1 : end]
+                block_text = _decode(self._tokenizer, block)
+                span = (i, end + 1)
                 first_ak = _find(block, self._ak_id) if self._ak_id is not None else -1
+                any_json_fallback = False
+                structure_broke = False
                 if first_ak == -1:
                     name = _decode(self._tokenizer, block).strip()
                     arguments: dict = {}
@@ -220,6 +293,7 @@ class GlmToolParser:
                                 else -1
                             )
                             if ake == -1:
+                                structure_broke = True
                                 break
                             key = _decode(self._tokenizer, block[j + 1 : ake]).strip()
                             av = (
@@ -228,6 +302,7 @@ class GlmToolParser:
                                 else -1
                             )
                             if av == -1:
+                                structure_broke = True
                                 break
                             ave = (
                                 _find(block, self._ave_id, av + 1)
@@ -235,6 +310,7 @@ class GlmToolParser:
                                 else -1
                             )
                             if ave == -1:
+                                structure_broke = True
                                 break
                             val_text = _decode(
                                 self._tokenizer, block[av + 1 : ave]
@@ -243,14 +319,31 @@ class GlmToolParser:
                                 arguments[key] = json.loads(val_text)
                             except (json.JSONDecodeError, ValueError):
                                 arguments[key] = val_text
+                                any_json_fallback = True
                             j = ave + 1
                         else:
                             j += 1
-                tool_calls.append({"function": {"name": name, "arguments": arguments}})
+                if not name:
+                    status = ToolCallParseStatus.MISSING_NAME
+                elif structure_broke:
+                    status = ToolCallParseStatus.MALFORMED_STRUCTURE
+                elif any_json_fallback:
+                    status = ToolCallParseStatus.INVALID_JSON
+                else:
+                    status = ToolCallParseStatus.OK
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=block_text,
+                        name=name or None,
+                        arguments=arguments,
+                        token_span=span,
+                        status=status,
+                    )
+                )
                 i = end + 1
             else:
                 i += 1
-        return ids[:tc_start], (tool_calls or None)
+        return ids[:tc_start], tool_calls
 
 
 class DeepSeekV3ToolParser:
@@ -264,12 +357,12 @@ class DeepSeekV3ToolParser:
         self._tc_end = _token_id(tokenizer, "<｜tool▁call▁end｜>")
         self._sep = _token_id(tokenizer, "<｜tool▁sep｜>")
 
-    def extract(self, ids: list[int]) -> tuple[list[int], list[dict] | None]:
+    def extract(self, ids: list[int]) -> tuple[list[int], list[ParsedToolCall]]:
         if self._tcs_begin is None:
-            return ids, None
+            return ids, []
         section_start = _find(ids, self._tcs_begin)
         if section_start == -1:
-            return ids, None
+            return ids, []
         content_ids = ids[:section_start]
         section_end = (
             _find(ids, self._tcs_end, section_start + 1)
@@ -278,9 +371,10 @@ class DeepSeekV3ToolParser:
         )
         if section_end == -1:
             section_end = len(ids)
+        inner_offset = section_start + 1
         section_ids = ids[section_start + 1 : section_end]
 
-        tool_calls: list[dict] = []
+        tool_calls: list[ParsedToolCall] = []
         i = 0
         while i < len(section_ids):
             if self._tc_begin is None or section_ids[i] != self._tc_begin:
@@ -291,23 +385,45 @@ class DeepSeekV3ToolParser:
                 if self._tc_end is not None
                 else -1
             )
+            unclosed = end == -1
             if end == -1:
                 end = len(section_ids)
             block_text = _decode(self._tokenizer, section_ids[i + 1 : end])
+            span = (inner_offset + i, inner_offset + end + (0 if unclosed else 1))
             # Format: "function<｜tool▁sep｜>{name}\n```json\n{args}\n```"
             name_match = re.search(r"^\s*\w+.*?([A-Za-z0-9_]+)\s*\n", block_text)
             name = name_match.group(1) if name_match else ""
             args: dict | str = {}
+            invalid_json = False
             json_match = re.search(r"```json\s*(.*?)\s*```", block_text, re.DOTALL)
             if json_match:
                 try:
                     args = json.loads(json_match.group(1))
                 except (json.JSONDecodeError, ValueError):
                     args = json_match.group(1)
-            tool_calls.append({"function": {"name": name, "arguments": args}})
+                    invalid_json = True
+            if unclosed:
+                status = ToolCallParseStatus.UNCLOSED_BLOCK
+            elif not name:
+                status = ToolCallParseStatus.MISSING_NAME
+            elif invalid_json:
+                status = ToolCallParseStatus.INVALID_JSON
+            else:
+                status = ToolCallParseStatus.OK
+            tool_calls.append(
+                ParsedToolCall(
+                    raw=block_text,
+                    name=name or None,
+                    arguments=args,
+                    token_span=span,
+                    status=status,
+                )
+            )
             i = end + 1
+            if unclosed:
+                break
 
-        return content_ids, (tool_calls or None)
+        return content_ids, tool_calls
 
 
 # ── Reasoning parsers ────────────────────────────────────────────────
@@ -345,7 +461,7 @@ TOOL_PARSERS: dict[str, type] = {
     "qwen3": Qwen3ToolParser,
     "qwen3.5": Qwen35ToolParser,
     "glm": GlmToolParser,
-    "deepseek_v3": DeepSeekV3ToolParser,
+    "deepseek-v3": DeepSeekV3ToolParser,
 }
 
 REASONING_PARSERS: dict[str, type] = {

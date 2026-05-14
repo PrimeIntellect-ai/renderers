@@ -113,20 +113,23 @@ class DeepSeekV3Renderer:
 
         tokens: list[int] = []
         indices: list[int] = []
+        sampled: list[bool] = []
 
-        def emit_ids(ids: list[int], msg_idx: int) -> None:
+        def emit_ids(ids: list[int], msg_idx: int, *, is_sampled: bool) -> None:
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
+            sampled.extend([is_sampled] * len(ids))
 
-        def emit_special(token_id: int, msg_idx: int) -> None:
+        def emit_special(token_id: int, msg_idx: int, *, is_sampled: bool) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
+            sampled.append(is_sampled)
 
-        def emit_text(text: str, msg_idx: int) -> None:
-            emit_ids(self._encode(text), msg_idx)
+        def emit_text(text: str, msg_idx: int, *, is_sampled: bool) -> None:
+            emit_ids(self._encode(text), msg_idx, is_sampled=is_sampled)
 
         # ── 1. BOS token ─────────────────────────────────────────────
-        emit_special(self._bos, -1)
+        emit_special(self._bos, -1, is_sampled=False)
 
         # ── 2. Collect system messages at the start ───────────────────
         # All leading system messages are concatenated with "\n\n" and emitted
@@ -148,7 +151,7 @@ class DeepSeekV3Renderer:
 
         if sys_parts:
             # Attribute the concatenated system text to the first system message (index 0).
-            emit_text("\n\n".join(sys_parts), 0)
+            emit_text("\n\n".join(sys_parts), 0, is_sampled=False)
 
         # ── 3. Render non-system messages ─────────────────────────────
         num_messages = len(messages)
@@ -163,8 +166,8 @@ class DeepSeekV3Renderer:
                     content = "".join(
                         p.get("text", "") for p in content if isinstance(p, dict)
                     )
-                emit_special(self._user_token, i)
-                emit_text(str(content), i)
+                emit_special(self._user_token, i, is_sampled=False)
+                emit_text(str(content), i, is_sampled=False)
 
             elif role == "user":
                 content = msg.get("content") or ""
@@ -177,8 +180,8 @@ class DeepSeekV3Renderer:
                         else ""
                         for p in content
                     )
-                emit_special(self._user_token, i)
-                emit_text(str(content), i)
+                emit_special(self._user_token, i, is_sampled=False)
+                emit_text(str(content), i, is_sampled=False)
 
             elif role == "assistant":
                 self._render_assistant(
@@ -202,11 +205,13 @@ class DeepSeekV3Renderer:
             # Don't add <｜Assistant｜> after tool outputs — content flows directly.
             last_role = messages[-1]["role"] if messages else None
             if last_role != "tool":
-                emit_special(self._assistant_token, -1)
+                emit_special(self._assistant_token, -1, is_sampled=False)
             if self._enable_thinking:
-                emit_text("<think>\n", -1)
+                emit_text("<think>\n", -1, is_sampled=False)
 
-        return RenderedTokens(token_ids=tokens, message_indices=indices)
+        return RenderedTokens(
+            token_ids=tokens, message_indices=indices, sampled_mask=sampled
+        )
 
     def render_ids(
         self,
@@ -221,7 +226,12 @@ class DeepSeekV3Renderer:
             add_generation_prompt=add_generation_prompt,
         ).token_ids
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,  # noqa: ARG002 — args land in a ```json fence, schema not needed
+    ) -> ParsedResponse:
         return parse_deepseek_v3(
             self._tokenizer,
             token_ids,
@@ -243,7 +253,7 @@ class DeepSeekV3Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
-    ) -> list[int] | None:
+    ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids
             or not new_messages
@@ -262,10 +272,20 @@ class DeepSeekV3Renderer:
 
         ext: list[int] = []
 
-        def emit_special(token_id: int, _msg_idx: int = -1) -> None:
+        # Bridge output is consumed as the next turn's prompt — the
+        # caller blanket-masks it via ``prompt_mask=[False]*N``, so we
+        # don't track sampled_mask here. Local helpers accept the kwarg
+        # for signature compatibility with ``_render_tool`` and ignore
+        # it; the returned ``RenderedTokens`` leaves ``sampled_mask``
+        # empty.
+        def emit_special(
+            token_id: int, _msg_idx: int = -1, *, is_sampled: bool = False
+        ) -> None:
             ext.append(token_id)
 
-        def emit_text(text: str, _msg_idx: int = -1) -> None:
+        def emit_text(
+            text: str, _msg_idx: int = -1, *, is_sampled: bool = False
+        ) -> None:
             ext.extend(self._encode(text))
 
         for i, msg in enumerate(new_messages):
@@ -309,7 +329,7 @@ class DeepSeekV3Renderer:
         if self._enable_thinking:
             emit_text("<think>\n", -1)
 
-        return previous_ids + ext
+        return RenderedTokens(token_ids=previous_ids + ext)
 
     # ------------------------------------------------------------------
     # Assistant rendering
@@ -349,17 +369,24 @@ class DeepSeekV3Renderer:
 
         tool_calls = msg.get("tool_calls") or []
 
+        # ``<｜Assistant｜>`` is template-injected scaffolding — at
+        # inference the chat template emits it as the generation prompt
+        # and the model never samples it. Marking it ``is_sampled=False``
+        # keeps the SFT loss mask aligned with what the model would
+        # actually have produced. When the previous message is a tool
+        # response, the template skips this token entirely (content
+        # flows directly out of ``<｜tool▁outputs▁end｜>``).
         if not prev_is_tool:
-            emit_special(self._assistant_token, msg_idx)
+            emit_special(self._assistant_token, msg_idx, is_sampled=False)
 
         if not tool_calls:
-            emit_text(content, msg_idx)
+            emit_text(content, msg_idx, is_sampled=True)
         else:
             # Emit any pre-tool-call content first.
-            emit_text(content, msg_idx)
+            emit_text(content, msg_idx, is_sampled=True)
 
             # Tool call section.
-            emit_special(self._tool_calls_begin, msg_idx)
+            emit_special(self._tool_calls_begin, msg_idx, is_sampled=True)
             for tc in tool_calls:
                 func = tc.get("function") or tc
                 name = func.get("name", "")
@@ -371,14 +398,17 @@ class DeepSeekV3Renderer:
                 )
                 # Format: <｜tool▁call▁begin｜>function<｜tool▁sep｜>{name}\n```json\n{args}\n```<｜tool▁call▁end｜>
                 # tool_sep is a special token; type ("function") and name+args are plain text.
-                emit_special(self._tool_call_begin, msg_idx)
-                emit_text("function", msg_idx)
-                emit_special(self._tool_sep, msg_idx)
-                emit_text(f"{name}\n```json\n{args_str}\n```", msg_idx)
-                emit_special(self._tool_call_end, msg_idx)
-            emit_special(self._tool_calls_end, msg_idx)
+                emit_special(self._tool_call_begin, msg_idx, is_sampled=True)
+                emit_text("function", msg_idx, is_sampled=True)
+                emit_special(self._tool_sep, msg_idx, is_sampled=True)
+                emit_text(f"{name}\n```json\n{args_str}\n```", msg_idx, is_sampled=True)
+                emit_special(self._tool_call_end, msg_idx, is_sampled=True)
+            emit_special(self._tool_calls_end, msg_idx, is_sampled=True)
 
-        emit_special(self._eos, msg_idx)
+        # ``<｜end▁of▁sentence｜>`` is the model's stop signal — it
+        # samples this to end its turn, so it is part of the sampled
+        # stream.
+        emit_special(self._eos, msg_idx, is_sampled=True)
 
     # ------------------------------------------------------------------
     # Tool (tool-response) rendering
@@ -392,6 +422,9 @@ class DeepSeekV3Renderer:
         emit_special,
         emit_text,
     ) -> None:
+        # Tool messages are conversation history injected by the runtime
+        # between assistant turns — the model never samples any of these
+        # tokens, so every emission is is_sampled=False.
         prev_is_tool = msg_idx > 0 and messages[msg_idx - 1]["role"] == "tool"
         next_is_tool = (
             msg_idx + 1 < len(messages) and messages[msg_idx + 1]["role"] == "tool"
@@ -402,11 +435,11 @@ class DeepSeekV3Renderer:
             content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
 
         if not prev_is_tool:
-            emit_special(self._tool_outputs_begin, msg_idx)
+            emit_special(self._tool_outputs_begin, msg_idx, is_sampled=False)
 
-        emit_special(self._tool_output_begin, msg_idx)
-        emit_text(str(content), msg_idx)
-        emit_special(self._tool_output_end, msg_idx)
+        emit_special(self._tool_output_begin, msg_idx, is_sampled=False)
+        emit_text(str(content), msg_idx, is_sampled=False)
+        emit_special(self._tool_output_end, msg_idx, is_sampled=False)
 
         if not next_is_tool:
-            emit_special(self._tool_outputs_end, msg_idx)
+            emit_special(self._tool_outputs_end, msg_idx, is_sampled=False)

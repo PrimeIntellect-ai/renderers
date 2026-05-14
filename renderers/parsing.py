@@ -3,19 +3,106 @@
 Finds special token boundaries by scanning token IDs, then decodes only
 the text segments between them. No regex on decoded text, no false positives
 from content that happens to look like special tokens.
+
+Every parser emits ``list[ParsedToolCall]`` covering every attempt —
+successful and malformed alike — with a ``status`` enum classifying the
+outcome and a ``token_span`` recording where in the (stop-stripped)
+token stream the attempt sat. Callers filter on ``status == OK`` for the
+clean subset; verifier and RL-loss code uses the rest. This diverges from
+vLLM's ``ExtractedToolCallInformation`` (single ``tools_called`` bool, no
+per-call status) and SGLang's ``StreamingParseResult`` (silent drop on
+failure) — see ``ToolCallParseStatus`` docstring for the rationale.
 """
 
 from __future__ import annotations
 
 import json
+from typing import Any
 
-from renderers.base import ParsedResponse
+from renderers.base import ParsedResponse, ParsedToolCall, ToolCallParseStatus, ToolSpec
+
+
+# ── Schema-aware argument coercion ──────────────────────────────────
+#
+# XML-style tool-call formats render argument values verbatim inside
+# ``<arg_value>`` tags with no quoting. ``true`` and the string
+# ``"true"`` produce identical wire bytes; without the tool schema, the
+# parser has no signal to distinguish them and defaults to
+# ``json.loads`` (the historical behavior). When the caller passes
+# ``tools=[...]``, parsers consult the per-parameter declared type to
+# keep string args verbatim, matching vLLM / SGLang reference parsers.
+
+
+def _build_param_type_index(
+    tools: list[ToolSpec] | None,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Map tool name → param name → param JSON-schema fragment.
+
+    Accepts both flat ``ToolSpec`` (``{name, description, parameters}``)
+    and the OpenAI envelope (``{"type": "function", "function": {...}}``)
+    so callers can pass either shape.
+    """
+    if not tools:
+        return {}
+    index: dict[str, dict[str, dict[str, Any]]] = {}
+    for tool in tools:
+        spec = tool.get("function", tool) if isinstance(tool, dict) else None
+        if not isinstance(spec, dict):
+            continue
+        name = spec.get("name")
+        if not isinstance(name, str):
+            continue
+        params = spec.get("parameters") or {}
+        props = params.get("properties") if isinstance(params, dict) else None
+        if isinstance(props, dict):
+            index[name] = {k: v for k, v in props.items() if isinstance(v, dict)}
+    return index
+
+
+def _coerce_arg_value(
+    text: str, param_schema: dict[str, Any] | None
+) -> tuple[Any, bool]:
+    """Coerce a raw ``<arg_value>`` body to its declared type.
+
+    Returns ``(value, used_json_fallback)``. The boolean is ``True`` only
+    when ``json.loads`` was attempted and raised, so the caller knows
+    whether to flag ``INVALID_JSON``. Returning a string verbatim
+    because the schema declared ``type: "string"`` is NOT a fallback.
+
+    Rule (matches vLLM / SGLang reference parsers):
+
+    - If the param's declared ``type`` is ``"string"`` (or single-element
+      ``["string"]``), return ``text`` verbatim — never ``json.loads``.
+    - Anything else (no schema, non-string scalar, object, array, or
+      union types that include non-string): try ``json.loads`` and fall
+      back to raw ``text`` on parse failure.
+
+    Union types that include ``"string"`` alongside other types still
+    attempt ``json.loads`` first so an explicit integer / bool can
+    parse; the string branch only wins as the fallback.
+    """
+    if param_schema is not None:
+        declared = param_schema.get("type")
+        if declared == "string" or declared == ["string"]:
+            return text, False
+    try:
+        return json.loads(text), False
+    except (json.JSONDecodeError, ValueError):
+        return text, True
 
 
 def _find(ids: list[int], target: int, start: int = 0) -> int:
     """Find index of target in ids, or -1."""
     for i in range(start, len(ids)):
         if ids[i] == target:
+            return i
+    return -1
+
+
+def _find_any(ids: list[int], targets: set[int], start: int = 0) -> int:
+    """Find first index in ids whose value is in targets, or -1."""
+    for i in range(start, len(ids)):
+        if ids[i] in targets:
             return i
     return -1
 
@@ -54,52 +141,67 @@ def parse_qwen3(
     """Parse Qwen3 completion tokens. Hermes-style JSON tool calls."""
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
-    # No thinking tokens in Qwen3 gen prompt — model may or may not think
-    # Parse from decoded text since <think>/<tool_call> may be multi-token in Qwen3
-    # Actually in Qwen3, <tool_call> IS a special token (151657)
-    # So we can find it by token ID
-
-    # Find tool calls by token ID
     tc_start = _find(ids, tool_call_id)
+    tool_calls: list[ParsedToolCall] = []
     if tc_start != -1:
         content_ids = ids[:tc_start]
-        # Extract all tool call blocks
-        tool_calls = []
         i = tc_start
         while i < len(ids):
             if ids[i] == tool_call_id:
                 end = _find(ids, tool_call_end_id, i + 1)
                 if end == -1:
-                    end = len(ids)
+                    # No closing delim — block runs to end of stripped ids.
+                    raw = _decode(tokenizer, ids[i + 1 :]).strip()
+                    tool_calls.append(
+                        ParsedToolCall(
+                            raw=raw,
+                            token_span=(i, len(ids)),
+                            status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                        )
+                    )
+                    break
                 tc_text = _decode(tokenizer, ids[i + 1 : end]).strip()
+                span = (i, end + 1)
                 try:
                     parsed = json.loads(tc_text)
-                    tool_calls.append(
-                        {
-                            "function": {
-                                "name": parsed.get("name", ""),
-                                "arguments": parsed.get("arguments", {}),
-                            }
-                        }
-                    )
                 except json.JSONDecodeError:
-                    pass
+                    tool_calls.append(
+                        ParsedToolCall(
+                            raw=tc_text,
+                            token_span=span,
+                            status=ToolCallParseStatus.INVALID_JSON,
+                        )
+                    )
+                else:
+                    name = parsed.get("name", "") if isinstance(parsed, dict) else ""
+                    arguments = (
+                        parsed.get("arguments", {}) if isinstance(parsed, dict) else {}
+                    )
+                    if not name:
+                        tool_calls.append(
+                            ParsedToolCall(
+                                raw=tc_text,
+                                name=None,
+                                arguments=arguments,
+                                token_span=span,
+                                status=ToolCallParseStatus.MISSING_NAME,
+                            )
+                        )
+                    else:
+                        tool_calls.append(
+                            ParsedToolCall(
+                                raw=tc_text,
+                                name=name,
+                                arguments=arguments,
+                                token_span=span,
+                                status=ToolCallParseStatus.OK,
+                            )
+                        )
                 i = end + 1
             else:
                 i += 1
-        # Match vLLM hermes_tool_parser: when no tool calls parse successfully,
-        # preserve the raw tokens as content instead of returning an empty
-        # response. vLLM/hermes_tool_parser.py::extract_tool_calls catches
-        # json.JSONDecodeError and falls through with content=model_output.
-        # Without this, clients raise EmptyModelResponseError on any
-        # <tool_call>...</tool_call> block with malformed JSON, which
-        # wastes inference compute on retries and diverges from main's
-        # behavior on hermes tool envs.
-        if not tool_calls:
-            content_ids = ids
     else:
         content_ids = ids
-        tool_calls = None
 
     text = _decode(tokenizer, content_ids)
     # Extract reasoning from text (Qwen3 doesn't have <think> as special token)
@@ -112,7 +214,7 @@ def parse_qwen3(
     return ParsedResponse(
         content=text.strip(),
         reasoning_content=reasoning or None,
-        tool_calls=tool_calls or None,
+        tool_calls=tool_calls,
     )
 
 
@@ -128,74 +230,119 @@ def parse_qwen35(
     think_end_id: int,
     tool_call_id: int,
     tool_call_end_id: int,
+    tools: list[ToolSpec] | None = None,
 ) -> ParsedResponse:
     """Parse Qwen3.5 completion tokens. XML-style tool calls, token-level thinking."""
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
     # Thinking: find </think> by token ID
     reasoning = None
+    parse_offset = 0  # shift to map local indices back to stop-stripped ids
     think_end = _find(ids, think_end_id)
     if think_end != -1:
-        # Everything before </think> is reasoning
         reasoning_ids = ids[:think_end]
-        # Strip <think> if present at start
         reasoning_ids = [t for t in reasoning_ids if t != think_id]
         reasoning = _decode(tokenizer, reasoning_ids).strip()
         ids = ids[think_end + 1 :]
+        parse_offset = think_end + 1
     elif think_id in set(ids):
         # <think> present but no </think> — truncated reasoning
         think_start = _find(ids, think_id)
         reasoning = _decode(tokenizer, ids[think_start + 1 :]).strip()
         return ParsedResponse(
-            content="", reasoning_content=reasoning or None, tool_calls=None
+            content="", reasoning_content=reasoning or None, tool_calls=[]
         )
 
-    # Tool calls by token ID
     tc_start = _find(ids, tool_call_id)
+    tool_calls: list[ParsedToolCall] = []
     if tc_start != -1:
         content_text = _decode(tokenizer, ids[:tc_start]).strip()
         tool_calls = _parse_xml_tool_calls(
-            tokenizer, ids[tc_start:], tool_call_id, tool_call_end_id
+            tokenizer,
+            ids[tc_start:],
+            tool_call_id,
+            tool_call_end_id,
+            section_offset=parse_offset + tc_start,
+            param_index=_build_param_type_index(tools),
         )
     else:
         content_text = _decode(tokenizer, ids).strip()
-        tool_calls = None
 
     return ParsedResponse(
         content=content_text,
         reasoning_content=reasoning or None,
-        tool_calls=tool_calls or None,
+        tool_calls=tool_calls,
     )
 
 
 def _parse_xml_tool_calls(
-    tokenizer, ids: list[int], tc_id: int, tc_end_id: int
-) -> list[dict]:
+    tokenizer,
+    ids: list[int],
+    tc_id: int,
+    tc_end_id: int,
+    *,
+    section_offset: int,
+    param_index: dict[str, dict[str, dict[str, Any]]],
+) -> list[ParsedToolCall]:
     """Parse Qwen3.5-style XML tool calls from token IDs."""
     import re
 
-    tool_calls = []
+    tool_calls: list[ParsedToolCall] = []
     i = 0
     while i < len(ids):
         if ids[i] == tc_id:
             end = _find(ids, tc_end_id, i + 1)
             if end == -1:
+                raw = _decode(tokenizer, ids[i + 1 :])
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=raw,
+                        token_span=(section_offset + i, section_offset + len(ids)),
+                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                    )
+                )
                 break
             block_text = _decode(tokenizer, ids[i + 1 : end])
+            span = (section_offset + i, section_offset + end + 1)
             name_match = re.search(r"<function=([^>]+)>", block_text)
-            if name_match:
-                name = name_match.group(1)
-                arguments = {}
-                for pm in re.finditer(
-                    r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>", block_text, re.DOTALL
-                ):
-                    arg_name = pm.group(1)
-                    arg_value = pm.group(2).strip()
-                    try:
-                        arguments[arg_name] = json.loads(arg_value)
-                    except (json.JSONDecodeError, ValueError):
-                        arguments[arg_name] = arg_value
-                tool_calls.append({"function": {"name": name, "arguments": arguments}})
+            if not name_match:
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=block_text,
+                        token_span=span,
+                        status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+                    )
+                )
+                i = end + 1
+                continue
+
+            name = name_match.group(1)
+            params = param_index.get(name, {})
+            arguments: dict = {}
+            any_json_fallback = False
+            for pm in re.finditer(
+                r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>", block_text, re.DOTALL
+            ):
+                arg_name = pm.group(1)
+                arg_value = pm.group(2).strip()
+                value, used_fallback = _coerce_arg_value(
+                    arg_value, params.get(arg_name)
+                )
+                arguments[arg_name] = value
+                any_json_fallback = any_json_fallback or used_fallback
+            tool_calls.append(
+                ParsedToolCall(
+                    raw=block_text,
+                    name=name,
+                    arguments=arguments,
+                    token_span=span,
+                    status=(
+                        ToolCallParseStatus.INVALID_JSON
+                        if any_json_fallback
+                        else ToolCallParseStatus.OK
+                    ),
+                )
+            )
             i = end + 1
         else:
             i += 1
@@ -218,27 +365,29 @@ def parse_glm(
     arg_key_end_id: int,
     arg_value_id: int,
     arg_value_end_id: int,
+    tools: list[ToolSpec] | None = None,
 ) -> ParsedResponse:
     """Parse GLM completion tokens. Token-level thinking + arg_key/arg_value tool calls."""
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
-    # Thinking by token ID
     reasoning = None
+    parse_offset = 0
     think_end = _find(ids, think_end_id)
     if think_end != -1:
         reasoning_ids = ids[:think_end]
         reasoning_ids = [t for t in reasoning_ids if t != think_id]
         reasoning = _decode(tokenizer, reasoning_ids).strip()
         ids = ids[think_end + 1 :]
+        parse_offset = think_end + 1
     elif think_id in set(ids):
         think_start = _find(ids, think_id)
         reasoning = _decode(tokenizer, ids[think_start + 1 :]).strip()
         return ParsedResponse(
-            content="", reasoning_content=reasoning or None, tool_calls=None
+            content="", reasoning_content=reasoning or None, tool_calls=[]
         )
 
-    # Tool calls by token ID
     tc_start = _find(ids, tool_call_id)
+    tool_calls: list[ParsedToolCall] = []
     if tc_start != -1:
         content_text = _decode(tokenizer, ids[:tc_start]).strip()
         tool_calls = _parse_glm_tool_calls(
@@ -250,61 +399,257 @@ def parse_glm(
             arg_key_end_id,
             arg_value_id,
             arg_value_end_id,
+            section_offset=parse_offset + tc_start,
+            param_index=_build_param_type_index(tools),
         )
     else:
         content_text = _decode(tokenizer, ids).strip()
-        tool_calls = None
 
     return ParsedResponse(
         content=content_text,
         reasoning_content=reasoning or None,
-        tool_calls=tool_calls or None,
+        tool_calls=tool_calls,
     )
 
 
 def _parse_glm_tool_calls(
-    tokenizer, ids, tc_id, tc_end_id, ak_id, ake_id, av_id, ave_id
-) -> list[dict]:
+    tokenizer,
+    ids,
+    tc_id,
+    tc_end_id,
+    ak_id,
+    ake_id,
+    av_id,
+    ave_id,
+    *,
+    section_offset: int,
+    param_index: dict[str, dict[str, dict[str, Any]]],
+) -> list[ParsedToolCall]:
     """Parse GLM-style tool calls: name + arg_key/arg_value pairs, all by token ID."""
-    tool_calls = []
+    tool_calls: list[ParsedToolCall] = []
     i = 0
     while i < len(ids):
         if ids[i] == tc_id:
             end = _find(ids, tc_end_id, i + 1)
             if end == -1:
+                raw = _decode(tokenizer, ids[i + 1 :])
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=raw,
+                        token_span=(section_offset + i, section_offset + len(ids)),
+                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                    )
+                )
                 break
             block = ids[i + 1 : end]
-            # Name is everything before first <arg_key>
+            block_text = _decode(tokenizer, block)
+            span = (section_offset + i, section_offset + end + 1)
             first_ak = _find(block, ak_id)
+            any_json_fallback = False
+            structure_broke = False
             if first_ak == -1:
                 name = _decode(tokenizer, block).strip()
-                arguments = {}
+                arguments: dict = {}
             else:
                 name = _decode(tokenizer, block[:first_ak]).strip()
+                params = param_index.get(name, {})
                 arguments = {}
                 j = first_ak
                 while j < len(block):
                     if block[j] == ak_id:
                         ake = _find(block, ake_id, j + 1)
                         if ake == -1:
+                            structure_broke = True
                             break
                         key = _decode(tokenizer, block[j + 1 : ake]).strip()
                         av = _find(block, av_id, ake + 1)
                         if av == -1:
+                            structure_broke = True
                             break
                         ave = _find(block, ave_id, av + 1)
                         if ave == -1:
+                            structure_broke = True
                             break
                         val_text = _decode(tokenizer, block[av + 1 : ave]).strip()
-                        try:
-                            arguments[key] = json.loads(val_text)
-                        except (json.JSONDecodeError, ValueError):
-                            arguments[key] = val_text
+                        value, used_fallback = _coerce_arg_value(
+                            val_text, params.get(key)
+                        )
+                        arguments[key] = value
+                        any_json_fallback = any_json_fallback or used_fallback
                         j = ave + 1
                     else:
                         j += 1
-            tool_calls.append({"function": {"name": name, "arguments": arguments}})
+            if not name:
+                status = ToolCallParseStatus.MISSING_NAME
+            elif structure_broke:
+                status = ToolCallParseStatus.MALFORMED_STRUCTURE
+            elif any_json_fallback:
+                status = ToolCallParseStatus.INVALID_JSON
+            else:
+                status = ToolCallParseStatus.OK
+            tool_calls.append(
+                ParsedToolCall(
+                    raw=block_text,
+                    name=name or None,
+                    arguments=arguments,
+                    token_span=span,
+                    status=status,
+                )
+            )
             i = end + 1
+        else:
+            i += 1
+    return tool_calls
+
+
+# ── Laguna-XS.2: <tool_call> name\n<arg_key>k</arg_key>\n<arg_value>v</arg_value> </tool_call>
+# Same outer skeleton as parse_glm, but <arg_key>/<arg_value> are plain text
+# (multi-token BPE), not single special tokens — so the inner block is decoded
+# to text and the key/value pairs are pulled out by regex.
+
+
+def parse_laguna_xs2(
+    tokenizer,
+    token_ids: list[int],
+    *,
+    stop_ids: set[int],
+    think_id: int,
+    think_end_id: int,
+    tool_call_id: int,
+    tool_call_end_id: int,
+    tools: list[ToolSpec] | None = None,
+) -> ParsedResponse:
+    """Parse Laguna-XS.2 completion tokens.
+
+    Thinking uses single-token ``<think>`` / ``</think>`` (ids found by
+    scan). Tool calls are delimited by single-token ``<tool_call>`` /
+    ``</tool_call>``, but ``<arg_key>`` / ``<arg_value>`` inside are
+    plain text — regex-extracted from the decoded inner block.
+    """
+    ids = _strip_stop_tokens(token_ids, stop_ids)
+
+    # The template wraps reasoning with ``\n`` on both sides
+    # (``<think>\n{r}\n</think>``) and brackets post-think content with ``\n``
+    # too (``</think>\n{c}\n``). Strip exactly those newlines from each
+    # decoded segment — never a bare ``.strip()``, which would also eat
+    # whitespace the model emitted intentionally.
+    reasoning = None
+    parse_offset = 0
+    think_end = _find(ids, think_end_id)
+    if think_end != -1:
+        reasoning_ids = ids[:think_end]
+        reasoning_ids = [t for t in reasoning_ids if t != think_id]
+        reasoning = _decode(tokenizer, reasoning_ids).strip("\n")
+        ids = ids[think_end + 1 :]
+        parse_offset = think_end + 1
+    elif (think_start := _find(ids, think_id)) != -1:
+        reasoning = _decode(tokenizer, ids[think_start + 1 :]).strip("\n")
+        return ParsedResponse(
+            content="", reasoning_content=reasoning or None, tool_calls=[]
+        )
+
+    tc_start = _find(ids, tool_call_id)
+    tool_calls: list[ParsedToolCall] = []
+    if tc_start != -1:
+        content_text = _decode(tokenizer, ids[:tc_start]).strip("\n")
+        tool_calls = _parse_laguna_xs2_tool_calls(
+            tokenizer,
+            ids[tc_start:],
+            tool_call_id,
+            tool_call_end_id,
+            section_offset=parse_offset + tc_start,
+            param_index=_build_param_type_index(tools),
+        )
+    else:
+        content_text = _decode(tokenizer, ids).strip("\n")
+
+    return ParsedResponse(
+        content=content_text,
+        reasoning_content=reasoning or None,
+        tool_calls=tool_calls,
+    )
+
+
+def _parse_laguna_xs2_tool_calls(
+    tokenizer,
+    ids: list[int],
+    tc_id: int,
+    tc_end_id: int,
+    *,
+    section_offset: int,
+    param_index: dict[str, dict[str, dict[str, Any]]],
+) -> list[ParsedToolCall]:
+    """Parse Laguna-XS.2 tool calls.
+
+    Inside each ``<tool_call>...</tool_call>`` block, the format is::
+
+        {name}\\n
+        <arg_key>{k1}</arg_key>\\n<arg_value>{v1}</arg_value>\\n
+        ...
+        <arg_key>{kn}</arg_key>\\n<arg_value>{vn}</arg_value>\\n
+
+    The function name is everything before the first ``<arg_key>`` literal
+    in the decoded block.
+    """
+    import re
+
+    tool_calls: list[ParsedToolCall] = []
+    i = 0
+    while i < len(ids):
+        if ids[i] == tc_id:
+            tc_end = _find(ids, tc_end_id, i + 1)
+            if tc_end == -1:
+                raw = _decode(tokenizer, ids[i + 1 :])
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=raw,
+                        token_span=(section_offset + i, section_offset + len(ids)),
+                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                    )
+                )
+                break
+            block_text = _decode(tokenizer, ids[i + 1 : tc_end])
+            span = (section_offset + i, section_offset + tc_end + 1)
+
+            ak_pos = block_text.find("<arg_key>")
+            if ak_pos != -1:
+                name = block_text[:ak_pos].strip()
+                args_section = block_text[ak_pos:]
+            else:
+                name = block_text.strip()
+                args_section = ""
+
+            params = param_index.get(name, {})
+            arguments: dict = {}
+            any_json_fallback = False
+            for m in re.finditer(
+                r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>",
+                args_section,
+                re.DOTALL,
+            ):
+                k = m.group(1).strip()
+                v = m.group(2).strip()
+                value, used_fallback = _coerce_arg_value(v, params.get(k))
+                arguments[k] = value
+                any_json_fallback = any_json_fallback or used_fallback
+
+            if not name:
+                status = ToolCallParseStatus.MISSING_NAME
+            elif any_json_fallback:
+                status = ToolCallParseStatus.INVALID_JSON
+            else:
+                status = ToolCallParseStatus.OK
+
+            tool_calls.append(
+                ParsedToolCall(
+                    raw=block_text,
+                    name=name or None,
+                    arguments=arguments,
+                    token_span=span,
+                    status=status,
+                )
+            )
+            i = tc_end + 1
         else:
             i += 1
     return tool_calls
@@ -334,8 +679,8 @@ def parse_deepseek_v3(
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
-    # ── Tool calls ──────────────────────────────────────────────────
     tc_section_start = _find(ids, tool_calls_begin_id)
+    tool_calls: list[ParsedToolCall] = []
     if tc_section_start != -1:
         content_ids = ids[:tc_section_start]
         tool_calls = _parse_deepseek_tool_calls(
@@ -346,14 +691,13 @@ def parse_deepseek_v3(
             tool_call_begin_id,
             tool_call_end_id,
             tool_sep_id,
+            section_offset=tc_section_start,
         )
     else:
         content_ids = ids
-        tool_calls = None
 
     text = _decode(tokenizer, content_ids)
 
-    # ── Thinking from text tags ────────────────────────────────────
     reasoning = None
     if "</think>" in text:
         before, _, after = text.partition("</think>")
@@ -363,7 +707,7 @@ def parse_deepseek_v3(
     return ParsedResponse(
         content=text.strip(),
         reasoning_content=reasoning or None,
-        tool_calls=tool_calls or None,
+        tool_calls=tool_calls,
     )
 
 
@@ -375,80 +719,106 @@ def _parse_deepseek_tool_calls(
     call_begin_id: int,
     call_end_id: int,
     sep_id: int,
-) -> list[dict] | None:
-    """Parse DeepSeek V3-style tool calls from token IDs.
-
-    Each individual tool call is delimited by <｜tool▁call▁begin｜> ... <｜tool▁call▁end｜>.
-    Inside, <｜tool▁sep｜> separates the call type (e.g. "function") from the
-    function name and JSON arguments block.
-    """
+    *,
+    section_offset: int,
+) -> list[ParsedToolCall]:
+    """Parse DeepSeek V3-style tool calls from token IDs."""
     import re
 
-    tool_calls: list[dict] = []
+    tool_calls: list[ParsedToolCall] = []
 
-    # Find the outer section boundaries.
     section_start = _find(ids, tc_begin_id)
     if section_start == -1:
-        return None
+        return tool_calls
     section_end = _find(ids, tc_end_id, section_start + 1)
+    section_end_clipped = section_end == -1
     if section_end == -1:
         section_end = len(ids)
 
+    inner_offset = section_offset + section_start + 1
     section_ids = ids[section_start + 1 : section_end]
 
     i = 0
     while i < len(section_ids):
         if section_ids[i] == call_begin_id:
             end = _find(section_ids, call_end_id, i + 1)
-            if end == -1:
+            unclosed = end == -1
+            if unclosed:
                 end = len(section_ids)
-
             call_ids = section_ids[i + 1 : end]
+            block_text = _decode(tokenizer, call_ids)
+            # Span for this call covers its <tool_call_begin>..<tool_call_end> range
+            # within the (stop-stripped) parent token stream.
+            span = (
+                inner_offset + i,
+                inner_offset + end + (0 if unclosed else 1),
+            )
 
-            # Find <｜tool▁sep｜> to split type from name+args.
             sep_pos = _find(call_ids, sep_id)
             if sep_pos == -1:
-                # Malformed — skip.
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=block_text,
+                        token_span=span,
+                        status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+                    )
+                )
                 i = end + 1
                 continue
 
-            # Everything after <｜tool▁sep｜> is the name and args block.
             after_sep_ids = call_ids[sep_pos + 1 :]
             after_sep_text = _decode(tokenizer, after_sep_ids).strip()
 
-            # Extract function name and JSON arguments.
-            # Format: "{name}\n```json\n{args}\n```"
-            # But we also gracefully handle raw JSON without the code fence.
             name = ""
             args_str = ""
-
-            # Try to split on first newline to get name, then find JSON.
             newline_pos = after_sep_text.find("\n")
             if newline_pos != -1:
                 name = after_sep_text[:newline_pos].strip()
                 rest = after_sep_text[newline_pos + 1 :].strip()
-                # Strip optional ```json ... ``` fence.
                 fence_match = re.match(r"```(?:json)?\s*([\s\S]*?)\s*```$", rest)
-                if fence_match:
-                    args_str = fence_match.group(1).strip()
-                else:
-                    args_str = rest
+                args_str = fence_match.group(1).strip() if fence_match else rest
             else:
-                # No newline — treat entire text as name, no args.
                 name = after_sep_text
 
-            # Parse arguments as JSON.
+            arguments: dict | str
+            invalid_json = False
             try:
                 arguments = json.loads(args_str) if args_str else {}
             except json.JSONDecodeError:
-                arguments = args_str  # preserve raw string on failure
+                arguments = args_str
+                invalid_json = True
 
-            tool_calls.append({"function": {"name": name, "arguments": arguments}})
+            if unclosed:
+                status = ToolCallParseStatus.UNCLOSED_BLOCK
+            elif not name:
+                status = ToolCallParseStatus.MISSING_NAME
+            elif invalid_json:
+                status = ToolCallParseStatus.INVALID_JSON
+            else:
+                status = ToolCallParseStatus.OK
+
+            tool_calls.append(
+                ParsedToolCall(
+                    raw=block_text,
+                    name=name or None,
+                    arguments=arguments,
+                    token_span=span,
+                    status=status,
+                )
+            )
             i = end + 1
+            if unclosed:
+                break
         else:
             i += 1
 
-    return tool_calls if tool_calls else None
+    # If the outer <tool_calls_begin> had no matching <tool_calls_end>, any
+    # call inside that didn't itself flag UNCLOSED_BLOCK is still nested in
+    # a truncated section — but we already mark individual unclosed calls,
+    # so we don't double-flag here. The section_end_clipped variable is
+    # carried for the (rare) caller that wants section-level UX.
+    _ = section_end_clipped
+    return tool_calls
 
 
 # ── MiniMax: <minimax:tool_call> ... </minimax:tool_call> ────────────
@@ -463,73 +833,158 @@ def parse_minimax(
     think_end_id: int,
     tool_call_id: int,
     tool_call_end_id: int,
+    tools: list[ToolSpec] | None = None,
 ) -> ParsedResponse:
     """Parse MiniMax M2 completion tokens."""
-    ids = _strip_stop_tokens(token_ids, stop_ids)
+    import re
 
-    # Thinking: </think> by token ID. MiniMax doesn't generate <think> start.
+    ids = _strip_stop_tokens(token_ids, stop_ids)
+    param_index = _build_param_type_index(tools)
+
     reasoning = None
+    parse_offset = 0
     think_end = _find(ids, think_end_id)
     if think_end != -1:
         reasoning_ids = ids[:think_end]
         reasoning_ids = [t for t in reasoning_ids if t != think_id]
         reasoning = _decode(tokenizer, reasoning_ids).strip()
         ids = ids[think_end + 1 :]
+        parse_offset = think_end + 1
     elif think_id in set(ids):
         think_start = _find(ids, think_id)
         reasoning = _decode(tokenizer, ids[think_start + 1 :]).strip()
         return ParsedResponse(
-            content="", reasoning_content=reasoning or None, tool_calls=None
+            content="", reasoning_content=reasoning or None, tool_calls=[]
         )
 
-    # Tool calls by token ID
     tc_start = _find(ids, tool_call_id)
+    tool_calls: list[ParsedToolCall] = []
     if tc_start != -1:
         content_text = _decode(tokenizer, ids[:tc_start]).strip()
-        # Decode the tool call blocks and parse with regex (invoke/parameter are text, not tokens)
-        tool_calls = []
         i = tc_start
         while i < len(ids):
             if ids[i] == tool_call_id:
                 end = _find(ids, tool_call_end_id, i + 1)
                 if end == -1:
+                    raw = _decode(tokenizer, ids[i + 1 :])
+                    tool_calls.append(
+                        ParsedToolCall(
+                            raw=raw,
+                            token_span=(
+                                parse_offset + i,
+                                parse_offset + len(ids),
+                            ),
+                            status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                        )
+                    )
                     break
                 block_text = _decode(tokenizer, ids[i + 1 : end])
-                import re
+                span = (parse_offset + i, parse_offset + end + 1)
 
-                for invoke_match in re.finditer(
-                    r'<invoke name="([^"]+)">(.*?)</invoke>', block_text, re.DOTALL
-                ):
-                    name = invoke_match.group(1)
-                    body = invoke_match.group(2)
-                    arguments = {}
-                    for pm in re.finditer(
-                        r'<parameter name="([^"]+)">(.*?)</parameter>', body, re.DOTALL
-                    ):
-                        pname = pm.group(1)
-                        pval = pm.group(2).strip()
-                        try:
-                            arguments[pname] = json.loads(pval)
-                        except (json.JSONDecodeError, ValueError):
-                            arguments[pname] = pval
-                    tool_calls.append(
-                        {"function": {"name": name, "arguments": arguments}}
+                invokes = list(
+                    re.finditer(
+                        r'<invoke name="([^"]+)">(.*?)</invoke>',
+                        block_text,
+                        re.DOTALL,
                     )
+                )
+                if not invokes:
+                    # Block exists but contains no <invoke> — model emitted
+                    # the wrapper without a usable body.
+                    tool_calls.append(
+                        ParsedToolCall(
+                            raw=block_text,
+                            token_span=span,
+                            status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+                        )
+                    )
+                else:
+                    for invoke_match in invokes:
+                        name = invoke_match.group(1)
+                        body = invoke_match.group(2)
+                        params = param_index.get(name, {})
+                        arguments: dict = {}
+                        any_json_fallback = False
+                        for pm in re.finditer(
+                            r'<parameter name="([^"]+)">(.*?)</parameter>',
+                            body,
+                            re.DOTALL,
+                        ):
+                            pname = pm.group(1)
+                            pval = pm.group(2).strip()
+                            value, used_fallback = _coerce_arg_value(
+                                pval, params.get(pname)
+                            )
+                            arguments[pname] = value
+                            any_json_fallback = any_json_fallback or used_fallback
+                        tool_calls.append(
+                            ParsedToolCall(
+                                raw=block_text,
+                                name=name,
+                                arguments=arguments,
+                                # All invokes in a block share the wrapper span.
+                                token_span=span,
+                                status=(
+                                    ToolCallParseStatus.INVALID_JSON
+                                    if any_json_fallback
+                                    else ToolCallParseStatus.OK
+                                ),
+                            )
+                        )
                 i = end + 1
             else:
                 i += 1
     else:
         content_text = _decode(tokenizer, ids).strip()
-        tool_calls = None
 
     return ParsedResponse(
         content=content_text,
         reasoning_content=reasoning or None,
-        tool_calls=tool_calls or None,
+        tool_calls=tool_calls,
     )
 
 
 # ── Kimi K2: <|tool_calls_section_begin|> ... <|tool_calls_section_end|> ────
+
+
+def parse_kimi_k2_section(
+    tokenizer,
+    ids: list[int],
+    *,
+    tool_calls_section_begin_ids: set[int],
+    tool_calls_section_end_ids: set[int],
+    tool_call_begin_id: int,
+    tool_call_argument_begin_id: int,
+    tool_call_end_id: int,
+) -> tuple[list[int], list[ParsedToolCall]]:
+    """Split ``ids`` into ``(content_before_section, tool_calls)`` by finding
+    the Kimi-style tool-call section delimiters.
+
+    Accepts *sets* of begin/end token IDs so callers can express models with
+    multiple delimiter variants (K2.5 has both plural ``<|tool_calls_section_*|>``
+    and singular ``<|tool_call_section_*|>`` forms, though only the plural form
+    is in the special-token vocab in practice). Returns the content ids ahead
+    of the section and a list of ``ParsedToolCall`` covering every attempted
+    block inside it; an unclosed section is still walked to whatever the model
+    emitted before EOS. Returns ``(ids, [])`` when no section is present.
+    """
+    section_start = _find_any(ids, tool_calls_section_begin_ids)
+    if section_start == -1:
+        return list(ids), []
+    content_ids = ids[:section_start]
+    section_end = _find_any(ids, tool_calls_section_end_ids, section_start + 1)
+    if section_end == -1:
+        section_end = len(ids)
+    section_ids = ids[section_start + 1 : section_end]
+    tool_calls = _parse_kimi_k2_tool_calls(
+        tokenizer,
+        section_ids,
+        tool_call_begin_id,
+        tool_call_argument_begin_id,
+        tool_call_end_id,
+        section_offset=section_start + 1,
+    )
+    return content_ids, tool_calls
 
 
 def parse_kimi_k2(
@@ -551,26 +1006,16 @@ def parse_kimi_k2(
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
-    # ── Tool calls ────────────────────────────────────────────────
-    section_start = _find(ids, tool_calls_section_begin_id)
-    if section_start != -1:
-        content_ids = ids[:section_start]
-        section_end = _find(ids, tool_calls_section_end_id, section_start + 1)
-        if section_end == -1:
-            section_end = len(ids)
-        section_ids = ids[section_start + 1 : section_end]
-        tool_calls = _parse_kimi_k2_tool_calls(
-            tokenizer,
-            section_ids,
-            tool_call_begin_id,
-            tool_call_argument_begin_id,
-            tool_call_end_id,
-        )
-    else:
-        content_ids = ids
-        tool_calls = None
+    content_ids, tool_calls = parse_kimi_k2_section(
+        tokenizer,
+        ids,
+        tool_calls_section_begin_ids={tool_calls_section_begin_id},
+        tool_calls_section_end_ids={tool_calls_section_end_id},
+        tool_call_begin_id=tool_call_begin_id,
+        tool_call_argument_begin_id=tool_call_argument_begin_id,
+        tool_call_end_id=tool_call_end_id,
+    )
 
-    # ── Thinking from text tags ───────────────────────────────────
     text = _decode(tokenizer, content_ids)
     reasoning: str | None = None
     if "</think>" in text:
@@ -585,13 +1030,13 @@ def parse_kimi_k2(
         return ParsedResponse(
             content="",
             reasoning_content=reasoning,
-            tool_calls=None,
+            tool_calls=[],
         )
 
     return ParsedResponse(
         content=text.strip(),
         reasoning_content=reasoning,
-        tool_calls=tool_calls or None,
+        tool_calls=tool_calls,
     )
 
 
@@ -601,7 +1046,9 @@ def _parse_kimi_k2_tool_calls(
     tc_begin_id: int,
     tc_arg_begin_id: int,
     tc_end_id: int,
-) -> list[dict]:
+    *,
+    section_offset: int,
+) -> list[ParsedToolCall]:
     """Parse individual Kimi K2 tool calls from the section token IDs.
 
     Format per call:
@@ -610,45 +1057,70 @@ def _parse_kimi_k2_tool_calls(
     The ``id`` is in format ``functions.name:index``; the function name is
     extracted by stripping the ``functions.`` prefix and ``:index`` suffix.
     """
-    tool_calls: list[dict] = []
+    tool_calls: list[ParsedToolCall] = []
     i = 0
     while i < len(ids):
         if ids[i] == tc_begin_id:
-            # Find <|tool_call_argument_begin|>
             arg_begin = _find(ids, tc_arg_begin_id, i + 1)
             if arg_begin == -1:
+                raw = _decode(tokenizer, ids[i + 1 :])
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=raw,
+                        token_span=(section_offset + i, section_offset + len(ids)),
+                        status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+                    )
+                )
                 break
-            # Find <|tool_call_end|>
             tc_end = _find(ids, tc_end_id, arg_begin + 1)
+            unclosed = tc_end == -1
             if tc_end == -1:
                 tc_end = len(ids)
 
             raw_id = _decode(tokenizer, ids[i + 1 : arg_begin]).strip()
             args_str = _decode(tokenizer, ids[arg_begin + 1 : tc_end]).strip()
+            block_text = _decode(tokenizer, ids[i + 1 : tc_end])
+            span = (
+                section_offset + i,
+                section_offset + tc_end + (0 if unclosed else 1),
+            )
 
-            # Extract function name from "functions.name:index"
             name_part = raw_id.split(":", 1)[0]
             if "." in name_part:
                 _, func_name = name_part.split(".", 1)
             else:
                 func_name = name_part
 
+            arguments: dict | str
+            invalid_json = False
             try:
                 arguments = json.loads(args_str)
             except json.JSONDecodeError:
                 arguments = args_str
+                invalid_json = True
+
+            if unclosed:
+                status = ToolCallParseStatus.UNCLOSED_BLOCK
+            elif not func_name:
+                status = ToolCallParseStatus.MISSING_NAME
+            elif invalid_json:
+                status = ToolCallParseStatus.INVALID_JSON
+            else:
+                status = ToolCallParseStatus.OK
 
             tool_calls.append(
-                {
-                    "id": raw_id,
-                    "type": "function",
-                    "function": {
-                        "name": func_name,
-                        "arguments": arguments,
-                    },
-                }
+                ParsedToolCall(
+                    raw=block_text,
+                    name=func_name or None,
+                    arguments=arguments,
+                    token_span=span,
+                    status=status,
+                    id=raw_id or None,
+                )
             )
             i = tc_end + 1
+            if unclosed:
+                break
         else:
             i += 1
     return tool_calls
@@ -692,7 +1164,7 @@ def parse_gpt_oss(
 
     reasoning_parts: list[str] = []
     content_parts: list[str] = []
-    tool_calls: list[dict] = []
+    tool_calls: list[ParsedToolCall] = []
 
     i = 0
     while i < len(ids):
@@ -700,18 +1172,14 @@ def parse_gpt_oss(
             i += 1
             continue
 
-        # Find <|message|> that terminates this block's header
+        block_start = i
         msg_pos = _find(ids, message_id, i + 1)
         if msg_pos == -1:
             break
 
-        # Header: tokens between <|start|> and <|message|>
         header_ids = ids[i + 1 : msg_pos]
         header_text = _decode(tokenizer, header_ids)
 
-        # Body: tokens from after <|message|> up to the next block boundary
-        # (<|start|>, <|end|>, or <|call|> — the last closes a tool-call
-        # commentary block within the same turn).
         body_start = msg_pos + 1
         candidates = [
             pos
@@ -723,39 +1191,54 @@ def parse_gpt_oss(
             if pos != -1
         ]
         body_end = min(candidates) if candidates else len(ids)
+        body_closed = bool(candidates) and ids[body_end] in (end_id, call_id)
 
         body_text = _decode(tokenizer, ids[body_start:body_end])
 
-        # Extract channel: token after <|channel|> in header_ids
         channel = _gptoss_extract_after_token(tokenizer, header_ids, channel_id)
 
-        # Extract recipient: "to=..." field in header text
         recipient_match = re.search(r"to=([^\s<]+)", header_text)
         recipient = recipient_match.group(1) if recipient_match else None
 
         if recipient and recipient.startswith("functions."):
             tool_name = recipient[len("functions.") :]
+            block_end = body_end + 1 if body_closed else body_end
+            span = (block_start, block_end)
             try:
                 arguments = json.loads(body_text)
             except json.JSONDecodeError:
-                arguments = body_text  # preserve raw string on failure
-            tool_calls.append(
-                {
-                    "function": {
-                        "name": tool_name,
-                        "arguments": arguments,
-                    }
-                }
-            )
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=body_text,
+                        name=tool_name or None,
+                        arguments=body_text,
+                        token_span=span,
+                        status=ToolCallParseStatus.INVALID_JSON,
+                    )
+                )
+            else:
+                if not body_closed:
+                    status = ToolCallParseStatus.UNCLOSED_BLOCK
+                elif not tool_name:
+                    status = ToolCallParseStatus.MISSING_NAME
+                else:
+                    status = ToolCallParseStatus.OK
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=body_text,
+                        name=tool_name or None,
+                        arguments=arguments,
+                        token_span=span,
+                        status=status,
+                    )
+                )
         elif channel == "analysis":
             reasoning_parts.append(body_text)
         elif channel == "final":
             content_parts.append(body_text)
         elif channel == "commentary":
-            # Commentary without a tool recipient is a user-visible preamble
             content_parts.append(body_text)
 
-        # Advance: skip body + any trailing <|end|> / <|call|>
         i = body_end
         if i < len(ids) and ids[i] in (end_id, call_id):
             i += 1
@@ -766,7 +1249,7 @@ def parse_gpt_oss(
     return ParsedResponse(
         content=content,
         reasoning_content=reasoning,
-        tool_calls=tool_calls or None,
+        tool_calls=tool_calls,
     )
 
 
@@ -780,5 +1263,4 @@ def _gptoss_extract_after_token(
     if pos == -1:
         return None
     after = _decode(tokenizer, header_ids[pos + 1 :]).strip()
-    # Take first whitespace-delimited word (channel name)
     return after.split()[0] if after else None

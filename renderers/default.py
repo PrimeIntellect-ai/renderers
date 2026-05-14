@@ -167,14 +167,19 @@ class DefaultRenderer:
             messages, tools=tools, add_generation_prompt=add_generation_prompt
         )
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,  # noqa: ARG002 — DefaultRenderer relies on configured tool_parser, schema not consulted here
+    ) -> ParsedResponse:
         # 1. Extract tool calls while we still have token ids (most formats
         #    use special-token delimiters, so id-level matching is reliable).
         if self._tool_parser is not None:
             content_ids, tool_calls = self._tool_parser.extract(list(token_ids))
         else:
             content_ids = list(token_ids)
-            tool_calls = None
+            tool_calls = []
 
         # 2. Decode (keep special tokens so a downstream reasoning parser can
         #    still see things like <think>/</think> when they're tokens).
@@ -226,7 +231,7 @@ class DefaultRenderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
-    ) -> list[int] | None:
+    ) -> RenderedTokens | None:
         """DefaultRenderer wraps an unknown Jinja template — it has no
         hand-coded extension logic to emit. Return ``None`` so the caller
         falls back to a full re-render; that's correct whenever the

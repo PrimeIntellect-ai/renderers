@@ -118,15 +118,18 @@ class MiniMaxM2Renderer:
 
         tokens: list[int] = []
         indices: list[int] = []
+        sampled: list[bool] = []
 
-        def emit_special(token_id: int, msg_idx: int) -> None:
+        def emit_special(token_id: int, msg_idx: int, *, is_sampled: bool) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
+            sampled.append(is_sampled)
 
-        def emit_text(text: str, msg_idx: int) -> None:
+        def emit_text(text: str, msg_idx: int, *, is_sampled: bool) -> None:
             ids = self._encode(text)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
+            sampled.extend([is_sampled] * len(ids))
 
         # ── Extract system message ──────────────────────────────────
         first_is_system = messages[0].get("role") == "system"
@@ -134,8 +137,8 @@ class MiniMaxM2Renderer:
         conversation: list[Message] = messages[1:] if first_is_system else messages
 
         # ── System block (always present) ───────────────────────────
-        emit_special(self._bos, sys_idx)
-        emit_special(self._role, sys_idx)
+        emit_special(self._bos, sys_idx, is_sampled=False)
+        emit_special(self._role, sys_idx, is_sampled=False)
 
         sys_content = (
             self._visible_text(messages[0].get("content")) if first_is_system else ""
@@ -152,9 +155,9 @@ class MiniMaxM2Renderer:
             system_text += _TOOLS_FOOTER_PREFIX
             system_text += _TOOLS_INSTRUCTIONS
 
-        emit_text(system_text, sys_idx)
-        emit_special(self._eos, sys_idx)
-        emit_text("\n", sys_idx)
+        emit_text(system_text, sys_idx, is_sampled=False)
+        emit_special(self._eos, sys_idx, is_sampled=False)
+        emit_text("\n", sys_idx, is_sampled=False)
 
         # ── Compute last_user_index (relative to conversation) ──────
         last_ui = -1
@@ -169,10 +172,14 @@ class MiniMaxM2Renderer:
             orig_idx = ci + (1 if first_is_system else 0)
 
             if role == "user":
-                emit_special(self._role, orig_idx)
-                emit_text("user\n" + self._visible_text(msg.get("content")), orig_idx)
-                emit_special(self._eos, orig_idx)
-                emit_text("\n", orig_idx)
+                emit_special(self._role, orig_idx, is_sampled=False)
+                emit_text(
+                    "user\n" + self._visible_text(msg.get("content")),
+                    orig_idx,
+                    is_sampled=False,
+                )
+                emit_special(self._eos, orig_idx, is_sampled=False)
+                emit_text("\n", orig_idx, is_sampled=False)
 
             elif role == "assistant":
                 preserve_thinking = should_preserve_past_thinking(
@@ -203,12 +210,14 @@ class MiniMaxM2Renderer:
 
         # ── Generation prompt ───────────────────────────────────────
         if add_generation_prompt:
-            emit_special(self._role, -1)
-            emit_text("ai\n", -1)
-            emit_special(self._think, -1)
-            emit_text("\n", -1)
+            emit_special(self._role, -1, is_sampled=False)
+            emit_text("ai\n", -1, is_sampled=False)
+            emit_special(self._think, -1, is_sampled=False)
+            emit_text("\n", -1, is_sampled=False)
 
-        return RenderedTokens(token_ids=tokens, message_indices=indices)
+        return RenderedTokens(
+            token_ids=tokens, message_indices=indices, sampled_mask=sampled
+        )
 
     def render_ids(
         self,
@@ -223,7 +232,12 @@ class MiniMaxM2Renderer:
             add_generation_prompt=add_generation_prompt,
         ).token_ids
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,
+    ) -> ParsedResponse:
         return parse_minimax(
             self._tokenizer,
             token_ids,
@@ -232,6 +246,7 @@ class MiniMaxM2Renderer:
             think_end_id=self._think_end,
             tool_call_id=self._tool_call_tok,
             tool_call_end_id=self._tool_call_end_tok,
+            tools=tools,
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -244,7 +259,7 @@ class MiniMaxM2Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
-    ) -> list[int] | None:
+    ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids
             or not new_messages
@@ -263,10 +278,20 @@ class MiniMaxM2Renderer:
 
         ext: list[int] = []
 
-        def emit_special(token_id: int, _msg_idx: int = -1) -> None:
+        # Bridge output is consumed as the next turn's prompt — the
+        # caller blanket-masks it via ``prompt_mask=[False]*N``, so we
+        # don't track sampled_mask here. Local helpers accept the kwarg
+        # for signature compatibility with ``_render_tool`` and ignore
+        # it; the returned ``RenderedTokens`` leaves ``sampled_mask``
+        # empty.
+        def emit_special(
+            token_id: int, _msg_idx: int = -1, *, is_sampled: bool = False
+        ) -> None:
             ext.append(token_id)
 
-        def emit_text(text: str, _msg_idx: int = -1) -> None:
+        def emit_text(
+            text: str, _msg_idx: int = -1, *, is_sampled: bool = False
+        ) -> None:
             ext.extend(self._encode(text))
 
         # Trailing ``\n`` after the ``[e~[`` turn close — see ``render()``.
@@ -303,7 +328,7 @@ class MiniMaxM2Renderer:
         emit_special(self._think, -1)
         emit_text("\n", -1)
 
-        return previous_ids + ext
+        return RenderedTokens(token_ids=previous_ids + ext)
 
     def _render_assistant(
         self,
@@ -329,26 +354,53 @@ class MiniMaxM2Renderer:
                 reasoning_content = before.strip("\n")
             content = after.strip("\n")
 
-        emit_special(self._role, orig_idx)
+        # ``]~b]ai\n`` is template-injected scaffolding — at inference
+        # the chat template emits these as the generation prompt and the
+        # model never samples them. Marking the role marker and tag as
+        # ``is_sampled=False`` keeps the SFT loss mask aligned with what
+        # the model would actually have produced.
+        emit_special(self._role, orig_idx, is_sampled=False)
 
-        # Build the full text between ]~b]ai and [e~[ with special tokens
-        # interspersed. Keep text segments contiguous to preserve BPE merges.
+        # Build the model-sampled portion (think block + content + tool
+        # calls). Text segments stay contiguous within each is_sampled
+        # span to preserve BPE merges.
         tool_calls = msg.get("tool_calls") or []
+        emit_thinking = reasoning_content and (
+            conv_idx > last_user_index or preserve_thinking
+        )
 
-        if reasoning_content and (conv_idx > last_user_index or preserve_thinking):
-            emit_text("ai\n", orig_idx)
-            emit_special(self._think, orig_idx)
-            emit_text("\n" + reasoning_content + "\n", orig_idx)
-            emit_special(self._think_end, orig_idx)
+        if emit_thinking:
+            # The thinking branch has the ``<think>`` special token
+            # immediately after ``ai\n``, which forces a tokenizer
+            # boundary — splitting ``ai\n`` (not_sampled) from the
+            # ``<think>``-led body (sampled) is BPE-safe.
+            emit_text("ai\n", orig_idx, is_sampled=False)
+            emit_special(self._think, orig_idx, is_sampled=True)
+            emit_text("\n" + reasoning_content + "\n", orig_idx, is_sampled=True)
+            emit_special(self._think_end, orig_idx, is_sampled=True)
             # \n\n + content must be contiguous for BPE
-            after_think = "\n\n" + content if content else "\n\n"
+            body = "\n\n" + content if content else "\n\n"
         else:
-            after_think = "ai\n" + content if content else "ai\n"
+            body = content
+            # Empty body + tool_calls would emit ``"\n"`` next, and
+            # ``ai\n`` + ``\n`` BPE-merges into a single ``\n\n`` token
+            # in this tokenizer. Fold the boundary ``\n`` into the
+            # role-tag emission so the merged token stays whole. The
+            # combined token is is_sampled=False — the conservative
+            # choice for SFT (don't train on a token whose first byte
+            # is template scaffolding).
+            if tool_calls and not body:
+                emit_text("ai\n\n", orig_idx, is_sampled=False)
+            else:
+                emit_text("ai\n", orig_idx, is_sampled=False)
 
         if tool_calls:
-            # \n before <minimax:tool_call> must be contiguous with preceding text
-            emit_text(after_think + "\n", orig_idx)
-            emit_special(self._tool_call_tok, orig_idx)
+            # \n before <minimax:tool_call> must be contiguous with preceding text.
+            # The empty-body / non-thinking case folded the leading \n
+            # into the role-tag emission above; skip it here.
+            if emit_thinking or body:
+                emit_text(body + "\n", orig_idx, is_sampled=True)
+            emit_special(self._tool_call_tok, orig_idx, is_sampled=True)
 
             invoke_block = "\n"
             for tc in tool_calls:
@@ -380,13 +432,16 @@ class MiniMaxM2Renderer:
                         )
                 invoke_block += "</invoke>\n"
 
-            emit_text(invoke_block, orig_idx)
-            emit_special(self._tool_call_end_tok, orig_idx)
-        else:
-            emit_text(after_think, orig_idx)
+            emit_text(invoke_block, orig_idx, is_sampled=True)
+            emit_special(self._tool_call_end_tok, orig_idx, is_sampled=True)
+        elif body:
+            emit_text(body, orig_idx, is_sampled=True)
 
-        emit_special(self._eos, orig_idx)
-        emit_text("\n", orig_idx)
+        # ``[e~[`` is the model's stop signal — it samples this to end
+        # its turn, so it is part of the sampled stream. The trailing
+        # ``\n`` is template-appended between turns and never sampled.
+        emit_special(self._eos, orig_idx, is_sampled=True)
+        emit_text("\n", orig_idx, is_sampled=False)
 
     def _render_tool(
         self,
@@ -398,6 +453,9 @@ class MiniMaxM2Renderer:
         emit_special,
         emit_text,
     ) -> None:
+        # Tool messages are conversation history injected by the runtime
+        # between assistant turns — the model never samples any of these
+        # tokens, so every emission is is_sampled=False.
         prev_is_tool = conv_idx > 0 and conversation[conv_idx - 1]["role"] == "tool"
         next_is_tool = (
             conv_idx + 1 < len(conversation)
@@ -405,8 +463,8 @@ class MiniMaxM2Renderer:
         )
 
         if not prev_is_tool:
-            emit_special(self._role, orig_idx)
-            emit_text("tool", orig_idx)
+            emit_special(self._role, orig_idx, is_sampled=False)
+            emit_text("tool", orig_idx, is_sampled=False)
 
         content = self._visible_text(msg.get("content"))
         # Leading ``\n`` before ``<response>`` only on the first of a
@@ -415,8 +473,12 @@ class MiniMaxM2Renderer:
         # through a single emit_text call instead of splitting the merge.
         prefix = "" if prev_is_tool else "\n"
         suffix = "\n" if next_is_tool else ""
-        emit_text(prefix + "<response>" + content + "</response>" + suffix, orig_idx)
+        emit_text(
+            prefix + "<response>" + content + "</response>" + suffix,
+            orig_idx,
+            is_sampled=False,
+        )
 
         if not next_is_tool:
-            emit_special(self._eos, orig_idx)
-            emit_text("\n", orig_idx)
+            emit_special(self._eos, orig_idx, is_sampled=False)
+            emit_text("\n", orig_idx, is_sampled=False)

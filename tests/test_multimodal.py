@@ -225,6 +225,27 @@ def _modality_kit(modality: str, model_name: str):
     )
 
 
+def _token_runs(token_ids: list[int], token_id: int) -> list[tuple[int, int]]:
+    """Return ``(offset, length)`` runs for ``token_id`` in ``token_ids``."""
+    runs: list[tuple[int, int]] = []
+    i, n = 0, len(token_ids)
+    while i < n:
+        if token_ids[i] == token_id:
+            start = i
+            while i < n and token_ids[i] == token_id:
+                i += 1
+            runs.append((start, i - start))
+        else:
+            i += 1
+    return runs
+
+
+def _token_window(tokenizer, token_ids: list[int], center: int) -> list[str]:
+    lo = max(0, center - 10)
+    hi = min(len(token_ids), center + 10)
+    return tokenizer.convert_ids_to_tokens(token_ids[lo:hi])
+
+
 # ---------------------------------------------------------------------------
 # Cases.
 # ---------------------------------------------------------------------------
@@ -337,6 +358,127 @@ def test_multimodal_byte_parity_vs_processor(mm_model_name, modality, tiny_image
             f"  ours[:80]={ours[:80]}\n  theirs[:80]={theirs[:80]}\n"
             f"  len(ours)={len(ours)} len(theirs)={len(theirs)}"
         )
+
+
+def test_qwen35_tool_result_image_parity_vs_processor(tiny_image):
+    """Qwen3.5's template renders images inside tool results.
+
+    This currently fails: ``Qwen35Renderer`` flattens tool content through
+    its text-only helper, so the image placeholder and sidecar are dropped.
+    """
+    mm_model_name = "Qwen/Qwen3.5-35B-A3B"
+    if not _hf_snapshot_cached(mm_model_name):
+        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+
+    tokenizer, processor, renderer = _load_processor_and_renderer(mm_model_name)
+    messages = [
+        {"role": "user", "content": "Inspect the screenshot."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "take_screenshot", "arguments": {}}}
+            ],
+        },
+        {
+            "role": "tool",
+            "content": [
+                {"type": "text", "text": "Screenshot:"},
+                _image_content_part(tiny_image),
+            ],
+        },
+    ]
+
+    ours = renderer.render(messages, add_generation_prompt=True)
+    theirs = _qwen_vl_processor_input_ids(processor, messages, add_gp=True)
+    pad_id = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+    expected_pad_runs = _token_runs(theirs, pad_id)
+    actual_pad_runs = _token_runs(ours.token_ids, pad_id)
+
+    assert expected_pad_runs, "processor did not render the tool-result image"
+    assert actual_pad_runs == expected_pad_runs, (
+        "Qwen35Renderer dropped or misplaced image placeholders in a tool result.\n"
+        f"expected processor <|image_pad|> runs: {expected_pad_runs}\n"
+        f"actual renderer <|image_pad|> runs: {actual_pad_runs}\n"
+        f"expected token window: "
+        f"{_token_window(tokenizer, theirs, expected_pad_runs[0][0])}"
+    )
+    actual_placeholders = (
+        []
+        if ours.multi_modal_data is None
+        else ours.multi_modal_data.mm_placeholders.get("image", [])
+    )
+    assert len(actual_placeholders) == 1, (
+        "Qwen35Renderer should attach one image sidecar for the tool result; "
+        f"got {actual_placeholders}"
+    )
+
+
+def test_qwen35_bridge_tool_result_image_carries_mm_data(tiny_image):
+    """Qwen3.5 bridge should carry image sidecars from new tool results.
+
+    This currently fails for the same reason as full rendering: the bridge
+    path flattens ``role=tool`` content through the text-only helper before
+    ``_render_tool`` sees it.
+    """
+    mm_model_name = "Qwen/Qwen3.5-35B-A3B"
+    if not _hf_snapshot_cached(mm_model_name):
+        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+
+    tokenizer, _, renderer = _load_processor_and_renderer(mm_model_name)
+    initial = [
+        {"role": "user", "content": "Take a screenshot."},
+    ]
+    new = [
+        {
+            "role": "tool",
+            "content": [
+                {"type": "text", "text": "Screenshot:"},
+                _image_content_part(tiny_image),
+            ],
+        }
+    ]
+
+    initial_rendered = renderer.render(initial, add_generation_prompt=True)
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    completion_ids = (
+        tokenizer.encode(
+            '<tool_call>\n<function=take_screenshot>\n</function>\n</tool_call>',
+            add_special_tokens=False,
+        )
+        + [im_end_id]
+    )
+
+    bridged = renderer.bridge_to_next_turn(
+        previous_prompt_ids=initial_rendered.token_ids,
+        previous_completion_ids=completion_ids,
+        new_messages=new,
+        previous_multi_modal_data=initial_rendered.multi_modal_data,
+    )
+
+    assert bridged is not None
+    pad_id = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+    prefix_len = len(initial_rendered.token_ids) + len(completion_ids)
+    actual_new_pad_runs = [
+        run for run in _token_runs(bridged.token_ids, pad_id) if run[0] >= prefix_len
+    ]
+    assert actual_new_pad_runs, (
+        "Qwen35Renderer.bridge_to_next_turn dropped image placeholders from "
+        "the new tool result.\n"
+        f"prefix_len={prefix_len}\n"
+        f"all renderer <|image_pad|> runs: {_token_runs(bridged.token_ids, pad_id)}\n"
+        f"extension tokens: "
+        f"{tokenizer.convert_ids_to_tokens(bridged.token_ids[prefix_len:])}"
+    )
+    actual_placeholders = (
+        []
+        if bridged.multi_modal_data is None
+        else bridged.multi_modal_data.mm_placeholders.get("image", [])
+    )
+    assert len(actual_placeholders) == 1, (
+        "Qwen35Renderer.bridge_to_next_turn should attach one image sidecar "
+        f"for the new tool result; got {actual_placeholders}"
+    )
 
 
 @pytest.mark.parametrize(

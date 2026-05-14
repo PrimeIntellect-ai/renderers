@@ -734,14 +734,11 @@ TRUSTED_REVISIONS: dict[str, str] = {
 
 # Models for which ``fastokens`` is known to diverge from vanilla
 # ``transformers.AutoTokenizer`` and therefore must NOT be patched.
-# Empirical audit (2026-05-07) ran each entry of ``MODEL_RENDERER_MAP``
-# through both backends on a representative encoding probe; 31/35 passed
-# byte-identical, the four below either fail to load under fastokens or
-# silently produce different tokens for content containing literal
-# special-token text. Renderer parity tests would not catch the latter
-# case (real-world content rarely embeds ``<|im_start|>`` literally),
-# but if it ever happens we'd diverge silently — denylist is the
-# conservative choice.
+# Empirical audit ran each entry of ``MODEL_RENDERER_MAP`` through both
+# backends; 31/35 passed byte-identical. The four below either fail to
+# load under fastokens (DeepSeek-V3 family — Metaspace pretokenizer not
+# yet implemented) or are kept defensively pending an upstream fastokens
+# fix (MiniMax-M2 family — see per-entry comments).
 FASTOKENS_INCOMPATIBLE: frozenset[str] = frozenset(
     {
         # fastokens 0.1.1: ``ValueError: pre-tokenizer error: unsupported
@@ -750,10 +747,13 @@ FASTOKENS_INCOMPATIBLE: frozenset[str] = frozenset(
         # doesn't yet implement.
         "deepseek-ai/DeepSeek-V3",
         "deepseek-ai/DeepSeek-V3-Base",
-        # MiniMax tokenizers: encode literal ``<|im_start|>``-like text in
-        # plain content as a special token id under fastokens, vs
-        # character-by-character bytes under vanilla. Diverges on
-        # ``encode("... <|im_start|> ...", add_special_tokens=False)``.
+        # MiniMax: kept defensive pending upstream fastokens fix
+        # https://github.com/crusoecloud/fastokens/pull/32 — that PR
+        # removes a stray attribute leaked by ``unpatch_transformers``
+        # which steers MiniMax (declared ``tokenizer_class =
+        # 'GPT2Tokenizer'`` → slow→fast conversion path) down a different
+        # load path on subsequent vanilla loads. Once the upstream fix
+        # is released, these two entries can be dropped after re-audit.
         "MiniMaxAI/MiniMax-M2",
         "MiniMaxAI/MiniMax-M2.5",
     }

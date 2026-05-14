@@ -148,8 +148,26 @@ class RenderedTokens:
     """Result of rendering messages to tokens.
 
     Each token carries an index into the original message list so callers can
-    build per-token loss masks without re-rendering.  Tokens from structural
-    scaffolding (generation prompt, im_start/im_end wrapping) carry index -1.
+    build per-token loss masks without re-rendering. Tokens from structural
+    scaffolding the renderer adds outside any single message (e.g. the
+    trailing generation prompt) carry index ``-1``.
+
+    ``sampled_mask`` is a separate per-token signal: ``True`` if the model
+    would have produced this token at inference time (i.e. it appears in
+    the sampled completion), ``False`` if it is template-injected
+    scaffolding the model never emits (``<|im_start|>role\\n`` openers,
+    inter-turn ``\\n`` separators, system / user / tool content from
+    conversation history, etc.). This is distinct from
+    ``message_indices``: a token can belong to an assistant message
+    (``message_indices[k] >= 0``) and still be scaffolding the template
+    adds around the model's actual completion. SFT loss masks should AND
+    both: train on tokens whose role is trainable AND that the model
+    would actually sample.
+
+    Empty ``sampled_mask`` (``[]``) means the renderer doesn't provide
+    this signal — consumers should fall back to attribution-only
+    masking. ``DefaultRenderer`` leaves it empty because the Jinja
+    template is opaque; hand-coded renderers populate it.
 
     ``multi_modal_data`` is populated by multimodal renderers (e.g.
     ``Qwen3VLRenderer``) when image / video content parts are present;
@@ -158,6 +176,7 @@ class RenderedTokens:
 
     token_ids: list[int] = field(default_factory=list)
     message_indices: list[int] = field(default_factory=list)
+    sampled_mask: list[bool] = field(default_factory=list)
     multi_modal_data: "MultiModalData | None" = None
 
 
@@ -947,11 +966,24 @@ def build_training_sample(
 
     Single render() call + message_indices → per-token mask.
     Replaces build_incremental_token_mask (O(N) renders → O(1)).
+
+    When the renderer populates ``rendered.sampled_mask``, the loss mask
+    is the AND of role-based attribution and the sampled signal: only
+    tokens the model would have produced at inference are trainable.
+    This keeps SFT byte-aligned with the RL trajectory mask (where the
+    prompt / completion split achieves the same effect structurally).
+    Renderers that don't populate ``sampled_mask`` (empty list) fall
+    back to attribution-only masking — every token attributed to a
+    trainable role is trained on, including template-injected
+    ``<|im_start|>role\\n`` openers.
     """
     rendered = renderer.render(messages, tools=tools)
+    has_sampled_info = len(rendered.sampled_mask) == len(rendered.token_ids)
     loss_mask: list[bool] = []
-    for msg_idx in rendered.message_indices:
+    for k, msg_idx in enumerate(rendered.message_indices):
         if msg_idx < 0:
+            loss_mask.append(False)
+        elif has_sampled_info and not rendered.sampled_mask[k]:
             loss_mask.append(False)
         else:
             loss_mask.append(role_to_mask(messages[msg_idx]))

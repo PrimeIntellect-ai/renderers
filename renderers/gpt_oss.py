@@ -333,7 +333,10 @@ class GptOssRenderer:
             emit([self._message], -1, is_sampled=False)
 
         return RenderedTokens(
-            token_ids=tokens, message_indices=indices, sampled_mask=sampled
+            token_ids=tokens,
+            message_indices=indices,
+            sampled_mask=sampled,
+            message_roles=[m.get("role") or "" for m in messages],
         )
 
     def render_ids(
@@ -400,22 +403,38 @@ class GptOssRenderer:
         if previous_ids is None:
             return None
 
+        # Bridge populates ``message_indices`` (relative to ``new_messages``)
+        # and ``sampled_mask`` (uniformly ``False``). The harmony encoder
+        # renders each ``new_messages[i]`` as a single block, so every
+        # token in that block carries index ``i``; the trailing
+        # generation prompt uses ``-1``.
         ext: list[int] = []
-        for msg in new_messages:
+        ext_indices: list[int] = []
+        for i, msg in enumerate(new_messages):
             role = msg.get("role")
             if role not in ("tool", "user", "system", "developer"):
                 return None
             for hm in self._to_harmony_messages(msg):
-                ext.extend(self._enc.render(hm))
+                ids = self._enc.render(hm)
+                ext.extend(ids)
+                ext_indices.extend([i] * len(ids))
 
         # Generation prompt: <|start|>assistant<|channel|>analysis<|message|>
+        gen_before = len(ext)
         ext.append(self._start)
         ext.extend(self._encode("assistant"))
         ext.append(self._channel)
         ext.extend(self._encode("analysis"))
         ext.append(self._message)
+        ext_indices.extend([-1] * (len(ext) - gen_before))
 
-        return RenderedTokens(token_ids=previous_ids + ext)
+        total_len = len(previous_ids) + len(ext)
+        return RenderedTokens(
+            token_ids=previous_ids + ext,
+            message_indices=[-1] * len(previous_ids) + ext_indices,
+            sampled_mask=[False] * total_len,
+            message_roles=[m.get("role") or "" for m in new_messages],
+        )
 
     # ── message conversion ───────────────────────────────────────────────────
 

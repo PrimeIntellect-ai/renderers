@@ -906,6 +906,7 @@ class KimiK25Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
+            message_roles=[m.get("role") or "" for m in messages],
             multi_modal_data=mm_data,
         )
 
@@ -995,44 +996,52 @@ class KimiK25Renderer:
             return None
 
         # Seed combined-token list with prior turn so placeholder offsets
-        # are absolute in the bridged sequence.
+        # are absolute in the bridged sequence. Parallel
+        # ``indices``/``sampled`` are seeded with ``-1``/``False`` for the
+        # prior portion — the bridge has no attribution info for
+        # ``previous_ids``. Bridge-added tokens get proper ``msg_idx``
+        # (relative to ``new_messages``) and uniformly ``False``
+        # ``sampled``: nothing the bridge emits was model-sampled.
         tokens: list[int] = list(previous_ids)
+        indices: list[int] = [-1] * len(previous_ids)
+        sampled: list[bool] = [False] * len(previous_ids)
         new_hashes: dict[str, list[str]] = {}
         new_placeholders: dict[str, list[PlaceholderRange]] = {}
         new_items: dict[str, list[dict[str, Any]]] = {}
 
-        # Bridge output is consumed as the next turn's prompt — the caller
-        # blanket-masks it via ``prompt_mask=[False]*N``, so we don't track
-        # sampled_mask here. Local helpers accept the kwarg for signature
-        # compatibility with ``_render_tool_body`` / ``_emit_content`` and
-        # ignore it; the returned ``RenderedTokens`` leaves ``sampled_mask``
-        # empty.
         def emit_special(
-            token_id: int, _msg_idx: int = -1, *, is_sampled: bool = False
+            token_id: int, msg_idx: int = -1, *, is_sampled: bool = False
         ) -> None:
             tokens.append(token_id)
+            indices.append(msg_idx)
+            sampled.append(is_sampled)
 
         def emit_text(
-            text: str, _msg_idx: int = -1, *, is_sampled: bool = False
+            text: str, msg_idx: int = -1, *, is_sampled: bool = False
         ) -> None:
-            tokens.extend(self._encode(text))
+            ids = self._encode(text)
+            tokens.extend(ids)
+            indices.extend([msg_idx] * len(ids))
+            sampled.extend([is_sampled] * len(ids))
 
         def emit_ids(
-            ids: list[int], _msg_idx: int = -1, *, is_sampled: bool = False
+            ids: list[int], msg_idx: int = -1, *, is_sampled: bool = False
         ) -> None:
             tokens.extend(ids)
+            indices.extend([msg_idx] * len(ids))
+            sampled.extend([is_sampled] * len(ids))
 
         def emit_image(
-            part: dict[str, Any], _msg_idx: int = -1, *, is_sampled: bool = False
+            part: dict[str, Any], msg_idx: int = -1, *, is_sampled: bool = False
         ) -> None:
             _, out, _num_patches, h = self._process_image(part)
-            emit_special(self._media_begin)
-            emit_text("image")
-            emit_special(self._media_content)
+            emit_special(self._media_begin, msg_idx)
+            emit_text("image", msg_idx)
+            emit_special(self._media_content, msg_idx)
             offset = len(tokens)
-            emit_special(self._media_pad)
-            emit_special(self._media_end)
-            emit_text("\n")
+            emit_special(self._media_pad, msg_idx)
+            emit_special(self._media_end, msg_idx)
+            emit_text("\n", msg_idx)
             new_hashes.setdefault("image", []).append(h)
             new_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=1)
@@ -1113,8 +1122,14 @@ class KimiK25Renderer:
         for modality, vals in new_items.items():
             merged_items.setdefault(modality, []).extend(vals)
 
+        bridge_roles = [m.get("role") or "" for m in new_messages]
         if not (merged_hashes or merged_placeholders or merged_items):
-            return RenderedTokens(token_ids=tokens)
+            return RenderedTokens(
+                token_ids=tokens,
+                message_indices=indices,
+                sampled_mask=sampled,
+                message_roles=bridge_roles,
+            )
 
         mm_data = MultiModalData(
             mm_hashes=merged_hashes,
@@ -1123,7 +1138,9 @@ class KimiK25Renderer:
         )
         return RenderedTokens(
             token_ids=tokens,
-            message_indices=[-1] * len(tokens),
+            message_indices=indices,
+            sampled_mask=sampled,
+            message_roles=bridge_roles,
             multi_modal_data=mm_data,
         )
 

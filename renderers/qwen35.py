@@ -480,6 +480,7 @@ class Qwen35Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
+            message_roles=[m.get("role") or "" for m in messages],
             multi_modal_data=mm_data,
         )
 
@@ -543,34 +544,40 @@ class Qwen35Renderer:
 
         # Seed combined-token list with prior turn so placeholder offsets
         # are absolute in the bridged sequence (matching ``render()``).
+        # Parallel ``indices``/``sampled`` are seeded with ``-1``/``False``
+        # for the prior portion — the bridge has no attribution info for
+        # ``previous_ids``. Bridge-added tokens get proper ``msg_idx``
+        # (relative to ``new_messages``) and uniformly ``False``
+        # ``sampled``: nothing the bridge emits was model-sampled.
         tokens: list[int] = list(previous_ids)
+        indices: list[int] = [-1] * len(previous_ids)
+        sampled: list[bool] = [False] * len(previous_ids)
         new_hashes: dict[str, list[str]] = {}
         new_placeholders: dict[str, list[PlaceholderRange]] = {}
         new_items: dict[str, list[dict[str, Any]]] = {}
 
-        # Bridge output is consumed as the next turn's prompt — the
-        # caller blanket-masks it via ``prompt_mask=[False]*N``, so we
-        # don't track sampled_mask here. Local helpers accept the kwarg
-        # for signature compatibility with ``_render_tool`` and ignore
-        # it; the returned ``RenderedTokens`` leaves ``sampled_mask``
-        # empty.
         def emit_special(
-            token_id: int, _msg_idx: int = -1, *, is_sampled: bool = False
+            token_id: int, msg_idx: int = -1, *, is_sampled: bool = False
         ) -> None:
             tokens.append(token_id)
+            indices.append(msg_idx)
+            sampled.append(is_sampled)
 
         def emit_text(
-            text: str, _msg_idx: int = -1, *, is_sampled: bool = False
+            text: str, msg_idx: int = -1, *, is_sampled: bool = False
         ) -> None:
-            tokens.extend(self._encode(text))
+            ids = self._encode(text)
+            tokens.extend(ids)
+            indices.extend([msg_idx] * len(ids))
+            sampled.extend([is_sampled] * len(ids))
 
-        def emit_image(part: dict[str, Any], _msg_idx: int = -1) -> None:
+        def emit_image(part: dict[str, Any], msg_idx: int = -1) -> None:
             _, out, n, h = self._process_image(part)
-            emit_special(self._vision_start)
+            emit_special(self._vision_start, msg_idx)
             offset = len(tokens)
             for _ in range(n):
-                emit_special(self._image_pad)
-            emit_special(self._vision_end)
+                emit_special(self._image_pad, msg_idx)
+            emit_special(self._vision_end, msg_idx)
             new_hashes.setdefault("image", []).append(h)
             new_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
@@ -582,13 +589,13 @@ class Qwen35Renderer:
                 }
             )
 
-        def emit_user_with_media(content_list: list[Any]) -> None:
-            emit_special(self._im_start)
+        def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
+            emit_special(self._im_start, msg_idx)
             buf: list[str] = ["user\n"]
 
             def flush_buf() -> None:
                 if buf:
-                    emit_text("".join(buf))
+                    emit_text("".join(buf), msg_idx)
                     buf.clear()
 
             for item in content_list:
@@ -597,7 +604,7 @@ class Qwen35Renderer:
                 elif isinstance(item, dict):
                     if _is_image_part(item):
                         flush_buf()
-                        emit_image(item)
+                        emit_image(item, msg_idx)
                     elif _is_video_part(item):
                         raise NotImplementedError(
                             "Video parts are not yet supported by Qwen35Renderer."
@@ -609,8 +616,8 @@ class Qwen35Renderer:
                 else:
                     raise ValueError(f"Unexpected content item: {item}")
             flush_buf()
-            emit_special(self._im_end)
-            emit_text("\n")
+            emit_special(self._im_end, msg_idx)
+            emit_text("\n", msg_idx)
 
         # Trailing ``\n`` after ``<|im_end|>`` — ``render()`` emits it as
         # part of the prior turn, but vLLM stops on ``<|im_end|>`` so the
@@ -623,7 +630,7 @@ class Qwen35Renderer:
             content = self._render_content(raw_content).strip()
             if role == "user":
                 if self._content_has_media(raw_content):
-                    emit_user_with_media(raw_content)
+                    emit_user_with_media(raw_content, i)
                 else:
                     emit_special(self._im_start, i)
                     emit_text("user\n" + content, i)
@@ -680,8 +687,14 @@ class Qwen35Renderer:
         for modality, vals in new_items.items():
             merged_items.setdefault(modality, []).extend(vals)
 
+        bridge_roles = [m.get("role") or "" for m in new_messages]
         if not (merged_hashes or merged_placeholders or merged_items):
-            return RenderedTokens(token_ids=tokens)
+            return RenderedTokens(
+                token_ids=tokens,
+                message_indices=indices,
+                sampled_mask=sampled,
+                message_roles=bridge_roles,
+            )
 
         mm_data = MultiModalData(
             mm_hashes=merged_hashes,
@@ -690,7 +703,9 @@ class Qwen35Renderer:
         )
         return RenderedTokens(
             token_ids=tokens,
-            message_indices=[-1] * len(tokens),
+            message_indices=indices,
+            sampled_mask=sampled,
+            message_roles=bridge_roles,
             multi_modal_data=mm_data,
         )
 

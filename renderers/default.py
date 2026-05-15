@@ -143,7 +143,12 @@ class DefaultRenderer:
             token_ids = full_ids
             message_indices.extend([-1] * len(gen_tokens))
 
-        return RenderedTokens(token_ids=token_ids, message_indices=message_indices)
+        message_roles = [m.get("role") or "" for m in messages]
+        return RenderedTokens(
+            token_ids=token_ids,
+            message_indices=message_indices,
+            message_roles=message_roles,
+        )
 
     def _apply(self, messages, *, tools=None, add_generation_prompt=False) -> list[int]:
         kwargs = dict(self._chat_template_kwargs)

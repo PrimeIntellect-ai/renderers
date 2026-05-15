@@ -517,6 +517,7 @@ class Qwen3VLRenderer:
             token_ids=em.token_ids,
             message_indices=em.message_indices,
             sampled_mask=em.sampled,
+            message_roles=[m.get("role") or "" for m in messages],
             multi_modal_data=mm_data,
         )
 
@@ -584,18 +585,21 @@ class Qwen3VLRenderer:
         if previous_ids is None:
             return None
 
-        # Bridge output is consumed as the next turn's prompt — the
-        # caller blanket-masks it via ``prompt_mask=[False]*N``, so we
-        # don't surface a sampled_mask here. The shared ``_render_tool``
-        # helper still routes through ``em.special``/``em.text`` with
-        # ``is_sampled`` kwargs, which the emitter accepts and tracks,
-        # but the returned ``RenderedTokens`` leaves ``sampled_mask``
-        # empty (the field defaults to ``[]``).
+        # Bridge populates ``message_indices`` (relative to ``new_messages``)
+        # and ``sampled_mask`` (uniformly ``False`` — every token the
+        # bridge emits is template scaffolding for the next prompt, not
+        # something the model sampled). Downstream consumers can run
+        # :meth:`RenderedTokens.tokens_per_message` on the bridge output
+        # to get per-new-message token counts without re-rendering.
         em = _Emitter(self._encode)
         # Seed the emitter with the prior turn's tokens so cursor() reports
-        # absolute offsets in the combined sequence.
+        # absolute offsets in the combined sequence. Per-token attribution
+        # for the prior portion is unknown to the bridge (it only has
+        # prev_prompt_ids + prev_completion_ids as raw lists), so seed
+        # both side channels with the "no info" sentinel.
         em.token_ids = list(previous_ids)
         em.message_indices = [-1] * len(previous_ids)
+        em.sampled = [False] * len(previous_ids)
 
         new_hashes: dict[str, list[str]] = {}
         new_placeholders: dict[str, list[PlaceholderRange]] = {}
@@ -700,6 +704,9 @@ class Qwen3VLRenderer:
 
         return RenderedTokens(
             token_ids=em.token_ids,
+            message_indices=em.message_indices,
+            sampled_mask=em.sampled,
+            message_roles=[m.get("role") or "" for m in new_messages],
             multi_modal_data=mm_data,
         )
 

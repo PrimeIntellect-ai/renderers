@@ -220,7 +220,10 @@ class GLM5Renderer:
                 emit_special(self._think_end, -1, is_sampled=False)
 
         return RenderedTokens(
-            token_ids=tokens, message_indices=indices, sampled_mask=sampled
+            token_ids=tokens,
+            message_indices=indices,
+            sampled_mask=sampled,
+            message_roles=[m.get("role") or "" for m in messages],
         )
 
     def render_ids(
@@ -292,22 +295,29 @@ class GLM5Renderer:
         last_prev = previous_ids[-1]
 
         ext: list[int] = []
+        ext_indices: list[int] = []
+        ext_sampled: list[bool] = []
 
-        # Bridge output is consumed as the next turn's prompt — the
-        # caller blanket-masks it via ``prompt_mask=[False]*N``, so we
-        # don't track sampled_mask here. Local helpers accept the kwarg
-        # for signature compatibility with ``_render_assistant`` /
-        # ``_render_tool`` and ignore it; the returned ``RenderedTokens``
-        # leaves ``sampled_mask`` empty.
+        # Bridge populates ``message_indices`` (relative to ``new_messages``)
+        # and ``sampled_mask`` (uniformly ``False`` — every token the
+        # bridge emits is template scaffolding for the next prompt, not
+        # something the model sampled). Downstream consumers can run
+        # :meth:`RenderedTokens.tokens_per_message` on the bridge output
+        # to get per-new-message token counts without re-rendering.
         def emit_special(
-            token_id: int, _msg_idx: int = -1, *, is_sampled: bool = False
+            token_id: int, msg_idx: int = -1, *, is_sampled: bool = False
         ) -> None:
             ext.append(token_id)
+            ext_indices.append(msg_idx)
+            ext_sampled.append(is_sampled)
 
         def emit_text(
-            text: str, _msg_idx: int = -1, *, is_sampled: bool = False
+            text: str, msg_idx: int = -1, *, is_sampled: bool = False
         ) -> None:
-            ext.extend(self._encode(text))
+            ids = self._encode(text)
+            ext.extend(ids)
+            ext_indices.extend([msg_idx] * len(ids))
+            ext_sampled.extend([is_sampled] * len(ids))
 
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
@@ -340,7 +350,13 @@ class GLM5Renderer:
         else:
             emit_special(self._think_end, -1)
 
-        return RenderedTokens(token_ids=previous_ids + ext)
+        total_len = len(previous_ids) + len(ext)
+        return RenderedTokens(
+            token_ids=previous_ids + ext,
+            message_indices=[-1] * len(previous_ids) + ext_indices,
+            sampled_mask=[False] * total_len,
+            message_roles=[m.get("role") or "" for m in new_messages],
+        )
 
     def _render_assistant(
         self,

@@ -177,7 +177,156 @@ class RenderedTokens:
     token_ids: list[int] = field(default_factory=list)
     message_indices: list[int] = field(default_factory=list)
     sampled_mask: list[bool] = field(default_factory=list)
+    message_roles: list[str] = field(default_factory=list)
     multi_modal_data: "MultiModalData | None" = None
+
+    def tokens_per_message(
+        self, n_messages: int | None = None, *, sampled_only: bool = False
+    ) -> list[int]:
+        """Count rendered tokens attributed to each caller-relative message.
+
+        ``out[i]`` is the number of tokens with ``message_indices[k] == i``,
+        i.e. tokens the renderer attributed to ``messages[i]``. This
+        includes template scaffolding the renderer wraps around the
+        message — the ``<|im_start|>role\\n`` opener, the closing
+        ``<|im_end|>\\n``, etc. — because those are the renderer's own
+        attribution decision and are preserved verbatim here. Tokens with
+        ``message_indices[k] == -1`` (scaffolding outside any single
+        message, e.g. the trailing generation prompt) are not counted.
+
+        With ``sampled_only=True``, counts only tokens the model would
+        have emitted at inference (``sampled_mask[k] is True``). Use this
+        for length-penalty signals in RL: scaffolding the template wraps
+        around an assistant turn is constant-size and not chosen by the
+        model, so it shouldn't enter the penalty. For roles the model
+        never samples (``user``, ``tool``, ``system``), the
+        ``sampled_only`` count is zero by construction. Renderers that
+        don't populate ``sampled_mask`` (``DefaultRenderer`` — the Jinja
+        template is opaque) return all zeros under ``sampled_only=True``.
+
+        ``n_messages`` defaults to ``len(self.message_roles)``, which
+        every Renderer populates with the caller-relative message list
+        (caller's ``messages`` for ``render()``; ``new_messages`` for
+        ``bridge_to_next_turn()``). Pass it explicitly only to truncate
+        — indices outside ``[0, n_messages)`` are ignored, so passing a
+        smaller value won't raise; it just drops the tail.
+
+        Works on results from both :meth:`Renderer.render` and
+        :meth:`Renderer.bridge_to_next_turn`. For a bridge result the
+        indices are relative to the new messages the bridge added, not
+        the full conversation history; the prior portion is uniformly
+        ``-1`` (and ``sampled_mask`` uniformly ``False``), so it
+        contributes nothing to either count.
+        """
+        if n_messages is None:
+            n_messages = len(self.message_roles)
+        out = [0] * n_messages
+        if sampled_only:
+            if len(self.sampled_mask) != len(self.token_ids):
+                return out
+            for idx, sampled in zip(self.message_indices, self.sampled_mask):
+                if sampled and 0 <= idx < n_messages:
+                    out[idx] += 1
+        else:
+            for idx in self.message_indices:
+                if 0 <= idx < n_messages:
+                    out[idx] += 1
+        return out
+
+    def message_token_spans(self) -> list[tuple[int, int] | None]:
+        """Per-message ``(start, end)`` slices into :attr:`token_ids`.
+
+        ``out[i]`` is the half-open span ``[start, end)`` such that
+        ``token_ids[start:end]`` are the tokens attributed to
+        ``messages[i]`` (or ``new_messages[i]`` for a bridge result).
+        Messages that contributed no tokens get ``None``. Renderer
+        scaffolding outside any message (``message_indices[k] == -1``)
+        is not represented.
+
+        Hand-coded renderers emit each message's tokens contiguously,
+        so the span is well-defined. The implementation tolerates
+        non-contiguous attribution by returning the outer span
+        ``(first_k, last_k + 1)``; if you suspect interleaving, slice
+        ``message_indices`` yourself to verify.
+
+        Returns ``len(self.message_roles)`` entries when ``message_roles``
+        is populated. Otherwise infers the count from
+        ``max(message_indices) + 1`` — useful for manually-constructed
+        ``RenderedTokens`` in tests but only correct when the last
+        message contributed at least one token.
+
+        Cheap to call: single pass over ``message_indices``. Re-call
+        rather than caching the result if you mutate the dataclass.
+        """
+        if self.message_roles:
+            n_messages = len(self.message_roles)
+        else:
+            max_idx = -1
+            for idx in self.message_indices:
+                if idx > max_idx:
+                    max_idx = idx
+            n_messages = max_idx + 1
+
+        firsts: list[int] = [-1] * n_messages
+        lasts: list[int] = [-1] * n_messages
+        for k, idx in enumerate(self.message_indices):
+            if 0 <= idx < n_messages:
+                if firsts[idx] == -1:
+                    firsts[idx] = k
+                lasts[idx] = k
+
+        out: list[tuple[int, int] | None] = []
+        for i in range(n_messages):
+            if firsts[i] == -1:
+                out.append(None)
+            else:
+                out.append((firsts[i], lasts[i] + 1))
+        return out
+
+    def role_token_spans(self) -> dict[str, list[tuple[int, int]]]:
+        """:meth:`message_token_spans` regrouped by ``message_roles``.
+
+        Maps each role appearing in :attr:`message_roles` to a list of
+        ``(start, end)`` spans — one per occurrence of that role, in
+        message order. Messages with no contributed tokens are skipped.
+        Returns an empty dict if :attr:`message_roles` is empty.
+
+        Intended for per-role statistics that operate on per-token
+        signals — e.g. ``logprobs[start:end]`` for each assistant span
+        to compute per-turn perplexity, or
+        ``attention[start:end]`` for tool-response attention analysis.
+        """
+        spans = self.message_token_spans()
+        out: dict[str, list[tuple[int, int]]] = {}
+        for role, span in zip(self.message_roles, spans):
+            if span is None:
+                out.setdefault(role, [])
+                continue
+            out.setdefault(role, []).append(span)
+        return out
+
+    def tokens_by_role(self, *, sampled_only: bool = False) -> dict[str, int]:
+        """Sum :meth:`tokens_per_message` grouped by ``message_roles``.
+
+        Convenience for length-penalty bookkeeping in RL trainers:
+        ``rendered.tokens_by_role(sampled_only=True)["assistant"]`` is
+        the count of tokens the model actually emitted across all
+        assistant turns — template scaffolding excluded.
+        ``rendered.tokens_by_role()["tool"]`` is the raw count of
+        tool-response tokens (``sampled_only`` is zero for ``tool`` by
+        construction since the model never samples those).
+
+        Roles present in :attr:`message_roles` always appear in the
+        returned dict, even with post-filter count ``0``, so callers
+        can index directly without ``KeyError`` on conversations that
+        happen to lack a role. Returns an empty dict if
+        :attr:`message_roles` is empty.
+        """
+        counts = self.tokens_per_message(sampled_only=sampled_only)
+        out: dict[str, int] = {}
+        for role, n in zip(self.message_roles, counts):
+            out[role] = out.get(role, 0) + n
+        return out
 
 
 class ToolCallParseStatus(str, enum.Enum):
@@ -357,6 +506,25 @@ class Renderer(Protocol):
         begins generating (i.e. equivalent to rendering the full message
         list so far with ``add_generation_prompt=True`` — except prev
         sampled tokens are kept verbatim rather than re-rendered).
+
+        Attribution on the returned ``RenderedTokens``:
+
+        - ``message_indices`` is ``-1`` over the entire prior portion
+          (length ``len(previous_ids)`` after :func:`trim_to_turn_close`)
+          because the bridge gets the prior as raw token lists with no
+          attribution. Over the bridge-added portion, indices are
+          relative to ``new_messages``: a token rendered as part of
+          ``new_messages[i]`` carries ``i``, and inter-turn separators /
+          the trailing generation prompt carry ``-1``. So
+          ``bridge.tokens_per_message(len(new_messages))`` gives the
+          per-new-message token count for length-penalty bookkeeping.
+        - ``sampled_mask`` is uniformly ``False`` across the entire
+          returned sequence. The bridge output is consumed as the next
+          turn's prompt; nothing it emits was model-sampled, and the
+          bridge has no way to recover which prior tokens were. If the
+          caller needs that distinction for the prior portion, they
+          have it directly: every token in ``prev_completion_ids`` was
+          sampled; every token in ``prev_prompt_ids`` was not.
 
         Text-only renderers return :class:`RenderedTokens` with
         ``multi_modal_data=None``. Multimodal renderers (see

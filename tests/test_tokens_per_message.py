@@ -60,9 +60,7 @@ def test_tokens_per_message_sum_equals_attributed(model_name, renderer):
 
     # Every caller message must have a positive count.
     bad = [i for i, n in enumerate(counts) if n == 0]
-    assert not bad, (
-        f"{model_name}: messages with zero attributed tokens: {bad}"
-    )
+    assert not bad, f"{model_name}: messages with zero attributed tokens: {bad}"
 
 
 def test_tokens_per_message_sampled_lt_total_for_assistant(model_name, renderer):
@@ -162,8 +160,7 @@ def test_tokens_per_message_bridge_attributes_new_messages(model_name, renderer)
         f"{model_name}: bridge sampled_mask length mismatch"
     )
     assert bridge.message_roles == ["user"], (
-        f"{model_name}: bridge message_roles {bridge.message_roles} "
-        f"!= ['user']"
+        f"{model_name}: bridge message_roles {bridge.message_roles} != ['user']"
     )
     assert not any(bridge.sampled_mask), (
         f"{model_name}: bridge emitted a token marked is_sampled=True"
@@ -190,8 +187,7 @@ def test_tokens_by_role_includes_every_input_role(model_name, renderer):
 
     by_role = rendered.tokens_by_role()
     assert set(by_role) == {"system", "user", "assistant"}, (
-        f"{model_name}: tokens_by_role keys {set(by_role)} != "
-        f"expected roles"
+        f"{model_name}: tokens_by_role keys {set(by_role)} != expected roles"
     )
     assert sum(by_role.values()) == sum(rendered.tokens_per_message()), (
         f"{model_name}: tokens_by_role sum disagrees with tokens_per_message sum"

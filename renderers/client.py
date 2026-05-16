@@ -282,15 +282,14 @@ async def _post_dynamo_chat_nvext(
 
       - ``nvext.token_data``: pre-tokenized prompt; Dynamo's preprocessor
         skips tokenization when present.
-      - ``nvext.extra_fields = ["engine_data"]``: opt-in to the PR #8119
-        channel — response carries ``nvext.engine_data.completion_token_ids``
-        and ``nvext.engine_data.completion_logprobs``.
+      - ``nvext.extra_fields = ["engine_data", "routed_experts"]``: opt-in
+        to Dynamo's engine metadata and router replay channels.
       - ``messages``: placeholder (single user message). Dynamo ignores
         when ``token_data`` is present, but the OpenAI schema requires
         a non-empty messages array, so we send a 1-token stub.
-      - ``stop_token_ids`` / ``cache_salt`` / ``logprobs`` ride as
-        ``extra_body`` passthrough (Dynamo's
-        ``PASSTHROUGH_EXTRA_FIELDS`` allowlist accepts them).
+      - ``stop_token_ids`` / ``cache_salt`` / ``logprobs`` / backend sampling
+        hints ride as passthrough fields accepted by Dynamo's
+        ``PASSTHROUGH_EXTRA_FIELDS`` allowlist.
     """
     # Standard OpenAI fields that map 1:1 onto Dynamo's chat-completions
     # request schema (validate.rs accepts them natively).
@@ -301,13 +300,15 @@ async def _post_dynamo_chat_nvext(
         "stream": False,
         "nvext": {
             "token_data": list(prompt_ids),
-            "extra_fields": ["engine_data"],
+            "extra_fields": ["engine_data", "routed_experts"],
         },
     }
     if tools:
         body["tools"] = tools
     if cache_salt is not None:
         body["nvext"]["cache_salt"] = cache_salt
+    if priority is not None:
+        body["nvext"]["agent_hints"] = {"priority": priority}
 
     # Surface standard sampling params at top level (Dynamo's schema
     # recognizes them natively, so they flow into SamplingOptions cleanly).
@@ -341,8 +342,13 @@ async def _post_dynamo_chat_nvext(
             body[key] = value
 
     # Pass-through hints that Dynamo's PASSTHROUGH_EXTRA_FIELDS allowlist
-    # accepts (stop_token_ids, bad_words_token_ids, ...).
-    for key in ("stop_token_ids", "bad_words_token_ids", "allowed_token_ids"):
+    # accepts (stop_token_ids, token constraints, backend sampling toggles).
+    for key in (
+        "stop_token_ids",
+        "bad_words_token_ids",
+        "allowed_token_ids",
+        "detokenize",
+    ):
         if sp.get(key) is not None:
             body[key] = sp[key]
 

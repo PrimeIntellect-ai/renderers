@@ -158,6 +158,55 @@ def test_generate_uses_prebuilt_prompt_ids_without_rendering():
     assert result["prompt_ids"] == [11, 12, 13]
 
 
+def test_dynamo_transport_forwards_priority_and_detokenize():
+    client = _FakeClient()
+
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={
+                "temperature": 0.3,
+                "max_tokens": 7,
+                "detokenize": False,
+                "allowed_token_ids": [7, 8],
+                "bad_words_token_ids": [[1, 2]],
+            },
+            cache_salt="ckpt-42",
+            priority=17,
+            transport="dynamo_chat_nvext",
+        )
+    )
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["path"] == "/chat/completions"
+    assert client.calls[0]["body"] == {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": ""}],
+        "stream": False,
+        "nvext": {
+            "token_data": [1, 2, 3],
+            "extra_fields": ["engine_data", "routed_experts"],
+            "cache_salt": "ckpt-42",
+            "agent_hints": {"priority": 17},
+        },
+        "tools": [{"type": "function", "function": {"name": "echo"}}],
+        "temperature": 0.3,
+        "max_completion_tokens": 7,
+        "logprobs": True,
+        "skip_special_tokens": False,
+        "stop_token_ids": [99],
+        "bad_words_token_ids": [[1, 2]],
+        "allowed_token_ids": [7, 8],
+        "detokenize": False,
+    }
+    assert result["completion_ids"] == [7, 8]
+    assert result["routed_experts"] == [[[1]], [[2]]]
+
+
 # ---------------------------------------------------------------------------
 # Multimodal features payload.
 # ---------------------------------------------------------------------------

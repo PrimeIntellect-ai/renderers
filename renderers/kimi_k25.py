@@ -36,6 +36,7 @@ from renderers.base import (
     should_preserve_past_thinking,
     trim_to_turn_close,
 )
+from renderers.stability import OPAQUE, RenderStability
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -544,6 +545,11 @@ class KimiK25Renderer:
 
         # The stop token for generation
         self._endoftext: int | None = self._try_token_id("<|endoftext|>")
+
+    @property
+    def stability(self) -> RenderStability:
+        # TODO(#41): audit Kimi K2.5 before tightening this declaration.
+        return OPAQUE
 
     # ------------------------------------------------------------------
     # Token helpers

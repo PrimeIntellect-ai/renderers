@@ -27,6 +27,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.parsing import parse_kimi_k2
+from renderers.stability import OPAQUE, RenderStability
 
 _DEFAULT_SYSTEM = "You are Kimi, an AI assistant created by Moonshot AI."
 
@@ -62,6 +63,11 @@ class KimiK2Renderer:
         self._tool_call_begin = self._token_id("<|tool_call_begin|>")
         self._tool_call_argument_begin = self._token_id("<|tool_call_argument_begin|>")
         self._tool_call_end = self._token_id("<|tool_call_end|>")
+
+    @property
+    def stability(self) -> RenderStability:
+        # TODO(#41): audit Kimi K2 before tightening this declaration.
+        return OPAQUE
 
     def _token_id(self, token: str) -> int:
         tid = self._tokenizer.convert_tokens_to_ids(token)

@@ -24,10 +24,16 @@ import json
 from typing import Any
 
 from renderers.qwen35 import Qwen35Renderer
+from renderers.stability import OPAQUE, RenderStability
 
 
 class Qwen36Renderer(Qwen35Renderer):
     """Deterministic message → token renderer for Qwen3.6 models."""
+
+    @property
+    def stability(self) -> RenderStability:
+        # TODO(#41): audit Qwen3.6 before tightening this declaration.
+        return OPAQUE
 
     @staticmethod
     def _render_arg_value(arg_value: Any) -> str:

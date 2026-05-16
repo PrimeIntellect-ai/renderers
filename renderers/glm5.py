@@ -25,6 +25,7 @@ from renderers.base import (
     should_preserve_past_thinking,
 )
 from renderers.parsing import parse_glm
+from renderers.stability import FULLY_STABLE, STABLE_IN_TOOL_CYCLE, RenderStability
 
 _TOOLS_HEADER = (
     "\n# Tools\n\n"
@@ -85,6 +86,12 @@ class GLM5Renderer:
         self._arg_key_end = self._token_id("</arg_key>")
         self._arg_value = self._token_id("<arg_value>")
         self._arg_value_end = self._token_id("</arg_value>")
+
+    @property
+    def stability(self) -> RenderStability:
+        if self._preserve_all_thinking:
+            return FULLY_STABLE
+        return STABLE_IN_TOOL_CYCLE
 
     def _token_id(self, token: str) -> int:
         tid = self._tokenizer.convert_tokens_to_ids(token)

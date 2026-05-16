@@ -25,6 +25,7 @@ from renderers.parsers import (
     get_reasoning_parser,
     get_tool_parser,
 )
+from renderers.stability import OPAQUE, RenderStability
 
 
 def _decode_tool_call_arguments(messages: list) -> list:
@@ -113,6 +114,10 @@ class DefaultRenderer:
         self._preserve_thinking_between_tool_calls = (
             preserve_thinking_between_tool_calls
         )
+
+    @property
+    def stability(self) -> RenderStability:
+        return OPAQUE
 
     @property
     def supports_tools(self) -> bool:

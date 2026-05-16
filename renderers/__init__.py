@@ -19,6 +19,13 @@ from renderers.base import (
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
+from renderers.stability import (
+    FULLY_STABLE,
+    OPAQUE,
+    STABLE_IN_TOOL_CYCLE,
+    Boundary,
+    RenderStability,
+)
 from renderers.deepseek_v3 import DeepSeekV3Renderer
 from renderers.default import DefaultRenderer
 from renderers.glm5 import GLM5Renderer
@@ -38,6 +45,7 @@ __all__ = [
     "ContentPart",
     "DeepSeekV3Renderer",
     "DefaultRenderer",
+    "FULLY_STABLE",
     "GLM45Renderer",
     "GLM5Renderer",
     "GptOssRenderer",
@@ -46,6 +54,7 @@ __all__ = [
     "Message",
     "MiniMaxM2Renderer",
     "Nemotron3Renderer",
+    "OPAQUE",
     "ParsedResponse",
     "Qwen3Renderer",
     "Qwen3VLRenderer",
@@ -55,11 +64,14 @@ __all__ = [
     "RenderedTokens",
     "Renderer",
     "RendererPool",
+    "RenderStability",
+    "STABLE_IN_TOOL_CYCLE",
     "TextPart",
     "ThinkingPart",
     "ToolCall",
     "ToolCallFunction",
     "ToolSpec",
+    "Boundary",
     "build_training_sample",
     "build_trajectory_step",
     "create_renderer",

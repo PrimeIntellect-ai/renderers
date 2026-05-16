@@ -22,6 +22,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.parsing import parse_qwen3
+from renderers.stability import FULLY_STABLE, STABLE_IN_TOOL_CYCLE, RenderStability
 
 _TOOLS_HEADER = (
     "# Tools\n\n"
@@ -66,6 +67,12 @@ class Qwen3VLRenderer:
         self._tool_call_end = self._token_id("</tool_call>")
         self._tool_response = self._token_id("<tool_response>")
         self._tool_response_end = self._token_id("</tool_response>")
+
+    @property
+    def stability(self) -> RenderStability:
+        if self._preserve_all_thinking:
+            return FULLY_STABLE
+        return STABLE_IN_TOOL_CYCLE
 
     def _token_id(self, token: str) -> int:
         tid = self._tokenizer.convert_tokens_to_ids(token)

@@ -26,6 +26,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.parsing import parse_minimax
+from renderers.stability import OPAQUE, RenderStability
 
 _DEFAULT_SYSTEM = (
     "You are a helpful assistant. Your name is MiniMax-M2.5 and is built by MiniMax."
@@ -77,6 +78,11 @@ class MiniMaxM2Renderer:
         self._think_end = self._token_id("</think>")
         self._tool_call_tok = self._token_id("<minimax:tool_call>")
         self._tool_call_end_tok = self._token_id("</minimax:tool_call>")
+
+    @property
+    def stability(self) -> RenderStability:
+        # TODO(#41): audit MiniMax M2 before tightening this declaration.
+        return OPAQUE
 
     def _token_id(self, token: str) -> int:
         tid = self._tokenizer.convert_tokens_to_ids(token)

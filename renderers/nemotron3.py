@@ -29,6 +29,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.parsing import parse_qwen35
+from renderers.stability import OPAQUE, RenderStability
 
 # ---------------------------------------------------------------------------
 # Tool system prompt constants
@@ -103,6 +104,11 @@ class Nemotron3Renderer:
         self._tool_call_end = self._token_id("</tool_call>")
         self._tool_response = self._token_id("<tool_response>")
         self._tool_response_end = self._token_id("</tool_response>")
+
+    @property
+    def stability(self) -> RenderStability:
+        # TODO(#41): audit Nemotron 3 before tightening this declaration.
+        return OPAQUE
 
     def _token_id(self, token: str, *, optional: bool = False) -> int | None:
         tid = self._tokenizer.convert_tokens_to_ids(token)

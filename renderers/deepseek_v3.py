@@ -25,6 +25,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.parsing import parse_deepseek_v3
+from renderers.stability import OPAQUE, RenderStability
 
 # Fullwidth vertical bar used in DeepSeek special token names.
 _SEP = "\uff5c"  # ｜  (U+FF5C)
@@ -80,6 +81,11 @@ class DeepSeekV3Renderer:
         self._tool_outputs_end = self._get_special_token(f"tool{_US}outputs{_US}end")
         self._tool_output_begin = self._get_special_token(f"tool{_US}output{_US}begin")
         self._tool_output_end = self._get_special_token(f"tool{_US}output{_US}end")
+
+    @property
+    def stability(self) -> RenderStability:
+        # TODO(#41): audit DeepSeek V3 before tightening this declaration.
+        return OPAQUE
 
     # ------------------------------------------------------------------
     # Helpers

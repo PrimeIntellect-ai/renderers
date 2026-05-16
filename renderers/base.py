@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Protocol, TypedDict, runtime_checkable
 
+from renderers.stability import RenderStability
+
 logger = logging.getLogger("renderers.base")
 
 
@@ -132,6 +134,11 @@ class RenderedConversation:
 @runtime_checkable
 class Renderer(Protocol):
     """Owns message ↔ token conversion for a specific model family."""
+
+    @property
+    def stability(self) -> RenderStability:
+        """Declared boundaries where appending a message preserves the prefix."""
+        ...
 
     def render(
         self,

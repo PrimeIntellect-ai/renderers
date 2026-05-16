@@ -61,6 +61,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.parsing import parse_gpt_oss
+from renderers.stability import OPAQUE, RenderStability
 
 
 def _reasoning_effort(effort: str | None) -> ReasoningEffort:
@@ -169,6 +170,11 @@ class GptOssRenderer:
         self._channel = self._token_id("<|channel|>")
         self._message = self._token_id("<|message|>")
         self._constrain = self._token_id("<|constrain|>")
+
+    @property
+    def stability(self) -> RenderStability:
+        # TODO(#41): audit GPT-OSS harmony before tightening this declaration.
+        return OPAQUE
 
     # ── token utilities ──────────────────────────────────────────────────────
 

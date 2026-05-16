@@ -195,10 +195,11 @@ class RenderedTokens:
         message, e.g. the trailing generation prompt) are not counted.
 
         With ``sampled_only=True``, counts only tokens the model would
-        have emitted at inference (``sampled_mask[k] is True``). Use this
-        for length-penalty signals in RL: scaffolding the template wraps
-        around an assistant turn is constant-size and not chosen by the
-        model, so it shouldn't enter the penalty. For roles the model
+        have emitted at inference (``sampled_mask[k] is True``). For
+        example, length-penalty signals in RL: the template wraps each
+        assistant turn in scaffolding tokens (e.g. ``<|im_start|>assistant\\n``,
+        ``<|im_end|>\\n``) that are constant-size and not chosen by the
+        model, so they shouldn't enter the penalty. For roles the model
         never samples (``user``, ``tool``, ``system``), the
         ``sampled_only`` count is zero by construction. Renderers that
         don't populate ``sampled_mask`` (``DefaultRenderer`` — the Jinja

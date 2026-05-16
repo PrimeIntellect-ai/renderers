@@ -8,6 +8,8 @@ carry image payloads through to vLLM. Pass multimodal inputs through MITO
 
 from __future__ import annotations
 
+import base64
+from io import BytesIO
 import json
 from typing import Any
 
@@ -38,6 +40,53 @@ _TOOLS_FOOTER = (
     '{"name": <function-name>, "arguments": <args-json-object>}\n'
     "</tool_call>"
 )
+
+
+def _is_image_part(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    part_type = item.get("type")
+    if part_type is not None:
+        return part_type in {"image", "image_url"}
+    return bool(item.get("image")) or bool(item.get("image_url"))
+
+
+def _is_video_part(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    part_type = item.get("type")
+    if part_type is not None:
+        return part_type in {"video", "video_url"}
+    return bool(item.get("video")) or bool(item.get("video_url"))
+
+
+def _load_pil_image(item: Any) -> Any:
+    if not _is_image_part(item):
+        raise TypeError(f"Expected image content part, got {item!r}")
+    if not isinstance(item, dict):
+        raise TypeError(f"Expected image content part, got {item!r}")
+
+    source = item.get("image") or item.get("image_url")
+    if isinstance(source, dict):
+        source = source.get("url")
+    if source is None:
+        raise TypeError(f"Image content part has no image payload: {item!r}")
+
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ImportError("Pillow is required to load image content parts") from exc
+
+    if hasattr(source, "convert"):
+        return source
+    if isinstance(source, bytes):
+        return Image.open(BytesIO(source)).convert("RGB")
+    if isinstance(source, str):
+        if source.startswith("data:image/"):
+            _, encoded = source.split(",", 1)
+            return Image.open(BytesIO(base64.b64decode(encoded))).convert("RGB")
+        return Image.open(source).convert("RGB")
+    raise TypeError(f"Unsupported image source {type(source).__name__!r}")
 
 
 class Qwen3VLRenderer:
@@ -90,8 +139,16 @@ class Qwen3VLRenderer:
             for item in content:
                 if isinstance(item, str):
                     parts.append(item)
-                elif isinstance(item, dict) and "text" in item:
-                    parts.append(item["text"])
+                elif isinstance(item, dict):
+                    part_type = item.get("type")
+                    if part_type == "text":
+                        parts.append(item.get("text") or "")
+                    elif _is_image_part(item) or _is_video_part(item):
+                        continue
+                    elif "text" in item:
+                        parts.append(item.get("text") or "")
+                    else:
+                        raise ValueError(f"Unexpected content item: {item}")
                 else:
                     raise ValueError(f"Unexpected content item: {item}")
             return "".join(parts)

@@ -70,9 +70,14 @@ def _is_image_part(item: Any) -> bool:
     t = item.get("type")
     if t in ("image", "image_url"):
         return True
-    # Permissive fallback: chat templates check ``'image' in content`` to
-    # accept loosely-shaped image parts, so mirror that.
-    return "image" in item or "image_url" in item
+    if t is not None:
+        return False
+    # Untyped fallback for loosely-shaped image parts. Require a truthy
+    # value: HF Arrow schema unification (Dataset.from_list over a list of
+    # heterogeneous content dicts) fills missing keys with None, so any
+    # text part round-tripped through a Dataset will have ``image_url: None``
+    # as a key. Mere key presence isn't enough.
+    return bool(item.get("image")) or bool(item.get("image_url"))
 
 
 def _is_video_part(item: Any) -> bool:
@@ -81,7 +86,9 @@ def _is_video_part(item: Any) -> bool:
     t = item.get("type")
     if t in ("video", "video_url"):
         return True
-    return "video" in item or "video_url" in item
+    if t is not None:
+        return False
+    return bool(item.get("video")) or bool(item.get("video_url"))
 
 
 def _load_pil_image(item: dict[str, Any]):

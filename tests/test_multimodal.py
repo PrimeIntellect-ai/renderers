@@ -695,3 +695,40 @@ def test_qwen3_vl_renderer_exposes_image_modality():
     renderer = create_renderer(tokenizer, renderer="auto")
     assert isinstance(renderer, Qwen3VLRenderer)
     assert "image" in MULTIMODAL_MODELS[model]
+
+
+def test_is_image_part_treats_type_field_as_authoritative():
+    """``Dataset.from_list`` unifies the Arrow schema across the elements
+    of a list-typed column. A content list mixing text and image parts
+    round-trips with ``image_url: None`` added to every text part (and
+    ``text: None`` added to every image part). The classifier must treat
+    the ``type`` field as authoritative when present — falling back to
+    a key-presence check on ``image_url`` would misclassify the text
+    part and the renderer would later raise on ``_load_pil_image(None)``.
+    """
+    from renderers.qwen3_vl import _is_image_part, _is_video_part
+
+    # Typed parts classify by their ``type``.
+    assert _is_image_part(
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,XXX"}}
+    )
+    assert _is_image_part({"type": "image", "image": object()})
+    assert _is_video_part(
+        {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,XXX"}}
+    )
+
+    # Schema-unified text parts — typed as text, with a None zombie key
+    # for the sibling modality — must NOT classify as image / video.
+    schema_unified_text = {"type": "text", "text": "hello", "image_url": None}
+    assert not _is_image_part(schema_unified_text)
+    assert not _is_video_part(schema_unified_text)
+    schema_unified_text_with_video = {"type": "text", "text": "hi", "video_url": None}
+    assert not _is_video_part(schema_unified_text_with_video)
+
+    # Untyped fallback only fires when ``type`` is absent, and requires
+    # a truthy value (mere key presence isn't enough).
+    assert _is_image_part({"image_url": {"url": "data:..."}})
+    assert _is_image_part({"image": object()})
+    assert not _is_image_part({"image_url": None})
+    assert not _is_image_part({"image": None})
+    assert not _is_video_part({"video_url": None})

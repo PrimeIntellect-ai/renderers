@@ -129,6 +129,20 @@ def test_tokens_per_message_truncates_to_n_messages(model_name, renderer):
     assert truncated[0] > 0
 
 
+def test_tokens_per_message_clamps_oversized_n_messages(model_name, renderer):
+    """Passing ``n_messages`` larger than ``len(message_roles)`` is
+    clamped — the helper never reports more messages than the renderer
+    attributed, so callers can't read trailing-zero phantoms."""
+    msgs = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
+    rendered = renderer.render(msgs)
+    clamped = rendered.tokens_per_message(99)
+    assert len(clamped) == len(rendered.message_roles)
+    assert clamped == rendered.tokens_per_message()
+
+
 def test_tokens_per_message_bridge_attributes_new_messages(model_name, renderer):
     """``bridge_to_next_turn`` returns ``RenderedTokens`` with proper
     per-token attribution AND populated ``message_roles`` for

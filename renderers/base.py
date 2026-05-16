@@ -210,7 +210,9 @@ class RenderedTokens:
         (caller's ``messages`` for ``render()``; ``new_messages`` for
         ``bridge_to_next_turn()``). Pass it explicitly only to truncate
         — indices outside ``[0, n_messages)`` are ignored, so passing a
-        smaller value won't raise; it just drops the tail.
+        smaller value won't raise; it just drops the tail. Values larger
+        than ``len(self.message_roles)`` are clamped, so the returned
+        list never claims more messages than the renderer attributed.
 
         Works on results from both :meth:`Renderer.render` and
         :meth:`Renderer.bridge_to_next_turn`. For a bridge result the
@@ -221,6 +223,8 @@ class RenderedTokens:
         """
         if n_messages is None:
             n_messages = len(self.message_roles)
+        else:
+            n_messages = min(n_messages, len(self.message_roles))
         out = [0] * n_messages
         if sampled_only:
             if len(self.sampled_mask) != len(self.token_ids):

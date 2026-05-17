@@ -1,7 +1,9 @@
-"""Renderer-based generate client for vLLM 0.20's /inference/v1/generate.
+"""Renderer-based generate client for vLLM 0.20 and Dynamo token-in routes.
 
-    messages → Renderer.render_ids() → token IDs → POST /inference/v1/generate
-    → completion tokens → Renderer.parse_response() → structured message
+Two transports are selected per call:
+
+    "vllm" → POST /inference/v1/generate
+    "dynamo" → POST /chat/completions with nvext.token_data
 
 When a RendererPool is passed instead of a single Renderer, the sync tokenization
 and parsing work is offloaded to threads for parallel execution across rollouts.
@@ -14,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from openai import AsyncOpenAI, BadRequestError
@@ -27,6 +29,8 @@ from renderers.base import (
     ToolCallParseStatus,
     ToolSpec,
 )
+
+RendererTransport = Literal["vllm", "dynamo"]
 
 _request_logger = logging.getLogger("renderers.client")
 
@@ -58,12 +62,13 @@ async def generate(
     cache_salt: str | None = None,
     priority: int | None = None,
     extra_headers: dict[str, str] | None = None,
+    transport: RendererTransport = "vllm",
 ) -> dict[str, Any]:
-    """Tokenize messages, call vLLM /inference/v1/generate, parse the response.
+    """Tokenize messages, call the selected token-in backend, parse response.
 
-    ``sampling_params`` is forwarded to vLLM verbatim. Two fields are always
-    set by us and override caller values: ``stop_token_ids`` (from the
-    renderer) and ``logprobs=1`` (we always emit completion_logprobs). Pass
+    ``sampling_params`` is forwarded to the selected token-in backend. Two
+    fields are always set by us and override caller values: stop token IDs
+    from the renderer and ``logprobs=1`` (we always emit completion_logprobs). Pass
     ``prompt_ids`` to skip rendering and use a prebuilt token sequence —
     pair it with ``multi_modal_data`` when the prebuilt prompt has image /
     video placeholders that need engine-side mm payload.
@@ -101,31 +106,72 @@ async def generate(
     sp["logprobs"] = 1
     sp.setdefault("skip_special_tokens", False)
 
-    body: dict[str, Any] = {
-        "model": model,
-        "token_ids": prompt_ids,
-        "sampling_params": sp,
-    }
-    features = (
-        _build_mm_features(renderer, mm_data)
-        if mm_data and not mm_data.is_empty()
-        else None
-    )
-    if features is not None:
-        body["features"] = features
-    if cache_salt is not None:
-        body["cache_salt"] = cache_salt
-    if priority is not None:
-        body["priority"] = priority
+    if transport == "vllm":
+        body: dict[str, Any] = {
+            "model": model,
+            "token_ids": prompt_ids,
+            "sampling_params": sp,
+        }
+        features = (
+            _build_mm_features(renderer, mm_data)
+            if mm_data and not mm_data.is_empty()
+            else None
+        )
+        if features is not None:
+            body["features"] = features
+        if cache_salt is not None:
+            body["cache_salt"] = cache_salt
+        if priority is not None:
+            body["priority"] = priority
 
-    # /inference/v1/generate is mounted at the server root, not under /v1
-    # like the OpenAI-compatible endpoints. Build an absolute URL so the
-    # AsyncOpenAI client doesn't prepend its automatic /v1.
-    base = str(client.base_url).rstrip("/").removesuffix("/v1")
-    endpoint = f"{base}/inference/v1/generate"
+        # /inference/v1/generate is mounted at the server root, not under /v1
+        # like the OpenAI-compatible endpoints. Build an absolute URL so the
+        # AsyncOpenAI client doesn't prepend its automatic /v1.
+        base = str(client.base_url).rstrip("/").removesuffix("/v1")
+        endpoint = f"{base}/inference/v1/generate"
+    elif transport == "dynamo":
+        if mm_data and not mm_data.is_empty():
+            raise NotImplementedError(
+                "Multimodal renderers are not yet supported on the dynamo transport."
+            )
+        nvext: dict[str, Any] = {
+            "token_data": prompt_ids,
+            "extra_fields": ["engine_data"],
+        }
+        if priority is not None:
+            nvext["agent_hints"] = {"priority": priority}
+
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": "(token-in mode)"}],
+            "stream": False,
+            "logprobs": True,
+            "nvext": nvext,
+        }
+        if tools:
+            body["tools"] = tools
+        if stop_token_ids:
+            body["stop_token_ids"] = stop_token_ids
+        if cache_salt is not None:
+            nvext["cache_salt"] = cache_salt
+
+        passthrough = dict(sp)
+        passthrough.pop("stop_token_ids", None)
+        passthrough.pop("stop", None)
+        passthrough.pop("logprobs", None)
+        passthrough.pop("skip_special_tokens", None)
+        max_tokens = passthrough.pop("max_tokens", None)
+        if max_tokens is not None:
+            body["max_completion_tokens"] = max_tokens
+        body.update({k: v for k, v in passthrough.items() if v is not None})
+        endpoint = "/chat/completions"
+    else:
+        raise ValueError(f"Unsupported renderer transport: {transport}")
+
     _request_logger.debug(
-        "POST %s prompt_len=%d max_tokens=%s",
+        "POST %s transport=%s prompt_len=%d max_tokens=%s",
         endpoint,
+        transport,
         len(prompt_ids),
         sp.get("max_tokens"),
     )
@@ -147,7 +193,31 @@ async def generate(
         raise
 
     choice = (data.get("choices") or [{}])[0]
-    completion_ids = choice.get("token_ids") or []
+    if transport == "dynamo":
+        choice_nvext = choice.get("nvext") or {}
+        response_nvext = data.get("nvext") or {}
+        choice_engine_data = choice_nvext.get("engine_data") or {}
+        response_engine_data = response_nvext.get("engine_data") or {}
+        completion_ids = (
+            choice.get("token_ids")
+            or choice_nvext.get("completion_token_ids")
+            or response_nvext.get("completion_token_ids")
+            or choice_engine_data.get("completion_token_ids")
+            or response_engine_data.get("completion_token_ids")
+            or []
+        )
+        raw_re = (
+            choice.get("routed_experts")
+            or choice_nvext.get("routed_experts")
+            or response_nvext.get("routed_experts")
+            or choice_engine_data.get("routed_experts")
+            or response_engine_data.get("routed_experts")
+        )
+        request_id = data.get("id") or data.get("request_id") or ""
+    else:
+        completion_ids = choice.get("token_ids") or []
+        raw_re = choice.get("routed_experts")
+        request_id = data.get("request_id") or ""
 
     parsed = await _maybe_offload(
         renderer, lambda: renderer.parse_response(completion_ids, tools=tools)
@@ -157,9 +227,17 @@ async def generate(
     raw_logprobs = choice.get("logprobs") or {}
     content_lp = raw_logprobs.get("content") if isinstance(raw_logprobs, dict) else None
     completion_logprobs = [float(c.get("logprob") or 0.0) for c in content_lp or []]
+    if not completion_logprobs and transport == "dynamo":
+        choice_nvext = choice.get("nvext") or {}
+        response_nvext = data.get("nvext") or {}
+        engine_logprobs = (
+            (choice_nvext.get("engine_data") or {}).get("completion_logprobs")
+            or (response_nvext.get("engine_data") or {}).get("completion_logprobs")
+            or []
+        )
+        completion_logprobs = [float(logprob) for logprob in engine_logprobs]
 
     routed_experts = None
-    raw_re = choice.get("routed_experts")
     if isinstance(raw_re, dict) and "data" in raw_re and "shape" in raw_re:
         routed_experts = (
             np.frombuffer(base64.b85decode(raw_re["data"]), dtype=np.int32)
@@ -183,7 +261,7 @@ async def generate(
         finish_reason = "tool_calls"
 
     return {
-        "request_id": data.get("request_id") or "",
+        "request_id": request_id,
         "prompt_ids": list(prompt_ids),
         "completion_ids": list(completion_ids),
         "completion_logprobs": completion_logprobs,

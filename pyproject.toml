@@ -36,14 +36,18 @@ dependencies = [
 source = "vcs"
 # Tags look like ``renderers-v0.1.8`` (prefix matches the publish.yml
 # release contract); strip the prefix to get a PEP 440 version. The
-# regex accepts any PEP 440-valid suffix after the prefix so we can
-# tag pre-releases like ``renderers-v0.2.0rc1`` later if needed.
-tag-pattern = '^renderers-v(?P<version>.+)$'
+# The regex intentionally ignores historical ``.devN`` tags except
+# ``.dev0``. hatch-vcs uses distance-from-tag to calculate dev versions,
+# so anchoring at ``.dev1`` or later makes git dependency builds fail.
+tag-pattern = '^renderers-v(?P<version>\d+\.\d+\.\d+(?:(?:a|b|rc)\d+|\.dev0)?)$'
 # Used when building from a context without VCS metadata (e.g. an
 # sdist consumed by a downstream that doesn't ship .git). Real
 # builds from a checkout get the resolved version; this fallback
 # only fires when the resolver has nothing to go on.
 fallback-version = "0.0.0"
+
+[tool.hatch.version.raw-options]
+git_describe_command = "git describe --dirty --tags --long --match renderers-v[0-9]* --exclude renderers-v*.dev[1-9]*"
 
 [tool.hatch.build.hooks.vcs]
 # Write the resolved version to a Python file so it can be inspected

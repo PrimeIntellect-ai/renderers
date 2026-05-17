@@ -36,6 +36,7 @@ from renderers.base import (
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
+from renderers.client import RendererTransport
 from renderers.deepseek_v3 import DeepSeekV3Renderer
 from renderers.default import DefaultRenderer
 from renderers.glm5 import GLM5Renderer
@@ -80,6 +81,7 @@ __all__ = [
     "RenderedTokens",
     "Renderer",
     "RendererPool",
+    "RendererTransport",
     "TextPart",
     "ThinkingPart",
     "ToolCall",

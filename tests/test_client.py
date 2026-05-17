@@ -2,6 +2,7 @@ import asyncio
 import base64
 
 import numpy as np
+import pytest
 
 from renderers.base import (
     ParsedResponse,
@@ -214,14 +215,25 @@ def test_generate_uses_prebuilt_prompt_ids_without_rendering():
 # ---------------------------------------------------------------------------
 
 
-def test_generate_serializes_multimodal_features_for_qwen3_vl():
+@pytest.mark.parametrize(
+    "model_id,renderer_class_path",
+    [
+        ("Qwen/Qwen3-VL-4B-Instruct", "renderers.qwen3_vl:Qwen3VLRenderer"),
+        ("Qwen/Qwen3.5-2B", "renderers.qwen35:Qwen35Renderer"),
+    ],
+    ids=["qwen3_vl", "qwen35"],
+)
+def test_generate_serializes_multimodal_features_for_qwen_vl_family(
+    model_id, renderer_class_path
+):
     """When the renderer emits ``MultiModalData``, ``generate`` translates
     it into vLLM's ``features`` payload (mm_hashes + mm_placeholders +
-    base64-encoded kwargs_data) and sticks it in the request body."""
-    import pytest as _pytest
+    base64-encoded kwargs_data) and sticks it in the request body. Covers
+    every renderer routed through ``_build_qwen_vl_features``."""
+    import importlib
 
-    _pytest.importorskip("torch")
-    _pytest.importorskip("vllm", reason="vllm needed for features serialization")
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm", reason="vllm needed for features serialization")
 
     import torch as _torch
 
@@ -230,14 +242,16 @@ def test_generate_serializes_multimodal_features_for_qwen3_vl():
         PlaceholderRange,
         load_tokenizer,
     )
-    from renderers.qwen3_vl import Qwen3VLRenderer
 
-    # Build a minimal real Qwen3VLRenderer so type dispatch in
+    mod_name, cls_name = renderer_class_path.split(":")
+    renderer_cls = getattr(importlib.import_module(mod_name), cls_name)
+
+    # Build a minimal real renderer so type dispatch in
     # _build_mm_features hits the qwen branch. The tokenizer is only
     # touched in __init__ to grab special-token ids; render() / etc.
     # aren't called here because we pre-supply prompt_ids + mm_data.
-    tokenizer = load_tokenizer("Qwen/Qwen3-VL-4B-Instruct")
-    renderer = Qwen3VLRenderer(tokenizer)
+    tokenizer = load_tokenizer(model_id)
+    renderer = renderer_cls(tokenizer)
 
     # Two synthetic 1×2×2 images. Field factory expects pixel_values
     # shape ``(sum_HW, embed_dim)`` and grid_thw shape ``(N, 3)``; the

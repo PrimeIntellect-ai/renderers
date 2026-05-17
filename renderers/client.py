@@ -224,6 +224,7 @@ def _build_mm_features(
     (``MultiModalData``) is already framework-agnostic and does not need
     to change. Don't pre-build the abstraction with one engine in tree.
     """
+    from renderers.qwen35 import Qwen35Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
 
     # Type dispatch only needs the renderer class. Pools expose
@@ -233,7 +234,10 @@ def _build_mm_features(
         renderer.renderer_cls if isinstance(renderer, RendererPool) else type(renderer)
     )
 
-    if issubclass(renderer_cls, Qwen3VLRenderer):
+    # Qwen3-VL and Qwen3.5 both ship ``pixel_values`` + ``image_grid_thw``
+    # via the shared Qwen2-VL field factory. ``spatial_merge_size=2`` is
+    # the family default and matches every Qwen-VL processor in tree.
+    if issubclass(renderer_cls, (Qwen3VLRenderer, Qwen35Renderer)):
         return _build_qwen_vl_features(mm_data, spatial_merge_size=2)
 
     raise NotImplementedError(

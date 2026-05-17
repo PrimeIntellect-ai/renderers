@@ -50,6 +50,7 @@ from renderers.qwen3 import Qwen3Renderer
 from renderers.qwen3_vl import Qwen3VLRenderer
 from renderers.qwen35 import Qwen35Renderer
 from renderers.qwen36 import Qwen36Renderer
+from renderers.zaya1 import Zaya1Renderer
 
 __all__ = [
     "Content",
@@ -87,6 +88,7 @@ __all__ = [
     "ToolCallParseStatus",
     "ToolSpec",
     "VideoPart",
+    "Zaya1Renderer",
     "__version__",
     "build_training_sample",
     "build_trajectory_step",

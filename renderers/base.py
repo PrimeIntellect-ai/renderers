@@ -815,6 +815,8 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
+    # ZAYA1.
+    "Zyphra/ZAYA1-8B": "zaya1",
 }
 
 
@@ -1026,6 +1028,7 @@ def _populate_registry():
     from renderers.qwen3_vl import Qwen3VLRenderer
     from renderers.qwen35 import Qwen35Renderer
     from renderers.qwen36 import Qwen36Renderer
+    from renderers.zaya1 import Zaya1Renderer
 
     RENDERER_REGISTRY.update(
         {
@@ -1044,6 +1047,7 @@ def _populate_registry():
             "laguna-xs.2": LagunaXS2Renderer,
             "nemotron-3": Nemotron3Renderer,
             "gpt-oss": GptOssRenderer,
+            "zaya1": Zaya1Renderer,
         }
     )
 
@@ -1107,7 +1111,7 @@ def create_renderer(
         renderer: Renderer name ('qwen3', 'qwen3-vl', 'qwen3.5', 'qwen3.6',
                   'glm-5', 'glm-5.1', 'glm-4.5', 'minimax-m2', 'deepseek-v3',
                   'kimi-k2', 'kimi-k2.5', 'laguna-xs.2', 'nemotron-3',
-                  'gpt-oss', 'default') or 'auto' to detect from model name.
+                  'gpt-oss', 'zaya1', 'default') or 'auto' to detect from model name.
         tool_parser: Name of a tool parser registered in ``renderers.parsers``.
                   Only consumed by DefaultRenderer. Model-specific renderers
                   have their own parsing wired in.

@@ -35,6 +35,7 @@ _MODELS = [
     ("zai-org/GLM-5", "auto"),  # XML
     ("MiniMaxAI/MiniMax-M2.5", "auto"),  # XML
     ("poolside/Laguna-XS.2", "auto"),  # XML
+    ("Zyphra/ZAYA1-8B", "auto"),  # XML
 ]
 
 

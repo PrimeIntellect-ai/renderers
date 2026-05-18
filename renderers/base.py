@@ -766,6 +766,8 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3-14B": "qwen3",
     "Qwen/Qwen3-32B": "qwen3",
     "Qwen/Qwen3-30B-A3B": "qwen3",
+    "Qwen/Qwen3-30B-A3B-Instruct-2507": "qwen3",
+    "Qwen/Qwen3-30B-A3B-Thinking-2507": "qwen3",
     "Qwen/Qwen3-235B-A22B": "qwen3",
     # Qwen3.5. All seven sizes share the same renderer. The 4B / 9B /
     # 35B-A3B / 122B-A10B / 397B-A17B chat template defaults
@@ -792,6 +794,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3-VL-30B-A3B-Instruct": "qwen3-vl",
     # GLM-5 family (GLM-4.7 reuses the GLM-5 template).
     "zai-org/GLM-5": "glm-5",
+    "zai-org/GLM-5-FP8": "glm-5",
     "zai-org/GLM-4.7-Flash": "glm-5",
     "zai-org/GLM-5.1": "glm-5.1",
     # GLM-4.5.

@@ -3,7 +3,6 @@ import base64
 
 import numpy as np
 import pytest
-
 from renderers.base import (
     ParsedResponse,
     ParsedToolCall,
@@ -236,7 +235,6 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     pytest.importorskip("vllm", reason="vllm needed for features serialization")
 
     import torch as _torch
-
     from renderers.base import (
         MultiModalData,
         PlaceholderRange,
@@ -305,3 +303,136 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     # Items are base64 strings (encode_mm_kwargs_item output).
     for item in features["kwargs_data"]["image"]:
         assert isinstance(item, str) and len(item) > 0
+
+
+# ---------------------------------------------------------------------------
+# Prompt overflow handling.
+# ---------------------------------------------------------------------------
+
+
+class _LongRenderer(_FakeRenderer):
+    """Renders a 10-token prompt regardless of input — enough to overflow a
+    small ``max_prompt_len``."""
+
+    def render(self, messages, *, tools=None, add_generation_prompt=False):
+        from renderers.base import RenderedTokens
+
+        return RenderedTokens(token_ids=list(range(10)))
+
+
+def test_generate_raises_overlong_prompt_when_explicit_cap_exceeded():
+    """Pre-flight overflow check: when an explicit ``max_prompt_len`` is set
+    and the rendered prompt is longer, ``generate`` raises
+    ``OverlongPromptError`` without dispatching the request to the engine."""
+    from renderers.client import OverlongPromptError
+
+    client = _FakeClient()
+    renderer = _LongRenderer()
+
+    with pytest.raises(OverlongPromptError) as excinfo:
+        asyncio.run(
+            generate(
+                client=client,
+                renderer=renderer,
+                messages=[{"role": "user", "content": "hi"}],
+                model="test-model",
+                max_prompt_len=4,
+            )
+        )
+
+    assert excinfo.value.prompt_len == 10
+    assert excinfo.value.max_prompt_len == 4
+    assert client.calls == [], "request must not be dispatched on pre-flight fail"
+
+
+def test_generate_allows_prompt_at_max_prompt_len():
+    """A prompt exactly equal to ``max_prompt_len`` is allowed (the check is
+    strict ``>``); only longer prompts trip the pre-flight."""
+    client = _FakeClient()
+    renderer = _LongRenderer()
+
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=renderer,
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            max_prompt_len=10,
+        )
+    )
+
+    assert len(client.calls) == 1
+    assert result["prompt_ids"] == list(range(10))
+
+
+def test_generate_auto_discovers_max_prompt_len_from_models_endpoint():
+    """When ``max_prompt_len`` is ``None`` (default), ``generate`` discovers
+    the cap via ``GET /v1/models`` and reads ``ModelCard.max_model_len``.
+    The result is cached per ``(base_url, model)`` so subsequent calls
+    don't re-query."""
+    from renderers.client import OverlongPromptError, _max_prompt_len_cache
+
+    class _ClientWithModels(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.base_url = "http://disco-host:8000/v1"
+            self.models_calls = 0
+
+        async def get(self, path, *, cast_to):
+            self.models_calls += 1
+            assert path == "/models"
+            return {
+                "object": "list",
+                "data": [
+                    {"id": "test-model", "max_model_len": 4},
+                    {"id": "other", "max_model_len": 999},
+                ],
+            }
+
+    # Clear cache so this test isn't affected by earlier ones.
+    _max_prompt_len_cache.clear()
+
+    client = _ClientWithModels()
+    renderer = _LongRenderer()
+
+    with pytest.raises(OverlongPromptError) as excinfo:
+        asyncio.run(
+            generate(
+                client=client,
+                renderer=renderer,
+                messages=[{"role": "user", "content": "hi"}],
+                model="test-model",
+            )
+        )
+
+    assert excinfo.value.max_prompt_len == 4
+    assert excinfo.value.prompt_len == 10
+    assert client.models_calls == 1, "lookup must hit /models once"
+    assert client.calls == [], "pre-flight must short-circuit the request"
+
+
+def test_generate_caches_max_prompt_len_lookup_failure():
+    """When ``GET /v1/models`` fails (e.g. mock client without ``.get``),
+    the lookup result is cached as ``None`` and the pre-flight quietly
+    disables — the request still goes through, callers fall back to
+    whatever reactive overflow handling they have."""
+    from renderers.client import _max_prompt_len_cache
+
+    # _FakeClient has no .get method → AttributeError → cached None.
+    _max_prompt_len_cache.clear()
+    client = _FakeClient()
+    client.base_url = "http://no-models:8000/v1"
+
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=_LongRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+        )
+    )
+
+    # Request was dispatched (no pre-flight rejection) and round-tripped.
+    assert len(client.calls) == 1
+    assert result["prompt_ids"] == list(range(10))
+    assert _max_prompt_len_cache[("http://no-models:8000/v1", "test-model")] is None

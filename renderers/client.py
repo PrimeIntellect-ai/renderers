@@ -14,10 +14,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+from collections.abc import Mapping
 from typing import Any, cast
 
 import numpy as np
-from openai import AsyncOpenAI, BadRequestError
+from openai import AsyncOpenAI
 
 from renderers.base import (
     Message,
@@ -29,6 +30,79 @@ from renderers.base import (
 )
 
 _request_logger = logging.getLogger("renderers.client")
+
+
+class OverlongPromptError(Exception):
+    """The rendered prompt exceeds the engine's context window.
+
+    Raised by :func:`generate` when the rendered token sequence is strictly
+    longer than the resolved cap — either an explicit ``max_prompt_len`` the
+    caller passed in, or the engine's ``max_model_len`` discovered via
+    ``GET /v1/models``. Caught client-side before the engine ever sees the
+    request, so callers route the failure to a deterministic policy (skip /
+    truncate / count) instead of round-tripping through an engine 4xx.
+
+    Named after the corresponding ``verifiers.errors.OverlongPromptError``;
+    the two are distinct classes (different package hierarchies) but the
+    concept is the same and downstream clients translate one to the other.
+    """
+
+    def __init__(self, *, prompt_len: int, max_prompt_len: int) -> None:
+        self.prompt_len = prompt_len
+        self.max_prompt_len = max_prompt_len
+        super().__init__(
+            f"Prompt length ({prompt_len}) exceeds maximum "
+            f"context length ({max_prompt_len})."
+        )
+
+
+# Per-process cache of resolved engine context-length caps, keyed by
+# ``(base_url, model)``. ``None`` is the "we asked the engine and it didn't
+# tell us" sentinel — distinct from "key missing" (haven't asked yet). The
+# lock serializes the first lookup per key; cache hits avoid the lock.
+_max_prompt_len_cache: dict[tuple[str, str], int | None] = {}
+_max_prompt_len_lock = asyncio.Lock()
+
+
+async def _resolve_max_prompt_len(client: AsyncOpenAI, model: str) -> int | None:
+    """Discover ``max_model_len`` from the engine via ``GET /v1/models``.
+
+    OpenAI-API-compatible engines expose model metadata at this endpoint;
+    vLLM extends its ``ModelCard`` with a ``max_model_len`` field. Engines
+    that don't (SGLang as of this writing, third-party gateways, etc.) get
+    a cached ``None`` and the pre-flight overflow check silently disables —
+    callers fall back to whatever reactive handling they have for engine
+    4xx, which the verifiers ``@handle_openai_overlong_prompt`` decorator
+    already supplies for the prime-rl path.
+
+    Any exception during lookup (network error, non-JSON body, attribute
+    miss on a mock client in tests) is treated as "unknown cap": cached
+    ``None`` so we don't retry on every call.
+    """
+    key = (str(getattr(client, "base_url", "")), model)
+    if key in _max_prompt_len_cache:
+        return _max_prompt_len_cache[key]
+    async with _max_prompt_len_lock:
+        if key in _max_prompt_len_cache:
+            return _max_prompt_len_cache[key]
+        try:
+            payload = await client.get("/models", cast_to=cast(Any, dict[str, Any]))
+        except Exception as exc:
+            _request_logger.debug("max_prompt_len lookup failed: %s", exc)
+            _max_prompt_len_cache[key] = None
+            return None
+        value: int | None = None
+        for card in payload.get("data") or []:
+            if not isinstance(card, Mapping):
+                continue
+            if card.get("id") != model:
+                continue
+            raw = card.get("max_model_len")
+            if isinstance(raw, int) and raw > 0:
+                value = raw
+            break
+        _max_prompt_len_cache[key] = value
+        return value
 
 
 async def _maybe_offload(renderer: Renderer | RendererPool, fn):
@@ -58,6 +132,7 @@ async def generate(
     cache_salt: str | None = None,
     priority: int | None = None,
     extra_headers: dict[str, str] | None = None,
+    max_prompt_len: int | None = None,
 ) -> dict[str, Any]:
     """Tokenize messages, call vLLM /inference/v1/generate, parse the response.
 
@@ -73,6 +148,16 @@ async def generate(
     sidecar, then serializes it to vLLM's ``features`` schema (mm_hashes,
     mm_placeholders, kwargs_data) before POSTing. The serializer imports
     ``vllm.*`` lazily so text-only consumers never pay for the import.
+
+    ``max_prompt_len`` controls the pre-flight overflow check. When the
+    rendered prompt is strictly longer than the cap, the request is never
+    sent and ``OverlongPromptError`` is raised. If ``max_prompt_len`` is
+    ``None`` (the default), the cap is auto-discovered once per
+    ``(base_url, model)`` via ``GET /v1/models`` (vLLM's
+    ``ModelCard.max_model_len`` extension); engines that don't expose it
+    cache a ``None`` cap and the pre-flight silently disables. Engine 4xx
+    that still slip through propagate raw — converting them into a domain
+    error is the calling client's job (its error shape is engine-specific).
 
     Returns a dict with: request_id, prompt_ids, completion_ids,
     completion_logprobs, content, reasoning_content, tool_calls,
@@ -95,6 +180,13 @@ async def generate(
         )
 
     prompt_ids, stop_token_ids, mm_data = await _maybe_offload(renderer, _prepare)
+
+    if max_prompt_len is None:
+        max_prompt_len = await _resolve_max_prompt_len(client, model)
+    if max_prompt_len is not None and len(prompt_ids) > max_prompt_len:
+        raise OverlongPromptError(
+            prompt_len=len(prompt_ids), max_prompt_len=max_prompt_len
+        )
 
     sp: dict[str, Any] = dict(sampling_params or {})
     sp["stop_token_ids"] = stop_token_ids
@@ -135,16 +227,7 @@ async def generate(
     }
     if extra_headers:
         post_kwargs["options"] = cast(Any, {"headers": extra_headers})
-    try:
-        data = await client.post(endpoint, **post_kwargs)
-    except BadRequestError as exc:
-        _log_overlong_prompt_diagnostic(
-            prompt_ids=prompt_ids,
-            messages=messages,
-            max_tokens=sp.get("max_tokens"),
-            exc=exc,
-        )
-        raise
+    data = await client.post(endpoint, **post_kwargs)
 
     choice = (data.get("choices") or [{}])[0]
     completion_ids = choice.get("token_ids") or []
@@ -224,8 +307,8 @@ def _build_mm_features(
     (``MultiModalData``) is already framework-agnostic and does not need
     to change. Don't pre-build the abstraction with one engine in tree.
     """
-    from renderers.qwen35 import Qwen35Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
+    from renderers.qwen35 import Qwen35Renderer
 
     # Type dispatch only needs the renderer class. Pools expose
     # ``renderer_cls`` as a snapshot attribute, so we don't have to check
@@ -309,44 +392,3 @@ def _build_qwen_vl_features(
         out["kwargs_data"] = None
 
     return out
-
-
-def _log_overlong_prompt_diagnostic(
-    *,
-    prompt_ids: list[int],
-    messages: list[Message],
-    max_tokens: int | None,
-    exc: BadRequestError,
-) -> None:
-    """Log a structured snapshot when vLLM rejects with 4xx — usually overlong.
-
-    Captures total prompt length, per-message role + character count, and
-    the first chunk of the response body.
-    """
-    body_text = ""
-    response = getattr(exc, "response", None)
-    if response is not None:
-        body_text = (response.text or "")[:500].replace("\n", " ")
-    msg_summary = []
-    for i, m in enumerate(messages):
-        role = m.get("role", "?")
-        content = m.get("content")
-        if isinstance(content, str):
-            content_len = len(content)
-        elif isinstance(content, list):
-            content_len = sum(
-                len(p.get("text", "")) if isinstance(p, dict) else 0 for p in content
-            )
-        else:
-            content_len = 0
-        tool_calls = m.get("tool_calls")
-        tc_count = len(tool_calls) if tool_calls else 0
-        msg_summary.append(f"[{i}]{role}(c={content_len},tc={tc_count})")
-    _request_logger.warning(
-        "vllm 4xx prompt_len=%d messages=%d max_tokens=%s per_msg=%s response_body=%s",
-        len(prompt_ids),
-        len(messages),
-        max_tokens,
-        " ".join(msg_summary),
-        body_text,
-    )

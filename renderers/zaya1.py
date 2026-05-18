@@ -1,4 +1,11 @@
-"""ZAYA1 renderer — hard-coded Python mirroring Zyphra/ZAYA1-8B's Jinja template."""
+"""ZAYA1 renderer — hard-coded Python mirroring Zyphra/ZAYA1-8B's Jinja template.
+
+Notes:
+- The template always emits an empty system prelude, even when the caller did not pass one.
+- Multi-turn bridging must strip that synthetic BOS + empty system prelude from subsequent turns.
+- Tool calls use Zyphra's XML-ish ``<zyphra_tool_call><function=...>`` format.
+- Thinking can be optionally truncated from history.
+"""
 
 from __future__ import annotations
 

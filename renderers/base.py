@@ -169,6 +169,32 @@ class RenderedTokens:
     masking. ``DefaultRenderer`` leaves it empty because the Jinja
     template is opaque; hand-coded renderers populate it.
 
+    ``is_content`` is a per-token signal generalizing the "scaffold vs
+    body" distinction across all roles: ``True`` iff the token was
+    produced from message-body bytes (caller-provided ``content`` /
+    ``tool_calls`` / ``reasoning_content``, or the model's sampled
+    emission for the assistant role), ``False`` iff it is template
+    scaffolding the renderer added around message bodies — role-tag
+    openers, closers when not model-sampled, inter-turn separators,
+    tool-response wraps, the tools-header block, the generation prompt.
+    Generalises ``sampled_mask``: where ``sampled_mask`` answers "would
+    the model emit this?" (useful for assistant tokens; uniformly
+    ``False`` elsewhere), ``is_content`` answers "is this from caller
+    or model data?" (meaningful on every role). By construction
+    ``is_content[k] == sampled_mask[k]`` over every token attributed to
+    an assistant message; on other roles ``is_content`` carries new
+    information that ``sampled_mask`` does not.
+
+    The use case: SFT on tool response bodies while applying RL only to
+    assistant tokens. The trainer wants the model to anticipate tool
+    outputs but never to emit ``<|tool_response>`` itself (that would
+    interrupt the rollout), so the SFT loss mask is
+    ``message_role == "tool" AND is_content``.
+
+    Empty ``is_content`` (``[]``) — like ``sampled_mask`` — means the
+    renderer doesn't provide the signal. ``DefaultRenderer`` leaves it
+    empty for the same reason.
+
     ``multi_modal_data`` is populated by multimodal renderers (e.g.
     ``Qwen3VLRenderer``) when image / video content parts are present;
     text-only renderers leave it as ``None``.
@@ -177,6 +203,7 @@ class RenderedTokens:
     token_ids: list[int] = field(default_factory=list)
     message_indices: list[int] = field(default_factory=list)
     sampled_mask: list[bool] = field(default_factory=list)
+    is_content: list[bool] = field(default_factory=list)
     message_roles: list[str] = field(default_factory=list)
     multi_modal_data: "MultiModalData | None" = None
 
@@ -332,6 +359,93 @@ class RenderedTokens:
         for role, n in zip(self.message_roles, counts):
             out[role] = out.get(role, 0) + n
         return out
+
+    def content_token_spans_by_role(self) -> dict[str, list[tuple[int, int]]]:
+        """Per-role spans of contiguous body-only tokens (``is_content=True``).
+
+        Maps each role appearing in :attr:`message_roles` to a list of
+        half-open ``[start, end)`` slices into :attr:`token_ids` over
+        which every token satisfies ``is_content=True`` AND belongs to
+        a message of that role. Spans never cross message boundaries:
+        a tool message contributes its own runs; an immediately
+        adjacent assistant message contributes separate runs even when
+        the bodies abut on the token axis.
+
+        Returns an empty dict when :attr:`is_content` or
+        :attr:`message_roles` is empty (renderer didn't populate the
+        signal — e.g. ``DefaultRenderer``).
+
+        Intended for selective loss masking: SFT on tool response
+        bodies while RL acts only on assistant turns is the canonical
+        case::
+
+            spans = rendered.content_token_spans_by_role()
+            tool_sft_mask = [False] * len(rendered.token_ids)
+            for s, e in spans.get("tool", []):
+                for k in range(s, e):
+                    tool_sft_mask[k] = True
+
+        See also :meth:`content_mask_for_roles` for the same
+        computation returned as a per-token bool list.
+        """
+        out: dict[str, list[tuple[int, int]]] = {}
+        if not self.is_content or not self.message_roles:
+            return out
+        if len(self.is_content) != len(self.token_ids):
+            return out
+
+        msg_spans = self.message_token_spans()
+        for role, span in zip(self.message_roles, msg_spans):
+            bucket = out.setdefault(role, [])
+            if span is None:
+                continue
+            start, end = span
+            run_start: int | None = None
+            for k in range(start, end):
+                if self.is_content[k]:
+                    if run_start is None:
+                        run_start = k
+                else:
+                    if run_start is not None:
+                        bucket.append((run_start, k))
+                        run_start = None
+            if run_start is not None:
+                bucket.append((run_start, end))
+        return out
+
+    def content_mask_for_roles(self, roles: "set[str] | frozenset[str]") -> list[bool]:
+        """Per-token bool list: ``True`` iff the token is body of a
+        message whose role is in ``roles``.
+
+        Length matches :attr:`token_ids`. Returns an all-``False``
+        list of that length when :attr:`is_content` or
+        :attr:`message_roles` is empty — consumers can AND this with
+        their own attribution masks without length checks.
+
+        ``role_to_mask`` style helpers in :func:`build_training_sample`
+        cover the trainable-role question; this one covers the
+        complementary "body-only" question. The two compose: SFT mask
+        on tool body is
+        ``rendered.content_mask_for_roles({"tool"})``; RL mask on
+        assistant tokens stays
+        ``[s and (mi >= 0 and rendered.message_roles[mi] == "assistant")
+        for s, mi in zip(rendered.sampled_mask, rendered.message_indices)]``.
+        """
+        n = len(self.token_ids)
+        mask = [False] * n
+        if not self.is_content or not self.message_roles:
+            return mask
+        if len(self.is_content) != n or len(self.message_indices) != n:
+            return mask
+
+        for k, msg_idx in enumerate(self.message_indices):
+            if msg_idx < 0:
+                continue
+            if msg_idx >= len(self.message_roles):
+                continue
+            if self.message_roles[msg_idx] in roles and self.is_content[k]:
+                mask[k] = True
+        return mask
 
 
 class ToolCallParseStatus(str, enum.Enum):
@@ -530,6 +644,15 @@ class Renderer(Protocol):
           caller needs that distinction for the prior portion, they
           have it directly: every token in ``prev_completion_ids`` was
           sampled; every token in ``prev_prompt_ids`` was not.
+        - ``is_content`` mirrors ``sampled_mask``'s scheme for the
+          prior portion (uniformly ``False`` — body-vs-wrap
+          attribution can't be recovered from raw token ids), and on
+          the bridge-added portion the renderer populates it the same
+          way as in :meth:`render`: ``True`` over the body bytes of
+          each new message, ``False`` over the surrounding scaffold.
+          Consumers walk the trajectory and read each step's own
+          ``is_content`` for full-conversation body masks; the bridge
+          output covers only the *new* tokens this turn adds.
 
         Text-only renderers return :class:`RenderedTokens` with
         ``multi_modal_data=None``. Multimodal renderers (see
@@ -1208,6 +1331,7 @@ def build_training_sample(
     *,
     role_to_mask: Callable[[Message], bool],
     tools: list[ToolSpec] | None = None,
+    content_sft_roles: "set[str] | frozenset[str] | None" = None,
 ) -> tuple[list[int], list[bool]]:
     """Build (token_ids, loss_mask) for supervised training.
 
@@ -1223,17 +1347,53 @@ def build_training_sample(
     back to attribution-only masking — every token attributed to a
     trainable role is trained on, including template-injected
     ``<|im_start|>role\\n`` openers.
+
+    ``content_sft_roles`` opts in additional roles for "body-only"
+    supervision: for every message whose role is in this set, tokens
+    with ``is_content=True`` are marked trainable even though the
+    ``sampled_mask`` gate excludes them (the model never samples
+    tool / user / system tokens). Template scaffolding around those
+    messages — ``<|im_start|>role\\n`` openers, ``<|im_end|>``
+    closers, ``<|tool_response>`` wraps, inter-turn ``\\n`` — stays
+    masked out, so the model learns to anticipate the body text
+    without producing the surrounding special tokens (which would
+    interrupt a real rollout). The canonical use case is RL on
+    assistant tokens (``role_to_mask=lambda m: m["role"] ==
+    "assistant"``) plus SFT on tool response bodies
+    (``content_sft_roles={"tool"}``).
+
+    Requires the renderer to populate ``is_content`` for the body-only
+    path to fire. Renderers that leave it empty (``DefaultRenderer``,
+    or hand-coded renderers that haven't been wired up yet) ignore
+    ``content_sft_roles`` silently — falling back to the original
+    ``role_to_mask`` + ``sampled_mask`` behaviour.
     """
     rendered = renderer.render(messages, tools=tools)
     has_sampled_info = len(rendered.sampled_mask) == len(rendered.token_ids)
+    has_content_info = len(rendered.is_content) == len(rendered.token_ids)
+    body_roles: "frozenset[str]"
+    if content_sft_roles and has_content_info:
+        body_roles = frozenset(content_sft_roles)
+    else:
+        body_roles = frozenset()
+
     loss_mask: list[bool] = []
     for k, msg_idx in enumerate(rendered.message_indices):
         if msg_idx < 0:
             loss_mask.append(False)
-        elif has_sampled_info and not rendered.sampled_mask[k]:
+            continue
+        msg = messages[msg_idx]
+        # Body-only path for opt-in roles. Fires only on tokens whose
+        # is_content bit is set; never adds the scaffolding around the
+        # message, so the model isn't supervised on emitting the role
+        # tags / wraps that would derail a rollout.
+        if body_roles and msg.get("role") in body_roles:
+            loss_mask.append(rendered.is_content[k])
+            continue
+        if has_sampled_info and not rendered.sampled_mask[k]:
             loss_mask.append(False)
         else:
-            loss_mask.append(role_to_mask(messages[msg_idx]))
+            loss_mask.append(role_to_mask(msg))
     return rendered.token_ids, loss_mask
 
 
@@ -1278,6 +1438,159 @@ def trim_to_turn_close(
         return None
     previous_ids.append(synthesize_close)
     return previous_ids
+
+
+# Per-model offset-aware tokenizer cache. ``attribute_text_segments``
+# uses the fast HuggingFace tokenizer's ``offset_mapping`` to attribute
+# each token to its source text segment under one BPE pass. Fastokens
+# (the Rust BPE we patch in by default for ~10x faster encode) does not
+# track character offsets — the patched tokenizer's
+# ``return_offsets_mapping=True`` raises ``NotImplementedError``. So we
+# keep a parallel vanilla tokenizer per model purely for offset queries.
+# Memory cost is one extra tokenizer per *unique* model name across all
+# pools / renderers (the cache is process-global), independent of pool
+# size.
+_offset_tokenizers: dict[str, Any] = {}
+_offset_tokenizers_lock = threading.Lock()
+
+
+def _get_offset_tokenizer(tokenizer):
+    """Return a tokenizer that supports ``return_offsets_mapping=True``.
+
+    If ``tokenizer`` itself supports offsets, returns it unchanged.
+    Otherwise loads a vanilla (non-fastokens) tokenizer from
+    ``tokenizer.name_or_path`` and caches it. Raises if the tokenizer
+    has no usable ``name_or_path`` — hand-coded renderers always pass
+    a tokenizer loaded via ``load_tokenizer`` which does set it.
+    """
+    # Cheap probe: does this tokenizer already provide offsets?
+    try:
+        tokenizer(
+            "a", add_special_tokens=False, return_offsets_mapping=True
+        )
+        return tokenizer
+    except (NotImplementedError, ValueError, TypeError):
+        pass
+
+    name_or_path = getattr(tokenizer, "name_or_path", "")
+    if not name_or_path:
+        raise RuntimeError(
+            "Cannot construct an offset-aware tokenizer: the supplied "
+            "tokenizer has no ``name_or_path`` to fall back on. Pass a "
+            "tokenizer loaded via ``renderers.base.load_tokenizer``."
+        )
+
+    with _offset_tokenizers_lock:
+        cached = _offset_tokenizers.get(name_or_path)
+        if cached is not None:
+            return cached
+        from transformers import AutoTokenizer
+
+        kwargs: dict[str, Any] = {}
+        revision = TRUSTED_REVISIONS.get(name_or_path)
+        if revision is not None:
+            kwargs = {"trust_remote_code": True, "revision": revision}
+        else:
+            kwargs = {"trust_remote_code": False}
+        # Explicitly vanilla — we want HF's Rust tokenizer with offset
+        # tracking, not the fastokens shim. ``load_tokenizer`` would
+        # patch fastokens in by default; calling
+        # ``AutoTokenizer.from_pretrained`` directly here keeps the
+        # fastokens patch out of this code path entirely.
+        offset_tok = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+        if not getattr(offset_tok, "is_fast", False):
+            raise RuntimeError(
+                f"Vanilla tokenizer for {name_or_path!r} is not a fast "
+                "tokenizer; offset_mapping is unavailable. Hand-coded "
+                "renderers require a fast tokenizer for body/scaffold "
+                "attribution."
+            )
+        _offset_tokenizers[name_or_path] = offset_tok
+        return offset_tok
+
+
+def attribute_text_segments(
+    tokenizer,
+    segments: "list[tuple[str, bool]]",
+) -> "list[tuple[int, bool]]":
+    """Tokenize concatenated segments as a single BPE pass and return
+    ``(token_id, is_content)`` pairs.
+
+    ``segments`` is a list of ``(text, is_content)`` chunks the renderer
+    wants to emit contiguously — for example ``[("user\\n", False),
+    (content, True)]`` for a user message. Concatenation is done before
+    encoding to preserve BPE merges across the wrap/body boundary; the
+    resulting tokens are then attributed back to their source segment
+    via the fast tokenizer's ``offset_mapping``.
+
+    A token is attributed to the segment containing its first source
+    character (``offset_mapping[k][0]``). Tokens whose first character
+    falls exactly on a segment boundary are attributed to the segment
+    that *starts* at that offset (the "later" segment). Zero-length
+    tokens (rare; usually pre-tokenizer artefacts) are attributed to
+    the most recently entered segment.
+
+    Requires a HuggingFace fast tokenizer with offset tracking. The
+    ``fastokens`` patch ``load_tokenizer`` applies by default does
+    **not** track offsets — when that's the case we transparently load
+    a vanilla offset-capable tokenizer for the same model and cache it
+    (see :func:`_get_offset_tokenizer`). Hand-coded renderers are only
+    registered for model families that ship a fast tokenizer, so a
+    silent slow-tokenizer fallback isn't supported — BPE drift at the
+    wrap/body boundary would defeat the whole point.
+
+    Empty input or empty joined text returns an empty list.
+    """
+    if not segments:
+        return []
+    full_text = "".join(text for text, _ in segments)
+    if not full_text:
+        return []
+
+    offset_tokenizer = _get_offset_tokenizer(tokenizer)
+    encoding = offset_tokenizer(
+        full_text,
+        add_special_tokens=False,
+        return_offsets_mapping=True,
+    )
+    token_ids = list(encoding["input_ids"])
+    offsets = list(encoding["offset_mapping"])
+
+    # Build segment char-span lookup. Track the half-open span
+    # [seg_start, seg_end) of each segment and its is_content bit.
+    spans: list[tuple[int, int, bool]] = []
+    pos = 0
+    for text, is_content in segments:
+        spans.append((pos, pos + len(text), is_content))
+        pos += len(text)
+    total_len = pos
+
+    out: list[tuple[int, bool]] = []
+    last_is_content = spans[-1][2] if spans else False
+    for tok_id, (start, _end) in zip(token_ids, offsets):
+        if start >= total_len:
+            # Token's character offset is past every segment (shouldn't
+            # normally happen for add_special_tokens=False, but defensive
+            # against tokenizer-specific edge cases).
+            out.append((tok_id, last_is_content))
+            continue
+        # Find the segment that contains `start`. Segments are
+        # contiguous and ordered, so a linear scan is fine — the inner
+        # loop runs at most len(segments) times per token and segments
+        # is typically 2-3 in practice.
+        is_content = last_is_content
+        for seg_start, seg_end, seg_is_content in spans:
+            if seg_start <= start < seg_end:
+                is_content = seg_is_content
+                break
+        else:
+            # start == total_len handled above; the remaining case is
+            # an empty segment in the middle. Empty segments emit no
+            # characters, so no token can land in them; fall through to
+            # the last non-empty segment's bit.
+            pass
+        out.append((tok_id, is_content))
+    return out
 
 
 def reject_assistant_in_extension(new_messages: list[Message]) -> bool:

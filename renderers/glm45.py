@@ -20,6 +20,7 @@ from renderers.base import (
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    attribute_text_segments,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
 )
@@ -128,30 +129,58 @@ class GLM45Renderer:
         tokens: list[int] = []
         indices: list[int] = []
         sampled: list[bool] = []
+        content_mask: list[bool] = []
 
-        def emit_special(token_id: int, msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_special(
+            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
             sampled.append(is_sampled)
+            content_mask.append(is_content)
 
-        def emit_text(text: str, msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_text(
+            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             ids = self._encode(text)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
+            content_mask.extend([is_content] * len(ids))
+
+        def emit_text_segments(
+            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
+        ) -> None:
+            """Tokenize concatenated segments as one BPE pass; per-token
+            ``is_content`` follows each token's source segment.
+
+            Lets call sites express "this wrap + this body, joined the
+            same way as the chat template, but attributed separately"
+            without splitting the encode call (which could shift BPE
+            merges at the boundary)."""
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments
+            ):
+                tokens.append(tok_id)
+                indices.append(msg_idx)
+                sampled.append(is_sampled)
+                content_mask.append(is_content)
 
         # ── Prefix ──────────────────────────────────────────────────
-        emit_special(self._gmask, -1, is_sampled=False)
-        emit_special(self._sop, -1, is_sampled=False)
+        emit_special(self._gmask, -1, is_sampled=False, is_content=False)
+        emit_special(self._sop, -1, is_sampled=False, is_content=False)
 
         # ── Tools in system prompt ──────────────────────────────────
+        # The tools-header block is all scaffold by design — the tools
+        # dict is recoverable from the ``tools`` argument; don't
+        # re-attribute the embedded JSON specs as message body.
         if tools:
-            emit_special(self._system, -1, is_sampled=False)
+            emit_special(self._system, -1, is_sampled=False, is_content=False)
             tool_text = _TOOLS_HEADER
             for tool in tools:
                 tool_text += json.dumps(tool, ensure_ascii=False) + "\n"
             tool_text += _TOOLS_FOOTER
-            emit_text(tool_text, -1, is_sampled=False)
+            emit_text(tool_text, -1, is_sampled=False, is_content=False)
 
         # ── Compute last_user_index ─────────────────────────────────
         last_ui = self._last_user_index(messages)
@@ -162,15 +191,22 @@ class GLM45Renderer:
             content = self._visible_text(msg.get("content"))
 
             if role == "system":
-                emit_special(self._system, i, is_sampled=False)
-                emit_text("\n" + content, i, is_sampled=False)
+                emit_special(self._system, i, is_sampled=False, is_content=False)
+                # ``\n`` is the scaffold separator after the role tag;
+                # the body proper is the caller-provided content.
+                emit_text_segments(
+                    [("\n", False), (content, True)], i, is_sampled=False
+                )
 
             elif role == "user":
-                emit_special(self._user, i, is_sampled=False)
-                user_text = "\n" + content
+                emit_special(self._user, i, is_sampled=False, is_content=False)
+                # ``\n`` is scaffold; ``content`` is body; the optional
+                # ``/nothink`` suffix is scaffold the renderer injects
+                # when ``enable_thinking=False``.
+                user_segments: list[tuple[str, bool]] = [("\n", False), (content, True)]
                 if not self._enable_thinking and not content.endswith("/nothink"):
-                    user_text += "/nothink"
-                emit_text(user_text, i, is_sampled=False)
+                    user_segments.append(("/nothink", False))
+                emit_text_segments(user_segments, i, is_sampled=False)
 
             elif role == "assistant":
                 preserve_thinking = should_preserve_past_thinking(
@@ -187,25 +223,32 @@ class GLM45Renderer:
                     preserve_thinking=preserve_thinking,
                     emit_special=emit_special,
                     emit_text=emit_text,
+                    emit_text_segments=emit_text_segments,
                 )
 
             elif role == "tool":
                 self._render_tool(
-                    messages, i, content, emit_special=emit_special, emit_text=emit_text
+                    messages,
+                    i,
+                    content,
+                    emit_special=emit_special,
+                    emit_text=emit_text,
+                    emit_text_segments=emit_text_segments,
                 )
 
         # ── Generation prompt ───────────────────────────────────────
         if add_generation_prompt:
-            emit_special(self._assistant, -1, is_sampled=False)
+            emit_special(self._assistant, -1, is_sampled=False, is_content=False)
             if not self._enable_thinking:
-                emit_text("\n", -1, is_sampled=False)
-                emit_special(self._think, -1, is_sampled=False)
-                emit_special(self._think_end, -1, is_sampled=False)
+                emit_text("\n", -1, is_sampled=False, is_content=False)
+                emit_special(self._think, -1, is_sampled=False, is_content=False)
+                emit_special(self._think_end, -1, is_sampled=False, is_content=False)
 
         return RenderedTokens(
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
+            is_content=content_mask,
             message_roles=[m.get("role") or "" for m in messages],
         )
 
@@ -276,27 +319,54 @@ class GLM45Renderer:
         ext: list[int] = []
         ext_indices: list[int] = []
         ext_sampled: list[bool] = []
+        ext_content: list[bool] = []
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
         # and ``sampled_mask`` (uniformly ``False`` — every token the
         # bridge emits is template scaffolding for the next prompt, not
-        # something the model sampled). Downstream consumers can run
-        # :meth:`RenderedTokens.tokens_per_message` on the bridge output
-        # to get per-new-message token counts without re-rendering.
+        # something the model sampled). ``is_content`` follows the same
+        # rules as in :meth:`render` so consumers can walk the trajectory
+        # and read each step's own body mask. Downstream consumers can
+        # run :meth:`RenderedTokens.tokens_per_message` on the bridge
+        # output to get per-new-message token counts without re-rendering.
         def emit_special(
-            token_id: int, msg_idx: int = -1, *, is_sampled: bool = False
+            token_id: int,
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
             ext.append(token_id)
             ext_indices.append(msg_idx)
             ext_sampled.append(is_sampled)
+            ext_content.append(is_content)
 
         def emit_text(
-            text: str, msg_idx: int = -1, *, is_sampled: bool = False
+            text: str,
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
             ids = self._encode(text)
             ext.extend(ids)
             ext_indices.extend([msg_idx] * len(ids))
             ext_sampled.extend([is_sampled] * len(ids))
+            ext_content.extend([is_content] * len(ids))
+
+        def emit_text_segments(
+            segments: list[tuple[str, bool]],
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+        ) -> None:
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments
+            ):
+                ext.append(tok_id)
+                ext_indices.append(msg_idx)
+                ext_sampled.append(is_sampled)
+                ext_content.append(is_content)
 
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
@@ -304,20 +374,32 @@ class GLM45Renderer:
             if role == "user":
                 if not (i == 0 and last_prev == self._user):
                     emit_special(self._user, i)
-                user_text = "\n" + content
+                user_segments: list[tuple[str, bool]] = [
+                    ("\n", False),
+                    (content, True),
+                ]
                 if not self._enable_thinking and not content.endswith("/nothink"):
-                    user_text += "/nothink"
-                emit_text(user_text, i)
+                    user_segments.append(("/nothink", False))
+                emit_text_segments(user_segments, i)
             elif role == "system":
                 emit_special(self._system, i)
-                emit_text("\n" + content, i)
+                emit_text_segments(
+                    [("\n", False), (content, True)], i
+                )
             elif role == "tool":
                 prev_is_tool = i > 0 and new_messages[i - 1].get("role") == "tool"
                 if i == 0 and last_prev == self._observation:
                     pass
                 elif not prev_is_tool:
                     emit_special(self._observation, i)
-                emit_text("\n<tool_response>\n" + content + "\n</tool_response>", i)
+                emit_text_segments(
+                    [
+                        ("\n<tool_response>\n", False),
+                        (content, True),
+                        ("\n</tool_response>", False),
+                    ],
+                    i,
+                )
             else:
                 return None
 
@@ -333,6 +415,7 @@ class GLM45Renderer:
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
+            is_content=[False] * len(previous_ids) + ext_content,
             message_roles=[m.get("role") or "" for m in new_messages],
         )
 
@@ -346,6 +429,7 @@ class GLM45Renderer:
         preserve_thinking: bool = False,
         emit_special,
         emit_text,
+        emit_text_segments,
     ):
         reasoning_content = ""
         if isinstance(msg.get("reasoning_content"), str):
@@ -373,23 +457,33 @@ class GLM45Renderer:
         # turn). So no sampled stop-signal token lives inside this
         # assistant span — content / think / tool_calls carry the
         # is_sampled=True signal.
-        emit_special(self._assistant, msg_idx, is_sampled=False)
-        emit_text("\n", msg_idx, is_sampled=False)
+        #
+        # Invariant on assistant tokens: ``is_content == sampled_mask``.
+        # Every scaffold token here gets ``is_sampled=False/is_content=False``;
+        # every model-sampled emit gets both True.
+        emit_special(self._assistant, msg_idx, is_sampled=False, is_content=False)
+        emit_text("\n", msg_idx, is_sampled=False, is_content=False)
 
         if (msg_idx > last_user_index or preserve_thinking) and reasoning_content:
-            emit_special(self._think, msg_idx, is_sampled=True)
-            emit_text(reasoning_content.strip(), msg_idx, is_sampled=True)
-            emit_special(self._think_end, msg_idx, is_sampled=True)
+            emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
+            emit_text(
+                reasoning_content.strip(), msg_idx, is_sampled=True, is_content=True
+            )
+            emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
         else:
-            emit_special(self._think, msg_idx, is_sampled=True)
-            emit_special(self._think_end, msg_idx, is_sampled=True)
+            emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
+            emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
 
         # Tool calls — keep content + \n contiguous to preserve BPE merges
         tool_calls = msg.get("tool_calls") or []
         if content.strip() and tool_calls:
-            emit_text("\n" + content.strip() + "\n", msg_idx, is_sampled=True)
+            emit_text(
+                "\n" + content.strip() + "\n", msg_idx, is_sampled=True, is_content=True
+            )
         elif content.strip():
-            emit_text("\n" + content.strip(), msg_idx, is_sampled=True)
+            emit_text(
+                "\n" + content.strip(), msg_idx, is_sampled=True, is_content=True
+            )
 
         for tc in tool_calls:
             func = tc.get("function") or tc
@@ -397,9 +491,9 @@ class GLM45Renderer:
             arguments = func.get("arguments", {})
 
             if not content.strip():
-                emit_text("\n", msg_idx, is_sampled=True)
-            emit_special(self._tool_call_tok, msg_idx, is_sampled=True)
-            emit_text(name + "\n", msg_idx, is_sampled=True)
+                emit_text("\n", msg_idx, is_sampled=True, is_content=True)
+            emit_special(self._tool_call_tok, msg_idx, is_sampled=True, is_content=True)
+            emit_text(name + "\n", msg_idx, is_sampled=True, is_content=True)
             # OpenAI canonical form: arguments is a JSON string. Parse it so the
             # per-argument rendering below still works.
             if isinstance(arguments, str):
@@ -409,22 +503,35 @@ class GLM45Renderer:
                     arguments = {}
             if isinstance(arguments, dict):
                 for arg_name, arg_value in arguments.items():
-                    emit_special(self._arg_key, msg_idx, is_sampled=True)
-                    emit_text(arg_name, msg_idx, is_sampled=True)
-                    emit_special(self._arg_key_end, msg_idx, is_sampled=True)
-                    emit_text("\n", msg_idx, is_sampled=True)
-                    emit_special(self._arg_value, msg_idx, is_sampled=True)
+                    emit_special(
+                        self._arg_key, msg_idx, is_sampled=True, is_content=True
+                    )
+                    emit_text(arg_name, msg_idx, is_sampled=True, is_content=True)
+                    emit_special(
+                        self._arg_key_end, msg_idx, is_sampled=True, is_content=True
+                    )
+                    emit_text("\n", msg_idx, is_sampled=True, is_content=True)
+                    emit_special(
+                        self._arg_value, msg_idx, is_sampled=True, is_content=True
+                    )
                     if isinstance(arg_value, str):
-                        emit_text(arg_value, msg_idx, is_sampled=True)
+                        emit_text(
+                            arg_value, msg_idx, is_sampled=True, is_content=True
+                        )
                     else:
                         emit_text(
                             json.dumps(arg_value, ensure_ascii=False),
                             msg_idx,
                             is_sampled=True,
+                            is_content=True,
                         )
-                    emit_special(self._arg_value_end, msg_idx, is_sampled=True)
-                    emit_text("\n", msg_idx, is_sampled=True)
-            emit_special(self._tool_call_end_tok, msg_idx, is_sampled=True)
+                    emit_special(
+                        self._arg_value_end, msg_idx, is_sampled=True, is_content=True
+                    )
+                    emit_text("\n", msg_idx, is_sampled=True, is_content=True)
+            emit_special(
+                self._tool_call_end_tok, msg_idx, is_sampled=True, is_content=True
+            )
 
     def _render_tool(
         self,
@@ -434,17 +541,30 @@ class GLM45Renderer:
         *,
         emit_special,
         emit_text,
+        emit_text_segments,
     ) -> None:
         # Tool messages are conversation history injected by the runtime
         # between assistant turns — the model never samples any of these
-        # tokens, so every emission is is_sampled=False.
+        # tokens, so every emission is is_sampled=False. The body bytes
+        # get ``is_content=True``; the ``\n<tool_response>\n`` /
+        # ``\n</tool_response>`` wraps and the ``<|observation|>`` role
+        # tag are scaffold so the SFT mask for tool body never trains
+        # the model to emit them. Single BPE pass over the joined text
+        # preserves boundary merges (the tool body's leading/trailing
+        # chars can merge with the wrap's ``\n``s if the tokenizer would
+        # do so; we route through ``emit_text_segments`` so the
+        # attribution is offset-driven and tokenizer-agnostic).
         prev_is_tool = msg_idx > 0 and messages[msg_idx - 1]["role"] == "tool"
 
         if not prev_is_tool:
-            emit_special(self._observation, msg_idx, is_sampled=False)
+            emit_special(self._observation, msg_idx, is_sampled=False, is_content=False)
 
-        emit_text(
-            "\n<tool_response>\n" + content + "\n</tool_response>",
+        emit_text_segments(
+            [
+                ("\n<tool_response>\n", False),
+                (content, True),
+                ("\n</tool_response>", False),
+            ],
             msg_idx,
             is_sampled=False,
         )

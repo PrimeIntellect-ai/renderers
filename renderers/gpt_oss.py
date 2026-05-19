@@ -184,6 +184,86 @@ class GptOssRenderer:
             return []
         return self._tokenizer.encode(text, add_special_tokens=False)
 
+    def _prefix_content_mask(
+        self,
+        prefix_tokens: list[int],
+        first_system_idx: int | None,
+        messages: list[Message],
+        tools: list[ToolSpec] | None,
+    ) -> list[bool]:
+        """Per-token is_content mask over the rendered system+developer prefix.
+
+        Harmony's prefix is one opaque block. The caller's system content
+        lands inside the developer message as ``# Instructions\\n\\n{content}``.
+        To attribute body bytes back, we render the same prefix with empty
+        instructions and diff: the unique-to-with-instructions span is the
+        body region. Falls back to all-False (whole prefix scaffold) if
+        the caller didn't supply a system message — there's no body to
+        attribute in that case.
+        """
+        n = len(prefix_tokens)
+        mask = [False] * n
+        if first_system_idx is None:
+            return mask
+        instructions = _content_text(messages[first_system_idx].get("content"))
+        if not instructions:
+            return mask
+
+        # Build the same prefix with empty instructions.
+        empty_prefix_msgs: list[HarmonyMessage] = []
+        if self._use_system_prompt:
+            sys_content = SystemContent.new().with_reasoning_effort(
+                self._reasoning_effort
+            )
+            sys_content = sys_content.with_conversation_start_date(
+                self._conversation_start_date
+            )
+            if self._knowledge_cutoff is not None:
+                sys_content = sys_content.with_knowledge_cutoff(self._knowledge_cutoff)
+            if self._model_identity is not None:
+                sys_content = sys_content.with_model_identity(self._model_identity)
+            empty_prefix_msgs.append(
+                HarmonyMessage.from_role_and_content(Role.SYSTEM, sys_content)
+            )
+        dev = DeveloperContent.new()
+        if tools:
+            dev = dev.with_function_tools([_tool_to_description(t) for t in tools])
+        empty_prefix_msgs.append(
+            HarmonyMessage.from_role_and_content(Role.DEVELOPER, dev)
+        )
+        try:
+            empty_tokens = self._enc.render_conversation(
+                Conversation.from_messages(empty_prefix_msgs)
+            )
+        except Exception:
+            return mask
+
+        # Longest common prefix.
+        i_start = 0
+        n_empty = len(empty_tokens)
+        while (
+            i_start < min(n, n_empty)
+            and prefix_tokens[i_start] == empty_tokens[i_start]
+        ):
+            i_start += 1
+        # Longest common suffix.
+        j_full = n
+        j_empty = n_empty
+        while (
+            j_full > i_start
+            and j_empty > i_start
+            and prefix_tokens[j_full - 1] == empty_tokens[j_empty - 1]
+        ):
+            j_full -= 1
+            j_empty -= 1
+        # Tokens [i_start:j_full] in prefix_tokens are unique to the
+        # with-instructions render — that's the body span (includes the
+        # ``# Instructions\n\n`` scaffolding header, which the substring
+        # match in the body-decode test ignores).
+        for k in range(i_start, j_full):
+            mask[k] = True
+        return mask
+
     # ── public interface ─────────────────────────────────────────────────────
 
     def render(
@@ -199,11 +279,15 @@ class GptOssRenderer:
         tokens: list[int] = []
         indices: list[int] = []
         sampled: list[bool] = []
+        content_mask: list[bool] = []
 
-        def emit(ids: list[int], msg_idx: int, *, is_sampled: bool) -> None:
+        def emit(
+            ids: list[int], msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
+            content_mask.extend([is_content] * len(ids))
 
         def emit_harmony_message(
             hm_ids: list[int], msg_idx: int, *, is_assistant: bool
@@ -225,18 +309,53 @@ class GptOssRenderer:
             developer, tool) the whole message is conversation history
             the model never samples — every token is
             ``is_sampled=False``.
+
+            ``is_content`` further splits the body: the trailing
+            terminator (``<|end|>`` / ``<|return|>`` / ``<|call|>``) is
+            scaffold on non-assistant turns; on assistant turns it's the
+            model's stop signal, so ``is_content=True`` mirrors
+            ``sampled_mask`` as the invariant on assistant requires.
+            The body bytes between ``<|message|>`` and the terminator
+            are body (``is_content=True``) on every role — that's the
+            caller-provided content (or, for assistant, the model's
+            sampled emission). The header (``<|start|>`` ... ``<|message|>``)
+            — including any ``functions.{name}`` recipient text on tool
+            results, which comes from a prior assistant's tool_calls
+            rather than this tool message's own content — is scaffold.
             """
             try:
                 msg_marker = hm_ids.index(self._message)
             except ValueError:
                 # Defensive: a harmony message without <|message|> is
                 # malformed. Treat the whole thing as scaffolding.
-                emit(hm_ids, msg_idx, is_sampled=False)
+                emit(hm_ids, msg_idx, is_sampled=False, is_content=False)
                 return
             header = hm_ids[: msg_marker + 1]
             body = hm_ids[msg_marker + 1 :]
-            emit(header, msg_idx, is_sampled=False)
-            emit(body, msg_idx, is_sampled=is_assistant)
+            emit(header, msg_idx, is_sampled=False, is_content=False)
+            # Split body into content + terminator. The terminator (if
+            # present) is the last token of the body and is one of the
+            # three harmony stop tokens.
+            terminator_ids = {self._end, self._return, self._call}
+            if body and body[-1] in terminator_ids:
+                body_content = body[:-1]
+                terminator = body[-1:]
+            else:
+                body_content = body
+                terminator = []
+            emit(
+                body_content,
+                msg_idx,
+                is_sampled=is_assistant,
+                is_content=True,
+            )
+            if terminator:
+                emit(
+                    terminator,
+                    msg_idx,
+                    is_sampled=is_assistant,
+                    is_content=is_assistant,
+                )
 
         # ── Build harmony prefix (system + developer) ───────────────────
         # When tools are present, harmony's conversation-level renderer
@@ -285,7 +404,23 @@ class GptOssRenderer:
             # caller-relative attribution); otherwise to -1 (pure scaffolding).
             # The whole prefix is pure template scaffolding — never sampled.
             prefix_origin = first_system_idx if first_system_idx is not None else -1
-            emit(prefix_tokens, prefix_origin, is_sampled=False)
+            # Compute the body-token span inside the prefix by diffing
+            # against the same render with empty developer instructions.
+            # Tokens unique to the with-instructions render are the body
+            # span (``# Instructions\n\n{caller_system_content}``). Marking
+            # those is_content=True so the caller's system text is
+            # recoverable from ``content_token_spans_by_role()["system"]``.
+            # The scaffolding ``# Instructions\n\n`` prefix bleeds into
+            # the body run; consumers reading the body do a substring
+            # check rather than expecting an exact match.
+            prefix_content_mask = self._prefix_content_mask(
+                prefix_tokens, first_system_idx, messages, tools
+            )
+            for tid, is_content in zip(prefix_tokens, prefix_content_mask):
+                tokens.append(tid)
+                indices.append(prefix_origin)
+                sampled.append(False)
+                content_mask.append(is_content)
 
         # ── Iterate the rest of the messages ────────────────────────────
         last_idx = len(messages) - 1
@@ -326,16 +461,17 @@ class GptOssRenderer:
         # ── Generation prompt: <|start|>assistant<|channel|>analysis<|message|>
         # Pure template scaffolding the model continues from — never sampled.
         if add_generation_prompt:
-            emit([self._start], -1, is_sampled=False)
-            emit(self._encode("assistant"), -1, is_sampled=False)
-            emit([self._channel], -1, is_sampled=False)
-            emit(self._encode("analysis"), -1, is_sampled=False)
-            emit([self._message], -1, is_sampled=False)
+            emit([self._start], -1, is_sampled=False, is_content=False)
+            emit(self._encode("assistant"), -1, is_sampled=False, is_content=False)
+            emit([self._channel], -1, is_sampled=False, is_content=False)
+            emit(self._encode("analysis"), -1, is_sampled=False, is_content=False)
+            emit([self._message], -1, is_sampled=False, is_content=False)
 
         return RenderedTokens(
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
+            is_content=content_mask,
             message_roles=[m.get("role") or "" for m in messages],
         )
 
@@ -407,17 +543,47 @@ class GptOssRenderer:
         # and ``sampled_mask`` (uniformly ``False``). The harmony encoder
         # renders each ``new_messages[i]`` as a single block, so every
         # token in that block carries index ``i``; the trailing
-        # generation prompt uses ``-1``.
+        # generation prompt uses ``-1``. ``is_content`` follows the same
+        # rules as :meth:`render`'s ``emit_harmony_message``: header is
+        # scaffold, body bytes are body, terminator scaffold (the bridge
+        # never carries assistant turns, so terminators are always
+        # scaffold on the non-assistant roles the bridge accepts).
+        terminator_ids = {self._end, self._return, self._call}
         ext: list[int] = []
         ext_indices: list[int] = []
+        ext_content: list[bool] = []
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
             if role not in ("tool", "user", "system", "developer"):
                 return None
             for hm in self._to_harmony_messages(msg):
                 ids = self._enc.render(hm)
-                ext.extend(ids)
-                ext_indices.extend([i] * len(ids))
+                try:
+                    msg_marker = ids.index(self._message)
+                except ValueError:
+                    # Defensive: treat as scaffolding.
+                    ext.extend(ids)
+                    ext_indices.extend([i] * len(ids))
+                    ext_content.extend([False] * len(ids))
+                    continue
+                header = ids[: msg_marker + 1]
+                body = ids[msg_marker + 1 :]
+                ext.extend(header)
+                ext_indices.extend([i] * len(header))
+                ext_content.extend([False] * len(header))
+                if body and body[-1] in terminator_ids:
+                    body_content = body[:-1]
+                    terminator = body[-1:]
+                else:
+                    body_content = body
+                    terminator = []
+                ext.extend(body_content)
+                ext_indices.extend([i] * len(body_content))
+                ext_content.extend([True] * len(body_content))
+                if terminator:
+                    ext.extend(terminator)
+                    ext_indices.extend([i] * len(terminator))
+                    ext_content.extend([False] * len(terminator))
 
         # Generation prompt: <|start|>assistant<|channel|>analysis<|message|>
         gen_before = len(ext)
@@ -427,12 +593,14 @@ class GptOssRenderer:
         ext.extend(self._encode("analysis"))
         ext.append(self._message)
         ext_indices.extend([-1] * (len(ext) - gen_before))
+        ext_content.extend([False] * (len(ext) - gen_before))
 
         total_len = len(previous_ids) + len(ext)
         return RenderedTokens(
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
+            is_content=[False] * len(previous_ids) + ext_content,
             message_roles=[m.get("role") or "" for m in new_messages],
         )
 

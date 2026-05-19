@@ -749,24 +749,44 @@ class KimiK25Renderer:
         tokens: list[int] = []
         indices: list[int] = []
         sampled: list[bool] = []
+        content_mask: list[bool] = []
         mm_hashes: dict[str, list[str]] = {}
         mm_placeholders: dict[str, list[PlaceholderRange]] = {}
         mm_items: dict[str, list[dict[str, Any]]] = {}
 
-        def emit_ids(ids: list[int], msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_ids(
+            ids: list[int], msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
+            content_mask.extend([is_content] * len(ids))
 
-        def emit_special(token_id: int, msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_special(
+            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
             sampled.append(is_sampled)
+            content_mask.append(is_content)
 
-        def emit_text(text: str, msg_idx: int, *, is_sampled: bool) -> None:
-            emit_ids(self._encode(text), msg_idx, is_sampled=is_sampled)
+        def emit_text(
+            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
+            emit_ids(
+                self._encode(text),
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=is_content,
+            )
 
-        def emit_image(part: dict[str, Any], msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_image(
+            part: dict[str, Any],
+            msg_idx: int,
+            *,
+            is_sampled: bool,
+            is_content: bool,
+        ) -> None:
             """Emit Kimi K2.5's image wrap and accumulate ``mm_data``.
 
             Template-equivalent expansion per image:
@@ -779,15 +799,32 @@ class KimiK25Renderer:
             Kimi's chat template after every image — kept here verbatim
             for byte-parity, regardless of what follows (more images,
             text, or the ``<|im_end|>`` close).
+
+            ``is_content`` attribution: ``<|media_pad|>`` represents
+            caller-provided image data — body. The wrap tokens
+            (``<|media_begin|>``, the literal ``"image"`` prose,
+            ``<|media_content|>``, ``<|media_end|>``, the trailing
+            ``\\n``) are template-injected scaffold.
             """
             _, out, _num_patches, h = self._process_image(part)
-            emit_special(self._media_begin, msg_idx, is_sampled=is_sampled)
-            emit_text("image", msg_idx, is_sampled=is_sampled)
-            emit_special(self._media_content, msg_idx, is_sampled=is_sampled)
+            emit_special(
+                self._media_begin, msg_idx, is_sampled=is_sampled, is_content=False
+            )
+            emit_text("image", msg_idx, is_sampled=is_sampled, is_content=False)
+            emit_special(
+                self._media_content, msg_idx, is_sampled=is_sampled, is_content=False
+            )
             offset = len(tokens)
-            emit_special(self._media_pad, msg_idx, is_sampled=is_sampled)
-            emit_special(self._media_end, msg_idx, is_sampled=is_sampled)
-            emit_text("\n", msg_idx, is_sampled=is_sampled)
+            emit_special(
+                self._media_pad,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=is_content,
+            )
+            emit_special(
+                self._media_end, msg_idx, is_sampled=is_sampled, is_content=False
+            )
+            emit_text("\n", msg_idx, is_sampled=is_sampled, is_content=False)
             mm_hashes.setdefault("image", []).append(h)
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=1)
@@ -807,13 +844,16 @@ class KimiK25Renderer:
         # K2.5/K2.6's tokenizer auto-computes ``tools_ts_str`` and threads
         # it into apply_chat_template, so the template's TS branch always
         # fires when tools are present. Match that with our own TS encoder.
+        # The tools-TS body is recoverable from the ``tools`` argument, so
+        # we attribute the entire tool_declare emission as scaffold —
+        # consistent with Qwen3's tools-header treatment.
         if tools:
             tools_ts = _encode_tools_typescript(tools)
-            emit_special(self._im_system, -1, is_sampled=False)
-            emit_text("tool_declare", -1, is_sampled=False)
-            emit_special(self._im_middle, -1, is_sampled=False)
-            emit_text(tools_ts, -1, is_sampled=False)
-            emit_special(self._im_end, -1, is_sampled=False)
+            emit_special(self._im_system, -1, is_sampled=False, is_content=False)
+            emit_text("tool_declare", -1, is_sampled=False, is_content=False)
+            emit_special(self._im_middle, -1, is_sampled=False, is_content=False)
+            emit_text(tools_ts, -1, is_sampled=False, is_content=False)
+            emit_special(self._im_end, -1, is_sampled=False, is_content=False)
 
         # ── Iterate messages ─────────────────────────────────────────
         for i, msg in enumerate(messages):
@@ -824,14 +864,18 @@ class KimiK25Renderer:
             # generation prompt emits them at inference for assistants;
             # user / system / tool roles are conversation history).
             if role == "user":
-                emit_special(self._im_user, i, is_sampled=False)
+                emit_special(self._im_user, i, is_sampled=False, is_content=False)
             elif role == "assistant":
-                emit_special(self._im_assistant, i, is_sampled=False)
+                emit_special(
+                    self._im_assistant, i, is_sampled=False, is_content=False
+                )
             else:
-                emit_special(self._im_system, i, is_sampled=False)
+                emit_special(
+                    self._im_system, i, is_sampled=False, is_content=False
+                )
             role_name = msg.get("name") or role
-            emit_text(role_name, i, is_sampled=False)
-            emit_special(self._im_middle, i, is_sampled=False)
+            emit_text(role_name, i, is_sampled=False, is_content=False)
+            emit_special(self._im_middle, i, is_sampled=False, is_content=False)
 
             # Body
             if role == "assistant":
@@ -852,10 +896,12 @@ class KimiK25Renderer:
                 )
                 # ``<|im_end|>`` is the model's stop signal — it samples
                 # this to end its turn, so it is part of the sampled
-                # stream. Kimi K2.5 has no inter-turn ``\n`` separator
-                # (unlike Qwen3), so the turn-close token is the last
-                # sampled token.
-                emit_special(self._im_end, i, is_sampled=True)
+                # stream (and the assistant's body). Kimi K2.5 has no
+                # inter-turn ``\n`` separator (unlike Qwen3), so the
+                # turn-close token is the last sampled token.
+                emit_special(
+                    self._im_end, i, is_sampled=True, is_content=True
+                )
                 continue
             elif role == "tool":
                 self._render_tool_body(
@@ -869,7 +915,8 @@ class KimiK25Renderer:
             elif msg.get("content") is not None:
                 # User / other content branches — images allowed. All
                 # non-assistant content is conversation history, never
-                # sampled by the model.
+                # sampled by the model. The body is caller-provided, so
+                # ``is_content=True`` over the content emit.
                 self._emit_content(
                     msg.get("content"),
                     i,
@@ -878,21 +925,24 @@ class KimiK25Renderer:
                     emit_ids,
                     emit_image=emit_image,
                     is_sampled=False,
+                    is_content=True,
                 )
 
-            emit_special(self._im_end, i, is_sampled=False)
+            emit_special(self._im_end, i, is_sampled=False, is_content=False)
 
         # ── Generation prompt ────────────────────────────────────────
         if add_generation_prompt:
-            emit_special(self._im_assistant, -1, is_sampled=False)
-            emit_text("assistant", -1, is_sampled=False)
-            emit_special(self._im_middle, -1, is_sampled=False)
+            emit_special(self._im_assistant, -1, is_sampled=False, is_content=False)
+            emit_text("assistant", -1, is_sampled=False, is_content=False)
+            emit_special(self._im_middle, -1, is_sampled=False, is_content=False)
             if self._enable_thinking:
                 # Prefill open <think> tag to trigger thinking mode
-                emit_text("<think>", -1, is_sampled=False)
+                emit_text("<think>", -1, is_sampled=False, is_content=False)
             else:
                 # Empty <think></think> to disable thinking
-                emit_text("<think></think>", -1, is_sampled=False)
+                emit_text(
+                    "<think></think>", -1, is_sampled=False, is_content=False
+                )
 
         mm_data: MultiModalData | None = None
         if mm_hashes or mm_placeholders or mm_items:
@@ -906,6 +956,7 @@ class KimiK25Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
+            is_content=content_mask,
             message_roles=[m.get("role") or "" for m in messages],
             multi_modal_data=mm_data,
         )
@@ -997,49 +1048,74 @@ class KimiK25Renderer:
 
         # Seed combined-token list with prior turn so placeholder offsets
         # are absolute in the bridged sequence. Parallel
-        # ``indices``/``sampled`` are seeded with ``-1``/``False`` for the
-        # prior portion — the bridge has no attribution info for
-        # ``previous_ids``. Bridge-added tokens get proper ``msg_idx``
-        # (relative to ``new_messages``) and uniformly ``False``
-        # ``sampled``: nothing the bridge emits was model-sampled.
+        # ``indices``/``sampled``/``content_mask`` are seeded with
+        # ``-1``/``False``/``False`` for the prior portion — the bridge
+        # has no attribution info for ``previous_ids``. Bridge-added
+        # tokens get proper ``msg_idx`` (relative to ``new_messages``)
+        # and uniformly ``False`` ``sampled``: nothing the bridge emits
+        # was model-sampled. ``is_content`` follows the same rules as in
+        # :meth:`render` so consumers can walk the trajectory and read
+        # each step's own body mask.
         tokens: list[int] = list(previous_ids)
         indices: list[int] = [-1] * len(previous_ids)
         sampled: list[bool] = [False] * len(previous_ids)
+        content_mask: list[bool] = [False] * len(previous_ids)
         new_hashes: dict[str, list[str]] = {}
         new_placeholders: dict[str, list[PlaceholderRange]] = {}
         new_items: dict[str, list[dict[str, Any]]] = {}
 
         def emit_special(
-            token_id: int, msg_idx: int = -1, *, is_sampled: bool = False
+            token_id: int,
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
             sampled.append(is_sampled)
+            content_mask.append(is_content)
 
         def emit_text(
-            text: str, msg_idx: int = -1, *, is_sampled: bool = False
+            text: str,
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
             ids = self._encode(text)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
+            content_mask.extend([is_content] * len(ids))
 
         def emit_ids(
-            ids: list[int], msg_idx: int = -1, *, is_sampled: bool = False
+            ids: list[int],
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
+            content_mask.extend([is_content] * len(ids))
 
         def emit_image(
-            part: dict[str, Any], msg_idx: int = -1, *, is_sampled: bool = False
+            part: dict[str, Any],
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
             _, out, _num_patches, h = self._process_image(part)
             emit_special(self._media_begin, msg_idx)
             emit_text("image", msg_idx)
             emit_special(self._media_content, msg_idx)
             offset = len(tokens)
-            emit_special(self._media_pad, msg_idx)
+            # ``<|media_pad|>`` stands in for caller-provided image data —
+            # mark it as body when the surrounding content is body.
+            emit_special(self._media_pad, msg_idx, is_content=is_content)
             emit_special(self._media_end, msg_idx)
             emit_text("\n", msg_idx)
             new_hashes.setdefault("image", []).append(h)
@@ -1086,6 +1162,7 @@ class KimiK25Renderer:
                     emit_ids,
                     emit_image=emit_image,
                     is_sampled=False,
+                    is_content=True,
                 )
 
             emit_special(self._im_end, i)
@@ -1128,6 +1205,7 @@ class KimiK25Renderer:
                 token_ids=tokens,
                 message_indices=indices,
                 sampled_mask=sampled,
+                is_content=content_mask,
                 message_roles=bridge_roles,
             )
 
@@ -1140,6 +1218,7 @@ class KimiK25Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
+            is_content=content_mask,
             message_roles=bridge_roles,
             multi_modal_data=mm_data,
         )
@@ -1158,6 +1237,7 @@ class KimiK25Renderer:
         *,
         emit_image=None,
         is_sampled: bool,
+        is_content: bool = True,
     ) -> None:
         """Emit message content, handling strings, multipart lists, and (when
         ``emit_image`` is supplied) image parts.
@@ -1172,11 +1252,15 @@ class KimiK25Renderer:
         ``bridge_to_next_turn``), so consecutive images naturally
         produce the template's ``...<|media_end|>\\n<|media_begin|>...``
         pattern without an inter-image separator here.
+
+        ``is_content`` propagates to text emits and to the
+        ``<|media_pad|>`` body token of each image; the surrounding
+        media wrap tokens are always scaffold (handled by ``emit_image``).
         """
         if content is None:
             return
         if isinstance(content, str):
-            emit_text(content, msg_idx, is_sampled=is_sampled)
+            emit_text(content, msg_idx, is_sampled=is_sampled, is_content=is_content)
             return
         if isinstance(content, list):
             for part in content:
@@ -1189,20 +1273,30 @@ class KimiK25Renderer:
                     if emit_image is None:
                         # Silently drop — caller didn't opt into multimodal.
                         continue
-                    emit_image(part, msg_idx, is_sampled=is_sampled)
+                    emit_image(
+                        part, msg_idx, is_sampled=is_sampled, is_content=is_content
+                    )
                     continue
                 if is_video:
                     raise NotImplementedError(
                         "Video parts are not yet supported by KimiK25Renderer."
                     )
                 if ptype == "text":
-                    emit_text(part.get("text", ""), msg_idx, is_sampled=is_sampled)
+                    emit_text(
+                        part.get("text", ""),
+                        msg_idx,
+                        is_sampled=is_sampled,
+                        is_content=is_content,
+                    )
                 elif ptype == "thinking":
                     # Thinking parts in non-assistant roles are rendered as text
                     thinking = part.get("thinking", "")
                     if thinking:
                         emit_text(
-                            f"<think>{thinking}</think>", msg_idx, is_sampled=is_sampled
+                            f"<think>{thinking}</think>",
+                            msg_idx,
+                            is_sampled=is_sampled,
+                            is_content=is_content,
                         )
                 # Other part types are silently skipped
 
@@ -1265,16 +1359,29 @@ class KimiK25Renderer:
         # block, text content, and any tool_calls section all live in
         # the sampled stream. The closing ``<|im_end|>`` is emitted by
         # ``render`` (also is_sampled=True; it's the model's stop
-        # signal).
+        # signal). On assistant tokens ``is_content == sampled_mask`` by
+        # construction.
         if is_suffix or (preserve_thinking and reasoning_content):
-            emit_text(f"<think>{reasoning_content}</think>", msg_idx, is_sampled=True)
+            emit_text(
+                f"<think>{reasoning_content}</think>",
+                msg_idx,
+                is_sampled=True,
+                is_content=True,
+            )
         else:
-            emit_text("<think></think>", msg_idx, is_sampled=True)
-        emit_text(text_content, msg_idx, is_sampled=True)
+            emit_text(
+                "<think></think>", msg_idx, is_sampled=True, is_content=True
+            )
+        emit_text(text_content, msg_idx, is_sampled=True, is_content=True)
 
         tool_calls = msg.get("tool_calls") or []
         if tool_calls:
-            emit_special(self._tool_calls_section_begin, msg_idx, is_sampled=True)
+            emit_special(
+                self._tool_calls_section_begin,
+                msg_idx,
+                is_sampled=True,
+                is_content=True,
+            )
             for tc in tool_calls:
                 func = tc.get("function") or tc
                 arguments = func.get("arguments", {})
@@ -1288,12 +1395,32 @@ class KimiK25Renderer:
                 # ``functions.{name}:{idx}`` form (Kimi's parser recovers
                 # the function name from that field).
                 tool_id = tc.get("id") or ""
-                emit_special(self._tool_call_begin, msg_idx, is_sampled=True)
-                emit_text(tool_id, msg_idx, is_sampled=True)
-                emit_special(self._tool_call_argument_begin, msg_idx, is_sampled=True)
-                emit_text(args_str, msg_idx, is_sampled=True)
-                emit_special(self._tool_call_end, msg_idx, is_sampled=True)
-            emit_special(self._tool_calls_section_end, msg_idx, is_sampled=True)
+                emit_special(
+                    self._tool_call_begin,
+                    msg_idx,
+                    is_sampled=True,
+                    is_content=True,
+                )
+                emit_text(tool_id, msg_idx, is_sampled=True, is_content=True)
+                emit_special(
+                    self._tool_call_argument_begin,
+                    msg_idx,
+                    is_sampled=True,
+                    is_content=True,
+                )
+                emit_text(args_str, msg_idx, is_sampled=True, is_content=True)
+                emit_special(
+                    self._tool_call_end,
+                    msg_idx,
+                    is_sampled=True,
+                    is_content=True,
+                )
+            emit_special(
+                self._tool_calls_section_end,
+                msg_idx,
+                is_sampled=True,
+                is_content=True,
+            )
 
     def _render_tool_body(
         self,
@@ -1319,9 +1446,16 @@ class KimiK25Renderer:
         """
         # Tool messages are conversation-history injected by the runtime
         # between assistant turns — the model never samples any of these
-        # tokens, so every emission is is_sampled=False.
+        # tokens, so every emission is is_sampled=False. The ``## Return
+        # of …\n`` header is template-synthesised scaffold; the
+        # ``content`` body bytes get ``is_content=True``.
         tool_call_id = msg.get("tool_call_id") or ""
-        emit_text(f"## Return of {tool_call_id}\n", msg_idx, is_sampled=False)
+        emit_text(
+            f"## Return of {tool_call_id}\n",
+            msg_idx,
+            is_sampled=False,
+            is_content=False,
+        )
         content = msg.get("content")
         if content is not None:
             self._emit_content(
@@ -1332,6 +1466,7 @@ class KimiK25Renderer:
                 emit_ids,
                 emit_image=emit_image,
                 is_sampled=False,
+                is_content=True,
             )
 
     def _normalize_response_tokens(self, response: list[int]) -> list[int]:

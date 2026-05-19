@@ -26,6 +26,7 @@ from renderers.base import (
     PlaceholderRange,
     RenderedTokens,
     ToolSpec,
+    attribute_text_segments,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
     trim_to_turn_close,
@@ -291,33 +292,72 @@ class Qwen35Renderer:
         tokens: list[int] = []
         indices: list[int] = []
         sampled: list[bool] = []
+        content_mask: list[bool] = []
         mm_hashes: dict[str, list[str]] = {}
         mm_placeholders: dict[str, list[PlaceholderRange]] = {}
         mm_items: dict[str, list[dict[str, Any]]] = {}
 
-        def emit_ids(ids: list[int], msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_ids(
+            ids: list[int], msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
+            content_mask.extend([is_content] * len(ids))
 
-        def emit_special(token_id: int, msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_special(
+            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
             sampled.append(is_sampled)
+            content_mask.append(is_content)
 
-        def emit_text(text: str, msg_idx: int, *, is_sampled: bool) -> None:
-            emit_ids(self._encode(text), msg_idx, is_sampled=is_sampled)
+        def emit_text(
+            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
+            emit_ids(
+                self._encode(text), msg_idx, is_sampled=is_sampled, is_content=is_content
+            )
+
+        def emit_text_segments(
+            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
+        ) -> None:
+            """Tokenize concatenated segments as one BPE pass; per-token
+            ``is_content`` follows each token's source segment.
+
+            Lets call sites express "this wrap + this body, joined the
+            same way as the chat template, but attributed separately"
+            without splitting the encode call (which could shift BPE
+            merges at the boundary)."""
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments
+            ):
+                tokens.append(tok_id)
+                indices.append(msg_idx)
+                sampled.append(is_sampled)
+                content_mask.append(is_content)
 
         def emit_image(part: dict[str, Any], msg_idx: int) -> None:
             # Image placeholders only appear in user / tool messages; the
             # model never samples them. Pin is_sampled=False here so
-            # callers don't need to thread the flag through.
+            # callers don't need to thread the flag through. The
+            # ``<|image_pad|>`` placeholders represent caller-provided
+            # image data, so they ARE body content (is_content=True);
+            # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
+            # specials are template scaffold.
             _, out, n, h = self._process_image(part)
-            emit_special(self._vision_start, msg_idx, is_sampled=False)
+            emit_special(
+                self._vision_start, msg_idx, is_sampled=False, is_content=False
+            )
             offset = len(tokens)
             for _ in range(n):
-                emit_special(self._image_pad, msg_idx, is_sampled=False)
-            emit_special(self._vision_end, msg_idx, is_sampled=False)
+                emit_special(
+                    self._image_pad, msg_idx, is_sampled=False, is_content=True
+                )
+            emit_special(
+                self._vision_end, msg_idx, is_sampled=False, is_content=False
+            )
             mm_hashes.setdefault("image", []).append(h)
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
@@ -337,20 +377,28 @@ class Qwen35Renderer:
             ``<|im_end|>``), matching how Jinja's ``render_content`` macro
             concatenates strings before tokenization. This preserves BPE
             byte-parity against ``apply_chat_template``.
+
+            Within each flush the ``"user\\n"`` wrap is scaffold and the
+            text parts are body. ``emit_text_segments`` carries that
+            attribution through the BPE pass.
             """
             # Every token in a user message is conversation history that
             # the model never samples at inference.
-            emit_special(self._im_start, msg_idx, is_sampled=False)
-            buf: list[str] = ["user\n"]
+            emit_special(self._im_start, msg_idx, is_sampled=False, is_content=False)
+            # First flush includes the ``"user\n"`` wrap as a scaffold
+            # segment; subsequent flushes are pure body (after a media
+            # break).
+            buf_segments: list[tuple[str, bool]] = [("user\n", False)]
 
             def flush_buf() -> None:
-                if buf:
-                    emit_text("".join(buf), msg_idx, is_sampled=False)
-                    buf.clear()
+                if buf_segments:
+                    emit_text_segments(buf_segments, msg_idx, is_sampled=False)
+                    buf_segments.clear()
 
             for item in content_list:
                 if isinstance(item, str):
-                    buf.append(item)
+                    if item:
+                        buf_segments.append((item, True))
                 elif isinstance(item, dict):
                     if _is_image_part(item):
                         flush_buf()
@@ -360,14 +408,15 @@ class Qwen35Renderer:
                             "Video parts are not yet supported by Qwen35Renderer."
                         )
                     elif "text" in item:
-                        buf.append(item["text"])
+                        if item["text"]:
+                            buf_segments.append((item["text"], True))
                     else:
                         raise ValueError(f"Unexpected content item: {item}")
                 else:
                     raise ValueError(f"Unexpected content item: {item}")
             flush_buf()
-            emit_special(self._im_end, msg_idx, is_sampled=False)
-            emit_text("\n", msg_idx, is_sampled=False)
+            emit_special(self._im_end, msg_idx, is_sampled=False, is_content=False)
+            emit_text("\n", msg_idx, is_sampled=False, is_content=False)
 
         # ── 1. System message + optional tools ──────────────────────
         first_is_system = messages[0].get("role") == "system"
@@ -376,31 +425,34 @@ class Qwen35Renderer:
             # System message index for attribution
             sys_idx = 0 if first_is_system else -1
 
-            emit_special(self._im_start, sys_idx, is_sampled=False)
-            emit_text("system\n", sys_idx, is_sampled=False)
-
-            # Tools header + JSON definitions
-            tool_text = _TOOLS_HEADER
+            emit_special(self._im_start, sys_idx, is_sampled=False, is_content=False)
+            # Body = system content (if any). Everything else in this
+            # block — role tag, tools header / footer / instructions, the
+            # JSON tool specs — is scaffold. The tools dict is
+            # recoverable from the ``tools`` argument; don't re-attribute
+            # its embedded JSON as message body.
+            segments: list[tuple[str, bool]] = [("system\n", False), (_TOOLS_HEADER, False)]
             for tool in tools:
-                tool_text += "\n" + json.dumps(tool, ensure_ascii=False)
-            tool_text += _TOOLS_FOOTER
-            tool_text += _TOOLS_INSTRUCTIONS
-
-            # Append user's system content if present
+                segments.append(("\n" + json.dumps(tool, ensure_ascii=False), False))
+            segments.append((_TOOLS_FOOTER, False))
+            segments.append((_TOOLS_INSTRUCTIONS, False))
             if first_is_system:
                 sys_content = self._render_content(messages[0].get("content")).strip()
                 if sys_content:
-                    tool_text += "\n\n" + sys_content
-
-            emit_text(tool_text, sys_idx, is_sampled=False)
-            emit_special(self._im_end, sys_idx, is_sampled=False)
-            emit_text("\n", sys_idx, is_sampled=False)
+                    segments.append(("\n\n", False))
+                    segments.append((sys_content, True))
+            emit_text_segments(segments, sys_idx, is_sampled=False)
+            emit_special(self._im_end, sys_idx, is_sampled=False, is_content=False)
+            emit_text("\n", sys_idx, is_sampled=False, is_content=False)
         elif first_is_system:
             sys_content = self._render_content(messages[0].get("content")).strip()
-            emit_special(self._im_start, 0, is_sampled=False)
-            emit_text("system\n" + sys_content, 0, is_sampled=False)
-            emit_special(self._im_end, 0, is_sampled=False)
-            emit_text("\n", 0, is_sampled=False)
+            emit_special(self._im_start, 0, is_sampled=False, is_content=False)
+            sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+            if sys_content:
+                sys_segments.append((sys_content, True))
+            emit_text_segments(sys_segments, 0, is_sampled=False)
+            emit_special(self._im_end, 0, is_sampled=False, is_content=False)
+            emit_text("\n", 0, is_sampled=False, is_content=False)
 
         # ── 2. Compute last_query_index ─────────────────────────────
         last_qi = self._last_query_index(messages)
@@ -420,10 +472,13 @@ class Qwen35Renderer:
                 if self._content_has_media(raw_content):
                     emit_user_with_media(raw_content, i)
                 else:
-                    emit_special(self._im_start, i, is_sampled=False)
-                    emit_text("user\n" + content, i, is_sampled=False)
-                    emit_special(self._im_end, i, is_sampled=False)
-                    emit_text("\n", i, is_sampled=False)
+                    emit_special(self._im_start, i, is_sampled=False, is_content=False)
+                    user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                    if content:
+                        user_segments.append((content, True))
+                    emit_text_segments(user_segments, i, is_sampled=False)
+                    emit_special(self._im_end, i, is_sampled=False, is_content=False)
+                    emit_text("\n", i, is_sampled=False, is_content=False)
 
             elif role == "assistant":
                 preserve_thinking = should_preserve_past_thinking(
@@ -441,6 +496,7 @@ class Qwen35Renderer:
                     emit_special=emit_special,
                     emit_text=emit_text,
                     emit_ids=emit_ids,
+                    emit_text_segments=emit_text_segments,
                 )
 
             elif role == "tool":
@@ -450,6 +506,7 @@ class Qwen35Renderer:
                     emit_special=emit_special,
                     emit_text=emit_text,
                     emit_image=emit_image,
+                    emit_text_segments=emit_text_segments,
                 )
 
             else:
@@ -457,16 +514,16 @@ class Qwen35Renderer:
 
         # ── 4. Generation prompt ────────────────────────────────────
         if add_generation_prompt:
-            emit_special(self._im_start, -1, is_sampled=False)
-            emit_text("assistant\n", -1, is_sampled=False)
+            emit_special(self._im_start, -1, is_sampled=False, is_content=False)
+            emit_text("assistant\n", -1, is_sampled=False, is_content=False)
             if self._enable_thinking:
-                emit_special(self._think, -1, is_sampled=False)
-                emit_text("\n", -1, is_sampled=False)
+                emit_special(self._think, -1, is_sampled=False, is_content=False)
+                emit_text("\n", -1, is_sampled=False, is_content=False)
             else:
-                emit_special(self._think, -1, is_sampled=False)
-                emit_text("\n\n", -1, is_sampled=False)
-                emit_special(self._think_end, -1, is_sampled=False)
-                emit_text("\n\n", -1, is_sampled=False)
+                emit_special(self._think, -1, is_sampled=False, is_content=False)
+                emit_text("\n\n", -1, is_sampled=False, is_content=False)
+                emit_special(self._think_end, -1, is_sampled=False, is_content=False)
+                emit_text("\n\n", -1, is_sampled=False, is_content=False)
 
         mm_data: MultiModalData | None = None
         if mm_hashes or mm_placeholders or mm_items:
@@ -480,6 +537,7 @@ class Qwen35Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
+            is_content=content_mask,
             message_roles=[m.get("role") or "" for m in messages],
             multi_modal_data=mm_data,
         )
@@ -549,34 +607,63 @@ class Qwen35Renderer:
         # ``previous_ids``. Bridge-added tokens get proper ``msg_idx``
         # (relative to ``new_messages``) and uniformly ``False``
         # ``sampled``: nothing the bridge emits was model-sampled.
+        # ``is_content`` follows the same rules as in :meth:`render` so
+        # consumers can walk the trajectory and read each step's own
+        # body mask; the prior portion is uniformly False since we have
+        # no attribution info for it.
         tokens: list[int] = list(previous_ids)
         indices: list[int] = [-1] * len(previous_ids)
         sampled: list[bool] = [False] * len(previous_ids)
+        content_mask: list[bool] = [False] * len(previous_ids)
         new_hashes: dict[str, list[str]] = {}
         new_placeholders: dict[str, list[PlaceholderRange]] = {}
         new_items: dict[str, list[dict[str, Any]]] = {}
 
         def emit_special(
-            token_id: int, msg_idx: int = -1, *, is_sampled: bool = False
+            token_id: int,
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
             sampled.append(is_sampled)
+            content_mask.append(is_content)
 
         def emit_text(
-            text: str, msg_idx: int = -1, *, is_sampled: bool = False
+            text: str,
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
             ids = self._encode(text)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
+            content_mask.extend([is_content] * len(ids))
+
+        def emit_text_segments(
+            segments: list[tuple[str, bool]],
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+        ) -> None:
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments
+            ):
+                tokens.append(tok_id)
+                indices.append(msg_idx)
+                sampled.append(is_sampled)
+                content_mask.append(is_content)
 
         def emit_image(part: dict[str, Any], msg_idx: int = -1) -> None:
             _, out, n, h = self._process_image(part)
             emit_special(self._vision_start, msg_idx)
             offset = len(tokens)
             for _ in range(n):
-                emit_special(self._image_pad, msg_idx)
+                emit_special(self._image_pad, msg_idx, is_content=True)
             emit_special(self._vision_end, msg_idx)
             new_hashes.setdefault("image", []).append(h)
             new_placeholders.setdefault("image", []).append(
@@ -591,16 +678,17 @@ class Qwen35Renderer:
 
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             emit_special(self._im_start, msg_idx)
-            buf: list[str] = ["user\n"]
+            buf_segments: list[tuple[str, bool]] = [("user\n", False)]
 
             def flush_buf() -> None:
-                if buf:
-                    emit_text("".join(buf), msg_idx)
-                    buf.clear()
+                if buf_segments:
+                    emit_text_segments(buf_segments, msg_idx)
+                    buf_segments.clear()
 
             for item in content_list:
                 if isinstance(item, str):
-                    buf.append(item)
+                    if item:
+                        buf_segments.append((item, True))
                 elif isinstance(item, dict):
                     if _is_image_part(item):
                         flush_buf()
@@ -610,7 +698,8 @@ class Qwen35Renderer:
                             "Video parts are not yet supported by Qwen35Renderer."
                         )
                     elif "text" in item:
-                        buf.append(item["text"])
+                        if item["text"]:
+                            buf_segments.append((item["text"], True))
                     else:
                         raise ValueError(f"Unexpected content item: {item}")
                 else:
@@ -633,12 +722,18 @@ class Qwen35Renderer:
                     emit_user_with_media(raw_content, i)
                 else:
                     emit_special(self._im_start, i)
-                    emit_text("user\n" + content, i)
+                    user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                    if content:
+                        user_segments.append((content, True))
+                    emit_text_segments(user_segments, i)
                     emit_special(self._im_end, i)
                     emit_text("\n", i)
             elif role == "system":
                 emit_special(self._im_start, i)
-                emit_text("system\n" + content, i)
+                sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+                if content:
+                    sys_segments.append((content, True))
+                emit_text_segments(sys_segments, i)
                 emit_special(self._im_end, i)
                 emit_text("\n", i)
             elif role == "tool":
@@ -648,6 +743,7 @@ class Qwen35Renderer:
                     emit_special=emit_special,
                     emit_text=emit_text,
                     emit_image=emit_image,
+                    emit_text_segments=emit_text_segments,
                 )
             else:
                 return None
@@ -693,6 +789,7 @@ class Qwen35Renderer:
                 token_ids=tokens,
                 message_indices=indices,
                 sampled_mask=sampled,
+                is_content=content_mask,
                 message_roles=bridge_roles,
             )
 
@@ -705,6 +802,7 @@ class Qwen35Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
+            is_content=content_mask,
             message_roles=bridge_roles,
             multi_modal_data=mm_data,
         )
@@ -747,6 +845,7 @@ class Qwen35Renderer:
         emit_special,
         emit_text,
         emit_ids,
+        emit_text_segments,
     ) -> None:
         # Extract reasoning_content
         reasoning_content = ""
@@ -769,26 +868,38 @@ class Qwen35Renderer:
         # at inference the chat template emits these as the generation
         # prompt and the model never samples them. Marking the role tag
         # as ``is_sampled=False`` keeps the SFT loss mask aligned with
-        # what the model would actually have produced. The split between
-        # ``assistant`` and ``\n`` is a safe BPE boundary in the Qwen
-        # tokenizer (``\n`` after the role is its own token).
-        emit_special(self._im_start, msg_idx, is_sampled=False)
-        emit_text("assistant\n", msg_idx, is_sampled=False)
+        # what the model would actually have produced. ``is_content`` is
+        # also False here — the role tag isn't part of any message's
+        # body, on any role.
+        emit_special(self._im_start, msg_idx, is_sampled=False, is_content=False)
+        emit_text("assistant\n", msg_idx, is_sampled=False, is_content=False)
 
         # Build the model-sampled portion (think block + content + tool
         # calls). Text segments stay contiguous within each is_sampled
-        # span to preserve BPE merges.
+        # span to preserve BPE merges. For assistant messages the
+        # invariant ``is_content == sampled_mask`` holds — every sampled
+        # token is body, every scaffold token isn't. The XML-style tool
+        # call tags (``<function=...>``, ``<parameter=...>``, etc.) are
+        # part of the model's emitted output too — keep them
+        # ``is_content=True`` per the assistant rule.
         emit_thinking = self._should_render_thinking(msg_idx, last_query_index) or (
             preserve_thinking and bool(reasoning_content)
         )
         if emit_thinking:
             # Include thinking block
-            emit_special(self._think, msg_idx, is_sampled=True)
-            emit_text("\n" + reasoning_content + "\n", msg_idx, is_sampled=True)
-            emit_special(self._think_end, msg_idx, is_sampled=True)
-            emit_text("\n\n" + content, msg_idx, is_sampled=True)
+            emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
+            emit_text(
+                "\n" + reasoning_content + "\n",
+                msg_idx,
+                is_sampled=True,
+                is_content=True,
+            )
+            emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
+            emit_text(
+                "\n\n" + content, msg_idx, is_sampled=True, is_content=True
+            )
         else:
-            emit_text(content, msg_idx, is_sampled=True)
+            emit_text(content, msg_idx, is_sampled=True, is_content=True)
 
         # Tool calls
         tool_calls = msg.get("tool_calls") or []
@@ -801,13 +912,22 @@ class Qwen35Renderer:
                 # Separator before <tool_call>
                 if tc_idx == 0:
                     if content.strip():
-                        emit_text("\n\n", msg_idx, is_sampled=True)
+                        emit_text(
+                            "\n\n", msg_idx, is_sampled=True, is_content=True
+                        )
                     # else: no separator
                 else:
-                    emit_text("\n", msg_idx, is_sampled=True)
+                    emit_text("\n", msg_idx, is_sampled=True, is_content=True)
 
-                emit_special(self._tool_call, msg_idx, is_sampled=True)
-                emit_text("\n<function=" + name + ">\n", msg_idx, is_sampled=True)
+                emit_special(
+                    self._tool_call, msg_idx, is_sampled=True, is_content=True
+                )
+                emit_text(
+                    "\n<function=" + name + ">\n",
+                    msg_idx,
+                    is_sampled=True,
+                    is_content=True,
+                )
 
                 # Render arguments
                 # OpenAI canonical form: arguments is a JSON string. Parse it so the
@@ -828,16 +948,22 @@ class Qwen35Renderer:
                             + "\n</parameter>\n",
                             msg_idx,
                             is_sampled=True,
+                            is_content=True,
                         )
 
-                emit_text("</function>\n", msg_idx, is_sampled=True)
-                emit_special(self._tool_call_end, msg_idx, is_sampled=True)
+                emit_text(
+                    "</function>\n", msg_idx, is_sampled=True, is_content=True
+                )
+                emit_special(
+                    self._tool_call_end, msg_idx, is_sampled=True, is_content=True
+                )
 
         # ``<|im_end|>`` is the model's stop signal — it samples this to
-        # end its turn, so it is part of the sampled stream. The trailing
-        # ``\n`` is template-appended between turns and never sampled.
-        emit_special(self._im_end, msg_idx, is_sampled=True)
-        emit_text("\n", msg_idx, is_sampled=False)
+        # end its turn, so it is part of the sampled stream (and the
+        # assistant's body). The trailing ``\n`` is template-appended
+        # between turns and never sampled — scaffold for is_content too.
+        emit_special(self._im_end, msg_idx, is_sampled=True, is_content=True)
+        emit_text("\n", msg_idx, is_sampled=False, is_content=False)
 
     # ------------------------------------------------------------------
     # Tool message rendering
@@ -851,6 +977,7 @@ class Qwen35Renderer:
         emit_special,
         emit_text,
         emit_image,
+        emit_text_segments,
     ) -> None:
         # Consecutive tool messages share a single <|im_start|>user ... <|im_end|>
         # envelope. Whether to open and close the envelope depends only on the
@@ -858,9 +985,11 @@ class Qwen35Renderer:
         # tool message — keep this predicate text/media-agnostic.
         # Tool messages are conversation history injected by the runtime
         # between assistant turns — the model never samples any of these
-        # tokens, so every emission is is_sampled=False. The bridge's
-        # local emit_special / emit_text accept the is_sampled kwarg for
-        # signature compatibility but ignore it.
+        # tokens, so every emission is is_sampled=False. The ``content``
+        # field's body bytes get ``is_content=True``; everything else —
+        # the ``<|im_start|>user`` wrap, the inter-section ``\n``s, the
+        # ``<|tool_response>`` specials — is scaffold so the SFT mask
+        # for tool body never trains the model to emit them.
         prev_is_tool = msg_idx > 0 and messages[msg_idx - 1]["role"] == "tool"
         next_is_tool = (
             msg_idx + 1 < len(messages) and messages[msg_idx + 1]["role"] == "tool"
@@ -868,11 +997,11 @@ class Qwen35Renderer:
         raw_content = messages[msg_idx].get("content")
 
         if not prev_is_tool:
-            emit_special(self._im_start, msg_idx, is_sampled=False)
-            emit_text("user", msg_idx, is_sampled=False)
+            emit_special(self._im_start, msg_idx, is_sampled=False, is_content=False)
+            emit_text("user", msg_idx, is_sampled=False, is_content=False)
 
-        emit_text("\n", msg_idx, is_sampled=False)
-        emit_special(self._tool_response, msg_idx, is_sampled=False)
+        emit_text("\n", msg_idx, is_sampled=False, is_content=False)
+        emit_special(self._tool_response, msg_idx, is_sampled=False, is_content=False)
 
         if self._content_has_media(raw_content):
             # Mirror the chat template's ``render_content`` macro for list
@@ -882,16 +1011,22 @@ class Qwen35Renderer:
             # ``_content_has_media`` returns False unless content is a list,
             # but the type checker can't follow that through the call.
             assert isinstance(raw_content, list)
-            buf: list[str] = ["\n"]
+            # First flush: leading ``"\n"`` is scaffold (separates the
+            # ``<|tool_response>`` special from the body); subsequent
+            # text items in this run are body. After a media break, the
+            # buffer resets to pure body until the next media break or
+            # end-of-content.
+            buf_segments: list[tuple[str, bool]] = [("\n", False)]
 
             def flush_buf() -> None:
-                if buf:
-                    emit_text("".join(buf), msg_idx, is_sampled=False)
-                    buf.clear()
+                if buf_segments:
+                    emit_text_segments(buf_segments, msg_idx, is_sampled=False)
+                    buf_segments.clear()
 
             for item in raw_content:
                 if isinstance(item, str):
-                    buf.append(item)
+                    if item:
+                        buf_segments.append((item, True))
                 elif isinstance(item, dict):
                     if _is_image_part(item):
                         flush_buf()
@@ -901,19 +1036,29 @@ class Qwen35Renderer:
                             "Video parts are not yet supported by Qwen35Renderer."
                         )
                     elif "text" in item:
-                        buf.append(item["text"])
+                        if item["text"]:
+                            buf_segments.append((item["text"], True))
                     else:
                         raise ValueError(f"Unexpected content item: {item}")
                 else:
                     raise ValueError(f"Unexpected content item: {item}")
             flush_buf()
-            emit_text("\n", msg_idx, is_sampled=False)
+            emit_text("\n", msg_idx, is_sampled=False, is_content=False)
         else:
             content = self._render_content(raw_content).strip()
-            emit_text("\n" + content + "\n", msg_idx, is_sampled=False)
+            # ``\n`` + content + ``\n`` — body is the middle segment only.
+            # Single BPE pass over the joined text preserves boundary
+            # merges.
+            emit_text_segments(
+                [("\n", False), (content, True), ("\n", False)],
+                msg_idx,
+                is_sampled=False,
+            )
 
-        emit_special(self._tool_response_end, msg_idx, is_sampled=False)
+        emit_special(
+            self._tool_response_end, msg_idx, is_sampled=False, is_content=False
+        )
 
         if not next_is_tool:
-            emit_special(self._im_end, msg_idx, is_sampled=False)
-            emit_text("\n", msg_idx, is_sampled=False)
+            emit_special(self._im_end, msg_idx, is_sampled=False, is_content=False)
+            emit_text("\n", msg_idx, is_sampled=False, is_content=False)

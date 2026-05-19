@@ -23,6 +23,7 @@ from openai import AsyncOpenAI
 from renderers.base import (
     Message,
     MultiModalData,
+    RenderedTokens,
     Renderer,
     RendererPool,
     ToolCallParseStatus,
@@ -127,6 +128,7 @@ async def generate(
     model: str,
     prompt_ids: list[int] | None = None,
     multi_modal_data: MultiModalData | None = None,
+    prompt_attribution: RenderedTokens | None = None,
     tools: list[ToolSpec] | None = None,
     sampling_params: dict[str, Any] | None = None,
     cache_salt: str | None = None,
@@ -141,7 +143,11 @@ async def generate(
     renderer) and ``logprobs=1`` (we always emit completion_logprobs). Pass
     ``prompt_ids`` to skip rendering and use a prebuilt token sequence —
     pair it with ``multi_modal_data`` when the prebuilt prompt has image /
-    video placeholders that need engine-side mm payload.
+    video placeholders that need engine-side mm payload, and with
+    ``prompt_attribution`` (a :class:`RenderedTokens` whose ``token_ids``
+    match the passed-in ``prompt_ids``) to carry the renderer's per-token
+    attribution (``is_content`` / ``sampled_mask`` / ``message_indices`` /
+    ``message_roles``) into the result without re-rendering.
 
     For multimodal renderers (e.g. ``Qwen3VLRenderer``), the call goes
     through ``renderer.render(...)`` to recover the ``multi_modal_data``
@@ -161,7 +167,19 @@ async def generate(
 
     Returns a dict with: request_id, prompt_ids, completion_ids,
     completion_logprobs, content, reasoning_content, tool_calls,
-    finish_reason, routed_experts.
+    finish_reason, routed_experts, multi_modal_data, prompt_attribution.
+
+    ``prompt_attribution`` is the renderer's :class:`RenderedTokens` for
+    the prompt — either the one this call computed via
+    ``renderer.render(...)`` or the one the caller threaded in alongside
+    ``prompt_ids``. Carries ``token_ids``, ``message_indices``,
+    ``sampled_mask``, ``is_content``, ``message_roles``, and
+    ``multi_modal_data``, so downstream consumers (verifiers
+    ``RendererClient`` → prime-rl) can build per-token loss masks
+    (``content_mask_for_roles({"tool"})`` for SFT-on-tool-body,
+    ``sampled_mask`` for RL trainable spans) without a second render
+    pass. ``None`` when the caller passed pre-built ``prompt_ids``
+    without attribution.
     """
     if tools and not getattr(renderer, "supports_tools", True):
         raise ValueError(
@@ -171,15 +189,26 @@ async def generate(
 
     def _prepare():
         if prompt_ids is not None:
-            return list(prompt_ids), renderer.get_stop_token_ids(), multi_modal_data
+            # Caller-supplied prompt; if they also gave us pre-computed
+            # attribution (e.g. the bridge path in verifiers), thread it
+            # through unchanged.
+            return (
+                list(prompt_ids),
+                renderer.get_stop_token_ids(),
+                multi_modal_data,
+                prompt_attribution,
+            )
         rendered = renderer.render(messages, tools=tools, add_generation_prompt=True)
         return (
             rendered.token_ids,
             renderer.get_stop_token_ids(),
             rendered.multi_modal_data,
+            rendered,
         )
 
-    prompt_ids, stop_token_ids, mm_data = await _maybe_offload(renderer, _prepare)
+    prompt_ids, stop_token_ids, mm_data, prompt_attr = await _maybe_offload(
+        renderer, _prepare
+    )
 
     if max_prompt_len is None:
         max_prompt_len = await _resolve_max_prompt_len(client, model)
@@ -279,6 +308,14 @@ async def generate(
         # callers can persist it on the trajectory step for downstream
         # multi-turn bridging and training-sample construction.
         "multi_modal_data": mm_data,
+        # The renderer's per-token attribution for the prompt — either
+        # the RenderedTokens computed here via renderer.render(...) or
+        # the one threaded in by the caller alongside prompt_ids (the
+        # bridge path). Lets downstream consumers (verifiers
+        # RendererClient → prime-rl) build SFT-on-tool-body and other
+        # selective loss masks without a second render pass. ``None``
+        # when the caller passed prompt_ids without attribution.
+        "prompt_attribution": prompt_attr,
     }
 
 

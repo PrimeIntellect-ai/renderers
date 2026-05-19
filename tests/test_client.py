@@ -19,7 +19,15 @@ class _FakeRenderer:
         assert messages == [{"role": "user", "content": "hi"}]
         assert tools == [{"type": "function", "function": {"name": "echo"}}]
         assert add_generation_prompt is True
-        return RenderedTokens(token_ids=[1, 2, 3])
+        # Populate the full attribution surface so the test can verify
+        # ``generate`` threads it through to the result dict unchanged.
+        return RenderedTokens(
+            token_ids=[1, 2, 3],
+            message_indices=[0, 0, -1],
+            sampled_mask=[False, False, False],
+            is_content=[False, True, False],
+            message_roles=["user"],
+        )
 
     def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
         return self.render(
@@ -137,6 +145,17 @@ def test_generate_builds_request_body_and_parses_response():
     assert result["routed_experts"] == [[[1]], [[2]]]
     assert result["multi_modal_data"] is None
     assert result["request_id"] == "gen-test"
+    # Per-token attribution from the renderer surfaces on the result so
+    # downstream consumers (verifiers RendererClient → prime-rl) can
+    # build selective loss masks without a second render pass.
+    attr = result["prompt_attribution"]
+    assert attr is not None
+    assert isinstance(attr, RenderedTokens)
+    assert attr.token_ids == [1, 2, 3]
+    assert attr.is_content == [False, True, False]
+    assert attr.sampled_mask == [False, False, False]
+    assert attr.message_indices == [0, 0, -1]
+    assert attr.message_roles == ["user"]
     assert len(result["tool_calls"]) == 1
     tc = result["tool_calls"][0]
     assert tc.name == "echo"
@@ -207,6 +226,44 @@ def test_generate_uses_prebuilt_prompt_ids_without_rendering():
 
     assert client.calls[0]["body"]["token_ids"] == [11, 12, 13]
     assert result["prompt_ids"] == [11, 12, 13]
+    # Pre-built prompt without explicit attribution → ``None`` carried
+    # through. Consumers fall back to whatever attribution-free path
+    # they have (e.g. uniform completion mask).
+    assert result["prompt_attribution"] is None
+
+
+def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
+    """When the caller passes both ``prompt_ids`` and ``prompt_attribution``
+    (the multi-turn bridge path in verifiers), ``generate`` must thread
+    the attribution through to the result dict unchanged — no re-rendering,
+    no per-token reshuffling. Lets downstream consumers carry the
+    renderer's body/scaffold cut into the trajectory step without an
+    extra render pass."""
+    client = _FakeClient()
+    # Caller-supplied attribution; mirrors what
+    # ``RendererClient._get_incremental_prompt_ids`` returns from the
+    # bridge_to_next_turn output.
+    supplied = RenderedTokens(
+        token_ids=[11, 12, 13],
+        message_indices=[-1, 0, 0],
+        sampled_mask=[False, False, False],
+        is_content=[False, True, True],
+        message_roles=["tool"],
+    )
+
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=_NoRenderRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            prompt_ids=[11, 12, 13],
+            prompt_attribution=supplied,
+        )
+    )
+
+    # Exact passthrough — same object, no copy / no transform.
+    assert result["prompt_attribution"] is supplied
 
 
 # ---------------------------------------------------------------------------

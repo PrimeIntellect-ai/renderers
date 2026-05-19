@@ -317,7 +317,10 @@ class Qwen35Renderer:
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
             emit_ids(
-                self._encode(text), msg_idx, is_sampled=is_sampled, is_content=is_content
+                self._encode(text),
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=is_content,
             )
 
         def emit_text_segments(
@@ -355,9 +358,7 @@ class Qwen35Renderer:
                 emit_special(
                     self._image_pad, msg_idx, is_sampled=False, is_content=True
                 )
-            emit_special(
-                self._vision_end, msg_idx, is_sampled=False, is_content=False
-            )
+            emit_special(self._vision_end, msg_idx, is_sampled=False, is_content=False)
             mm_hashes.setdefault("image", []).append(h)
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
@@ -431,7 +432,10 @@ class Qwen35Renderer:
             # JSON tool specs — is scaffold. The tools dict is
             # recoverable from the ``tools`` argument; don't re-attribute
             # its embedded JSON as message body.
-            segments: list[tuple[str, bool]] = [("system\n", False), (_TOOLS_HEADER, False)]
+            segments: list[tuple[str, bool]] = [
+                ("system\n", False),
+                (_TOOLS_HEADER, False),
+            ]
             for tool in tools:
                 segments.append(("\n" + json.dumps(tool, ensure_ascii=False), False))
             segments.append((_TOOLS_FOOTER, False))
@@ -895,9 +899,7 @@ class Qwen35Renderer:
                 is_content=True,
             )
             emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
-            emit_text(
-                "\n\n" + content, msg_idx, is_sampled=True, is_content=True
-            )
+            emit_text("\n\n" + content, msg_idx, is_sampled=True, is_content=True)
         else:
             emit_text(content, msg_idx, is_sampled=True, is_content=True)
 
@@ -912,16 +914,12 @@ class Qwen35Renderer:
                 # Separator before <tool_call>
                 if tc_idx == 0:
                     if content.strip():
-                        emit_text(
-                            "\n\n", msg_idx, is_sampled=True, is_content=True
-                        )
+                        emit_text("\n\n", msg_idx, is_sampled=True, is_content=True)
                     # else: no separator
                 else:
                     emit_text("\n", msg_idx, is_sampled=True, is_content=True)
 
-                emit_special(
-                    self._tool_call, msg_idx, is_sampled=True, is_content=True
-                )
+                emit_special(self._tool_call, msg_idx, is_sampled=True, is_content=True)
                 emit_text(
                     "\n<function=" + name + ">\n",
                     msg_idx,
@@ -951,9 +949,7 @@ class Qwen35Renderer:
                             is_content=True,
                         )
 
-                emit_text(
-                    "</function>\n", msg_idx, is_sampled=True, is_content=True
-                )
+                emit_text("</function>\n", msg_idx, is_sampled=True, is_content=True)
                 emit_special(
                     self._tool_call_end, msg_idx, is_sampled=True, is_content=True
                 )

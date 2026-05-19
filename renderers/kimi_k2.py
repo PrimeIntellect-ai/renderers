@@ -233,19 +233,11 @@ class KimiK2Renderer:
             body_is_content = oi >= 0
 
             if role == "system":
-                emit_special(
-                    self._im_system, oi, is_sampled=False, is_content=False
-                )
+                emit_special(self._im_system, oi, is_sampled=False, is_content=False)
                 emit_text("system", oi, is_sampled=False, is_content=False)
-                emit_special(
-                    self._im_middle, oi, is_sampled=False, is_content=False
-                )
-                emit_text(
-                    content, oi, is_sampled=False, is_content=body_is_content
-                )
-                emit_special(
-                    self._im_end, oi, is_sampled=False, is_content=False
-                )
+                emit_special(self._im_middle, oi, is_sampled=False, is_content=False)
+                emit_text(content, oi, is_sampled=False, is_content=body_is_content)
+                emit_special(self._im_end, oi, is_sampled=False, is_content=False)
                 # Jinja emits a literal newline only after the auto-injected
                 # system's <|im_end|> (see _ensure_system_message's contract).
                 if i == auto_system_idx:
@@ -255,34 +247,18 @@ class KimiK2Renderer:
                 # The tool_declare body is the tools JSON — recoverable
                 # from the caller's ``tools`` argument, so we treat it as
                 # scaffold (consistent with Qwen3's tools-header block).
-                emit_special(
-                    self._im_system, oi, is_sampled=False, is_content=False
-                )
-                emit_text(
-                    "tool_declare", oi, is_sampled=False, is_content=False
-                )
-                emit_special(
-                    self._im_middle, oi, is_sampled=False, is_content=False
-                )
+                emit_special(self._im_system, oi, is_sampled=False, is_content=False)
+                emit_text("tool_declare", oi, is_sampled=False, is_content=False)
+                emit_special(self._im_middle, oi, is_sampled=False, is_content=False)
                 emit_text(content, oi, is_sampled=False, is_content=False)
-                emit_special(
-                    self._im_end, oi, is_sampled=False, is_content=False
-                )
+                emit_special(self._im_end, oi, is_sampled=False, is_content=False)
 
             elif role == "user":
-                emit_special(
-                    self._im_user, oi, is_sampled=False, is_content=False
-                )
+                emit_special(self._im_user, oi, is_sampled=False, is_content=False)
                 emit_text("user", oi, is_sampled=False, is_content=False)
-                emit_special(
-                    self._im_middle, oi, is_sampled=False, is_content=False
-                )
-                emit_text(
-                    content, oi, is_sampled=False, is_content=body_is_content
-                )
-                emit_special(
-                    self._im_end, oi, is_sampled=False, is_content=False
-                )
+                emit_special(self._im_middle, oi, is_sampled=False, is_content=False)
+                emit_text(content, oi, is_sampled=False, is_content=body_is_content)
+                emit_special(self._im_end, oi, is_sampled=False, is_content=False)
 
             elif role == "assistant":
                 # Kimi strips reasoning from historical assistant turns and
@@ -313,19 +289,11 @@ class KimiK2Renderer:
                 # Unknown role: use system-style formatting. Not a sampled
                 # assistant turn — every token is template-injected from the
                 # caller's POV, so is_sampled=False across the whole emission.
-                emit_special(
-                    self._im_system, oi, is_sampled=False, is_content=False
-                )
+                emit_special(self._im_system, oi, is_sampled=False, is_content=False)
                 emit_text(role, oi, is_sampled=False, is_content=False)
-                emit_special(
-                    self._im_middle, oi, is_sampled=False, is_content=False
-                )
-                emit_text(
-                    content, oi, is_sampled=False, is_content=body_is_content
-                )
-                emit_special(
-                    self._im_end, oi, is_sampled=False, is_content=False
-                )
+                emit_special(self._im_middle, oi, is_sampled=False, is_content=False)
+                emit_text(content, oi, is_sampled=False, is_content=body_is_content)
+                emit_special(self._im_end, oi, is_sampled=False, is_content=False)
 
         # Generation prompt
         if add_generation_prompt:

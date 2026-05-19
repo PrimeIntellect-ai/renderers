@@ -190,9 +190,7 @@ class LagunaXS2Renderer:
         # ── System header (absorbs messages[0] if it's a system message) ──
         system_content = _DEFAULT_SYSTEM_MESSAGE
         system_msg_idx = -1
-        caller_has_system = bool(
-            messages and messages[0].get("role") == "system"
-        )
+        caller_has_system = bool(messages and messages[0].get("role") == "system")
         if caller_has_system:
             system_content = self._visible_text(messages[0].get("content"))
             system_msg_idx = 0

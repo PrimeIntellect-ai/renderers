@@ -1465,9 +1465,7 @@ def _get_offset_tokenizer(tokenizer):
     """
     # Cheap probe: does this tokenizer already provide offsets?
     try:
-        tokenizer(
-            "a", add_special_tokens=False, return_offsets_mapping=True
-        )
+        tokenizer("a", add_special_tokens=False, return_offsets_mapping=True)
         return tokenizer
     except (NotImplementedError, ValueError, TypeError):
         pass

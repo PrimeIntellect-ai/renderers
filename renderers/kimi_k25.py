@@ -866,13 +866,9 @@ class KimiK25Renderer:
             if role == "user":
                 emit_special(self._im_user, i, is_sampled=False, is_content=False)
             elif role == "assistant":
-                emit_special(
-                    self._im_assistant, i, is_sampled=False, is_content=False
-                )
+                emit_special(self._im_assistant, i, is_sampled=False, is_content=False)
             else:
-                emit_special(
-                    self._im_system, i, is_sampled=False, is_content=False
-                )
+                emit_special(self._im_system, i, is_sampled=False, is_content=False)
             role_name = msg.get("name") or role
             emit_text(role_name, i, is_sampled=False, is_content=False)
             emit_special(self._im_middle, i, is_sampled=False, is_content=False)
@@ -899,9 +895,7 @@ class KimiK25Renderer:
                 # stream (and the assistant's body). Kimi K2.5 has no
                 # inter-turn ``\n`` separator (unlike Qwen3), so the
                 # turn-close token is the last sampled token.
-                emit_special(
-                    self._im_end, i, is_sampled=True, is_content=True
-                )
+                emit_special(self._im_end, i, is_sampled=True, is_content=True)
                 continue
             elif role == "tool":
                 self._render_tool_body(
@@ -940,9 +934,7 @@ class KimiK25Renderer:
                 emit_text("<think>", -1, is_sampled=False, is_content=False)
             else:
                 # Empty <think></think> to disable thinking
-                emit_text(
-                    "<think></think>", -1, is_sampled=False, is_content=False
-                )
+                emit_text("<think></think>", -1, is_sampled=False, is_content=False)
 
         mm_data: MultiModalData | None = None
         if mm_hashes or mm_placeholders or mm_items:
@@ -1369,9 +1361,7 @@ class KimiK25Renderer:
                 is_content=True,
             )
         else:
-            emit_text(
-                "<think></think>", msg_idx, is_sampled=True, is_content=True
-            )
+            emit_text("<think></think>", msg_idx, is_sampled=True, is_content=True)
         emit_text(text_content, msg_idx, is_sampled=True, is_content=True)
 
         tool_calls = msg.get("tool_calls") or []

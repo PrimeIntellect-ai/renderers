@@ -264,7 +264,10 @@ class Nemotron3Renderer:
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
             emit_ids(
-                self._encode(text), msg_idx, is_sampled=is_sampled, is_content=is_content
+                self._encode(text),
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=is_content,
             )
 
         def emit_text_segments(
@@ -349,12 +352,16 @@ class Nemotron3Renderer:
                 continue  # Already handled above
 
             elif role == "user":
-                emit_special(self._im_start, msg_orig_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._im_start, msg_orig_idx, is_sampled=False, is_content=False
+                )
                 user_segments: list[tuple[str, bool]] = [("user\n", False)]
                 if content:
                     user_segments.append((content, True))
                 emit_text_segments(user_segments, msg_orig_idx, is_sampled=False)
-                emit_special(self._im_end, msg_orig_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._im_end, msg_orig_idx, is_sampled=False, is_content=False
+                )
                 emit_text("\n", msg_orig_idx, is_sampled=False, is_content=False)
 
             elif role == "assistant":
@@ -715,9 +722,7 @@ class Nemotron3Renderer:
                             is_content=True,
                         )
 
-                emit_text(
-                    "</function>\n", msg_idx, is_sampled=True, is_content=True
-                )
+                emit_text("</function>\n", msg_idx, is_sampled=True, is_content=True)
                 emit_special(
                     self._tool_call_end, msg_idx, is_sampled=True, is_content=True
                 )

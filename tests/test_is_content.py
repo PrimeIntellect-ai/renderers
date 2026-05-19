@@ -76,9 +76,7 @@ def test_is_content_equals_sampled_on_assistant(model_name, renderer):
         if msgs[msg_idx].get("role") != "assistant":
             continue
         if rendered.is_content[k] != rendered.sampled_mask[k]:
-            mismatches.append(
-                (k, rendered.is_content[k], rendered.sampled_mask[k])
-            )
+            mismatches.append((k, rendered.is_content[k], rendered.sampled_mask[k]))
     assert not mismatches, (
         f"{model_name}: is_content != sampled_mask on assistant tokens "
         f"(k, is_content, sampled): {mismatches[:8]}"
@@ -230,12 +228,8 @@ def test_is_content_no_body_on_role_tag(model_name, renderer):
     if not _is_populated(rendered):
         return
 
-    user_positions = [
-        k for k, idx in enumerate(rendered.message_indices) if idx == 0
-    ]
-    assert user_positions, (
-        f"{model_name}: no tokens attributed to user message"
-    )
+    user_positions = [k for k, idx in enumerate(rendered.message_indices) if idx == 0]
+    assert user_positions, f"{model_name}: no tokens attributed to user message"
     first_k = user_positions[0]
     assert not rendered.is_content[first_k], (
         f"{model_name}: first user-attributed token at k={first_k} should "
@@ -243,7 +237,9 @@ def test_is_content_no_body_on_role_tag(model_name, renderer):
     )
 
 
-def test_content_token_spans_by_role_isolates_tool_body(model_name, tokenizer, renderer):
+def test_content_token_spans_by_role_isolates_tool_body(
+    model_name, tokenizer, renderer
+):
     """``content_token_spans_by_role()["tool"]`` returns spans over
     which every token is the tool message body. Joining the decoded
     spans recovers the tool response. Adjacent scaffold tokens
@@ -272,9 +268,7 @@ def test_content_token_spans_by_role_isolates_tool_body(model_name, tokenizer, r
 
     spans = rendered.content_token_spans_by_role()
     tool_spans = spans.get("tool") or []
-    assert tool_spans, (
-        f"{model_name}: no tool content spans returned"
-    )
+    assert tool_spans, f"{model_name}: no tool content spans returned"
 
     pieces: list[str] = []
     for s, e in tool_spans:
@@ -282,8 +276,7 @@ def test_content_token_spans_by_role_isolates_tool_body(model_name, tokenizer, r
         # All tokens in the span must be is_content=True by definition.
         for k in range(s, e):
             assert rendered.is_content[k], (
-                f"{model_name}: span {(s, e)} contains is_content=False "
-                f"at k={k}"
+                f"{model_name}: span {(s, e)} contains is_content=False at k={k}"
             )
         pieces.append(tokenizer.decode(run_ids))
     joined = "".join(pieces).strip()
@@ -293,9 +286,7 @@ def test_content_token_spans_by_role_isolates_tool_body(model_name, tokenizer, r
     )
 
 
-def test_content_mask_for_roles_excludes_assistant_when_unset(
-    model_name, renderer
-):
+def test_content_mask_for_roles_excludes_assistant_when_unset(model_name, renderer):
     """``content_mask_for_roles({"tool"})`` returns a mask that's True
     only on tool body tokens — never on assistant tokens, even though
     those also have ``is_content=True``. The role filter is the whole
@@ -326,15 +317,13 @@ def test_content_mask_for_roles_excludes_assistant_when_unset(
     for k, mi in enumerate(rendered.message_indices):
         if mi < 0:
             assert not tool_mask[k], (
-                f"{model_name}: scaffold token k={k} (msg_idx=-1) marked "
-                f"in tool mask"
+                f"{model_name}: scaffold token k={k} (msg_idx=-1) marked in tool mask"
             )
             continue
         role = msgs[mi].get("role")
         if role != "tool" and tool_mask[k]:
             raise AssertionError(
-                f"{model_name}: tool-role mask True on a {role!r} token "
-                f"at k={k}"
+                f"{model_name}: tool-role mask True on a {role!r} token at k={k}"
             )
 
 
@@ -396,6 +385,5 @@ def test_build_training_sample_content_sft_roles_picks_up_tool_body(
         f"{model_name}: assistant tokens dropped from training mask"
     )
     assert trainable_per_role.get("user", 0) == 0, (
-        f"{model_name}: user tokens leaked into training mask: "
-        f"{trainable_per_role}"
+        f"{model_name}: user tokens leaked into training mask: {trainable_per_role}"
     )

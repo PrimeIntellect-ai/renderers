@@ -279,9 +279,7 @@ class _Emitter:
             "_Emitter mixed-is_content flush requires a tokenizer; "
             "pass one to the constructor."
         )
-        for tok_id, is_content in attribute_text_segments(
-            self._tokenizer, segments
-        ):
+        for tok_id, is_content in attribute_text_segments(self._tokenizer, segments):
             self.token_ids.append(tok_id)
             self.message_indices.append(self._buf_idx)
             self.sampled.append(self._buf_sampled)

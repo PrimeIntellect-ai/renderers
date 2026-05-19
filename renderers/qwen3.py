@@ -492,9 +492,7 @@ class Qwen3Renderer:
                 else:
                     emit_text("\n", msg_idx, is_sampled=True, is_content=True)
 
-                emit_special(
-                    self._tool_call, msg_idx, is_sampled=True, is_content=True
-                )
+                emit_special(self._tool_call, msg_idx, is_sampled=True, is_content=True)
                 emit_text(
                     '\n{"name": "' + name + '", "arguments": ' + args_str + "}\n",
                     msg_idx,

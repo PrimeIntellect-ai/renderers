@@ -211,7 +211,10 @@ class MiniMaxM2Renderer:
             for tool in tools:
                 func = tool.get("function", tool)
                 sys_segments.append(
-                    ("<tool>" + json.dumps(func, ensure_ascii=False) + "</tool>\n", False)
+                    (
+                        "<tool>" + json.dumps(func, ensure_ascii=False) + "</tool>\n",
+                        False,
+                    )
                 )
             sys_segments.append((_TOOLS_FOOTER_PREFIX, False))
             sys_segments.append((_TOOLS_INSTRUCTIONS, False))
@@ -545,9 +548,7 @@ class MiniMaxM2Renderer:
             # The empty-body / non-thinking case folded the leading \n
             # into the role-tag emission above; skip it here.
             if emit_thinking or body:
-                emit_text(
-                    body + "\n", orig_idx, is_sampled=True, is_content=True
-                )
+                emit_text(body + "\n", orig_idx, is_sampled=True, is_content=True)
             emit_special(
                 self._tool_call_tok, orig_idx, is_sampled=True, is_content=True
             )

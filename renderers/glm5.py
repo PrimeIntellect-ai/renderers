@@ -527,9 +527,7 @@ class GLM5Renderer:
                         self._arg_value, msg_idx, is_sampled=True, is_content=True
                     )
                     if isinstance(arg_value, str):
-                        emit_text(
-                            arg_value, msg_idx, is_sampled=True, is_content=True
-                        )
+                        emit_text(arg_value, msg_idx, is_sampled=True, is_content=True)
                     else:
                         emit_text(
                             json.dumps(arg_value, ensure_ascii=False),

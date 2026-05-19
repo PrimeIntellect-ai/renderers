@@ -383,9 +383,7 @@ class GLM45Renderer:
                 emit_text_segments(user_segments, i)
             elif role == "system":
                 emit_special(self._system, i)
-                emit_text_segments(
-                    [("\n", False), (content, True)], i
-                )
+                emit_text_segments([("\n", False), (content, True)], i)
             elif role == "tool":
                 prev_is_tool = i > 0 and new_messages[i - 1].get("role") == "tool"
                 if i == 0 and last_prev == self._observation:
@@ -481,9 +479,7 @@ class GLM45Renderer:
                 "\n" + content.strip() + "\n", msg_idx, is_sampled=True, is_content=True
             )
         elif content.strip():
-            emit_text(
-                "\n" + content.strip(), msg_idx, is_sampled=True, is_content=True
-            )
+            emit_text("\n" + content.strip(), msg_idx, is_sampled=True, is_content=True)
 
         for tc in tool_calls:
             func = tc.get("function") or tc
@@ -515,9 +511,7 @@ class GLM45Renderer:
                         self._arg_value, msg_idx, is_sampled=True, is_content=True
                     )
                     if isinstance(arg_value, str):
-                        emit_text(
-                            arg_value, msg_idx, is_sampled=True, is_content=True
-                        )
+                        emit_text(arg_value, msg_idx, is_sampled=True, is_content=True)
                     else:
                         emit_text(
                             json.dumps(arg_value, ensure_ascii=False),

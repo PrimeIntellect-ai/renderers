@@ -137,7 +137,10 @@ class DeepSeekV3Renderer:
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
             emit_ids(
-                self._encode(text), msg_idx, is_sampled=is_sampled, is_content=is_content
+                self._encode(text),
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=is_content,
             )
 
         def emit_text_segments(
@@ -175,9 +178,7 @@ class DeepSeekV3Renderer:
         if sys_parts:
             # Attribute the concatenated system text to the first system message (index 0).
             # The system content is the caller's body — mark is_content=True.
-            emit_text(
-                "\n\n".join(sys_parts), 0, is_sampled=False, is_content=True
-            )
+            emit_text("\n\n".join(sys_parts), 0, is_sampled=False, is_content=True)
 
         # ── 3. Render non-system messages ─────────────────────────────
         num_messages = len(messages)
@@ -467,9 +468,7 @@ class DeepSeekV3Renderer:
                     self._tool_call_begin, msg_idx, is_sampled=True, is_content=True
                 )
                 emit_text("function", msg_idx, is_sampled=True, is_content=True)
-                emit_special(
-                    self._tool_sep, msg_idx, is_sampled=True, is_content=True
-                )
+                emit_special(self._tool_sep, msg_idx, is_sampled=True, is_content=True)
                 emit_text(
                     f"{name}\n```json\n{args_str}\n```",
                     msg_idx,
@@ -524,9 +523,7 @@ class DeepSeekV3Renderer:
             self._tool_output_begin, msg_idx, is_sampled=False, is_content=False
         )
         emit_text(str(content), msg_idx, is_sampled=False, is_content=True)
-        emit_special(
-            self._tool_output_end, msg_idx, is_sampled=False, is_content=False
-        )
+        emit_special(self._tool_output_end, msg_idx, is_sampled=False, is_content=False)
 
         if not next_is_tool:
             emit_special(

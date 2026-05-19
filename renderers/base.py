@@ -391,7 +391,8 @@ class RenderedTokens:
         out: dict[str, list[tuple[int, int]]] = {}
         if not self.is_content or not self.message_roles:
             return out
-        if len(self.is_content) != len(self.token_ids):
+        n = len(self.token_ids)
+        if len(self.is_content) != n or len(self.message_indices) != n:
             return out
 
         msg_spans = self.message_token_spans()

@@ -213,7 +213,9 @@ class _EnumType(_BaseType):
         self.enum = schema["enum"]
 
     def to_typescript_style(self, indent: str = "") -> str:
-        return " | ".join(f'"{e}"' if isinstance(e, str) else str(e) for e in self.enum)
+        return " | ".join(
+            f'"{e}"' if isinstance(e, str) else json.dumps(e) for e in self.enum
+        )
 
 
 class _AnyOfType(_BaseType):
@@ -283,11 +285,7 @@ class _TypedParam:
     def to_typescript_style(self, indent: str = "") -> str:
         comments = self.type_.format_docstring(indent)
         if self.default is not None:
-            default_repr = (
-                json.dumps(self.default, ensure_ascii=False)
-                if not isinstance(self.default, (int, float, bool))
-                else repr(self.default)
-            )
+            default_repr = json.dumps(self.default, ensure_ascii=False)
             comments += f"{indent}// Default: {default_repr}\n"
         opt = "?" if self.optional else ""
         return (

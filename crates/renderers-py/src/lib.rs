@@ -13,7 +13,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyType};
 
-use renderers_core::families::Qwen3RendererBuilder;
+use renderers_core::families::{Qwen35RendererBuilder, Qwen3RendererBuilder};
 use renderers_core::tokenizer::Tokenizer;
 use renderers_core::types::{
     Message, ParsedResponse, ParsedToolCall, RenderedTokens, ToolArguments, ToolCallParseStatus,
@@ -258,6 +258,42 @@ impl PyRenderer {
         let renderer = py
             .allow_threads(|| {
                 Qwen3RendererBuilder::default()
+                    .enable_thinking(enable_thinking)
+                    .preserve_all_thinking(preserve_all_thinking)
+                    .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls)
+                    .build(tok)
+            })
+            .map_err(render_err)?;
+        Ok(PyRenderer {
+            inner: Arc::new(renderer),
+        })
+    }
+
+    /// Build a Qwen3.5 renderer (text-only path) from a tokenizer.json.
+    ///
+    /// `enable_thinking` defaults to `True` (big-size variant). The Python
+    /// shim is expected to probe the tokenizer's Jinja template to pick
+    /// the right polarity for 0.8B / 2B models and forward it explicitly.
+    #[classmethod]
+    #[pyo3(signature = (
+        tokenizer_path,
+        *,
+        enable_thinking = true,
+        preserve_all_thinking = false,
+        preserve_thinking_between_tool_calls = false,
+    ))]
+    fn qwen35(
+        _cls: &Bound<'_, PyType>,
+        py: Python<'_>,
+        tokenizer_path: &str,
+        enable_thinking: bool,
+        preserve_all_thinking: bool,
+        preserve_thinking_between_tool_calls: bool,
+    ) -> PyResult<Self> {
+        let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
+        let renderer = py
+            .allow_threads(|| {
+                Qwen35RendererBuilder::default()
                     .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
                     .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls)

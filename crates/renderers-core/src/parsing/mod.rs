@@ -10,6 +10,7 @@
 //! they vanish into the family parsers at -O.
 
 pub mod qwen3;
+pub mod qwen35;
 
 use crate::tokenizer::Tokenizer;
 use crate::types::RenderError;

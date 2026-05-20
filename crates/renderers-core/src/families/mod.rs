@@ -5,5 +5,7 @@
 //! registry entry in [`crate::registry`].
 
 pub mod qwen3;
+pub mod qwen35;
 
 pub use qwen3::{Qwen3Renderer, Qwen3RendererBuilder};
+pub use qwen35::{Qwen35Renderer, Qwen35RendererBuilder};

@@ -40,6 +40,7 @@ pytestmark = pytest.mark.parity
 # (model_id, family-key, extra-kwargs)
 NATIVE_PARITY_FAMILIES = [
     ("Qwen/Qwen3-8B", "qwen3", {}),
+    ("Qwen/Qwen3.5-9B", "qwen35", {}),
 ]
 
 
@@ -83,6 +84,10 @@ def native_pair(request, native_module):
             from renderers.qwen3 import Qwen3Renderer
 
             py_renderer = Qwen3Renderer(tokenizer, **extra)
+        elif family == "qwen35":
+            from renderers.qwen35 import Qwen35Renderer
+
+            py_renderer = Qwen35Renderer(tokenizer, **extra)
         else:
             pytest.skip(f"no python builder wired for {family}")
     finally:
@@ -93,6 +98,8 @@ def native_pair(request, native_module):
     # bypasses the env-var routing entirely.
     if family == "qwen3":
         native_renderer = native_module.Renderer.qwen3(tok_path, **extra)
+    elif family == "qwen35":
+        native_renderer = native_module.Renderer.qwen35(tok_path, **extra)
     else:
         pytest.skip(f"no native builder wired for {family}")
 

@@ -19,6 +19,11 @@ from typing import Any
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
+from renderers._native_router import (
+    load_native,
+    native_enabled,
+    resolve_tokenizer_path,
+)
 from renderers.base import (
     Message,
     MultiModalData,
@@ -108,6 +113,35 @@ def _default_enable_thinking(tokenizer) -> bool:
 
 class Qwen35Renderer:
     """Deterministic message → token renderer for Qwen3.5 models."""
+
+    def __new__(
+        cls,
+        tokenizer: PreTrainedTokenizer,
+        *,
+        processor: Any = None,
+        enable_thinking: bool | None = None,
+        preserve_all_thinking: bool = False,
+        preserve_thinking_between_tool_calls: bool = False,
+        image_cache_max: int = 256,
+    ):
+        # Route to native only when:
+        #   1. the user opted in via RENDERERS_NATIVE,
+        #   2. the wheel is installed,
+        #   3. the message stream is text-only (no processor / images).
+        # Phase 5 will lift restriction 3.
+        if native_enabled("qwen35") and processor is None:
+            native = load_native()
+            if native is not None:
+                if enable_thinking is None:
+                    enable_thinking = _detect_enable_thinking_default(tokenizer)
+                path = resolve_tokenizer_path(tokenizer)
+                return native.Renderer.qwen35(
+                    path,
+                    enable_thinking=enable_thinking,
+                    preserve_all_thinking=preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                )
+        return super().__new__(cls)
 
     _config_cls: type = Qwen35RendererConfig
 

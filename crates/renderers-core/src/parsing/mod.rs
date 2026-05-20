@@ -10,6 +10,7 @@
 //! they vanish into the family parsers at -O.
 
 pub mod deepseek_v3;
+pub mod glm;
 pub mod qwen3;
 pub mod qwen35;
 

@@ -4,6 +4,7 @@
 //! stays focused. New families slot in by adding a module here and a
 //! registry entry in [`crate::registry`].
 
+pub mod default;
 pub mod deepseek_v3;
 pub mod glm;
 pub mod gpt_oss;
@@ -15,6 +16,7 @@ pub mod qwen3;
 pub mod qwen35;
 pub mod qwen36;
 
+pub use default::{DefaultRenderer, DefaultRendererBuilder};
 pub use deepseek_v3::{DeepSeekV3Renderer, DeepSeekV3RendererBuilder};
 pub use glm::{GlmRenderer, GlmRendererBuilder};
 pub use gpt_oss::{GptOssRenderer, GptOssRendererBuilder};

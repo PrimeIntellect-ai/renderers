@@ -14,9 +14,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyType};
 
 use renderers_core::families::{
-    DeepSeekV3RendererBuilder, GlmRendererBuilder, GptOssRendererBuilder, KimiK25RendererBuilder,
-    KimiK2RendererBuilder, MiniMaxM2RendererBuilder, Nemotron3RendererBuilder,
-    Qwen35RendererBuilder, Qwen36RendererBuilder, Qwen3RendererBuilder,
+    DefaultRendererBuilder, DeepSeekV3RendererBuilder, GlmRendererBuilder, GptOssRendererBuilder,
+    KimiK25RendererBuilder, KimiK2RendererBuilder, MiniMaxM2RendererBuilder,
+    Nemotron3RendererBuilder, Qwen35RendererBuilder, Qwen36RendererBuilder, Qwen3RendererBuilder,
 };
 use renderers_core::tokenizer::Tokenizer;
 use renderers_core::types::{
@@ -453,6 +453,53 @@ impl PyRenderer {
                     .preserve_all_thinking(preserve_all_thinking)
                     .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls)
                     .build(tok)
+            })
+            .map_err(render_err)?;
+        Ok(PyRenderer { inner: Arc::new(renderer) })
+    }
+
+    /// Build a DefaultRenderer (Jinja fallback via minijinja).
+    ///
+    /// `chat_template` is the model's Jinja chat template (usually the
+    /// `chat_template` field of `tokenizer_config.json` or the contents
+    /// of `chat_template.jinja`). `stop_token_ids` is typically
+    /// `[eos_token_id]`; pass `None` to leave it empty.
+    #[classmethod]
+    #[pyo3(signature = (tokenizer_path, chat_template, *, stop_token_ids = None, extra_context = None))]
+    fn default_renderer(
+        _cls: &Bound<'_, PyType>,
+        py: Python<'_>,
+        tokenizer_path: &str,
+        chat_template: &str,
+        stop_token_ids: Option<&Bound<'_, PyAny>>,
+        extra_context: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
+        let stop_ids: Vec<u32> = match stop_token_ids {
+            None => Vec::new(),
+            Some(obj) if obj.is_none() => Vec::new(),
+            Some(obj) => parse_u32_list(obj)?,
+        };
+        let extras: Vec<(String, serde_json::Value)> = match extra_context {
+            None => Vec::new(),
+            Some(obj) if obj.is_none() => Vec::new(),
+            Some(obj) => {
+                let v: serde_json::Value = pythonize::depythonize(obj)
+                    .map_err(|e| invalid(format!("extra_context: {e}")))?;
+                match v {
+                    serde_json::Value::Object(m) => m.into_iter().collect(),
+                    _ => return Err(invalid("extra_context must be a dict")),
+                }
+            }
+        };
+        let ct = chat_template.to_string();
+        let renderer = py
+            .allow_threads(move || {
+                let mut b = DefaultRendererBuilder::new(ct).stop_token_ids(stop_ids);
+                for (k, v) in extras {
+                    b = b.add_context(k, v);
+                }
+                b.build(tok)
             })
             .map_err(render_err)?;
         Ok(PyRenderer { inner: Arc::new(renderer) })

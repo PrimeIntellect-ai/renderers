@@ -11,6 +11,7 @@
 
 pub mod deepseek_v3;
 pub mod glm;
+pub mod kimi_k2;
 pub mod qwen3;
 pub mod qwen35;
 

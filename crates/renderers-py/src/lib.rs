@@ -14,8 +14,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyType};
 
 use renderers_core::families::{
-    DeepSeekV3RendererBuilder, GlmRendererBuilder, Nemotron3RendererBuilder,
-    Qwen35RendererBuilder, Qwen36RendererBuilder, Qwen3RendererBuilder,
+    DeepSeekV3RendererBuilder, GlmRendererBuilder, KimiK2RendererBuilder,
+    Nemotron3RendererBuilder, Qwen35RendererBuilder, Qwen36RendererBuilder, Qwen3RendererBuilder,
 };
 use renderers_core::tokenizer::Tokenizer;
 use renderers_core::types::{
@@ -421,6 +421,36 @@ impl PyRenderer {
         let renderer = py
             .allow_threads(|| {
                 GlmRendererBuilder::glm45()
+                    .enable_thinking(enable_thinking)
+                    .preserve_all_thinking(preserve_all_thinking)
+                    .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls)
+                    .build(tok)
+            })
+            .map_err(render_err)?;
+        Ok(PyRenderer { inner: Arc::new(renderer) })
+    }
+
+    /// Build a Kimi K2 renderer from a tokenizer.json.
+    #[classmethod]
+    #[pyo3(signature = (
+        tokenizer_path,
+        *,
+        enable_thinking = true,
+        preserve_all_thinking = false,
+        preserve_thinking_between_tool_calls = false,
+    ))]
+    fn kimi_k2(
+        _cls: &Bound<'_, PyType>,
+        py: Python<'_>,
+        tokenizer_path: &str,
+        enable_thinking: bool,
+        preserve_all_thinking: bool,
+        preserve_thinking_between_tool_calls: bool,
+    ) -> PyResult<Self> {
+        let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
+        let renderer = py
+            .allow_threads(|| {
+                KimiK2RendererBuilder::default()
                     .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
                     .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls)

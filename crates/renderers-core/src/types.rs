@@ -58,6 +58,7 @@ pub struct VideoRef {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Content {
+    Null,
     Text(String),
     Parts(Vec<ContentPart>),
 }
@@ -73,6 +74,15 @@ impl Content {
     /// `""` for `Parts` variants (Qwen3 ignores list content entirely).
     pub fn as_text(&self) -> &str {
         match self {
+            Content::Null => "",
+            Content::Text(s) => s.as_str(),
+            Content::Parts(_) => "",
+        }
+    }
+
+    pub fn as_text_or_none_literal(&self) -> &str {
+        match self {
+            Content::Null => "None",
             Content::Text(s) => s.as_str(),
             Content::Parts(_) => "",
         }
@@ -80,6 +90,7 @@ impl Content {
 
     pub fn is_empty(&self) -> bool {
         match self {
+            Content::Null => true,
             Content::Text(s) => s.is_empty(),
             Content::Parts(p) => p.is_empty(),
         }
@@ -121,6 +132,8 @@ pub struct ToolSpec {
     pub description: String,
     #[serde(default)]
     pub parameters: serde_json::Value,
+    #[serde(default, skip)]
+    pub openai_envelope: bool,
 }
 
 /// A single turn in a multi-turn conversation.
@@ -147,6 +160,11 @@ impl Message {
     pub fn text_content(&self) -> &str {
         self.content.as_text()
     }
+
+    #[inline]
+    pub fn visible_text_content(&self) -> &str {
+        self.content.as_text_or_none_literal()
+    }
 }
 
 /// Tool-call argument payload. The JSON-object case is the common path;
@@ -155,8 +173,8 @@ impl Message {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum ToolArguments {
-    Object(serde_json::Value),
     Raw(String),
+    Object(serde_json::Value),
 }
 
 impl Default for ToolArguments {

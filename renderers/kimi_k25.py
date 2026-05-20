@@ -30,7 +30,7 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from renderers._native_router import (
     load_native,
     native_enabled,
-    resolve_tokenizer_path,
+    try_resolve_tokenizer_path,
 )
 from renderers.base import (
     Message,
@@ -620,13 +620,14 @@ class KimiK25Renderer:
         if native_enabled("kimi_k25") and processor is None:
             native = load_native()
             if native is not None:
-                path = resolve_tokenizer_path(tokenizer)
-                self._native_renderer = native.Renderer.kimi_k25(
-                    path,
-                    enable_thinking=enable_thinking,
-                    preserve_all_thinking=preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
-                )
+                path = try_resolve_tokenizer_path(tokenizer, "kimi_k25")
+                if path is not None:
+                    self._native_renderer = native.Renderer.kimi_k25(
+                        path,
+                        enable_thinking=enable_thinking,
+                        preserve_all_thinking=preserve_all_thinking,
+                        preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                    )
 
         # Core structural tokens — all must be single special tokens in the vocab
         self._im_user = self._token_id("<|im_user|>")

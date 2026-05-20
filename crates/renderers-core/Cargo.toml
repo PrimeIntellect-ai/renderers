@@ -23,8 +23,11 @@ phf = { workspace = true }
 openai-harmony = { version = "0.0.8", default-features = false }
 minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-ndarray = "0.16"
-sha2 = "0.10"
+ndarray = "0.17"
+sha2 = "0.11"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

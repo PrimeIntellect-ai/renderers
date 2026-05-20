@@ -31,6 +31,7 @@ use serde_json::Value as JsonValue;
 
 use crate::bridge::reject_assistant_in_extension;
 use crate::emit::RenderBuf;
+use crate::json::{to_string_python, tool_spec_inner_value, tool_spec_template_value};
 use crate::parsing::glm::parse_glm;
 use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
@@ -216,18 +217,12 @@ impl GlmRenderer {
     }
 
     fn format_tool_spec(&self, tool: &ToolSpec) -> Result<String, RenderError> {
-        // GLM-5 / GLM-4.5 render the spec verbatim; GLM-5.1 unwraps the
-        // OpenAI envelope (`{"type":"function","function":{...}}`) and
-        // strips internal-only keys.
-        //
-        // Our `ToolSpec` is already the inner shape, so the GLM-5.1
-        // unwrap is a no-op in Rust — kept here as a structural note.
-        let spec = serde_json::json!({
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.parameters,
-        });
-        serde_json::to_string(&spec)
+        let spec = if self.variant == Variant::Glm51 {
+            tool_spec_inner_value(tool)
+        } else {
+            tool_spec_template_value(tool)
+        };
+        to_string_python(&spec)
             .map_err(|e| RenderError::Invalid(format!("tool spec serialisation: {e}")))
     }
 
@@ -264,9 +259,6 @@ impl Renderer for GlmRenderer {
             if !t.is_empty() {
                 buf.scaffold_special(self.system);
                 let mut s = String::with_capacity(512);
-                if !nl.is_empty() {
-                    s.push_str(nl);
-                }
                 s.push_str(TOOLS_HEADER_GLM5);
                 for tool in t {
                     s.push_str(&self.format_tool_spec(tool)?);
@@ -284,7 +276,7 @@ impl Renderer for GlmRenderer {
         let last_ui = Self::last_user_index(messages);
 
         for (i, msg) in messages.iter().enumerate() {
-            let content = msg.text_content();
+            let content = msg.visible_text_content();
             let idx = i as i32;
             match msg.role.as_str() {
                 "system" => {
@@ -397,7 +389,7 @@ impl Renderer for GlmRenderer {
 
         for (i, msg) in new_messages.iter().enumerate() {
             let idx = i as i32;
-            let content = msg.text_content();
+            let content = msg.visible_text_content();
             match msg.role.as_str() {
                 "user" => {
                     if !(i == 0 && last_prev == self.user) {
@@ -469,7 +461,7 @@ impl GlmRenderer {
         last_user_index: i32,
         preserve_thinking: bool,
     ) -> Result<(), RenderError> {
-        let raw_content = msg.text_content();
+        let raw_content = msg.visible_text_content();
         let (reasoning_content, content) = match &msg.reasoning_content {
             Some(s) => (s.clone(), raw_content.to_string()),
             None => {

@@ -1,0 +1,81 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/rust.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        # `clippy::all` is `deny` via workspace lints; pedantic stays at `warn`
+        # for visibility. `-D warnings` here still escalates any remaining
+        # rustc warnings to errors.
+        run: cargo clippy --workspace --all-targets --locked
+
+  test:
+    name: Test (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        # Skip the PyO3 crate: it links libpython and is exercised via pytest.
+        run: cargo test --workspace --exclude renderers-py --locked
+
+  miri:
+    name: Miri (renderers-core)
+    runs-on: ubuntu-latest
+    env:
+      # Miri's stricter UB detection.
+      MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly with miri
+        run: |
+          rustup toolchain install nightly --component miri
+          rustup +nightly component add rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: miri
+      - name: cargo miri setup
+        run: cargo +nightly miri setup
+      - name: cargo miri test
+        # renderers-core only — PyO3 / FFI crates can't run under Miri.
+        run: cargo +nightly miri test -p renderers-core --lib --tests

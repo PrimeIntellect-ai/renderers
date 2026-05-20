@@ -28,6 +28,7 @@
 pub mod bridge;
 pub mod emit;
 pub mod families;
+pub(crate) mod json;
 pub mod parsing;
 pub mod processing;
 pub mod registry;

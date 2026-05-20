@@ -18,10 +18,9 @@
 
 use std::borrow::Cow;
 
-use serde_json::json;
-
 use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
 use crate::emit::RenderBuf;
+use crate::json::{to_string_python, tool_spec_template_value};
 use crate::parsing::qwen35::parse_qwen35;
 use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
@@ -192,6 +191,7 @@ impl Qwen35Renderer {
     /// so OpenAI-style structured text content is not silently dropped.
     fn render_content_text(content: &Content) -> Cow<'_, str> {
         match content {
+            Content::Null => Cow::Borrowed(""),
             Content::Text(s) => Cow::Borrowed(s.as_str()),
             Content::Parts(parts) => {
                 let mut out = String::new();
@@ -239,12 +239,8 @@ impl Qwen35Renderer {
         tool_text.push_str(TOOLS_HEADER);
         for tool in tools {
             tool_text.push('\n');
-            let spec = json!({
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters,
-            });
-            tool_text.push_str(&serde_json::to_string(&spec).map_err(|e| {
+            let spec = tool_spec_template_value(tool);
+            tool_text.push_str(&to_string_python(&spec).map_err(|e| {
                 RenderError::Invalid(format!("tool spec serialisation failed: {e}"))
             })?);
         }
@@ -677,6 +673,11 @@ impl Qwen35Renderer {
             .filter_map(|(m, item)| (*m == msg_idx).then_some(item));
 
         match &msg.content {
+            crate::types::Content::Null => {
+                for item in media_iter.by_ref() {
+                    self.emit_media_item(buf, idx, item, mm)?;
+                }
+            }
             crate::types::Content::Text(s) => {
                 // Plain-text user message with attached media: emit
                 // images first (canonical Qwen-VL shape:

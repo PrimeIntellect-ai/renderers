@@ -51,13 +51,28 @@ fn parse_tools(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<ToolSpec>>
     if obj.is_none() {
         return Ok(None);
     }
-    let value: serde_json::Value = pythonize::depythonize(obj).map_err(|e| {
+    let mut value: serde_json::Value = pythonize::depythonize(obj).map_err(|e| {
         invalid(format!(
             "tools must be a list of dicts (decode failed: {e})"
         ))
     })?;
-    let parsed: Vec<ToolSpec> =
+    let arr = value
+        .as_array_mut()
+        .ok_or_else(|| invalid("tools must be a list of dicts"))?;
+    let mut envelopes = Vec::with_capacity(arr.len());
+    for item in arr {
+        if let Some(function) = item.get("function").and_then(|v| v.as_object()) {
+            envelopes.push(true);
+            *item = serde_json::Value::Object(function.clone());
+        } else {
+            envelopes.push(false);
+        }
+    }
+    let mut parsed: Vec<ToolSpec> =
         serde_json::from_value(value).map_err(|e| invalid(format!("tools shape mismatch: {e}")))?;
+    for (tool, openai_envelope) in parsed.iter_mut().zip(envelopes) {
+        tool.openai_envelope = openai_envelope;
+    }
     Ok(Some(parsed))
 }
 
@@ -116,7 +131,7 @@ fn parse_media_bundle(obj: &Bound<'_, PyAny>) -> PyResult<MediaBundle> {
 fn parse_u32_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
     // Accept either a Python list of ints or a numpy-style sequence.
     let list = obj
-        .downcast::<PyList>()
+        .cast::<PyList>()
         .map_err(|_| invalid("expected list[int]"))?;
     let mut out = Vec::with_capacity(list.len());
     for item in list.iter() {
@@ -129,7 +144,11 @@ fn parse_u32_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
     Ok(out)
 }
 
-#[pyclass(name = "RenderedTokens", module = "renderers_native")]
+#[pyclass(
+    name = "RenderedTokens",
+    module = "renderers_native",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 struct PyRenderedTokens {
     inner: RenderedTokens,
@@ -173,7 +192,11 @@ impl PyRenderedTokens {
     }
 }
 
-#[pyclass(name = "ParsedToolCall", module = "renderers_native")]
+#[pyclass(
+    name = "ParsedToolCall",
+    module = "renderers_native",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 struct PyParsedToolCall {
     inner: ParsedToolCall,
@@ -227,7 +250,11 @@ impl PyParsedToolCall {
     }
 }
 
-#[pyclass(name = "ParsedResponse", module = "renderers_native")]
+#[pyclass(
+    name = "ParsedResponse",
+    module = "renderers_native",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 struct PyParsedResponse {
     inner: ParsedResponse,
@@ -267,7 +294,11 @@ impl PyParsedResponse {
 
 /// Wire enum mirror — matches the Python `ToolCallParseStatus` string
 /// values so existing code reading `tc.status == "ok"` keeps working.
-#[pyclass(name = "ToolCallParseStatus", module = "renderers_native")]
+#[pyclass(
+    name = "ToolCallParseStatus",
+    module = "renderers_native",
+    skip_from_py_object
+)]
 #[derive(Clone, Copy)]
 struct PyToolCallParseStatus {
     inner: ToolCallParseStatus,
@@ -323,7 +354,7 @@ impl PyRenderer {
     ) -> PyResult<Self> {
         let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
         let renderer = py
-            .allow_threads(|| {
+            .detach(|| {
                 Qwen3RendererBuilder::default()
                     .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
@@ -391,7 +422,7 @@ impl PyRenderer {
     ) -> PyResult<Self> {
         let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
         let renderer = py
-            .allow_threads(|| {
+            .detach(|| {
                 Qwen35RendererBuilder::default()
                     .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
@@ -423,7 +454,7 @@ impl PyRenderer {
     ) -> PyResult<Self> {
         let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
         let renderer = py
-            .allow_threads(|| {
+            .detach(|| {
                 Qwen36RendererBuilder::default()
                     .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
@@ -455,7 +486,7 @@ impl PyRenderer {
     ) -> PyResult<Self> {
         let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
         let renderer = py
-            .allow_threads(|| {
+            .detach(|| {
                 GlmRendererBuilder::glm5()
                     .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
@@ -487,7 +518,7 @@ impl PyRenderer {
     ) -> PyResult<Self> {
         let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
         let renderer = py
-            .allow_threads(|| {
+            .detach(|| {
                 GlmRendererBuilder::glm51()
                     .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
@@ -519,7 +550,7 @@ impl PyRenderer {
     ) -> PyResult<Self> {
         let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
         let renderer = py
-            .allow_threads(|| {
+            .detach(|| {
                 GlmRendererBuilder::glm45()
                     .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
@@ -549,7 +580,7 @@ impl PyRenderer {
     ) -> PyResult<Self> {
         let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
         let renderer = py
-            .allow_threads(|| {
+            .detach(|| {
                 MiniMaxM2RendererBuilder::default()
                     .preserve_all_thinking(preserve_all_thinking)
                     .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls)
@@ -597,7 +628,7 @@ impl PyRenderer {
         };
         let ct = chat_template.to_string();
         let renderer = py
-            .allow_threads(move || {
+            .detach(move || {
                 let mut b = DefaultRendererBuilder::new(ct).stop_token_ids(stop_ids);
                 for (k, v) in extras {
                     b = b.add_context(k, v);
@@ -645,7 +676,7 @@ impl PyRenderer {
         let _ = tokenizer_path; // not needed for harmony
         let effort = reasoning_effort.unwrap_or("medium").to_string();
         let renderer = py
-            .allow_threads(move || -> Result<_, renderers_core::types::RenderError> {
+            .detach(move || -> Result<_, renderers_core::types::RenderError> {
                 let mut b = GptOssRendererBuilder::default()
                     .use_system_prompt(use_system_prompt)
                     .preserve_all_thinking(preserve_all_thinking)
@@ -692,7 +723,7 @@ impl PyRenderer {
     ) -> PyResult<Self> {
         let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
         let renderer = py
-            .allow_threads(|| {
+            .detach(|| {
                 KimiK25RendererBuilder::default()
                     .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
@@ -724,7 +755,7 @@ impl PyRenderer {
     ) -> PyResult<Self> {
         let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
         let renderer = py
-            .allow_threads(|| {
+            .detach(|| {
                 KimiK2RendererBuilder::default()
                     .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
@@ -759,7 +790,7 @@ impl PyRenderer {
     ) -> PyResult<Self> {
         let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
         let renderer = py
-            .allow_threads(|| {
+            .detach(|| {
                 Nemotron3RendererBuilder::default()
                     .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
@@ -787,7 +818,7 @@ impl PyRenderer {
     ) -> PyResult<Self> {
         let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
         let renderer = py
-            .allow_threads(|| {
+            .detach(|| {
                 DeepSeekV3RendererBuilder::default()
                     .enable_thinking(enable_thinking)
                     .build(tok)
@@ -810,7 +841,7 @@ impl PyRenderer {
         let tools = parse_tools(tools)?;
         let renderer = self.inner.clone();
         let out = py
-            .allow_threads(move || renderer.render(&msgs, tools.as_deref(), add_generation_prompt))
+            .detach(move || renderer.render(&msgs, tools.as_deref(), add_generation_prompt))
             .map_err(render_err)?;
         Ok(PyRenderedTokens { inner: out })
     }
@@ -827,9 +858,7 @@ impl PyRenderer {
         let tools = parse_tools(tools)?;
         let renderer = self.inner.clone();
         let ids = py
-            .allow_threads(move || {
-                renderer.render_ids(&msgs, tools.as_deref(), add_generation_prompt)
-            })
+            .detach(move || renderer.render_ids(&msgs, tools.as_deref(), add_generation_prompt))
             .map_err(render_err)?;
         Ok(PyList::new_bound(py, ids.iter().map(|&t| t as i64)))
     }
@@ -841,7 +870,7 @@ impl PyRenderer {
     ) -> PyResult<PyParsedResponse> {
         let ids = parse_u32_list(token_ids)?;
         let renderer = self.inner.clone();
-        let parsed = py.allow_threads(move || renderer.parse_response(&ids));
+        let parsed = py.detach(move || renderer.parse_response(&ids));
         Ok(PyParsedResponse { inner: parsed })
     }
 
@@ -877,7 +906,7 @@ impl PyRenderer {
         let bundle = parse_media_bundle(media)?;
         let renderer = self.inner.clone();
         let out = py
-            .allow_threads(move || -> Result<_, renderers_core::types::RenderError> {
+            .detach(move || -> Result<_, renderers_core::types::RenderError> {
                 let mm = renderer
                     .as_multimodal()
                     .ok_or_else(|| renderers_core::types::RenderError::Invalid(
@@ -910,9 +939,7 @@ impl PyRenderer {
         let tools = parse_tools(tools)?;
         let renderer = self.inner.clone();
         let bridged = py
-            .allow_threads(move || {
-                renderer.bridge_to_next_turn(&prev_p, &prev_c, &msgs, tools.as_deref())
-            })
+            .detach(move || renderer.bridge_to_next_turn(&prev_p, &prev_c, &msgs, tools.as_deref()))
             .map_err(render_err)?;
         Ok(bridged.map(|rt| PyRenderedTokens { inner: rt }))
     }
@@ -994,9 +1021,9 @@ impl PyQwen3VlImageProcessor {
     ///
     /// `message_idx` is up to the caller — it's not added here.
     fn process_bytes<'py>(&self, py: Python<'py>, bytes: &[u8]) -> PyResult<Bound<'py, PyAny>> {
-        // Clone so the move into allow_threads is straightforward
+        // Clone so the move into detach is straightforward
         let processed: ProcessedImage = py
-            .allow_threads(|| self.inner.process_bytes(bytes))
+            .detach(|| self.inner.process_bytes(bytes))
             .map_err(render_err)?;
         processed_to_pyobject(py, processed)
     }
@@ -1006,7 +1033,7 @@ impl PyQwen3VlImageProcessor {
         let bytes =
             std::fs::read(path).map_err(|e| invalid(format!("read image {path:?}: {e}")))?;
         let processed: ProcessedImage = py
-            .allow_threads(|| self.inner.process_bytes(&bytes))
+            .detach(|| self.inner.process_bytes(&bytes))
             .map_err(render_err)?;
         processed_to_pyobject(py, processed)
     }

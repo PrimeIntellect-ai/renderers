@@ -21,7 +21,7 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from renderers._native_router import (
     load_native,
     native_enabled,
-    resolve_tokenizer_path,
+    try_resolve_tokenizer_path,
 )
 from renderers.base import (
     Message,
@@ -58,13 +58,14 @@ class KimiK2Renderer:
         if native_enabled("kimi_k2") or native_enabled("kimi-k2"):
             native = load_native()
             if native is not None:
-                path = resolve_tokenizer_path(tokenizer)
-                return native.Renderer.kimi_k2(
-                    path,
-                    enable_thinking=enable_thinking,
-                    preserve_all_thinking=preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
-                )
+                path = try_resolve_tokenizer_path(tokenizer, "kimi_k2")
+                if path is not None:
+                    return native.Renderer.kimi_k2(
+                        path,
+                        enable_thinking=enable_thinking,
+                        preserve_all_thinking=preserve_all_thinking,
+                        preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                    )
         return super().__new__(cls)
 
     def __init__(

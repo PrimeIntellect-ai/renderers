@@ -20,6 +20,7 @@
 
 use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
 use crate::emit::RenderBuf;
+use crate::json::to_string_python;
 use crate::parsing::minimax::parse_minimax;
 use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
@@ -139,7 +140,7 @@ impl MiniMaxM2Renderer {
                         "description": tool.description,
                         "parameters": tool.parameters,
                     });
-                    s.push_str(&serde_json::to_string(&spec).unwrap_or_default());
+                    s.push_str(&to_string_python(&spec).unwrap_or_default());
                     s.push_str("</tool>\n");
                 }
                 s.push_str(TOOLS_FOOTER_PREFIX);
@@ -181,7 +182,7 @@ impl Renderer for MiniMaxM2Renderer {
         buf.special(self.bos, sys_idx);
         buf.special(self.role, sys_idx);
         let sys_content = if first_is_system {
-            messages[0].text_content().to_string()
+            messages[0].visible_text_content().to_string()
         } else {
             String::new()
         };
@@ -204,7 +205,7 @@ impl Renderer for MiniMaxM2Renderer {
 
         for (ci, msg) in conversation.iter().enumerate() {
             let orig_idx = (ci + conversation_start) as i32;
-            let content = msg.text_content();
+            let content = msg.visible_text_content();
             match msg.role.as_str() {
                 "user" => {
                     buf.special(self.role, orig_idx);
@@ -290,7 +291,7 @@ impl Renderer for MiniMaxM2Renderer {
 
         for (i, msg) in new_messages.iter().enumerate() {
             let idx = i as i32;
-            let content = msg.text_content();
+            let content = msg.visible_text_content();
             match msg.role.as_str() {
                 "user" => {
                     buf.special(self.role, idx);
@@ -342,7 +343,7 @@ impl MiniMaxM2Renderer {
         last_user_index: i32,
         preserve_thinking: bool,
     ) -> Result<(), RenderError> {
-        let raw_content = msg.text_content();
+        let raw_content = msg.visible_text_content();
         let (reasoning_content, content_text) = match &msg.reasoning_content {
             Some(s) => (s.clone(), raw_content.to_string()),
             None => {
@@ -449,7 +450,7 @@ impl MiniMaxM2Renderer {
         }
         let prefix = if prev_is_tool { "" } else { "\n" };
         let suffix = if next_is_tool { "\n" } else { "" };
-        let content = conversation[conv_idx].text_content();
+        let content = conversation[conv_idx].visible_text_content();
         let mut s = String::with_capacity(content.len() + 32);
         s.push_str(prefix);
         s.push_str("<response>");

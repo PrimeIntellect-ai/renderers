@@ -16,10 +16,9 @@
 //!   ~5–10× faster than Python's `json.dumps` for the JSON sizes typical
 //!   here.
 
-use serde_json::json;
-
 use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
 use crate::emit::RenderBuf;
+use crate::json::{to_string_python, tool_spec_template_value};
 use crate::parsing::qwen3::parse_qwen3;
 use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
@@ -170,15 +169,8 @@ impl Qwen3Renderer {
         tool_text.push_str(TOOLS_HEADER);
         for tool in tools {
             tool_text.push('\n');
-            let spec = json!({
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters,
-            });
-            // `to_string` here is `serde_json::to_string` (no pretty,
-            // no ensure_ascii — matches Python's
-            // `json.dumps(..., ensure_ascii=False)`).
-            tool_text.push_str(&serde_json::to_string(&spec).map_err(|e| {
+            let spec = tool_spec_template_value(tool);
+            tool_text.push_str(&to_string_python(&spec).map_err(|e| {
                 RenderError::Invalid(format!("tool spec serialisation failed: {e}"))
             })?);
         }
@@ -332,7 +324,7 @@ impl Qwen3Renderer {
                 let name = tc.function.name.as_str();
                 let args_str = match &tc.function.arguments {
                     ToolArguments::Raw(s) => s.clone(),
-                    ToolArguments::Object(v) => serde_json::to_string(v).map_err(|e| {
+                    ToolArguments::Object(v) => to_string_python(v).map_err(|e| {
                         RenderError::Invalid(format!("tool args serialisation failed: {e}"))
                     })?,
                 };

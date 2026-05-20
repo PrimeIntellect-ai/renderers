@@ -18,8 +18,10 @@ verbatim.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,7 @@ logger = logging.getLogger("renderers._native_router")
 
 _NATIVE_MODULE: Any | None = None
 _NATIVE_LOAD_ATTEMPTED = False
+_ALL_EXCLUDED = {"default"}
 
 
 def native_enabled(family: str) -> bool:
@@ -35,7 +38,7 @@ def native_enabled(family: str) -> bool:
     if not raw or raw == "0":
         return False
     if raw in {"1", "all"}:
-        return True
+        return family not in _ALL_EXCLUDED
     return family in {part.strip() for part in raw.split(",") if part.strip()}
 
 
@@ -82,6 +85,19 @@ def resolve_tokenizer_path(tokenizer: Any) -> str:
             return str(path / "tokenizer.json")
         return str(path)
 
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is not None and hasattr(backend, "to_str"):
+        data = backend.to_str()
+        digest = hashlib.sha256(data.encode("utf-8")).hexdigest()
+        cache_dir = Path(tempfile.gettempdir()) / "renderers-tokenizers"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        path = cache_dir / f"{digest}.json"
+        if not path.exists():
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(data, encoding="utf-8")
+            tmp.replace(path)
+        return str(path)
+
     name_or_path = getattr(tokenizer, "name_or_path", None)
     if not name_or_path:
         raise ValueError(
@@ -111,3 +127,17 @@ def resolve_tokenizer_path(tokenizer: Any) -> str:
             "Run `snapshot_download` first or pass an explicit path."
         )
     return str(cached)
+
+
+def try_resolve_tokenizer_path(tokenizer: Any, family: str) -> str | None:
+    """Best-effort tokenizer resolution for optional native routing."""
+    try:
+        return resolve_tokenizer_path(tokenizer)
+    except ValueError as exc:
+        logger.info(
+            "RENDERERS_NATIVE selected %s but no native tokenizer path was "
+            "available (%s); falling back to pure Python.",
+            family,
+            exc,
+        )
+        return None

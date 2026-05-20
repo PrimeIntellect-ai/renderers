@@ -492,6 +492,11 @@ impl KimiK25Renderer {
         mm: &mut MultiModalData,
     ) -> Result<(), RenderError> {
         match &msg.content {
+            crate::types::Content::Null => {
+                for item in media_iter.by_ref() {
+                    self.emit_media_item(buf, msg_idx, item, mm)?;
+                }
+            }
             crate::types::Content::Text(s) => {
                 // Plain-text + attached media: emit images first, then
                 // text. Same convention as Qwen-VL when the caller

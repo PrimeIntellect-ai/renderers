@@ -304,6 +304,7 @@ fn messages_to_value(messages: &[Message]) -> Result<MjValue, RenderError> {
         map.insert("role".into(), JsonValue::String(m.role.clone()));
         // Content: string fast-path, structured parts pass through as JSON
         let content_value = match &m.content {
+            crate::types::Content::Null => JsonValue::Null,
             crate::types::Content::Text(s) => JsonValue::String(s.clone()),
             crate::types::Content::Parts(parts) => serde_json::to_value(parts)
                 .map_err(|e| RenderError::Invalid(format!("content serialisation: {e}")))?,

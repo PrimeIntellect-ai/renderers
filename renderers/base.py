@@ -911,27 +911,16 @@ TRUSTED_REVISIONS: dict[str, str] = {
 # Models for which ``fastokens`` is known to diverge from vanilla
 # ``transformers.AutoTokenizer`` and therefore must NOT be patched.
 # Empirical audit ran each entry of ``MODEL_RENDERER_MAP`` through both
-# backends; 31/35 passed byte-identical. The four below either fail to
-# load under fastokens (DeepSeek-V3 family — Metaspace pretokenizer not
-# yet implemented) or are kept defensively pending an upstream fastokens
-# fix (MiniMax-M2 family — see per-entry comments).
+# backends. The entries below fail to load under fastokens (DeepSeek-V3
+# family — Metaspace pretokenizer not yet implemented).
 FASTOKENS_INCOMPATIBLE: frozenset[str] = frozenset(
     {
-        # fastokens 0.1.1: ``ValueError: pre-tokenizer error: unsupported
+        # fastokens: ``ValueError: pre-tokenizer error: unsupported
         # pre-tokenizer type: Metaspace`` — DeepSeek's tokenizer uses
         # SentencePiece-style Metaspace pretokenization which fastokens
         # doesn't yet implement.
         "deepseek-ai/DeepSeek-V3",
         "deepseek-ai/DeepSeek-V3-Base",
-        # MiniMax: kept defensive pending upstream fastokens fix
-        # https://github.com/crusoecloud/fastokens/pull/32 — that PR
-        # removes a stray attribute leaked by ``unpatch_transformers``
-        # which steers MiniMax (declared ``tokenizer_class =
-        # 'GPT2Tokenizer'`` → slow→fast conversion path) down a different
-        # load path on subsequent vanilla loads. Once the upstream fix
-        # is released, these two entries can be dropped after re-audit.
-        "MiniMaxAI/MiniMax-M2",
-        "MiniMaxAI/MiniMax-M2.5",
     }
 )
 
@@ -975,10 +964,10 @@ def load_tokenizer(
     immediately after, so global ``AutoTokenizer.from_pretrained`` calls
     elsewhere in the user's process are not affected.
 
-    Models in ``FASTOKENS_INCOMPATIBLE`` (DeepSeek-V3 family, MiniMax-M2
-    family) skip the patch — fastokens 0.1.1 either fails to load them
-    or produces token-divergent output. Pass ``use_fastokens=False`` to
-    force the vanilla backend for any other model.
+    Models in ``FASTOKENS_INCOMPATIBLE`` (DeepSeek-V3 family) skip the
+    patch — fastokens currently fails to load them. Pass
+    ``use_fastokens=False`` to force the vanilla backend for any other
+    model.
 
     Unknown / fine-tuned model paths fall through to
     ``trust_remote_code=False`` and the patched-load fast path. If

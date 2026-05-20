@@ -1,6 +1,8 @@
 import asyncio
 import base64
+import json
 
+import httpx
 import numpy as np
 import pytest
 from renderers.base import (
@@ -70,8 +72,8 @@ class _FakeClient:
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
         )
-        routed_experts = np.array([[[1]], [[2]]], dtype=np.int32)
-        return {
+        routed_experts = np.array([[[1]], [[2]]], dtype=np.uint8)
+        payload = {
             "request_id": "gen-test",
             "choices": [
                 {
@@ -85,7 +87,7 @@ class _FakeClient:
                     },
                     "finish_reason": "stop",
                     "routed_experts": {
-                        "data": base64.b85encode(routed_experts.tobytes()).decode(
+                        "data": base64.b64encode(routed_experts.tobytes()).decode(
                             "ascii"
                         ),
                         "shape": list(routed_experts.shape),
@@ -93,6 +95,10 @@ class _FakeClient:
                 }
             ],
         }
+        return httpx.Response(
+            200,
+            content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        )
 
 
 def test_generate_builds_request_body_and_parses_response():
@@ -121,6 +127,7 @@ def test_generate_builds_request_body_and_parses_response():
     # /inference/v1/generate is mounted at the server root, so we post to
     # an absolute URL stripped of the OpenAI SDK's automatic /v1 prefix.
     assert client.calls[0]["path"] == "http://fake-host:8000/inference/v1/generate"
+    assert client.calls[0]["cast_to"] is httpx.Response
     assert client.calls[0]["body"] == {
         "model": "test-model",
         "token_ids": [1, 2, 3],
@@ -142,7 +149,9 @@ def test_generate_builds_request_body_and_parses_response():
     assert result["prompt_ids"] == [1, 2, 3]
     assert result["completion_ids"] == [7, 8]
     assert result["completion_logprobs"] == [-0.1, -0.2]
-    assert result["routed_experts"] == [[[1]], [[2]]]
+    assert result["routed_experts"]["shape"] == [2, 1, 1]
+    assert isinstance(result["routed_experts"]["data"], memoryview)
+    assert result["routed_experts"]["data"].tobytes() == base64.b64encode(b"\x01\x02")
     assert result["multi_modal_data"] is None
     assert result["request_id"] == "gen-test"
     # Per-token attribution from the renderer surfaces on the result so

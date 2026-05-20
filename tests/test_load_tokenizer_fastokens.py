@@ -3,8 +3,7 @@
 ``load_tokenizer`` defaults to routing every supported model through
 ``fastokens.patch_transformers()`` for ~10x faster encode. Models in
 ``FASTOKENS_INCOMPATIBLE`` skip the patch (DeepSeek's Metaspace
-pretokenizer isn't supported; MiniMax tokenizers diverge on literal
-special-token text). Callers can opt out per-call with
+pretokenizer isn't supported). Callers can opt out per-call with
 ``use_fastokens=False``.
 
 These tests pin the policy:
@@ -47,8 +46,6 @@ def test_fastokens_incompatible_is_explicit_set():
         {
             "deepseek-ai/DeepSeek-V3",
             "deepseek-ai/DeepSeek-V3-Base",
-            "MiniMaxAI/MiniMax-M2",
-            "MiniMaxAI/MiniMax-M2.5",
         }
     )
 
@@ -108,7 +105,7 @@ def test_fast_and_vanilla_encode_identically_on_compatible_model():
 def test_incompat_model_loads_via_vanilla_backend(model):
     """For models we know diverge / fail under fastokens, the fast path
     must be skipped so the load still succeeds with a vanilla backend."""
-    if "DeepSeek" in model or "MiniMax" in model:
+    if "DeepSeek" in model:
         # Skip if upstream gating / size makes the load impractical here.
         # We only care that the path doesn't try fastokens. Probe the
         # tokenizer_config to make sure the repo is reachable; if not,

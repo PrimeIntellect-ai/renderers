@@ -26,10 +26,10 @@ dependencies = [
     "openai-harmony>=0.0.8",
     # Crusoe's Rust BPE tokenizer; ~10x faster encode vs HF's tokenizers.
     # ``load_tokenizer`` patches it in by default for every supported model
-    # except a small denylist (DeepSeek-V3 family, MiniMax-M2 family). The
-    # patch is bracketed around ``from_pretrained``, so subsequent
-    # ``AutoTokenizer`` calls outside the renderers package stay vanilla.
-    "fastokens>=0.1.1",
+    # except a small denylist (DeepSeek-V3 family). The patch is bracketed
+    # around ``from_pretrained``, so subsequent ``AutoTokenizer`` calls
+    # outside the renderers package stay vanilla.
+    "fastokens>=0.2.0",
 ]
 
 [tool.hatch.version]
@@ -68,6 +68,12 @@ dev = [
 
 [tool.uv]
 exclude-newer = "7 days"
+# fastokens 0.2.0 was published on 2026-05-17 and contains the
+# ``unpatch_transformers`` fix (crusoecloud/fastokens#32) needed for
+# MiniMax-M2's slow→fast tokenizer conversion path. Exempting it from
+# the project-wide 7-day cutoff lets the lockfile pick it up immediately
+# while the rest of the dependency graph stays gated.
+exclude-newer-package = { fastokens = false }
 
 [tool.ty.environment]
 python-version = "3.13"

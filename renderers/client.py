@@ -12,12 +12,12 @@ achieve real parallelism.
 from __future__ import annotations
 
 import asyncio
-import base64
+import json
 import logging
 from collections.abc import Mapping
 from typing import Any, cast
 
-import numpy as np
+import httpx
 from openai import AsyncOpenAI
 
 from renderers.base import (
@@ -31,6 +31,7 @@ from renderers.base import (
 )
 
 _request_logger = logging.getLogger("renderers.client")
+ROUTED_EXPERTS_DATA_PREFIX = b'"routed_experts":{"data":"'
 
 
 class OverlongPromptError(Exception):
@@ -118,6 +119,26 @@ async def _maybe_offload(renderer: Renderer | RendererPool, fn):
     if isinstance(renderer, RendererPool):
         return await asyncio.to_thread(fn)
     return fn()
+
+
+def strip_routed_experts_data(raw: bytes) -> tuple[bytes, memoryview | None]:
+    data_start = raw.find(ROUTED_EXPERTS_DATA_PREFIX)
+    if data_start < 0:
+        return raw, None
+
+    data_start += len(ROUTED_EXPERTS_DATA_PREFIX)
+    data_end = raw.index(b'"', data_start)
+    routed_data = memoryview(raw)[data_start:data_end]
+    stripped = raw[:data_start] + raw[data_end:]
+    return stripped, routed_data
+
+
+def parse_generate_response(raw: bytes) -> dict[str, Any]:
+    stripped, routed_data = strip_routed_experts_data(raw)
+    payload: dict[str, Any] = json.loads(stripped)
+    if routed_data is not None:
+        payload["choices"][0]["routed_experts"]["data"] = routed_data
+    return payload
 
 
 async def generate(
@@ -251,12 +272,13 @@ async def generate(
         sp.get("max_tokens"),
     )
     post_kwargs: dict[str, Any] = {
-        "cast_to": cast(Any, dict[str, Any]),
+        "cast_to": httpx.Response,
         "body": body,
     }
     if extra_headers:
         post_kwargs["options"] = cast(Any, {"headers": extra_headers})
-    data = await client.post(endpoint, **post_kwargs)
+    raw_response = await client.post(endpoint, **post_kwargs)
+    data = parse_generate_response(raw_response.content)
 
     choice = (data.get("choices") or [{}])[0]
     completion_ids = choice.get("token_ids") or []
@@ -270,14 +292,7 @@ async def generate(
     content_lp = raw_logprobs.get("content") if isinstance(raw_logprobs, dict) else None
     completion_logprobs = [float(c.get("logprob") or 0.0) for c in content_lp or []]
 
-    routed_experts = None
-    raw_re = choice.get("routed_experts")
-    if isinstance(raw_re, dict) and "data" in raw_re and "shape" in raw_re:
-        routed_experts = (
-            np.frombuffer(base64.b85decode(raw_re["data"]), dtype=np.int32)
-            .reshape(raw_re["shape"])
-            .tolist()
-        )
+    routed_experts = choice.get("routed_experts")
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls

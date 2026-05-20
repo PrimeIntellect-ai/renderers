@@ -6,6 +6,7 @@
 
 pub mod deepseek_v3;
 pub mod glm;
+pub mod gpt_oss;
 pub mod kimi_k2;
 pub mod kimi_k25;
 pub mod minimax_m2;
@@ -16,6 +17,7 @@ pub mod qwen36;
 
 pub use deepseek_v3::{DeepSeekV3Renderer, DeepSeekV3RendererBuilder};
 pub use glm::{GlmRenderer, GlmRendererBuilder};
+pub use gpt_oss::{GptOssRenderer, GptOssRendererBuilder};
 pub use kimi_k2::{KimiK2Renderer, KimiK2RendererBuilder};
 pub use kimi_k25::{KimiK25Renderer, KimiK25RendererBuilder};
 pub use minimax_m2::{MiniMaxM2Renderer, MiniMaxM2RendererBuilder};

@@ -20,6 +20,7 @@ thiserror = { workspace = true }
 smallvec = { workspace = true }
 bumpalo = { workspace = true }
 phf = { workspace = true }
+openai-harmony = { version = "0.0.8", default-features = false }
 
 [dev-dependencies]
 serde_json = { workspace = true }

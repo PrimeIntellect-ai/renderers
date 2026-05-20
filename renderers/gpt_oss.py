@@ -51,6 +51,11 @@ from openai_harmony import (
 )
 from transformers.tokenization_utils import PreTrainedTokenizer
 
+from renderers._native_router import (
+    load_native,
+    native_enabled,
+    resolve_tokenizer_path,
+)
 from renderers.base import (
     Message,
     ParsedResponse,
@@ -118,6 +123,35 @@ def _arguments_to_str(arguments: Any) -> str:
 
 class GptOssRenderer:
     """Deterministic message → token renderer for OpenAI gpt-oss (harmony)."""
+
+    def __new__(
+        cls,
+        tokenizer: PreTrainedTokenizer,
+        *,
+        use_system_prompt: bool = True,
+        reasoning_effort: str | None = "medium",
+        conversation_start_date: str | None = None,
+        knowledge_cutoff: str | None = None,
+        model_identity: str | None = None,
+        preserve_all_thinking: bool = False,
+        preserve_thinking_between_tool_calls: bool = False,
+    ):
+        if native_enabled("gpt_oss") or native_enabled("gpt-oss"):
+            native = load_native()
+            if native is not None:
+                # GPT-OSS embeds its own tokenizer; the tokenizer_path
+                # argument is ignored on the native side.
+                return native.Renderer.gpt_oss(
+                    "",
+                    use_system_prompt=use_system_prompt,
+                    reasoning_effort=reasoning_effort,
+                    conversation_start_date=conversation_start_date,
+                    knowledge_cutoff=knowledge_cutoff,
+                    model_identity=model_identity,
+                    preserve_all_thinking=preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                )
+        return super().__new__(cls)
 
     def __init__(
         self,

@@ -14,9 +14,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyType};
 
 use renderers_core::families::{
-    DeepSeekV3RendererBuilder, GlmRendererBuilder, KimiK25RendererBuilder, KimiK2RendererBuilder,
-    MiniMaxM2RendererBuilder, Nemotron3RendererBuilder, Qwen35RendererBuilder,
-    Qwen36RendererBuilder, Qwen3RendererBuilder,
+    DeepSeekV3RendererBuilder, GlmRendererBuilder, GptOssRendererBuilder, KimiK25RendererBuilder,
+    KimiK2RendererBuilder, MiniMaxM2RendererBuilder, Nemotron3RendererBuilder,
+    Qwen35RendererBuilder, Qwen36RendererBuilder, Qwen3RendererBuilder,
 };
 use renderers_core::tokenizer::Tokenizer;
 use renderers_core::types::{
@@ -453,6 +453,62 @@ impl PyRenderer {
                     .preserve_all_thinking(preserve_all_thinking)
                     .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls)
                     .build(tok)
+            })
+            .map_err(render_err)?;
+        Ok(PyRenderer { inner: Arc::new(renderer) })
+    }
+
+    /// Build a GPT-OSS (Harmony) renderer.
+    ///
+    /// Unlike the other families, GPT-OSS doesn't need a HuggingFace
+    /// `tokenizer.json` — the harmony encoding embeds its own
+    /// tiktoken-based tokenizer. The `tokenizer_path` argument is
+    /// ignored on this path but kept for API uniformity with the other
+    /// classmethods (callers can pass an empty string).
+    #[classmethod]
+    #[pyo3(signature = (
+        tokenizer_path,
+        *,
+        use_system_prompt = true,
+        reasoning_effort = None,
+        conversation_start_date = None,
+        knowledge_cutoff = None,
+        model_identity = None,
+        preserve_all_thinking = false,
+        preserve_thinking_between_tool_calls = false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn gpt_oss(
+        _cls: &Bound<'_, PyType>,
+        py: Python<'_>,
+        tokenizer_path: &str,
+        use_system_prompt: bool,
+        reasoning_effort: Option<&str>,
+        conversation_start_date: Option<&str>,
+        knowledge_cutoff: Option<&str>,
+        model_identity: Option<&str>,
+        preserve_all_thinking: bool,
+        preserve_thinking_between_tool_calls: bool,
+    ) -> PyResult<Self> {
+        let _ = tokenizer_path; // not needed for harmony
+        let effort = reasoning_effort.unwrap_or("medium").to_string();
+        let renderer = py
+            .allow_threads(move || -> Result<_, renderers_core::types::RenderError> {
+                let mut b = GptOssRendererBuilder::default()
+                    .use_system_prompt(use_system_prompt)
+                    .preserve_all_thinking(preserve_all_thinking)
+                    .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls);
+                b = b.reasoning_effort(&effort)?;
+                if let Some(d) = conversation_start_date {
+                    b = b.conversation_start_date(d);
+                }
+                if let Some(k) = knowledge_cutoff {
+                    b = b.knowledge_cutoff(k);
+                }
+                if let Some(m) = model_identity {
+                    b = b.model_identity(m);
+                }
+                b.build()
             })
             .map_err(render_err)?;
         Ok(PyRenderer { inner: Arc::new(renderer) })

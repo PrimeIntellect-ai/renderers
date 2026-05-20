@@ -138,7 +138,7 @@ impl KimiK2Renderer {
         // for sort_keys behaviour we use a BTreeMap-backed Value tree.
         // serde_json's `serialize` of a BTreeMap sorts keys by Ord<String>.
         use std::collections::BTreeMap;
-        let mut arr: Vec<BTreeMap<String, serde_json::Value>> = Vec::with_capacity(tools.len());
+        let mut arr: Vec<serde_json::Value> = Vec::with_capacity(tools.len());
         for tool in tools {
             let mut m: BTreeMap<String, serde_json::Value> = BTreeMap::new();
             m.insert("name".into(), serde_json::Value::String(tool.name.clone()));
@@ -147,7 +147,17 @@ impl KimiK2Renderer {
                 serde_json::Value::String(tool.description.clone()),
             );
             m.insert("parameters".into(), Self::sort_keys(&tool.parameters));
-            arr.push(m);
+            if tool.openai_envelope {
+                let mut envelope: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+                envelope.insert(
+                    "function".into(),
+                    serde_json::to_value(m).unwrap_or_default(),
+                );
+                envelope.insert("type".into(), serde_json::Value::String("function".into()));
+                arr.push(serde_json::to_value(envelope).unwrap_or_default());
+            } else {
+                arr.push(serde_json::to_value(m).unwrap_or_default());
+            }
         }
         serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string())
     }
@@ -172,7 +182,36 @@ impl KimiK2Renderer {
     fn args_to_string(args: &ToolArguments) -> String {
         match args {
             ToolArguments::Raw(s) => s.clone(),
-            ToolArguments::Object(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".into()),
+            ToolArguments::Object(v) => Self::json_dumps_default(v),
+        }
+    }
+
+    fn json_dumps_default(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::Null => "null".to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::String(s) => serde_json::to_string(s).unwrap_or_default(),
+            serde_json::Value::Array(values) => {
+                let inner = values
+                    .iter()
+                    .map(Self::json_dumps_default)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{inner}]")
+            }
+            serde_json::Value::Object(values) => {
+                let inner = values
+                    .iter()
+                    .map(|(key, value)| {
+                        let key = serde_json::to_string(key).unwrap_or_default();
+                        let value = Self::json_dumps_default(value);
+                        format!("{key}: {value}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{{inner}}}")
+            }
         }
     }
 

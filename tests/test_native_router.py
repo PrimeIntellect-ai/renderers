@@ -85,6 +85,23 @@ def test_resolve_tokenizer_path_rejects_hf_missing_sentinel(monkeypatch):
         router.resolve_tokenizer_path(tokenizer)
 
 
+def test_resolve_tokenizer_path_uses_tiktoken_export(monkeypatch, tmp_path):
+    tokenizer = SimpleNamespace(name_or_path="moonshotai/Kimi-K2-Instruct")
+    fake_hf = SimpleNamespace(try_to_load_from_cache=lambda **_kwargs: object())
+    exported = tmp_path / "tokenizer.json"
+    exported.write_text("{}")
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+    monkeypatch.setattr(
+        router,
+        "_export_tiktoken_tokenizer_json",
+        lambda repo_id, _loader: str(exported)
+        if repo_id == "moonshotai/Kimi-K2-Instruct"
+        else None,
+    )
+
+    assert router.resolve_tokenizer_path(tokenizer) == str(exported)
+
+
 def test_kimi_k2_constructor_falls_back_without_tokenizer_path(monkeypatch):
     from renderers.kimi_k2 import KimiK2Renderer
 

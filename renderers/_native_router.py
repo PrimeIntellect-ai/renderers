@@ -19,6 +19,7 @@ verbatim.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import tempfile
@@ -30,6 +31,18 @@ logger = logging.getLogger("renderers._native_router")
 _NATIVE_MODULE: Any | None = None
 _NATIVE_LOAD_ATTEMPTED = False
 _ALL_EXCLUDED = {"default"}
+_KIMI_TIKTOKEN_PATTERN = "|".join(
+    [
+        r"""[\p{Han}]+""",
+        r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?""",
+        r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?""",
+        r"""\p{N}{1,3}""",
+        r""" ?[^\s\p{L}\p{N}]+[\r\n]*""",
+        r"""\s*[\r\n]+""",
+        r"""\s+(?!\S)""",
+        r"""\s+""",
+    ]
+)
 
 
 def native_enabled(family: str) -> bool:
@@ -121,12 +134,72 @@ def resolve_tokenizer_path(tokenizer: Any) -> str:
         )
 
     cached = try_to_load_from_cache(repo_id=name_or_path, filename="tokenizer.json")
-    if not isinstance(cached, (str, os.PathLike)):
-        raise ValueError(
-            f"tokenizer.json not available in the local HF cache for {name_or_path}. "
-            "Run `snapshot_download` first or pass an explicit path."
-        )
-    return str(cached)
+    if isinstance(cached, (str, os.PathLike)):
+        return str(cached)
+
+    exported = _export_tiktoken_tokenizer_json(name_or_path, try_to_load_from_cache)
+    if exported is not None:
+        return exported
+
+    raise ValueError(
+        f"tokenizer.json not available in the local HF cache for {name_or_path}. "
+        "Run `snapshot_download` first or pass an explicit path."
+    )
+
+
+def _export_tiktoken_tokenizer_json(
+    repo_id: str,
+    try_to_load_from_cache: Any,
+) -> str | None:
+    """Export Kimi's tiktoken tokenizer to a native-loadable tokenizer.json."""
+    tiktoken_model = try_to_load_from_cache(repo_id=repo_id, filename="tiktoken.model")
+    tokenizer_config = try_to_load_from_cache(
+        repo_id=repo_id, filename="tokenizer_config.json"
+    )
+    if not isinstance(tiktoken_model, (str, os.PathLike)) or not isinstance(
+        tokenizer_config, (str, os.PathLike)
+    ):
+        return None
+
+    config_path = Path(tokenizer_config)
+    model_path = Path(tiktoken_model)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if config.get("tokenizer_class") != "TikTokenTokenizer":
+        return None
+
+    added = {
+        int(idx): value["content"]
+        for idx, value in config.get("added_tokens_decoder", {}).items()
+    }
+    if not added:
+        return None
+
+    base_id = min(added)
+    special_tokens = [
+        added.get(idx, f"<|reserved_token_{idx}|>")
+        for idx in range(base_id, base_id + 256)
+    ]
+    digest = hashlib.sha256()
+    digest.update(model_path.read_bytes())
+    digest.update(config_path.read_bytes())
+    digest.update(_KIMI_TIKTOKEN_PATTERN.encode("utf-8"))
+    cache_dir = Path(tempfile.gettempdir()) / "renderers-tokenizers"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out = cache_dir / f"tiktoken-{digest.hexdigest()}.json"
+    if out.exists():
+        return str(out)
+
+    from transformers.convert_slow_tokenizer import TikTokenConverter
+
+    converted = TikTokenConverter(
+        vocab_file=str(model_path),
+        pattern=_KIMI_TIKTOKEN_PATTERN,
+        extra_special_tokens=special_tokens,
+    ).converted()
+    tmp = out.with_suffix(".tmp")
+    converted.save(str(tmp))
+    tmp.replace(out)
+    return str(out)
 
 
 def try_resolve_tokenizer_path(tokenizer: Any, family: str) -> str | None:

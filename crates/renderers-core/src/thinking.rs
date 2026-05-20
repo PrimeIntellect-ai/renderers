@@ -39,9 +39,7 @@ pub fn should_preserve_past_thinking(
     }
     // The current segment must contain a tool response for the block to
     // count as an in-flight tool cycle.
-    messages[last_user + 1..]
-        .iter()
-        .any(|m| m.role == "tool")
+    messages[last_user + 1..].iter().any(|m| m.role == "tool")
 }
 
 #[cfg(test)]

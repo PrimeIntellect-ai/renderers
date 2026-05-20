@@ -28,7 +28,10 @@ pub fn find(ids: &[u32], target: u32) -> Option<usize> {
 /// Find the first index of `target` in `ids[start..]`, or `None`.
 #[inline]
 pub fn find_from(ids: &[u32], target: u32, start: usize) -> Option<usize> {
-    ids[start..].iter().position(|&x| x == target).map(|i| i + start)
+    ids[start..]
+        .iter()
+        .position(|&x| x == target)
+        .map(|i| i + start)
 }
 
 /// Find the first index of any token in `targets`, or `None`. `targets`

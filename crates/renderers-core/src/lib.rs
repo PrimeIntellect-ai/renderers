@@ -39,6 +39,7 @@ pub mod types;
 pub use traits::{MultimodalRenderer, Renderer};
 pub use types::{
     Content, ContentPart, ImageRef, Message, MultiModalData, ParsedResponse, ParsedToolCall,
-    PlaceholderRange, RenderError, RenderedTokens, ToolArguments, ToolCall, ToolCallFunction,
-    ToolCallParseStatus, ToolSpec, VideoRef, SCAFFOLD_IDX,
+    PlaceholderRange, RenderError, RenderedTokens, SCAFFOLD_IDX,
+    ToolArguments, ToolCall, ToolCallFunction,
+    ToolCallParseStatus, ToolSpec, VideoRef,
 };

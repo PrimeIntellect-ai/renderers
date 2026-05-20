@@ -36,7 +36,7 @@ use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
 use crate::traits::Renderer;
 use crate::types::{
-    Message, ParsedResponse, RenderError, RenderedTokens, ToolArguments, ToolSpec, SCAFFOLD_IDX,
+    Message, ParsedResponse, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments, ToolSpec,
 };
 
 const TOOLS_HEADER_GLM5: &str = "\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n";
@@ -69,10 +69,16 @@ impl GlmRendererBuilder {
         }
     }
     pub fn glm51() -> Self {
-        Self { variant: Variant::Glm51, ..Self::glm5() }
+        Self {
+            variant: Variant::Glm51,
+            ..Self::glm5()
+        }
     }
     pub fn glm45() -> Self {
-        Self { variant: Variant::Glm45, ..Self::glm5() }
+        Self {
+            variant: Variant::Glm45,
+            ..Self::glm5()
+        }
     }
     pub fn enable_thinking(mut self, on: bool) -> Self {
         self.enable_thinking = on;
@@ -189,7 +195,11 @@ impl GlmRenderer {
     }
 
     fn nl_after_role(&self) -> &'static str {
-        if self.variant == Variant::Glm45 { "\n" } else { "" }
+        if self.variant == Variant::Glm45 {
+            "\n"
+        } else {
+            ""
+        }
     }
 
     fn empty_think_on_last_assistant(&self) -> bool {
@@ -383,10 +393,7 @@ impl Renderer for GlmRenderer {
         let last_prev = *combined.last().expect("non-empty");
 
         let nl = self.nl_after_role();
-        let mut buf = RenderBuf::new(
-            &self.tokenizer,
-            new_messages.len().max(1) * 256,
-        );
+        let mut buf = RenderBuf::new(&self.tokenizer, new_messages.len().max(1) * 256);
 
         for (i, msg) in new_messages.iter().enumerate() {
             let idx = i as i32;
@@ -468,9 +475,15 @@ impl GlmRenderer {
             None => {
                 if let Some((before, after)) = raw_content.split_once("</think>") {
                     let r = if let Some((_, inner)) = before.rsplit_once("<think>") {
-                        inner.trim_start_matches('\n').trim_end_matches('\n').to_string()
+                        inner
+                            .trim_start_matches('\n')
+                            .trim_end_matches('\n')
+                            .to_string()
                     } else {
-                        before.trim_start_matches('\n').trim_end_matches('\n').to_string()
+                        before
+                            .trim_start_matches('\n')
+                            .trim_end_matches('\n')
+                            .to_string()
                     };
                     (r, after.trim_start_matches('\n').to_string())
                 } else {
@@ -484,12 +497,29 @@ impl GlmRenderer {
         buf.special(self.assistant, msg_idx);
 
         if self.variant == Variant::Glm45 {
-            self.emit_assistant_glm45(buf, msg, msg_idx, &reasoning_content, &content, last_user_index, preserve_thinking)
+            self.emit_assistant_glm45(
+                buf,
+                msg,
+                msg_idx,
+                &reasoning_content,
+                &content,
+                last_user_index,
+                preserve_thinking,
+            )
         } else {
-            self.emit_assistant_glm5_family(buf, msg, msg_idx, &reasoning_content, &content, last_user_index, preserve_thinking)
+            self.emit_assistant_glm5_family(
+                buf,
+                msg,
+                msg_idx,
+                &reasoning_content,
+                &content,
+                last_user_index,
+                preserve_thinking,
+            )
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_assistant_glm5_family(
         &self,
         buf: &mut RenderBuf<'_>,
@@ -524,7 +554,9 @@ impl GlmRenderer {
             buf.text(name, msg_idx)?;
             let args_value = match &tc.function.arguments {
                 ToolArguments::Object(v) => v.clone(),
-                ToolArguments::Raw(s) => serde_json::from_str(s).unwrap_or(JsonValue::Object(Default::default())),
+                ToolArguments::Raw(s) => {
+                    serde_json::from_str(s).unwrap_or(JsonValue::Object(Default::default()))
+                }
             };
             if let Some(obj) = args_value.as_object() {
                 for (k, v) in obj {
@@ -541,6 +573,7 @@ impl GlmRenderer {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_assistant_glm45(
         &self,
         buf: &mut RenderBuf<'_>,
@@ -590,7 +623,9 @@ impl GlmRenderer {
 
             let args_value = match &tc.function.arguments {
                 ToolArguments::Object(v) => v.clone(),
-                ToolArguments::Raw(s) => serde_json::from_str(s).unwrap_or(JsonValue::Object(Default::default())),
+                ToolArguments::Raw(s) => {
+                    serde_json::from_str(s).unwrap_or(JsonValue::Object(Default::default()))
+                }
             };
             if let Some(obj) = args_value.as_object() {
                 for (k, v) in obj {
@@ -641,7 +676,10 @@ impl GlmRenderer {
             // GLM-5 / GLM-5.1 use special tokens
             buf.special(self.tool_response.expect("tool_response token"), idx);
             buf.text(content, idx)?;
-            buf.special(self.tool_response_end.expect("tool_response_end token"), idx);
+            buf.special(
+                self.tool_response_end.expect("tool_response_end token"),
+                idx,
+            );
         }
         Ok(())
     }

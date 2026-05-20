@@ -6,13 +6,13 @@
 //!   Role "assistant" is rendered as "ai".
 //! - System block always present — default system message
 //!   ("You are a helpful assistant. Your name is MiniMax-M2.5 and is
-//!    built by MiniMax.") auto-injected if missing.
+//!   built by MiniMax.") auto-injected if missing.
 //! - Tools, when supplied, are appended to the system message as
 //!   `<tool>{json}</tool>` lines inside a `<tools>...</tools>` block,
 //!   followed by a verbose instructions block.
 //! - Tool calls use XML wrapper + nested invokes:
-//!     `<minimax:tool_call><invoke name="fn"><parameter name="k">v</parameter>...
-//!     </invoke></minimax:tool_call>`
+//!   `<minimax:tool_call><invoke name="fn"><parameter name="k">v</parameter>...
+//!   </invoke></minimax:tool_call>`
 //! - Tool responses wrapped in literal `<response>...</response>`
 //!   (plain text, no special token).
 //! - Thinking emitted only for assistants after the last user turn
@@ -25,7 +25,7 @@ use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
 use crate::traits::Renderer;
 use crate::types::{
-    Message, ParsedResponse, RenderError, RenderedTokens, ToolArguments, ToolSpec, SCAFFOLD_IDX,
+    Message, ParsedResponse, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments, ToolSpec,
 };
 
 const DEFAULT_SYSTEM: &str =
@@ -96,10 +96,7 @@ impl MiniMaxM2Renderer {
         MiniMaxM2RendererBuilder::default()
     }
 
-    fn new_with(
-        tokenizer: Tokenizer,
-        cfg: MiniMaxM2RendererBuilder,
-    ) -> Result<Self, RenderError> {
+    fn new_with(tokenizer: Tokenizer, cfg: MiniMaxM2RendererBuilder) -> Result<Self, RenderError> {
         let bos = tokenizer.token_to_id_strict("]~!b[")?;
         let role = tokenizer.token_to_id_strict("]~b]")?;
         let eos = tokenizer.token_to_id_strict("[e~[")?;
@@ -174,8 +171,7 @@ impl Renderer for MiniMaxM2Renderer {
         }
         let mut buf = RenderBuf::new(
             &self.tokenizer,
-            messages.len().max(1) * 256
-                + tools.map(|t| t.len() * 256 + 512).unwrap_or(0),
+            messages.len().max(1) * 256 + tools.map(|t| t.len() * 256 + 512).unwrap_or(0),
         );
 
         let first_is_system = messages[0].role == "system";
@@ -366,8 +362,8 @@ impl MiniMaxM2Renderer {
         buf.special(self.role, orig_idx);
 
         let tool_calls = &msg.tool_calls;
-        let emit_think = !reasoning_content.is_empty()
-            && (conv_idx > last_user_index || preserve_thinking);
+        let emit_think =
+            !reasoning_content.is_empty() && (conv_idx > last_user_index || preserve_thinking);
 
         let after_think: String = if emit_think {
             buf.text("ai\n", orig_idx)?;

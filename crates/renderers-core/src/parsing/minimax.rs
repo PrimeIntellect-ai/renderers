@@ -80,7 +80,10 @@ pub fn parse_minimax(
 
     let mut tool_calls: Vec<ParsedToolCall> = Vec::new();
     let content_text = match find(ids, tool_call_id) {
-        None => decode(tokenizer, ids).unwrap_or_default().trim().to_string(),
+        None => decode(tokenizer, ids)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
         Some(tc_start) => {
             let content = decode(tokenizer, &ids[..tc_start])
                 .unwrap_or_default()

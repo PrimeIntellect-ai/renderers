@@ -4,7 +4,7 @@
 //! families ported to Rust so far. New families slot in by adding a
 //! match arm in [`create_renderer`].
 
-use crate::families::{DeepSeekV3Renderer, Qwen35Renderer, Qwen3Renderer};
+use crate::families::{DeepSeekV3Renderer, Qwen3Renderer, Qwen35Renderer};
 use crate::tokenizer::Tokenizer;
 use crate::traits::Renderer;
 use crate::types::RenderError;
@@ -19,7 +19,11 @@ pub enum RendererKind {
 }
 
 impl RendererKind {
-    pub fn from_str(name: &str) -> Option<Self> {
+    /// Resolve a renderer kind from its registry name. Accepts the
+    /// canonical lowercase form plus common aliases. Not named
+    /// `from_str` to avoid the `std::str::FromStr` trait collision —
+    /// it's an inherent method.
+    pub fn parse(name: &str) -> Option<Self> {
         match name {
             "qwen3" | "Qwen3" => Some(Self::Qwen3),
             "qwen35" | "qwen3.5" | "Qwen3.5" => Some(Self::Qwen35),

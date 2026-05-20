@@ -23,13 +23,9 @@ pub const SCAFFOLD_IDX: i32 = -1;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
     /// Plain text.
-    Text {
-        text: String,
-    },
+    Text { text: String },
     /// Model chain-of-thought as a content part.
-    Thinking {
-        thinking: String,
-    },
+    Thinking { thinking: String },
     /// Image reference. Resolution to bytes / processor output happens
     /// in the multimodal renderer.
     Image(ImageRef),
@@ -176,8 +172,9 @@ impl ToolArguments {
     pub fn to_json_string(&self) -> String {
         match self {
             ToolArguments::Raw(s) => s.clone(),
-            ToolArguments::Object(v) => serde_json::to_string(v)
-                .unwrap_or_else(|_| "{}".to_string()),
+            ToolArguments::Object(v) => {
+                serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string())
+            }
         }
     }
 }
@@ -332,4 +329,3 @@ pub enum RenderError {
     #[error("invalid input: {0}")]
     Invalid(String),
 }
-

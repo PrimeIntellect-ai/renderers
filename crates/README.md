@@ -75,13 +75,13 @@ shim logs a one-shot info message and falls back to Python.
 | ------------ | ----------------------------------------------- |
 | Qwen3        | ✅ ported (Phase 2)                              |
 | Qwen3.5      | ✅ ported text-only (Phase 3) — multimodal Phase 5 |
-| GLM 4.5 / 5  | planned (Phase 3)                                |
+| GLM 4.5 / 5  | ✅ ported (Phase 3) — GLM-5, GLM-5.1, GLM-4.5    |
 | DeepSeek V3  | ✅ ported (Phase 3)                              |
-| Nemotron3    | planned (Phase 3)                                |
-| Kimi K2      | planned (Phase 4)                                |
+| Nemotron3    | ✅ ported (Phase 3)                              |
+| Kimi K2      | ✅ ported (Phase 4)                              |
 | Kimi K2.5    | planned (Phase 4 — text; multimodal Phase 5)    |
-| MiniMax M2   | planned (Phase 4)                                |
-| Qwen3.6      | planned (Phase 4)                                |
+| MiniMax M2   | ✅ ported (Phase 4)                              |
+| Qwen3.6      | ✅ ported (Phase 4)                              |
 | Qwen3-VL     | planned (Phase 5 — multimodal incl. processor) |
 | Qwen3.5 mm   | planned (Phase 5)                                |
 | GPT-OSS      | planned (Phase 6 — via `openai-harmony` crate)  |

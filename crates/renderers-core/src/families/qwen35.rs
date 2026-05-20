@@ -614,32 +614,79 @@ impl Renderer for Qwen35Renderer {
 // through as opaque JSON into `MultiModalData::mm_items`.
 
 impl Qwen35Renderer {
-    /// Walk the user-message content parts and pop matching media items
-    /// from `bundle`, emitting placeholder spans inline. Stops at
-    /// content boundaries and accumulates `MultiModalData` side-by-side
-    /// with the token buffer.
+    /// Walk the user-message content parts in order, interleaving
+    /// placeholder spans where Image / Video parts appear. Mirrors the
+    /// HF chat template's behaviour: text and images appear in the
+    /// same order the caller listed them in `Content::Parts`.
+    ///
+    /// `media` items are consumed positionally — the N-th media item
+    /// for this message matches the N-th Image/Video part in the
+    /// content. Mismatched counts return an `Invalid` error.
     fn emit_user_with_media(
         &self,
         buf: &mut RenderBuf<'_>,
+        msg: &Message,
         msg_idx: usize,
-        content: &str,
         media: &MediaBundle,
         mm: &mut MultiModalData,
     ) -> Result<(), RenderError> {
         let idx = msg_idx as i32;
         buf.special(self.im_start, idx);
         buf.text("user\n", idx)?;
-        // Emit the text body
-        if !content.is_empty() {
-            buf.text(content, idx)?;
-        }
-        // Then any media items attached to this message
-        for (m_idx, item) in &media.items {
-            if *m_idx != msg_idx {
-                continue;
+
+        // Gather this message's media items in render order.
+        let mut media_iter = media
+            .items
+            .iter()
+            .filter_map(|(m, item)| (*m == msg_idx).then_some(item));
+
+        match &msg.content {
+            crate::types::Content::Text(s) => {
+                // Plain-text user message with attached media: emit
+                // images first (canonical Qwen-VL shape:
+                // <|vision_start|>...<|vision_end|>{text}), then text.
+                for item in media_iter.by_ref() {
+                    self.emit_media_item(buf, idx, item, mm)?;
+                }
+                if !s.is_empty() {
+                    buf.text(s.trim(), idx)?;
+                }
             }
-            self.emit_media_item(buf, idx, item, mm)?;
+            crate::types::Content::Parts(parts) => {
+                use crate::types::ContentPart;
+                for part in parts {
+                    match part {
+                        ContentPart::Text { text } => {
+                            if !text.is_empty() {
+                                buf.text(text, idx)?;
+                            }
+                        }
+                        ContentPart::Thinking { .. } => {
+                            // Thinking parts shouldn't appear in user
+                            // content — silently skip to match the
+                            // Python implementation's behaviour.
+                        }
+                        ContentPart::Image(_) | ContentPart::Video(_) => {
+                            let item = media_iter.next().ok_or_else(|| {
+                                RenderError::Invalid(format!(
+                                    "message {msg_idx} content lists more media parts than the MediaBundle provides"
+                                ))
+                            })?;
+                            self.emit_media_item(buf, idx, item, mm)?;
+                        }
+                    }
+                }
+            }
         }
+
+        // Reject extra media items in the bundle that didn't get used —
+        // catches off-by-one errors in caller's bundle construction.
+        if media_iter.next().is_some() {
+            return Err(RenderError::Invalid(format!(
+                "MediaBundle has more items for message {msg_idx} than the content's media parts"
+            )));
+        }
+
         buf.special(self.im_end, idx);
         buf.text("\n", idx)?;
         Ok(())
@@ -739,11 +786,14 @@ impl MultimodalRenderer for Qwen35Renderer {
                     }
                 }
                 "user" => {
-                    // Check if this message has attached media; if so, use
-                    // the multimodal emit path.
+                    // If this message has attached media OR the caller
+                    // provided structured content with image/video parts,
+                    // walk the parts inline so order matches the caller's
+                    // list. Pure text paths bypass the heavier walk.
                     let has_media = media.items.iter().any(|(idx, _)| *idx == i);
-                    if has_media {
-                        self.emit_user_with_media(&mut buf, i, content, media, &mut mm)?;
+                    let has_structured = matches!(msg.content, crate::types::Content::Parts(_));
+                    if has_media || has_structured {
+                        self.emit_user_with_media(&mut buf, msg, i, media, &mut mm)?;
                     } else {
                         self.emit_user(&mut buf, content, i as i32)?;
                     }

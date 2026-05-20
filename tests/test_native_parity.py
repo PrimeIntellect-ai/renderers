@@ -41,7 +41,14 @@ pytestmark = pytest.mark.parity
 NATIVE_PARITY_FAMILIES = [
     ("Qwen/Qwen3-8B", "qwen3", {}),
     ("Qwen/Qwen3.5-9B", "qwen35", {}),
+    ("Qwen/Qwen3.6-35B-A3B", "qwen36", {}),
+    ("zai-org/GLM-5", "glm5", {}),
+    ("zai-org/GLM-5.1", "glm51", {}),
+    ("THUDM/GLM-4.5-Air", "glm45", {}),
     ("deepseek-ai/DeepSeek-V3", "deepseek_v3", {}),
+    ("moonshotai/Kimi-K2-Instruct", "kimi_k2", {}),
+    ("MiniMaxAI/MiniMax-M2.5", "minimax_m2", {}),
+    ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "nemotron3", {}),
 ]
 
 
@@ -81,19 +88,8 @@ def native_pair(request, native_module):
     # the ``__new__`` routing doesn't return a native instance.
     saved = os.environ.pop("RENDERERS_NATIVE", None)
     try:
-        if family == "qwen3":
-            from renderers.qwen3 import Qwen3Renderer
-
-            py_renderer = Qwen3Renderer(tokenizer, **extra)
-        elif family == "qwen35":
-            from renderers.qwen35 import Qwen35Renderer
-
-            py_renderer = Qwen35Renderer(tokenizer, **extra)
-        elif family == "deepseek_v3":
-            from renderers.deepseek_v3 import DeepSeekV3Renderer
-
-            py_renderer = DeepSeekV3Renderer(tokenizer, **extra)
-        else:
+        py_renderer = _build_python_renderer(family, tokenizer, extra)
+        if py_renderer is None:
             pytest.skip(f"no python builder wired for {family}")
     finally:
         if saved is not None:
@@ -101,16 +97,68 @@ def native_pair(request, native_module):
 
     # Build the native renderer directly through the module surface —
     # bypasses the env-var routing entirely.
-    if family == "qwen3":
-        native_renderer = native_module.Renderer.qwen3(tok_path, **extra)
-    elif family == "qwen35":
-        native_renderer = native_module.Renderer.qwen35(tok_path, **extra)
-    elif family == "deepseek_v3":
-        native_renderer = native_module.Renderer.deepseek_v3(tok_path, **extra)
-    else:
+    native_renderer = _build_native_renderer(native_module, family, tok_path, extra)
+    if native_renderer is None:
         pytest.skip(f"no native builder wired for {family}")
 
     return py_renderer, native_renderer, tokenizer
+
+
+# ── Family-specific builder dispatch ─────────────────────────────────
+
+
+def _build_python_renderer(family: str, tokenizer, extra):
+    """Return a pure-Python renderer for *family*, or ``None`` if missing."""
+    if family == "qwen3":
+        from renderers.qwen3 import Qwen3Renderer
+        return Qwen3Renderer(tokenizer, **extra)
+    if family == "qwen35":
+        from renderers.qwen35 import Qwen35Renderer
+        return Qwen35Renderer(tokenizer, **extra)
+    if family == "qwen36":
+        from renderers.qwen36 import Qwen36Renderer
+        return Qwen36Renderer(tokenizer, **extra)
+    if family == "glm5":
+        from renderers.glm5 import GLM5Renderer
+        return GLM5Renderer(tokenizer, **extra)
+    if family == "glm51":
+        from renderers.glm5 import GLM51Renderer
+        return GLM51Renderer(tokenizer, **extra)
+    if family == "glm45":
+        from renderers.glm45 import GLM45Renderer
+        return GLM45Renderer(tokenizer, **extra)
+    if family == "deepseek_v3":
+        from renderers.deepseek_v3 import DeepSeekV3Renderer
+        return DeepSeekV3Renderer(tokenizer, **extra)
+    if family == "kimi_k2":
+        from renderers.kimi_k2 import KimiK2Renderer
+        return KimiK2Renderer(tokenizer, **extra)
+    if family == "minimax_m2":
+        from renderers.minimax_m2 import MiniMaxM2Renderer
+        return MiniMaxM2Renderer(tokenizer, **extra)
+    if family == "nemotron3":
+        from renderers.nemotron3 import Nemotron3Renderer
+        return Nemotron3Renderer(tokenizer, **extra)
+    return None
+
+
+def _build_native_renderer(native_module, family: str, tok_path: str, extra):
+    """Return a native renderer for *family* via the explicit factory."""
+    factory = {
+        "qwen3":       native_module.Renderer.qwen3,
+        "qwen35":      native_module.Renderer.qwen35,
+        "qwen36":      native_module.Renderer.qwen36,
+        "glm5":        native_module.Renderer.glm5,
+        "glm51":       native_module.Renderer.glm51,
+        "glm45":       native_module.Renderer.glm45,
+        "deepseek_v3": native_module.Renderer.deepseek_v3,
+        "kimi_k2":     native_module.Renderer.kimi_k2,
+        "minimax_m2":  native_module.Renderer.minimax_m2,
+        "nemotron3":   native_module.Renderer.nemotron3,
+    }.get(family)
+    if factory is None:
+        return None
+    return factory(tok_path, **extra)
 
 
 # ── Conversation fixtures (a representative cross-section) ───────────

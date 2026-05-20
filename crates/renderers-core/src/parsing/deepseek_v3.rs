@@ -145,7 +145,11 @@ fn parse_deepseek_tool_calls(
                 let n = after_sep[..nl].trim().to_string();
                 let rest = after_sep[nl + 1..].trim();
                 let args = match JSON_FENCE_RE.captures(rest) {
-                    Some(c) => c.get(1).map(|m| m.as_str().trim()).unwrap_or("").to_string(),
+                    Some(c) => c
+                        .get(1)
+                        .map(|m| m.as_str().trim())
+                        .unwrap_or("")
+                        .to_string(),
                     None => rest.to_string(),
                 };
                 (n, args)

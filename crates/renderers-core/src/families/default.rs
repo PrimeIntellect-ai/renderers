@@ -27,14 +27,14 @@
 
 use std::sync::Arc;
 
+use minijinja::Environment;
 use minijinja::value::Value as MjValue;
-use minijinja::{Environment, context};
 use serde_json::Value as JsonValue;
 
 use crate::tokenizer::Tokenizer;
 use crate::traits::Renderer;
 use crate::types::{
-    Message, ParsedResponse, RenderError, RenderedTokens, ToolArguments, ToolSpec, SCAFFOLD_IDX,
+    Message, ParsedResponse, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments, ToolSpec,
 };
 
 /// Builder for [`DefaultRenderer`].
@@ -108,10 +108,7 @@ impl Clone for DefaultRenderer {
 }
 
 impl DefaultRenderer {
-    fn new_with(
-        tokenizer: Tokenizer,
-        cfg: DefaultRendererBuilder,
-    ) -> Result<Self, RenderError> {
+    fn new_with(tokenizer: Tokenizer, cfg: DefaultRendererBuilder) -> Result<Self, RenderError> {
         let mut env = Environment::new();
         // HF chat templates use whitespace-stripped markers freely
         // (e.g. `{%- if foo -%}`); minijinja respects that via the
@@ -141,25 +138,33 @@ impl DefaultRenderer {
         tools: Option<&[ToolSpec]>,
         add_generation_prompt: bool,
     ) -> Result<String, RenderError> {
-        let messages_value = messages_to_value(messages)?;
+        // Build a single flat context map up front. minijinja's
+        // `context!` macro and `Value::from_object` produce equivalent
+        // results, but a single dict keeps the per-render allocation
+        // count constant regardless of how many extra context keys the
+        // caller passes (vs the wrapped-Object chain previously used).
+        let mut ctx_map = serde_json::Map::new();
+        ctx_map.insert(
+            "messages".into(),
+            serde_json::to_value(messages_to_value(messages)?).unwrap_or(JsonValue::Null),
+        );
         let tools_value: MjValue = match tools {
             Some(t) => tools_to_value(t)?,
             None => MjValue::from(Vec::<MjValue>::new()),
         };
-        let mut ctx = context! {
-            messages => messages_value,
-            tools => tools_value,
-            add_generation_prompt => add_generation_prompt,
-        };
+        ctx_map.insert(
+            "tools".into(),
+            serde_json::to_value(tools_value).unwrap_or(JsonValue::Null),
+        );
+        ctx_map.insert(
+            "add_generation_prompt".into(),
+            JsonValue::Bool(add_generation_prompt),
+        );
         for (k, v) in &self.extra_context {
-            // Merge — minijinja contexts compose by re-emitting.
-            ctx = minijinja::Value::from_object(MergedCtx {
-                base: ctx.clone(),
-                key: k.clone(),
-                value: MjValue::from_serialize(v),
-            })
-            .into();
+            ctx_map.insert(k.clone(), v.clone());
         }
+        let ctx = MjValue::from_serialize(JsonValue::Object(ctx_map));
+
         let tmpl = self
             .env
             .get_template("chat")
@@ -195,7 +200,11 @@ impl Renderer for DefaultRenderer {
             if ids.len() < prev_len {
                 // Template didn't extend prefix-monotonically — fall back to
                 // a single full render attributed entirely to scaffolding.
-                let all = self.encode_full(&self.render_jinja(messages, tools, add_generation_prompt)?)?;
+                let all = self.encode_full(&self.render_jinja(
+                    messages,
+                    tools,
+                    add_generation_prompt,
+                )?)?;
                 return Ok(RenderedTokens {
                     token_ids: all.clone(),
                     message_indices: vec![SCAFFOLD_IDX; all.len()],
@@ -203,7 +212,7 @@ impl Renderer for DefaultRenderer {
                 });
             }
             let new_count = ids.len() - prev_len;
-            message_indices.extend(std::iter::repeat(i as i32).take(new_count));
+            message_indices.extend(std::iter::repeat_n(i as i32, new_count));
             token_ids = ids;
             prev_len = token_ids.len();
         }
@@ -213,7 +222,7 @@ impl Renderer for DefaultRenderer {
             let full_ids = self.encode_full(&full)?;
             if full_ids.len() >= prev_len {
                 let gen_count = full_ids.len() - prev_len;
-                message_indices.extend(std::iter::repeat(SCAFFOLD_IDX).take(gen_count));
+                message_indices.extend(std::iter::repeat_n(SCAFFOLD_IDX, gen_count));
                 token_ids = full_ids;
             } else {
                 token_ids = full_ids;
@@ -316,8 +325,9 @@ fn messages_to_value(messages: &[Message]) -> Result<MjValue, RenderError> {
                 .map(|tc| {
                     let args = match &tc.function.arguments {
                         ToolArguments::Object(v) => v.clone(),
-                        ToolArguments::Raw(s) => serde_json::from_str(s)
-                            .unwrap_or(JsonValue::String(s.clone())),
+                        ToolArguments::Raw(s) => {
+                            serde_json::from_str(s).unwrap_or(JsonValue::String(s.clone()))
+                        }
                     };
                     serde_json::json!({
                         "type": tc.kind,
@@ -350,26 +360,4 @@ fn tools_to_value(tools: &[ToolSpec]) -> Result<MjValue, RenderError> {
         out.push(MjValue::from_serialize(v));
     }
     Ok(MjValue::from(out))
-}
-
-/// Minijinja value adapter that merges an extra `(key, value)` pair
-/// into an existing context. The HF templates expect `bos_token`,
-/// `eos_token`, etc. to be addressable directly off the top-level
-/// context.
-#[derive(Debug, Clone)]
-struct MergedCtx {
-    base: MjValue,
-    key: String,
-    value: MjValue,
-}
-
-impl minijinja::value::Object for MergedCtx {
-    fn get_value(self: &Arc<Self>, key: &MjValue) -> Option<MjValue> {
-        if let Some(k) = key.as_str() {
-            if k == self.key {
-                return Some(self.value.clone());
-            }
-        }
-        self.base.get_item(key).ok()
-    }
 }

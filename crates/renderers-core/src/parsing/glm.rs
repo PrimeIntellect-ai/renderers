@@ -90,7 +90,10 @@ pub fn parse_glm(
             (content, tcs)
         }
         None => (
-            decode(tokenizer, ids).unwrap_or_default().trim().to_string(),
+            decode(tokenizer, ids)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
             Vec::new(),
         ),
     };
@@ -153,7 +156,10 @@ fn parse_glm_tool_calls(
         let mut any_json_fallback = false;
         let mut structure_broke = false;
         let name = match first_ak {
-            None => decode(tokenizer, block).unwrap_or_default().trim().to_string(),
+            None => decode(tokenizer, block)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
             Some(first) => {
                 let n = decode(tokenizer, &block[..first])
                     .unwrap_or_default()

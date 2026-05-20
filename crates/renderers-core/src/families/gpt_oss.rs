@@ -34,8 +34,8 @@ use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
 use crate::thinking::should_preserve_past_thinking;
 use crate::traits::Renderer;
 use crate::types::{
-    Message, ParsedResponse, ParsedToolCall, RenderError, RenderedTokens, ToolArguments,
-    ToolCallParseStatus, ToolSpec, SCAFFOLD_IDX,
+    Message, ParsedResponse, ParsedToolCall, RenderError, RenderedTokens, SCAFFOLD_IDX,
+    ToolArguments, ToolCallParseStatus, ToolSpec,
 };
 
 fn harmony_err<E: std::fmt::Display>(e: E) -> RenderError {
@@ -78,7 +78,11 @@ impl GptOssRendererBuilder {
             "low" => ReasoningEffort::Low,
             "medium" => ReasoningEffort::Medium,
             "high" => ReasoningEffort::High,
-            other => return Err(RenderError::Invalid(format!("unknown reasoning effort: {other}"))),
+            other => {
+                return Err(RenderError::Invalid(format!(
+                    "unknown reasoning effort: {other}"
+                )));
+            }
         };
         Ok(self)
     }
@@ -153,8 +157,8 @@ impl GptOssRenderer {
             if ids.len() != 1 {
                 return Err(RenderError::MissingSpecialToken(s.to_string()));
             }
-            u32::try_from(ids[0])
-                .map_err(|_| RenderError::MissingSpecialToken(s.to_string()))
+            // `Rank` in tiktoken is `u32`; no conversion needed.
+            Ok(ids[0])
         };
         let start = resolve("<|start|>")?;
         let end = resolve("<|end|>")?;
@@ -203,7 +207,7 @@ impl GptOssRenderer {
             .map_err(harmony_err)?;
         let len = out.len();
         tokens.append(&mut out);
-        indices.extend(std::iter::repeat(msg_idx).take(len));
+        indices.extend(std::iter::repeat_n(msg_idx, len));
         Ok(())
     }
 
@@ -211,12 +215,8 @@ impl GptOssRenderer {
     /// Helper so the call sites don't need to name CoreBPE (which is not
     /// re-exported from the harmony crate).
     fn encode_text(&self, text: &str) -> Vec<u32> {
-        self.enc
-            .tokenizer()
-            .encode_with_special_tokens(text)
-            .iter()
-            .map(|&r| r as u32)
-            .collect()
+        // `Rank` is `u32`; encode_with_special_tokens already returns Vec<u32>.
+        self.enc.tokenizer().encode_with_special_tokens(text)
     }
 
     /// Decode a slice of token ids via the harmony tokenizer.
@@ -259,11 +259,7 @@ impl GptOssRenderer {
         }
     }
 
-    fn message_to_harmony(
-        &self,
-        msg: &Message,
-        preserve_thinking: bool,
-    ) -> Vec<HarmonyMessage> {
+    fn message_to_harmony(&self, msg: &Message, preserve_thinking: bool) -> Vec<HarmonyMessage> {
         match msg.role.as_str() {
             "user" => vec![HarmonyMessage::from_role_and_content(
                 HarmonyRole::User,
@@ -296,11 +292,7 @@ impl GptOssRenderer {
         }
     }
 
-    fn assistant_to_harmony(
-        &self,
-        msg: &Message,
-        preserve_thinking: bool,
-    ) -> Vec<HarmonyMessage> {
+    fn assistant_to_harmony(&self, msg: &Message, preserve_thinking: bool) -> Vec<HarmonyMessage> {
         let mut out: Vec<HarmonyMessage> = Vec::new();
 
         if preserve_thinking {
@@ -319,11 +311,8 @@ impl GptOssRenderer {
         // Text content goes on the `final` channel.
         let text = msg.text_content();
         if !text.is_empty() {
-            let m = HarmonyMessage::from_role_and_content(
-                HarmonyRole::Assistant,
-                text.to_string(),
-            )
-            .with_channel("final");
+            let m = HarmonyMessage::from_role_and_content(HarmonyRole::Assistant, text.to_string())
+                .with_channel("final");
             out.push(m);
         }
 
@@ -350,11 +339,8 @@ impl GptOssRenderer {
         // final-channel message so per-token attribution still produces
         // at least one token slot.
         if out.is_empty() {
-            let m = HarmonyMessage::from_role_and_content(
-                HarmonyRole::Assistant,
-                String::new(),
-            )
-            .with_channel("final");
+            let m = HarmonyMessage::from_role_and_content(HarmonyRole::Assistant, String::new())
+                .with_channel("final");
             out.push(m);
         }
 
@@ -435,8 +421,7 @@ impl Renderer for GptOssRenderer {
                 sys,
             ));
         }
-        let has_dev = first_system_idx.is_some()
-            || tools.map(|t| !t.is_empty()).unwrap_or(false);
+        let has_dev = first_system_idx.is_some() || tools.map(|t| !t.is_empty()).unwrap_or(false);
         if has_dev {
             let mut dev = DeveloperContent::new();
             if let Some(idx) = first_system_idx {
@@ -529,7 +514,10 @@ impl Renderer for GptOssRenderer {
                 continue;
             }
             let block_start = i;
-            let Some(msg_pos) = ids[i + 1..].iter().position(|&t| t == self.message).map(|p| p + i + 1)
+            let Some(msg_pos) = ids[i + 1..]
+                .iter()
+                .position(|&t| t == self.message)
+                .map(|p| p + i + 1)
             else {
                 break;
             };
@@ -542,7 +530,8 @@ impl Renderer for GptOssRenderer {
                 .position(|&t| t == self.start || t == self.end || t == self.call)
                 .map(|p| p + body_start)
                 .unwrap_or(ids.len());
-            let body_closed = body_end < ids.len() && (ids[body_end] == self.end || ids[body_end] == self.call);
+            let body_closed =
+                body_end < ids.len() && (ids[body_end] == self.end || ids[body_end] == self.call);
             let body_text = self.decode_text(&ids[body_start..body_end]);
 
             // Channel: look for <|channel|>NAME in header — NAME is the
@@ -560,14 +549,14 @@ impl Renderer for GptOssRenderer {
                 .unwrap_or_default();
 
             // Recipient: header text may contain "to=functions.NAME"
-            let recipient: Option<&str> = header_text
-                .split("to=")
-                .nth(1)
-                .map(|s| s.split(|c: char| c.is_whitespace() || c == '<').next().unwrap_or(""));
+            let recipient: Option<&str> = header_text.split("to=").nth(1).map(|s| {
+                s.split(|c: char| c.is_whitespace() || c == '<')
+                    .next()
+                    .unwrap_or("")
+            });
 
             if let Some(r) = recipient {
-                if r.starts_with("functions.") {
-                    let tool_name = &r["functions.".len()..];
+                if let Some(tool_name) = r.strip_prefix("functions.") {
                     let block_end = if body_closed { body_end + 1 } else { body_end };
                     let span = block_start..block_end;
                     match serde_json::from_str::<serde_json::Value>(&body_text) {
@@ -597,9 +586,12 @@ impl Renderer for GptOssRenderer {
                 }
             }
 
+            // analysis → reasoning_content; everything else (final,
+            // commentary without a tool recipient, missing channel)
+            // collapses into the visible content stream.
             match channel.split_whitespace().next() {
                 Some("analysis") => reasoning_parts.push(body_text),
-                Some("final") | _ => content_parts.push(body_text),
+                _ => content_parts.push(body_text),
             }
 
             i = if body_closed { body_end + 1 } else { body_end };
@@ -652,7 +644,9 @@ impl Renderer for GptOssRenderer {
             }
             for hm in self.message_to_harmony(msg, false) {
                 let mut out: Vec<u32> = Vec::new();
-                self.enc.render_into(&hm, &mut out, None).map_err(harmony_err)?;
+                self.enc
+                    .render_into(&hm, &mut out, None)
+                    .map_err(harmony_err)?;
                 ext.extend(out);
             }
         }

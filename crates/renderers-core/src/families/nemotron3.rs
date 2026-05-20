@@ -27,7 +27,7 @@ use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
 use crate::traits::Renderer;
 use crate::types::{
-    Message, ParsedResponse, RenderError, RenderedTokens, ToolArguments, ToolSpec, SCAFFOLD_IDX,
+    Message, ParsedResponse, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments, ToolSpec,
 };
 
 const TOOLS_HEADER: &str = "# Tools\n\nYou have access to the following functions:\n\n<tools>";
@@ -99,10 +99,7 @@ impl Nemotron3Renderer {
         Nemotron3RendererBuilder::default()
     }
 
-    fn new_with(
-        tokenizer: Tokenizer,
-        cfg: Nemotron3RendererBuilder,
-    ) -> Result<Self, RenderError> {
+    fn new_with(tokenizer: Tokenizer, cfg: Nemotron3RendererBuilder) -> Result<Self, RenderError> {
         let im_start = tokenizer.token_to_id_strict("<|im_start|>")?;
         let im_end = tokenizer.token_to_id_strict("<|im_end|>")?;
         let endoftext = tokenizer.token_to_id("<|endoftext|>");
@@ -151,7 +148,11 @@ impl Nemotron3Renderer {
         }
         out.push_str("\n<parameters>");
 
-        if let Some(props) = tool.parameters.get("properties").and_then(|v| v.as_object()) {
+        if let Some(props) = tool
+            .parameters
+            .get("properties")
+            .and_then(|v| v.as_object())
+        {
             for (param_name, param_fields) in props {
                 out.push_str("\n<parameter>\n<name>");
                 out.push_str(param_name);
@@ -215,7 +216,7 @@ impl Nemotron3Renderer {
         handled: &[&str],
     ) {
         for (k, v) in obj {
-            if handled.iter().any(|h| *h == k.as_str()) {
+            if handled.contains(&k.as_str()) {
                 continue;
             }
             out.push_str("\n<");
@@ -315,8 +316,7 @@ impl Nemotron3Renderer {
         msg_orig_idx: i32,
     ) -> Result<(), RenderError> {
         let prev_is_tool = msg_idx > 0 && messages[msg_idx - 1].role == "tool";
-        let next_is_tool =
-            msg_idx + 1 < messages.len() && messages[msg_idx + 1].role == "tool";
+        let next_is_tool = msg_idx + 1 < messages.len() && messages[msg_idx + 1].role == "tool";
 
         if !prev_is_tool {
             buf.special(self.im_start, msg_orig_idx);
@@ -354,9 +354,15 @@ impl Nemotron3Renderer {
             None => {
                 if let Some((before, after)) = raw_content.split_once("</think>") {
                     let r = if let Some((_, inner)) = before.rsplit_once("<think>") {
-                        inner.trim_start_matches('\n').trim_end_matches('\n').to_string()
+                        inner
+                            .trim_start_matches('\n')
+                            .trim_end_matches('\n')
+                            .to_string()
                     } else {
-                        before.trim_start_matches('\n').trim_end_matches('\n').to_string()
+                        before
+                            .trim_start_matches('\n')
+                            .trim_end_matches('\n')
+                            .to_string()
                     };
                     (r, after.trim_start_matches('\n').to_string())
                 } else {
@@ -417,8 +423,9 @@ impl Nemotron3Renderer {
 
             let args_value = match &tc.function.arguments {
                 ToolArguments::Object(v) => v.clone(),
-                ToolArguments::Raw(s) => serde_json::from_str(s)
-                    .unwrap_or(JsonValue::Object(Default::default())),
+                ToolArguments::Raw(s) => {
+                    serde_json::from_str(s).unwrap_or(JsonValue::Object(Default::default()))
+                }
             };
             if let Some(obj) = args_value.as_object() {
                 for (arg_name, arg_value) in obj {
@@ -427,12 +434,17 @@ impl Nemotron3Renderer {
                             serde_json::to_string(arg_value).unwrap_or_default()
                         }
                         JsonValue::String(s) => s.clone(),
-                        JsonValue::Bool(b) => if *b { "True".into() } else { "False".into() },
+                        JsonValue::Bool(b) => {
+                            if *b {
+                                "True".into()
+                            } else {
+                                "False".into()
+                            }
+                        }
                         JsonValue::Null => "None".into(),
                         JsonValue::Number(n) => n.to_string(),
                     };
-                    let mut param =
-                        String::with_capacity(arg_name.len() + val_str.len() + 24);
+                    let mut param = String::with_capacity(arg_name.len() + val_str.len() + 24);
                     param.push_str("<parameter=");
                     param.push_str(arg_name);
                     param.push_str(">\n");

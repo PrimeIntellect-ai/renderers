@@ -22,12 +22,10 @@ use crate::emit::RenderBuf;
 use crate::parsing::deepseek_v3::parse_deepseek_v3;
 use crate::tokenizer::Tokenizer;
 use crate::traits::Renderer;
-use crate::types::{
-    Message, ParsedResponse, RenderError, RenderedTokens, ToolArguments, ToolSpec,
-};
+use crate::types::{Message, ParsedResponse, RenderError, RenderedTokens, ToolArguments, ToolSpec};
 
 const SEP: char = '\u{FF5C}'; // ｜
-const US: char = '\u{2581}';  // ▁
+const US: char = '\u{2581}'; // ▁
 
 fn ds_token(name: &str) -> String {
     let mut s = String::with_capacity(name.len() + 4);
@@ -46,7 +44,9 @@ pub struct DeepSeekV3RendererBuilder {
 
 impl Default for DeepSeekV3RendererBuilder {
     fn default() -> Self {
-        Self { enable_thinking: true }
+        Self {
+            enable_thinking: true,
+        }
     }
 }
 
@@ -105,10 +105,7 @@ impl DeepSeekV3Renderer {
         Ok(ids[0])
     }
 
-    fn new_with(
-        tokenizer: Tokenizer,
-        cfg: DeepSeekV3RendererBuilder,
-    ) -> Result<Self, RenderError> {
+    fn new_with(tokenizer: Tokenizer, cfg: DeepSeekV3RendererBuilder) -> Result<Self, RenderError> {
         let bos = Self::resolve(&tokenizer, &format!("begin{US}of{US}sentence"))?;
         let eos = Self::resolve(&tokenizer, &format!("end{US}of{US}sentence"))?;
         let user_token = Self::resolve(&tokenizer, "User")?;
@@ -287,10 +284,7 @@ impl Renderer for DeepSeekV3Renderer {
             }
         }
 
-        let last_role = new_messages
-            .last()
-            .map(|m| m.role.as_str())
-            .unwrap_or("");
+        let last_role = new_messages.last().map(|m| m.role.as_str()).unwrap_or("");
         if last_role != "tool" {
             buf.scaffold_special(self.assistant_token);
         }
@@ -373,8 +367,7 @@ impl DeepSeekV3Renderer {
         msg_idx: usize,
     ) -> Result<(), RenderError> {
         let prev_is_tool = msg_idx > 0 && messages[msg_idx - 1].role == "tool";
-        let next_is_tool =
-            msg_idx + 1 < messages.len() && messages[msg_idx + 1].role == "tool";
+        let next_is_tool = msg_idx + 1 < messages.len() && messages[msg_idx + 1].role == "tool";
         let idx = msg_idx as i32;
         let content = messages[msg_idx].text_content();
 

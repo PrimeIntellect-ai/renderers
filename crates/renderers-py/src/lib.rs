@@ -9,23 +9,24 @@
 
 use std::sync::Arc;
 
+use numpy::{IntoPyArray, PyArray2};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyType};
+use pyo3::types::{PyDict, PyList, PyType};
 
+use renderers_core::Renderer as CoreRenderer;
 use renderers_core::families::{
-    DefaultRendererBuilder, DeepSeekV3RendererBuilder, GlmRendererBuilder, GptOssRendererBuilder,
-    KimiK25RendererBuilder, KimiK2RendererBuilder, MiniMaxM2RendererBuilder,
-    Nemotron3RendererBuilder, Qwen35RendererBuilder, Qwen36RendererBuilder, Qwen3RendererBuilder,
+    DeepSeekV3RendererBuilder, DefaultRendererBuilder, GlmRendererBuilder, GptOssRendererBuilder,
+    KimiK2RendererBuilder, KimiK25RendererBuilder, MiniMaxM2RendererBuilder,
+    Nemotron3RendererBuilder, Qwen3RendererBuilder, Qwen35RendererBuilder, Qwen36RendererBuilder,
 };
 use renderers_core::processing::{ProcessedImage, Qwen3VlImageProcessor};
-use renderers_core::types::{MediaBundle, MediaItem, Modality};
 use renderers_core::tokenizer::Tokenizer;
+use renderers_core::types::{MediaBundle, MediaItem, Modality};
 use renderers_core::types::{
     Message, ParsedResponse, ParsedToolCall, RenderedTokens, ToolArguments, ToolCallParseStatus,
     ToolSpec,
 };
-use renderers_core::Renderer as CoreRenderer;
 
 fn render_err(e: renderers_core::types::RenderError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
@@ -38,7 +39,9 @@ fn invalid(msg: impl Into<String>) -> PyErr {
 /// Decode a Python `list[dict]` of messages via pythonize.
 fn parse_messages(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Message>> {
     let value: serde_json::Value = pythonize::depythonize(obj).map_err(|e| {
-        invalid(format!("messages must be a list of dicts (decode failed: {e})"))
+        invalid(format!(
+            "messages must be a list of dicts (decode failed: {e})"
+        ))
     })?;
     serde_json::from_value(value).map_err(|e| invalid(format!("messages shape mismatch: {e}")))
 }
@@ -48,10 +51,13 @@ fn parse_tools(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<ToolSpec>>
     if obj.is_none() {
         return Ok(None);
     }
-    let value: serde_json::Value = pythonize::depythonize(obj)
-        .map_err(|e| invalid(format!("tools must be a list of dicts (decode failed: {e})")))?;
-    let parsed: Vec<ToolSpec> = serde_json::from_value(value)
-        .map_err(|e| invalid(format!("tools shape mismatch: {e}")))?;
+    let value: serde_json::Value = pythonize::depythonize(obj).map_err(|e| {
+        invalid(format!(
+            "tools must be a list of dicts (decode failed: {e})"
+        ))
+    })?;
+    let parsed: Vec<ToolSpec> =
+        serde_json::from_value(value).map_err(|e| invalid(format!("tools shape mismatch: {e}")))?;
     Ok(Some(parsed))
 }
 
@@ -65,11 +71,13 @@ fn parse_media_bundle(obj: &Bound<'_, PyAny>) -> PyResult<MediaBundle> {
     };
     let mut bundle = MediaBundle::new();
     for item in arr {
-        let obj = item.as_object().ok_or_else(|| invalid("media item must be a dict"))?;
-        let message_idx = obj
-            .get("message_idx")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| invalid("media item missing message_idx"))? as usize;
+        let obj = item
+            .as_object()
+            .ok_or_else(|| invalid("media item must be a dict"))?;
+        let message_idx =
+            obj.get("message_idx")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid("media item missing message_idx"))? as usize;
         let modality_str = obj
             .get("modality")
             .and_then(|v| v.as_str())
@@ -79,19 +87,27 @@ fn parse_media_bundle(obj: &Bound<'_, PyAny>) -> PyResult<MediaBundle> {
             "video" => Modality::Video,
             other => return Err(invalid(format!("unknown modality: {other}"))),
         };
-        let num_tokens = obj
-            .get("num_tokens")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| invalid("media item missing num_tokens"))? as usize;
+        let num_tokens =
+            obj.get("num_tokens")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid("media item missing num_tokens"))? as usize;
         let hash = obj
             .get("hash")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_default();
-        let hf_payload = obj.get("hf_payload").cloned().unwrap_or(serde_json::Value::Null);
+        let hf_payload = obj
+            .get("hf_payload")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         bundle.push(
             message_idx,
-            MediaItem { modality, hash, num_tokens, hf_payload },
+            MediaItem {
+                modality,
+                hash,
+                num_tokens,
+                hf_payload,
+            },
         );
     }
     Ok(bundle)
@@ -99,7 +115,9 @@ fn parse_media_bundle(obj: &Bound<'_, PyAny>) -> PyResult<MediaBundle> {
 
 fn parse_u32_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
     // Accept either a Python list of ints or a numpy-style sequence.
-    let list = obj.downcast::<PyList>().map_err(|_| invalid("expected list[int]"))?;
+    let list = obj
+        .downcast::<PyList>()
+        .map_err(|_| invalid("expected list[int]"))?;
     let mut out = Vec::with_capacity(list.len());
     for item in list.iter() {
         let v: i64 = item.extract()?;
@@ -177,8 +195,9 @@ impl PyParsedToolCall {
     fn arguments<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match &self.inner.arguments {
             None => Ok(py.None().into_bound(py)),
-            Some(ToolArguments::Object(v)) => pythonize::pythonize(py, v)
-                .map_err(|e| invalid(format!("args serialisation: {e}"))),
+            Some(ToolArguments::Object(v)) => {
+                pythonize::pythonize(py, v).map_err(|e| invalid(format!("args serialisation: {e}")))
+            }
             Some(ToolArguments::Raw(s)) => Ok(s.clone().into_py(py).into_bound(py)),
         }
     }
@@ -317,6 +336,38 @@ impl PyRenderer {
         })
     }
 
+    /// Build a Qwen3-VL renderer — alias for [`Renderer.qwen35`].
+    ///
+    /// Qwen3-VL and Qwen3.5-VL share the same chat template and the
+    /// same set of special tokens, so the renderer implementation is
+    /// identical. The factory is exposed separately so callers reading
+    /// from a registry can spell the family name directly.
+    #[classmethod]
+    #[pyo3(signature = (
+        tokenizer_path,
+        *,
+        enable_thinking = true,
+        preserve_all_thinking = false,
+        preserve_thinking_between_tool_calls = false,
+    ))]
+    fn qwen3_vl(
+        _cls: &Bound<'_, PyType>,
+        py: Python<'_>,
+        tokenizer_path: &str,
+        enable_thinking: bool,
+        preserve_all_thinking: bool,
+        preserve_thinking_between_tool_calls: bool,
+    ) -> PyResult<Self> {
+        Self::qwen35(
+            _cls,
+            py,
+            tokenizer_path,
+            enable_thinking,
+            preserve_all_thinking,
+            preserve_thinking_between_tool_calls,
+        )
+    }
+
     /// Build a Qwen3.5 renderer (text-only path) from a tokenizer.json.
     ///
     /// `enable_thinking` defaults to `True` (big-size variant). The Python
@@ -412,7 +463,9 @@ impl PyRenderer {
                     .build(tok)
             })
             .map_err(render_err)?;
-        Ok(PyRenderer { inner: Arc::new(renderer) })
+        Ok(PyRenderer {
+            inner: Arc::new(renderer),
+        })
     }
 
     /// Build a GLM-5.1 renderer (GLM-5 + empty <think></think> on last assistant).
@@ -442,7 +495,9 @@ impl PyRenderer {
                     .build(tok)
             })
             .map_err(render_err)?;
-        Ok(PyRenderer { inner: Arc::new(renderer) })
+        Ok(PyRenderer {
+            inner: Arc::new(renderer),
+        })
     }
 
     /// Build a GLM-4.5 Air renderer from a tokenizer.json.
@@ -472,7 +527,9 @@ impl PyRenderer {
                     .build(tok)
             })
             .map_err(render_err)?;
-        Ok(PyRenderer { inner: Arc::new(renderer) })
+        Ok(PyRenderer {
+            inner: Arc::new(renderer),
+        })
     }
 
     /// Build a MiniMax M2 / M2.5 renderer from a tokenizer.json.
@@ -499,7 +556,9 @@ impl PyRenderer {
                     .build(tok)
             })
             .map_err(render_err)?;
-        Ok(PyRenderer { inner: Arc::new(renderer) })
+        Ok(PyRenderer {
+            inner: Arc::new(renderer),
+        })
     }
 
     /// Build a DefaultRenderer (Jinja fallback via minijinja).
@@ -546,7 +605,9 @@ impl PyRenderer {
                 b.build(tok)
             })
             .map_err(render_err)?;
-        Ok(PyRenderer { inner: Arc::new(renderer) })
+        Ok(PyRenderer {
+            inner: Arc::new(renderer),
+        })
     }
 
     /// Build a GPT-OSS (Harmony) renderer.
@@ -602,7 +663,9 @@ impl PyRenderer {
                 b.build()
             })
             .map_err(render_err)?;
-        Ok(PyRenderer { inner: Arc::new(renderer) })
+        Ok(PyRenderer {
+            inner: Arc::new(renderer),
+        })
     }
 
     /// Build a Kimi K2.5 renderer (text-only, no tools).
@@ -637,7 +700,9 @@ impl PyRenderer {
                     .build(tok)
             })
             .map_err(render_err)?;
-        Ok(PyRenderer { inner: Arc::new(renderer) })
+        Ok(PyRenderer {
+            inner: Arc::new(renderer),
+        })
     }
 
     /// Build a Kimi K2 renderer from a tokenizer.json.
@@ -667,7 +732,9 @@ impl PyRenderer {
                     .build(tok)
             })
             .map_err(render_err)?;
-        Ok(PyRenderer { inner: Arc::new(renderer) })
+        Ok(PyRenderer {
+            inner: Arc::new(renderer),
+        })
     }
 
     /// Build a Nemotron 3 renderer from a tokenizer.json.
@@ -885,11 +952,21 @@ impl PyQwen3VlImageProcessor {
         merge_size: Option<u32>,
     ) -> PyResult<Self> {
         let mut p = Qwen3VlImageProcessor::default();
-        if let Some(v) = min_pixels { p.min_pixels = v; }
-        if let Some(v) = max_pixels { p.max_pixels = v; }
-        if let Some(v) = patch_size { p.patch_size = v; }
-        if let Some(v) = temporal_patch_size { p.temporal_patch_size = v; }
-        if let Some(v) = merge_size { p.merge_size = v; }
+        if let Some(v) = min_pixels {
+            p.min_pixels = v;
+        }
+        if let Some(v) = max_pixels {
+            p.max_pixels = v;
+        }
+        if let Some(v) = patch_size {
+            p.patch_size = v;
+        }
+        if let Some(v) = temporal_patch_size {
+            p.temporal_patch_size = v;
+        }
+        if let Some(v) = merge_size {
+            p.merge_size = v;
+        }
         Ok(Self { inner: p })
     }
 
@@ -916,11 +993,7 @@ impl PyQwen3VlImageProcessor {
     /// ```
     ///
     /// `message_idx` is up to the caller — it's not added here.
-    fn process_bytes<'py>(
-        &self,
-        py: Python<'py>,
-        bytes: &[u8],
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn process_bytes<'py>(&self, py: Python<'py>, bytes: &[u8]) -> PyResult<Bound<'py, PyAny>> {
         // Clone so the move into allow_threads is straightforward
         let processed: ProcessedImage = py
             .allow_threads(|| self.inner.process_bytes(bytes))
@@ -930,8 +1003,8 @@ impl PyQwen3VlImageProcessor {
 
     /// Convenience: read a file and process it.
     fn process_path<'py>(&self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyAny>> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| invalid(format!("read image {path:?}: {e}")))?;
+        let bytes =
+            std::fs::read(path).map_err(|e| invalid(format!("read image {path:?}: {e}")))?;
         let processed: ProcessedImage = py
             .allow_threads(|| self.inner.process_bytes(&bytes))
             .map_err(render_err)?;
@@ -939,43 +1012,52 @@ impl PyQwen3VlImageProcessor {
     }
 
     #[getter]
-    fn patch_size(&self) -> u32 { self.inner.patch_size }
+    fn patch_size(&self) -> u32 {
+        self.inner.patch_size
+    }
     #[getter]
-    fn merge_size(&self) -> u32 { self.inner.merge_size }
+    fn merge_size(&self) -> u32 {
+        self.inner.merge_size
+    }
     #[getter]
-    fn temporal_patch_size(&self) -> u32 { self.inner.temporal_patch_size }
+    fn temporal_patch_size(&self) -> u32 {
+        self.inner.temporal_patch_size
+    }
     #[getter]
-    fn min_pixels(&self) -> u32 { self.inner.min_pixels }
+    fn min_pixels(&self) -> u32 {
+        self.inner.min_pixels
+    }
     #[getter]
-    fn max_pixels(&self) -> u32 { self.inner.max_pixels }
+    fn max_pixels(&self) -> u32 {
+        self.inner.max_pixels
+    }
 }
 
-fn processed_to_pyobject<'py>(
-    py: Python<'py>,
-    p: ProcessedImage,
-) -> PyResult<Bound<'py, PyAny>> {
-    // Serialise via serde_json::Value first, then convert to a Python
-    // dict. The shape is identical to what the HF processor produces
-    // (lists of f32 + integer dims), so downstream glue can route it
-    // unchanged.
-    let shape = p.pixel_values.shape().to_vec();
-    let value = serde_json::json!({
-        "modality":    "image",
-        "num_tokens":  p.num_tokens,
-        "hash":        p.hash,
-        "hf_payload":  {
-            "pixel_values": {
-                "shape": [shape[0] as u64, shape[1] as u64],
-                "data":  p.pixel_values.iter().copied().collect::<Vec<f32>>(),
-            },
-            "image_grid_thw": {
-                "shape": [1u32, 3u32],
-                "data":  p.image_grid_thw.to_vec(),
-            },
-        },
-    });
-    pythonize::pythonize(py, &value)
-        .map_err(|e| invalid(format!("processed image → py: {e}")))
+fn processed_to_pyobject<'py>(py: Python<'py>, p: ProcessedImage) -> PyResult<Bound<'py, PyAny>> {
+    // Zero-copy: hand numpy the Vec<f32> directly. The numpy array
+    // takes ownership of the buffer, so this avoids the per-element
+    // PyFloat allocation that the previous nested-list path triggered.
+    // Shape: (num_tokens × merge², 3 × temporal × patch²).
+    let shape = (p.pixel_values.shape()[0], p.pixel_values.shape()[1]);
+    let pixel_array: Bound<'py, PyArray2<f32>> = p.pixel_values.into_pyarray(py);
+    let grid_array: Bound<'py, PyArray2<i64>> = ndarray::Array2::from_shape_vec(
+        (1, 3),
+        p.image_grid_thw.iter().map(|&v| v as i64).collect(),
+    )
+    .expect("image_grid_thw is always shape [1,3]")
+    .into_pyarray(py);
+
+    let hf_payload = PyDict::new(py);
+    hf_payload.set_item("pixel_values", pixel_array)?;
+    hf_payload.set_item("image_grid_thw", grid_array)?;
+
+    let out = PyDict::new(py);
+    out.set_item("modality", "image")?;
+    out.set_item("num_tokens", p.num_tokens)?;
+    out.set_item("hash", p.hash)?;
+    out.set_item("hf_payload", hf_payload)?;
+    let _ = shape; // shape captured in the numpy array's own metadata
+    Ok(out.into_any())
 }
 
 #[pymodule]

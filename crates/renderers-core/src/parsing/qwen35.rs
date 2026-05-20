@@ -174,7 +174,10 @@ fn parse_xml_tool_calls(
                 continue;
             }
         };
-        let name = name_match.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = name_match
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
 
         let mut arguments = serde_json::Map::new();
         let mut any_json_fallback = false;

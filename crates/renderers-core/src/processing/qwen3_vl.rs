@@ -33,7 +33,7 @@ use crate::types::RenderError;
 
 /// OpenAI CLIP normalisation constants — Qwen-VL inherits these.
 pub const CLIP_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
-pub const CLIP_STD: [f32; 3] = [0.268_629_54, 0.261_302_58, 0.275_777_11];
+pub const CLIP_STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
 
 /// Configuration for the Qwen-VL image processor pipeline.
 #[derive(Debug, Clone)]
@@ -148,10 +148,7 @@ impl Qwen3VlImageProcessor {
         h.update(format!("({}, {})", rgb.width(), rgb.height()).as_bytes());
         let digest = h.finalize();
         // Trim to 32 hex chars to match the Python implementation.
-        let hex: String = digest
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
         hex[..32].to_string()
     }
 
@@ -162,12 +159,8 @@ impl Qwen3VlImageProcessor {
 
         // Resize: image crate's CatmullRom is the closest match to PIL's
         // bicubic. See module-level docs for the parity caveat.
-        let resized = image::imageops::resize(
-            rgb,
-            new_w,
-            new_h,
-            image::imageops::FilterType::CatmullRom,
-        );
+        let resized =
+            image::imageops::resize(rgb, new_w, new_h, image::imageops::FilterType::CatmullRom);
 
         // Build a (C=3, H, W) f32 array, normalised.
         let (h, w) = (new_h as usize, new_w as usize);
@@ -217,8 +210,7 @@ impl Qwen3VlImageProcessor {
             for m_col in 0..merged_grid_w {
                 for mi in 0..merge {
                     for mj in 0..merge {
-                        let token_idx =
-                            ((m_row * merged_grid_w + m_col) * merge + mi) * merge + mj;
+                        let token_idx = ((m_row * merged_grid_w + m_col) * merge + mi) * merge + mj;
                         // Patch top-left in pixel coordinates:
                         let py = (m_row * merge + mi) * ps;
                         let px = (m_col * merge + mj) * ps;

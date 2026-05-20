@@ -25,7 +25,7 @@ use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
 use crate::traits::Renderer;
 use crate::types::{
-    Message, ParsedResponse, RenderError, RenderedTokens, ToolArguments, ToolSpec, SCAFFOLD_IDX,
+    Message, ParsedResponse, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments, ToolSpec,
 };
 
 const TOOLS_HEADER: &str = "# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>";
@@ -110,10 +110,7 @@ impl Qwen3Renderer {
         Qwen3RendererBuilder::default()
     }
 
-    fn new_with(
-        tokenizer: Tokenizer,
-        cfg: Qwen3RendererBuilder,
-    ) -> Result<Self, RenderError> {
+    fn new_with(tokenizer: Tokenizer, cfg: Qwen3RendererBuilder) -> Result<Self, RenderError> {
         let im_start = tokenizer.token_to_id_strict("<|im_start|>")?;
         let im_end = tokenizer.token_to_id_strict("<|im_end|>")?;
         let endoftext = tokenizer.token_to_id_strict("<|endoftext|>")?;
@@ -247,8 +244,7 @@ impl Qwen3Renderer {
         content: &str,
     ) -> Result<(), RenderError> {
         let prev_is_tool = msg_idx > 0 && messages[msg_idx - 1].role == "tool";
-        let next_is_tool =
-            msg_idx + 1 < messages.len() && messages[msg_idx + 1].role == "tool";
+        let next_is_tool = msg_idx + 1 < messages.len() && messages[msg_idx + 1].role == "tool";
         let idx = msg_idx as i32;
 
         if !prev_is_tool {
@@ -289,9 +285,15 @@ impl Qwen3Renderer {
             None => {
                 if let Some((before, after)) = raw_content.split_once("</think>") {
                     let reasoning = if let Some((_, inner)) = before.rsplit_once("<think>") {
-                        inner.trim_start_matches('\n').trim_end_matches('\n').to_string()
+                        inner
+                            .trim_start_matches('\n')
+                            .trim_end_matches('\n')
+                            .to_string()
                     } else {
-                        before.trim_start_matches('\n').trim_end_matches('\n').to_string()
+                        before
+                            .trim_start_matches('\n')
+                            .trim_end_matches('\n')
+                            .to_string()
                     };
                     (reasoning, after.trim_start_matches('\n').to_string())
                 } else {
@@ -309,7 +311,8 @@ impl Qwen3Renderer {
         let emit_via_override = preserve_thinking && !reasoning_content.is_empty();
 
         let prefix = if emit_in_template_window || emit_via_override {
-            let mut s = String::with_capacity(reasoning_content.len() + content_after_think.len() + 32);
+            let mut s =
+                String::with_capacity(reasoning_content.len() + content_after_think.len() + 32);
             s.push_str("assistant\n<think>\n");
             s.push_str(reasoning_content.trim_matches('\n'));
             s.push_str("\n</think>\n\n");

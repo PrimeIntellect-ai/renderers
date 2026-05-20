@@ -163,11 +163,19 @@ fn parse_kimi_k2_calls(
 
         out.push(ParsedToolCall {
             raw: block_text,
-            name: if func_name.is_empty() { None } else { Some(func_name) },
+            name: if func_name.is_empty() {
+                None
+            } else {
+                Some(func_name)
+            },
             arguments: Some(arguments),
             token_span: Some(span),
             status,
-            id: if raw_id.is_empty() { None } else { Some(raw_id) },
+            id: if raw_id.is_empty() {
+                None
+            } else {
+                Some(raw_id)
+            },
         });
         i = tc_end + 1;
         if unclosed {

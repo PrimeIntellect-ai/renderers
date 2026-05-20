@@ -79,11 +79,13 @@ impl MediaResolver for Qwen3VlResolver {
     fn resolve_image(&self, source: &MediaSource<'_>) -> Result<MediaItem, RenderError> {
         let bytes: Vec<u8> = match source {
             MediaSource::Bytes(b) => b.to_vec(),
-            MediaSource::Path(p) => fs::read(p)
-                .map_err(|e| RenderError::Invalid(format!("read image {p:?}: {e}")))?,
+            MediaSource::Path(p) => {
+                fs::read(p).map_err(|e| RenderError::Invalid(format!("read image {p:?}: {e}")))?
+            }
             MediaSource::Url(_) => {
                 return Err(RenderError::Invalid(
-                    "URL sources require an async fetch — pass already-downloaded bytes instead".into(),
+                    "URL sources require an async fetch — pass already-downloaded bytes instead"
+                        .into(),
                 ));
             }
         };

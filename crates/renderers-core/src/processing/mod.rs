@@ -19,5 +19,5 @@
 pub mod qwen3_vl;
 pub mod resolver;
 
-pub use qwen3_vl::{ProcessedImage, Qwen3VlImageProcessor, CLIP_MEAN, CLIP_STD};
+pub use qwen3_vl::{CLIP_MEAN, CLIP_STD, ProcessedImage, Qwen3VlImageProcessor};
 pub use resolver::Qwen3VlResolver;

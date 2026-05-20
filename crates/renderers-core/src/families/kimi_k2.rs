@@ -24,7 +24,7 @@ use crate::parsing::kimi_k2::parse_kimi_k2;
 use crate::tokenizer::Tokenizer;
 use crate::traits::Renderer;
 use crate::types::{
-    Message, ParsedResponse, RenderError, RenderedTokens, ToolArguments, ToolSpec, SCAFFOLD_IDX,
+    Message, ParsedResponse, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments, ToolSpec,
 };
 
 const DEFAULT_SYSTEM: &str = "You are Kimi, an AI assistant created by Moonshot AI.";
@@ -105,8 +105,7 @@ impl KimiK2Renderer {
         let im_end = tokenizer.token_to_id_strict("<|im_end|>")?;
         let tool_calls_section_begin =
             tokenizer.token_to_id_strict("<|tool_calls_section_begin|>")?;
-        let tool_calls_section_end =
-            tokenizer.token_to_id_strict("<|tool_calls_section_end|>")?;
+        let tool_calls_section_end = tokenizer.token_to_id_strict("<|tool_calls_section_end|>")?;
         let tool_call_begin = tokenizer.token_to_id_strict("<|tool_call_begin|>")?;
         let tool_call_argument_begin =
             tokenizer.token_to_id_strict("<|tool_call_argument_begin|>")?;
@@ -143,7 +142,10 @@ impl KimiK2Renderer {
         for tool in tools {
             let mut m: BTreeMap<String, serde_json::Value> = BTreeMap::new();
             m.insert("name".into(), serde_json::Value::String(tool.name.clone()));
-            m.insert("description".into(), serde_json::Value::String(tool.description.clone()));
+            m.insert(
+                "description".into(),
+                serde_json::Value::String(tool.description.clone()),
+            );
             m.insert("parameters".into(), Self::sort_keys(&tool.parameters));
             arr.push(m);
         }
@@ -211,8 +213,7 @@ impl Renderer for KimiK2Renderer {
         // tool_declare goes first if tools were provided and the caller
         // didn't already include a tool_declare message.
         let tools_pending = tools.map(|t| !t.is_empty()).unwrap_or(false);
-        let already_has_tool_declare =
-            !messages.is_empty() && messages[0].role == "tool_declare";
+        let already_has_tool_declare = !messages.is_empty() && messages[0].role == "tool_declare";
         if tools_pending && !already_has_tool_declare {
             working.push(Message {
                 role: "tool_declare".to_string(),
@@ -223,21 +224,20 @@ impl Renderer for KimiK2Renderer {
         }
 
         // Then the optional default system message
-        let auto_system_position: Option<usize> = if !messages.is_empty()
-            && messages[0].role == "tool_declare"
-        {
-            // tool_declare present in caller's input → if next isn't system,
-            // inject default system AFTER tool_declare
-            if messages.len() < 2 || messages[1].role != "system" {
-                Some(working.len() + 1) // will be inserted between tool_declare and the rest
+        let auto_system_position: Option<usize> =
+            if !messages.is_empty() && messages[0].role == "tool_declare" {
+                // tool_declare present in caller's input → if next isn't system,
+                // inject default system AFTER tool_declare
+                if messages.len() < 2 || messages[1].role != "system" {
+                    Some(working.len() + 1) // will be inserted between tool_declare and the rest
+                } else {
+                    None
+                }
+            } else if messages.is_empty() || messages[0].role != "system" {
+                Some(working.len())
             } else {
                 None
-            }
-        } else if messages.is_empty() || messages[0].role != "system" {
-            Some(working.len())
-        } else {
-            None
-        };
+            };
 
         // Now lay out the rest:
         if let Some(pos) = auto_system_position {
@@ -277,15 +277,23 @@ impl Renderer for KimiK2Renderer {
         }
 
         // Map normalised index → caller's index (sentinel for injected).
-        let orig_idx = |i: usize| -> i32 {
-            if injected[i] {
-                SCAFFOLD_IDX
-            } else {
-                let real: usize =
-                    injected[..=i].iter().filter(|&&inj| !inj).count() - 1;
-                real as i32
+        // Precompute as a flat Vec so the lookup is O(1) instead of an
+        // O(i) filter inside the render loop — saves an O(n²) walk on
+        // long conversations.
+        let orig_idx_table: Vec<i32> = {
+            let mut table = Vec::with_capacity(working.len());
+            let mut real: i32 = -1;
+            for &inj in &injected {
+                if inj {
+                    table.push(SCAFFOLD_IDX);
+                } else {
+                    real += 1;
+                    table.push(real);
+                }
             }
+            table
         };
+        let orig_idx = |i: usize| -> i32 { orig_idx_table[i] };
 
         // Index of the auto-injected system message (if any) — emits a
         // trailing literal "\n" after its <|im_end|>.

@@ -14,7 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 renderers-core = { path = "../renderers-core" }
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.22", features = ["abi3-py310"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 pythonize = "0.22"

@@ -16,6 +16,8 @@
 //! Rust — the caller passes it explicitly through the builder. The
 //! Python shim handles the polarity probe and forwards the result.
 
+use std::borrow::Cow;
+
 use serde_json::json;
 
 use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
@@ -25,8 +27,9 @@ use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
 use crate::traits::{MultimodalRenderer, Renderer};
 use crate::types::{
-    MediaBundle, MediaItem, Message, Modality, MultiModalData, ParsedResponse, PlaceholderRange,
-    RenderError, RenderedTokens, ToolArguments, ToolSpec, SCAFFOLD_IDX,
+    Content, ContentPart, MediaBundle, MediaItem, Message, Modality, MultiModalData,
+    ParsedResponse, PlaceholderRange, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments,
+    ToolSpec,
 };
 
 const TOOLS_HEADER: &str = "# Tools\n\nYou have access to the following functions:\n\n<tools>";
@@ -180,9 +183,26 @@ impl Qwen35Renderer {
     /// True when the underlying tokenizer ships the vision special
     /// tokens. Used by [`Renderer::as_multimodal`].
     pub fn supports_multimodal(&self) -> bool {
-        self.vision_start.is_some()
-            && self.vision_end.is_some()
-            && self.image_pad.is_some()
+        self.vision_start.is_some() && self.vision_end.is_some() && self.image_pad.is_some()
+    }
+
+    /// Text view of message content, matching the Python
+    /// `Qwen35Renderer._render_content` helper: join text parts and skip
+    /// media / thinking parts. This is used by the text-only native path
+    /// so OpenAI-style structured text content is not silently dropped.
+    fn render_content_text(content: &Content) -> Cow<'_, str> {
+        match content {
+            Content::Text(s) => Cow::Borrowed(s.as_str()),
+            Content::Parts(parts) => {
+                let mut out = String::new();
+                for part in parts {
+                    if let ContentPart::Text { text } = part {
+                        out.push_str(text);
+                    }
+                }
+                Cow::Owned(out)
+            }
+        }
     }
 
     /// Index of the most recent non-tool-response user message;
@@ -194,7 +214,8 @@ impl Qwen35Renderer {
             if msg.role != "user" {
                 continue;
             }
-            let content = msg.text_content().trim();
+            let content = Self::render_content_text(&msg.content);
+            let content = content.trim();
             if !(content.starts_with("<tool_response>") && content.ends_with("</tool_response>")) {
                 return i as i32;
             }
@@ -213,7 +234,8 @@ impl Qwen35Renderer {
         buf.special(self.im_start, sys_idx);
         buf.text("system\n", sys_idx)?;
 
-        let mut tool_text = String::with_capacity(TOOLS_HEADER.len() + TOOLS_INSTRUCTIONS.len() + 256);
+        let mut tool_text =
+            String::with_capacity(TOOLS_HEADER.len() + TOOLS_INSTRUCTIONS.len() + 256);
         tool_text.push_str(TOOLS_HEADER);
         for tool in tools {
             tool_text.push('\n');
@@ -230,7 +252,8 @@ impl Qwen35Renderer {
         tool_text.push_str(TOOLS_INSTRUCTIONS);
 
         if first_is_system {
-            let sys_content = messages[0].text_content().trim();
+            let sys_content = Self::render_content_text(&messages[0].content);
+            let sys_content = sys_content.trim();
             if !sys_content.is_empty() {
                 tool_text.push_str("\n\n");
                 tool_text.push_str(sys_content);
@@ -248,7 +271,8 @@ impl Qwen35Renderer {
         buf: &mut RenderBuf<'_>,
         messages: &[Message],
     ) -> Result<(), RenderError> {
-        let content = messages[0].text_content().trim();
+        let content = Self::render_content_text(&messages[0].content);
+        let content = content.trim();
         buf.special(self.im_start, 0);
         let mut s = String::with_capacity(content.len() + 8);
         s.push_str("system\n");
@@ -283,8 +307,7 @@ impl Qwen35Renderer {
         content: &str,
     ) -> Result<(), RenderError> {
         let prev_is_tool = msg_idx > 0 && messages[msg_idx - 1].role == "tool";
-        let next_is_tool =
-            msg_idx + 1 < messages.len() && messages[msg_idx + 1].role == "tool";
+        let next_is_tool = msg_idx + 1 < messages.len() && messages[msg_idx + 1].role == "tool";
         let idx = msg_idx as i32;
 
         if !prev_is_tool {
@@ -325,7 +348,11 @@ impl Qwen35Renderer {
                 }
                 serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Bool(b) => {
-                    if *b { "True".to_string() } else { "False".to_string() }
+                    if *b {
+                        "True".to_string()
+                    } else {
+                        "False".to_string()
+                    }
                 }
                 serde_json::Value::Null => "None".to_string(),
                 serde_json::Value::Number(n) => n.to_string(),
@@ -341,15 +368,21 @@ impl Qwen35Renderer {
         last_query_index: i32,
         preserve_thinking: bool,
     ) -> Result<(), RenderError> {
-        let raw_content = msg.text_content();
+        let raw_content = Self::render_content_text(&msg.content);
         let (reasoning_content, content_after) = match &msg.reasoning_content {
             Some(s) => (s.clone(), raw_content.to_string()),
             None => {
                 if let Some((before, after)) = raw_content.split_once("</think>") {
                     let reasoning = if let Some((_, inner)) = before.rsplit_once("<think>") {
-                        inner.trim_start_matches('\n').trim_end_matches('\n').to_string()
+                        inner
+                            .trim_start_matches('\n')
+                            .trim_end_matches('\n')
+                            .to_string()
                     } else {
-                        before.trim_start_matches('\n').trim_end_matches('\n').to_string()
+                        before
+                            .trim_start_matches('\n')
+                            .trim_end_matches('\n')
+                            .to_string()
                     };
                     (reasoning, after.trim_start_matches('\n').to_string())
                 } else {
@@ -407,8 +440,9 @@ impl Qwen35Renderer {
             // Arguments — accept JSON string (decode first) or object
             let args_value = match &tc.function.arguments {
                 ToolArguments::Object(v) => v.clone(),
-                ToolArguments::Raw(s) => serde_json::from_str(s)
-                    .unwrap_or(serde_json::Value::Object(Default::default())),
+                ToolArguments::Raw(s) => {
+                    serde_json::from_str(s).unwrap_or(serde_json::Value::Object(Default::default()))
+                }
             };
             if let Some(obj) = args_value.as_object() {
                 for (arg_name, arg_value) in obj {
@@ -482,7 +516,8 @@ impl Renderer for Qwen35Renderer {
         let last_qi = Self::last_query_index(messages);
 
         for (i, msg) in messages.iter().enumerate() {
-            let content = msg.text_content().trim();
+            let content = Self::render_content_text(&msg.content);
+            let content = content.trim();
             match msg.role.as_str() {
                 "system" => {
                     if i != 0 {
@@ -563,7 +598,8 @@ impl Renderer for Qwen35Renderer {
         buf.scaffold_text("\n")?;
 
         for (i, msg) in new_messages.iter().enumerate() {
-            let content = msg.text_content().trim();
+            let content = Self::render_content_text(&msg.content);
+            let content = content.trim();
             let idx = i as i32;
             match msg.role.as_str() {
                 "user" => self.emit_user(&mut buf, content, idx)?,
@@ -726,7 +762,10 @@ impl Qwen35Renderer {
         // Update MultiModalData. Key by modality string ("image" /
         // "video") so the inference engine glue can route per-key.
         let key = item.modality.as_str().to_string();
-        mm.mm_hashes.entry(key.clone()).or_default().push(item.hash.clone());
+        mm.mm_hashes
+            .entry(key.clone())
+            .or_default()
+            .push(item.hash.clone());
         mm.mm_placeholders
             .entry(key.clone())
             .or_default()
@@ -734,7 +773,10 @@ impl Qwen35Renderer {
                 offset,
                 length: item.num_tokens,
             });
-        mm.mm_items.entry(key).or_default().push(item.hf_payload.clone());
+        mm.mm_items
+            .entry(key)
+            .or_default()
+            .push(item.hf_payload.clone());
         Ok(())
     }
 }
@@ -776,7 +818,8 @@ impl MultimodalRenderer for Qwen35Renderer {
         let mut mm = MultiModalData::default();
 
         for (i, msg) in messages.iter().enumerate() {
-            let content = msg.text_content().trim();
+            let content = Self::render_content_text(&msg.content);
+            let content = content.trim();
             match msg.role.as_str() {
                 "system" => {
                     if i != 0 {
@@ -847,7 +890,11 @@ impl MultimodalRenderer for Qwen35Renderer {
         if !_new_media.is_empty() {
             return Ok(None);
         }
-        self.bridge_to_next_turn(previous_prompt_ids, previous_completion_ids, new_messages, tools)
+        self.bridge_to_next_turn(
+            previous_prompt_ids,
+            previous_completion_ids,
+            new_messages,
+            tools,
+        )
     }
 }
-

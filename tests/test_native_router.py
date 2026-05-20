@@ -74,6 +74,32 @@ def test_resolve_tokenizer_path_from_exact_file(tmp_path):
     assert router.resolve_tokenizer_path(str(f)) == str(f)
 
 
+def test_kimi_k25_constructor_does_not_route_eagerly(monkeypatch):
+    from renderers.kimi_k25 import KimiK25Renderer
+
+    fake_native = mock.Mock()
+    monkeypatch.setattr("renderers.kimi_k25.native_enabled", lambda _family: True)
+    monkeypatch.setattr("renderers.kimi_k25.load_native", lambda: fake_native)
+
+    inst = KimiK25Renderer.__new__(KimiK25Renderer, object(), processor=None)
+
+    assert isinstance(inst, KimiK25Renderer)
+    fake_native.Renderer.kimi_k25.assert_not_called()
+
+
+def test_kimi_k25_native_delegate_rejects_render_time_tools():
+    from renderers.kimi_k25 import KimiK25Renderer
+
+    inst = object.__new__(KimiK25Renderer)
+    inst._native_renderer = object()
+
+    assert inst._can_use_native([{"role": "user", "content": "hi"}], tools=None)
+    assert not inst._can_use_native(
+        [{"role": "user", "content": "hi"}],
+        tools=[{"name": "echo", "parameters": {}}],
+    )
+
+
 # ── Native module surface (only runs when the wheel is built) ────────
 
 

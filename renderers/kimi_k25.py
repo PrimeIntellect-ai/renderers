@@ -601,20 +601,9 @@ class KimiK25Renderer:
         preserve_all_thinking=False,
         preserve_thinking_between_tool_calls=False,
         image_cache_max=256,
-        # Tools / messages are bound to render-time, but native routing
-        # decides eagerly here based on builder-time signals: skip native
-        # when a processor is configured (caller will pass images later).
+        # Tools / messages are bound to render-time, so native routing
+        # happens inside render() via a cached text-only delegate.
     ):
-        if native_enabled("kimi_k25") and processor is None:
-            native = load_native()
-            if native is not None:
-                path = resolve_tokenizer_path(tokenizer)
-                return native.Renderer.kimi_k25(
-                    path,
-                    enable_thinking=enable_thinking,
-                    preserve_all_thinking=preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
-                )
         return super().__new__(cls)
 
     def __init__(
@@ -627,6 +616,17 @@ class KimiK25Renderer:
         self._tokenizer = tokenizer
         self._processor = processor
         self.config = config or KimiK25RendererConfig()
+        self._native_renderer = None
+        if native_enabled("kimi_k25") and processor is None:
+            native = load_native()
+            if native is not None:
+                path = resolve_tokenizer_path(tokenizer)
+                self._native_renderer = native.Renderer.kimi_k25(
+                    path,
+                    enable_thinking=enable_thinking,
+                    preserve_all_thinking=preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                )
 
         # Core structural tokens — all must be single special tokens in the vocab
         self._im_user = self._token_id("<|im_user|>")
@@ -667,6 +667,22 @@ class KimiK25Renderer:
         # for Kimi (we emit a single placeholder regardless), but kept for
         # consistency / debugging.
         self._image_cache: dict[str, tuple[Any, int]] = {}
+
+    @staticmethod
+    def _content_has_media(content: Any) -> bool:
+        if not isinstance(content, list):
+            return False
+        return any(
+            isinstance(part, dict) and (_is_image_part(part) or _is_video_part(part))
+            for part in content
+        )
+
+    def _can_use_native(
+        self, messages: list[Message], tools: list[ToolSpec] | None
+    ) -> bool:
+        if self._native_renderer is None or tools:
+            return False
+        return not any(self._content_has_media(msg.get("content")) for msg in messages)
 
     @property
     def mm_token_type_id_map(self) -> dict[int, int]:
@@ -770,6 +786,13 @@ class KimiK25Renderer:
           - Generation prompt: ``<|im_assistant|>assistant<|im_middle|>``
             + ``<think>`` (or ``<think></think>`` when thinking off)
         """
+        if self._can_use_native(messages, tools):
+            return self._native_renderer.render(
+                messages,
+                tools=tools,
+                add_generation_prompt=add_generation_prompt,
+            )
+
         if not messages:
             raise ValueError("No messages provided.")
 
@@ -997,6 +1020,14 @@ class KimiK25Renderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> list[int]:
+        if self._can_use_native(messages, tools):
+            return list(
+                self._native_renderer.render_ids(
+                    messages,
+                    tools=tools,
+                    add_generation_prompt=add_generation_prompt,
+                )
+            )
         return self.render(
             messages,
             tools=tools,

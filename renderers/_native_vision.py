@@ -112,18 +112,34 @@ def process_image_for_qwen_vl(
         image.convert("RGB").save(buf, format="PNG")
         out = proc.process_bytes(buf.getvalue())
 
-    if return_numpy:
-        import numpy as np  # local to keep import cost off the hot path
+    import numpy as np  # local to keep import cost off the hot path
 
-        pv = out["hf_payload"]["pixel_values"]
-        gt = out["hf_payload"]["image_grid_thw"]
+    pv = out["hf_payload"]["pixel_values"]
+    gt = out["hf_payload"]["image_grid_thw"]
+
+    def _as_array(value, dtype):
+        if isinstance(value, dict):
+            return np.asarray(value["data"], dtype=dtype).reshape(tuple(value["shape"]))
+        return np.asarray(value, dtype=dtype)
+
+    pixel_values = _as_array(pv, np.float32)
+    image_grid_thw = _as_array(gt, np.int64)
+
+    if return_numpy:
         out["hf_payload"] = {
-            "pixel_values": np.asarray(pv["data"], dtype=np.float32).reshape(
-                tuple(pv["shape"])
-            ),
-            "image_grid_thw": np.asarray(gt["data"], dtype=np.int64).reshape(
-                tuple(gt["shape"])
-            ),
+            "pixel_values": pixel_values,
+            "image_grid_thw": image_grid_thw,
+        }
+    else:
+        out["hf_payload"] = {
+            "pixel_values": {
+                "shape": list(pixel_values.shape),
+                "data": pixel_values.reshape(-1).tolist(),
+            },
+            "image_grid_thw": {
+                "shape": list(image_grid_thw.shape),
+                "data": image_grid_thw.reshape(-1).tolist(),
+            },
         }
 
     out["message_idx"] = message_idx

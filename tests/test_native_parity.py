@@ -294,6 +294,33 @@ def test_render_ids_with_tools_parity(native_pair, case, messages):
     assert py_ids == rs_ids
 
 
+def test_qwen35_structured_text_parts_parity(native_pair):
+    py_renderer, native_renderer, _tok = native_pair
+    if type(py_renderer).__name__ not in {"Qwen35Renderer", "Qwen36Renderer"}:
+        pytest.skip("structured text part coverage is specific to Qwen3.5/Qwen3.6")
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Hello"},
+                {"type": "text", "text": " from structured parts"},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Structured"},
+                {"type": "text", "text": " reply"},
+            ],
+        },
+    ]
+
+    py_ids = list(py_renderer.render_ids(messages))
+    rs_ids = list(native_renderer.render_ids(messages))
+    assert py_ids == rs_ids
+
+
 @pytest.mark.parametrize("case,messages", CONVERSATIONS, ids=lambda x: x if isinstance(x, str) else None)
 def test_message_indices_parity(native_pair, case, messages):
     """Per-token attribution must match — critical for training loss masks."""

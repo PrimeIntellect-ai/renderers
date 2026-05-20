@@ -224,6 +224,85 @@ impl MultiModalData {
     }
 }
 
+/// Modality marker for a multimodal item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Modality {
+    Image,
+    Video,
+}
+
+impl Modality {
+    /// Wire string matching the keys used in [`MultiModalData::mm_hashes`]
+    /// and friends ("image" / "video").
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+        }
+    }
+
+    /// Numeric marker used by per-token modality masks
+    /// (1 = image, 2 = video). Matches the `mm_token_type_id_map`
+    /// convention in the Python protocol.
+    pub fn type_id(&self) -> u8 {
+        match self {
+            Self::Image => 1,
+            Self::Video => 2,
+        }
+    }
+}
+
+/// A single media item — image or video — that the caller has already
+/// resolved through a vision processor. The renderer never touches raw
+/// pixel data; it only needs [`MediaItem::num_tokens`] to emit the right
+/// placeholder count and the opaque [`MediaItem::hf_payload`] to splice
+/// into the [`MultiModalData::mm_items`] map for the inference engine.
+#[derive(Clone, Debug)]
+pub struct MediaItem {
+    pub modality: Modality,
+    /// Cache key for this item — typically a SHA256 of the resolved
+    /// bytes. The renderer pushes it into
+    /// [`MultiModalData::mm_hashes`] under the modality key.
+    pub hash: String,
+    /// How many placeholder tokens this item expands into. For
+    /// Qwen3-VL this is `image_grid_thw.prod() / merge_size²`; for
+    /// Kimi K2.5 this is always 1 (the model expands per-patch
+    /// internally).
+    pub num_tokens: usize,
+    /// Opaque payload that travels alongside the placeholders to the
+    /// inference engine. In Phase 5a this is the HF
+    /// `image_processor(...)` output (`pixel_values`, `image_grid_thw`,
+    /// ...) — `serde_json::Value` keeps the crate framework-agnostic
+    /// without dragging numpy / torch into the dependency graph.
+    pub hf_payload: serde_json::Value,
+}
+
+/// Bundle of pre-resolved media items keyed by the message index they
+/// belong to. The renderer pops items in walk order; one bundle covers
+/// the full call.
+#[derive(Clone, Debug, Default)]
+pub struct MediaBundle {
+    /// `(message_idx, item)` pairs in render order. Multiple items per
+    /// message are supported — the bundle stays a flat `Vec` so the
+    /// renderer can iterate with a single cursor.
+    pub items: Vec<(usize, MediaItem)>,
+}
+
+impl MediaBundle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn push(&mut self, message_idx: usize, item: MediaItem) {
+        self.items.push((message_idx, item));
+    }
+}
+
 /// Result of rendering messages to tokens.
 ///
 /// `token_ids` and `message_indices` are parallel: `message_indices[i]` is

@@ -87,6 +87,13 @@ exclude-newer = "7 days"
 # while the rest of the dependency graph stays gated.
 exclude-newer-package = { fastokens = false, "prime-pydantic-config" = false }
 
+[tool.pytest.ini_options]
+# Registered markers — `parity` gates the Python<->Rust native parity
+# suite. Skip with `-m 'not parity'` if the native module isn't built.
+markers = [
+    "parity: Python<->Rust native parity tests (require maturin develop + a tokenizer.json)",
+]
+
 [tool.ty.environment]
 python-version = "3.13"
 

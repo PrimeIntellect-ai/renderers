@@ -27,7 +27,9 @@
 
 pub mod bridge;
 pub mod emit;
+pub mod families;
 pub mod parsing;
+pub mod registry;
 pub mod thinking;
 pub mod tokenizer;
 pub mod traits;

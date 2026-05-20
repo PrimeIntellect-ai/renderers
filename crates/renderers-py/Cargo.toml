@@ -1,0 +1,20 @@
+[package]
+name = "renderers-py"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "PyO3 bindings for renderers-core."
+
+[lib]
+name = "renderers_native"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+renderers-core = { path = "../renderers-core" }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+pythonize = "0.22"

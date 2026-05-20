@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.4"]
+build-backend = "maturin"
+
+[project]
+name = "renderers-native"
+version = "0.1.0"
+requires-python = ">=3.10,<3.14"
+description = "Native (Rust) extension module for the `renderers` package."
+license = { text = "Apache-2.0" }
+
+# Maturin installs the cdylib as a top-level module. The pure-Python
+# `renderers` package imports it as ``import renderers_native``, kept
+# separate from the `renderers/` hatchling-built wheel so the two
+# distributions don't collide at install time.
+[tool.maturin]
+module-name = "renderers_native"
+features = ["pyo3/extension-module"]
+strip = true

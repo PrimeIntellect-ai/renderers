@@ -68,6 +68,12 @@ dev = [
 
 [tool.uv]
 exclude-newer = "7 days"
+# fastokens 0.2.0 was published on 2026-05-17 and contains the
+# ``unpatch_transformers`` fix (crusoecloud/fastokens#32) needed for
+# MiniMax-M2's slow→fast tokenizer conversion path. Exempting it from
+# the project-wide 7-day cutoff lets the lockfile pick it up immediately
+# while the rest of the dependency graph stays gated.
+exclude-newer-package = { fastokens = false }
 
 [tool.ty.environment]
 python-version = "3.13"

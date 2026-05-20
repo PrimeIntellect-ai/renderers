@@ -150,12 +150,45 @@ impl DeepSeekV3Renderer {
     fn args_to_json_string(args: &ToolArguments) -> String {
         match args {
             ToolArguments::Raw(s) => s.clone(),
-            ToolArguments::Object(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".into()),
+            ToolArguments::Object(v) => python_json_dumps(v),
         }
     }
 
     fn estimate_capacity(messages: &[Message]) -> usize {
         messages.len().max(1) * 256 + 64
+    }
+}
+
+fn python_json_dumps(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "null".to_string(),
+        JsonValue::Bool(v) => v.to_string(),
+        JsonValue::Number(v) => v.to_string(),
+        JsonValue::String(v) => serde_json::to_string(v).unwrap_or_else(|_| "\"\"".to_string()),
+        JsonValue::Array(items) => {
+            let mut out = String::from("[");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&python_json_dumps(item));
+            }
+            out.push(']');
+            out
+        }
+        JsonValue::Object(map) => {
+            let mut out = String::from("{");
+            for (i, (key, item)) in map.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string()));
+                out.push_str(": ");
+                out.push_str(&python_json_dumps(item));
+            }
+            out.push('}');
+            out
+        }
     }
 }
 
@@ -347,7 +380,6 @@ impl DeepSeekV3Renderer {
             for tc in &msg.tool_calls {
                 let name = tc.function.name.as_str();
                 let args_str = Self::args_to_json_string(&tc.function.arguments);
-                let _ = JsonValue::Null; // keep import in scope for future use
 
                 buf.special(self.tool_call_begin, idx);
                 buf.text("function", idx)?;

@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyType};
 
 use renderers_core::families::{
-    DeepSeekV3RendererBuilder, GlmRendererBuilder, KimiK2RendererBuilder,
+    DeepSeekV3RendererBuilder, GlmRendererBuilder, KimiK25RendererBuilder, KimiK2RendererBuilder,
     MiniMaxM2RendererBuilder, Nemotron3RendererBuilder, Qwen35RendererBuilder,
     Qwen36RendererBuilder, Qwen3RendererBuilder,
 };
@@ -450,6 +450,41 @@ impl PyRenderer {
         let renderer = py
             .allow_threads(|| {
                 MiniMaxM2RendererBuilder::default()
+                    .preserve_all_thinking(preserve_all_thinking)
+                    .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls)
+                    .build(tok)
+            })
+            .map_err(render_err)?;
+        Ok(PyRenderer { inner: Arc::new(renderer) })
+    }
+
+    /// Build a Kimi K2.5 renderer (text-only, no tools).
+    ///
+    /// The Python shim is expected to route Kimi K2.5 to native ONLY
+    /// when there are no tools and no image / video content — the
+    /// TypeScript-style tool declaration formatter and the vision
+    /// processor are still pure-Python in this phase.
+    #[classmethod]
+    #[pyo3(signature = (
+        tokenizer_path,
+        *,
+        enable_thinking = true,
+        preserve_all_thinking = false,
+        preserve_thinking_between_tool_calls = false,
+    ))]
+    fn kimi_k25(
+        _cls: &Bound<'_, PyType>,
+        py: Python<'_>,
+        tokenizer_path: &str,
+        enable_thinking: bool,
+        preserve_all_thinking: bool,
+        preserve_thinking_between_tool_calls: bool,
+    ) -> PyResult<Self> {
+        let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
+        let renderer = py
+            .allow_threads(|| {
+                KimiK25RendererBuilder::default()
+                    .enable_thinking(enable_thinking)
                     .preserve_all_thinking(preserve_all_thinking)
                     .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls)
                     .build(tok)

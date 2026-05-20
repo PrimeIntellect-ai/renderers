@@ -27,6 +27,11 @@ from typing import Any
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
+from renderers._native_router import (
+    load_native,
+    native_enabled,
+    resolve_tokenizer_path,
+)
 from renderers.base import (
     Message,
     MultiModalData,
@@ -48,6 +53,17 @@ from renderers.qwen3_vl import (
     _is_video_part,
     _load_pil_image,
 )
+
+
+def _messages_have_media(messages: list[Message]) -> bool:
+    """Return True if any message carries image / video content parts."""
+    for m in messages:
+        c = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+        if isinstance(c, list):
+            for p in c:
+                if isinstance(p, dict) and p.get("type") in ("image", "image_url", "video", "video_url"):
+                    return True
+    return False
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -575,6 +591,31 @@ class KimiK25Renderer:
 
     The tokenizer should be ``moonshotai/Kimi-K2-Instruct`` (same as K2).
     """
+
+    def __new__(
+        cls,
+        tokenizer,
+        *,
+        processor=None,
+        enable_thinking=True,
+        preserve_all_thinking=False,
+        preserve_thinking_between_tool_calls=False,
+        image_cache_max=256,
+        # Tools / messages are bound to render-time, but native routing
+        # decides eagerly here based on builder-time signals: skip native
+        # when a processor is configured (caller will pass images later).
+    ):
+        if native_enabled("kimi_k25") and processor is None:
+            native = load_native()
+            if native is not None:
+                path = resolve_tokenizer_path(tokenizer)
+                return native.Renderer.kimi_k25(
+                    path,
+                    enable_thinking=enable_thinking,
+                    preserve_all_thinking=preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                )
+        return super().__new__(cls)
 
     def __init__(
         self,

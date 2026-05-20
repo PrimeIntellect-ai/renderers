@@ -574,7 +574,8 @@ def main() -> None:
         default=1000,
         help=(
             "Iterations for tracemalloc peak measurement. This tracks Python "
-            "heap allocations, including PyO3 boundary objects, not Rust malloc."
+            "heap allocations, including PyO3 boundary objects, not Rust malloc "
+            "or NumPy native data buffers."
         ),
     )
     args = parser.parse_args()
@@ -593,7 +594,16 @@ def main() -> None:
     py_renderer = Qwen3Renderer(tokenizer)
     native_renderer = native.Renderer.qwen3(tokenizer_path)
 
-    cases: list[tuple[str, str, int, Callable[[Any], Callable[[], object]]]] = []
+    cases: list[
+        tuple[
+            str,
+            str,
+            int,
+            Callable[[], object],
+            Callable[[], object],
+            Callable[[], object] | None,
+        ]
+    ] = []
 
     for scenario in render_scenarios():
         py_ids = _as_ids(
@@ -617,12 +627,20 @@ def main() -> None:
                 "render_ids",
                 scenario.name,
                 len(py_ids),
-                lambda r, scenario=scenario: (
-                    lambda: r.render_ids(
-                        scenario.messages,
-                        tools=scenario.tools,
-                        add_generation_prompt=scenario.add_generation_prompt,
-                    )
+                lambda scenario=scenario: py_renderer.render_ids(
+                    scenario.messages,
+                    tools=scenario.tools,
+                    add_generation_prompt=scenario.add_generation_prompt,
+                ),
+                lambda scenario=scenario: native_renderer.render_ids(
+                    scenario.messages,
+                    tools=scenario.tools,
+                    add_generation_prompt=scenario.add_generation_prompt,
+                ),
+                lambda scenario=scenario: native_renderer.render_ids_np(
+                    scenario.messages,
+                    tools=scenario.tools,
+                    add_generation_prompt=scenario.add_generation_prompt,
                 ),
             )
         )
@@ -630,18 +648,34 @@ def main() -> None:
     for scenario in parse_scenarios():
         py_completion_ids = _completion_ids(py_renderer, scenario)
         native_completion_ids = _completion_ids(native_renderer, scenario)
+        native_prompt_np = native_renderer.render_ids_np(
+            scenario.prompt,
+            tools=scenario.tools,
+            add_generation_prompt=True,
+        )
+        native_full_np = native_renderer.render_ids_np(
+            scenario.prompt + [scenario.assistant],
+            tools=scenario.tools,
+        )
+        native_completion_np = native_full_np[len(native_prompt_np) :]
         if py_completion_ids != native_completion_ids:
             raise AssertionError(f"{scenario.name} completion parity failed")
         _assert_parsed_equal(
             py_renderer.parse_response(py_completion_ids),
             native_renderer.parse_response(py_completion_ids),
         )
+        _assert_parsed_equal(
+            py_renderer.parse_response(py_completion_ids),
+            native_renderer.parse_response_np(native_completion_np),
+        )
         cases.append(
             (
                 "parse_response",
                 scenario.name,
                 len(py_completion_ids),
-                lambda r, ids=py_completion_ids: lambda: r.parse_response(ids),
+                lambda ids=py_completion_ids: py_renderer.parse_response(ids),
+                lambda ids=py_completion_ids: native_renderer.parse_response(ids),
+                lambda ids=native_completion_np: native_renderer.parse_response_np(ids),
             )
         )
 
@@ -650,6 +684,16 @@ def main() -> None:
         native_prev_prompt, native_prev_completion = _bridge_inputs(
             native_renderer, scenario
         )
+        native_prev_prompt_np = native_renderer.render_ids_np(
+            scenario.prompt,
+            tools=scenario.tools,
+            add_generation_prompt=True,
+        )
+        native_full_np = native_renderer.render_ids_np(
+            scenario.prompt + [scenario.assistant],
+            tools=scenario.tools,
+        )
+        native_prev_completion_np = native_full_np[len(native_prev_prompt_np) :]
         if (
             prev_prompt != native_prev_prompt
             or prev_completion != native_prev_completion
@@ -671,18 +715,38 @@ def main() -> None:
             raise AssertionError(f"{scenario.name} bridge unexpectedly returned None")
         if list(py_bridge.token_ids) != list(native_bridge.token_ids):
             raise AssertionError(f"{scenario.name} bridge parity failed")
+        native_bridge_np = native_renderer.bridge_to_next_turn_np(
+            native_prev_prompt_np,
+            native_prev_completion_np,
+            scenario.new_messages,
+            tools=scenario.tools,
+        )
+        if native_bridge_np is None:
+            raise AssertionError(f"{scenario.name} numpy bridge returned None")
+        if list(py_bridge.token_ids) != native_bridge_np.tolist():
+            raise AssertionError(f"{scenario.name} numpy bridge parity failed")
         cases.append(
             (
                 "bridge_to_next_turn",
                 scenario.name,
                 len(py_bridge.token_ids),
-                lambda r, scenario=scenario, pp=prev_prompt, pc=prev_completion: (
-                    lambda: r.bridge_to_next_turn(
-                        pp,
-                        pc,
-                        scenario.new_messages,
-                        tools=scenario.tools,
-                    )
+                lambda scenario=scenario, pp=prev_prompt, pc=prev_completion: py_renderer.bridge_to_next_turn(
+                    pp,
+                    pc,
+                    scenario.new_messages,
+                    tools=scenario.tools,
+                ),
+                lambda scenario=scenario, pp=prev_prompt, pc=prev_completion: native_renderer.bridge_to_next_turn(
+                    pp,
+                    pc,
+                    scenario.new_messages,
+                    tools=scenario.tools,
+                ),
+                lambda scenario=scenario, pp=native_prev_prompt_np, pc=native_prev_completion_np: native_renderer.bridge_to_next_turn_np(
+                    pp,
+                    pc,
+                    scenario.new_messages,
+                    tools=scenario.tools,
                 ),
             )
         )
@@ -691,15 +755,25 @@ def main() -> None:
     gc.disable()
     try:
         rows = []
-        for operation, scenario, token_count, make in cases:
+        for operation, scenario, token_count, py_fn, native_fn, native_np_fn in cases:
             py_timing = time_case(
-                make(py_renderer), min_time_s=args.min_time, repeats=args.repeats
+                py_fn, min_time_s=args.min_time, repeats=args.repeats
             )
             native_timing = time_case(
-                make(native_renderer), min_time_s=args.min_time, repeats=args.repeats
+                native_fn, min_time_s=args.min_time, repeats=args.repeats
             )
-            py_memory = memory_case(make(py_renderer), loops=args.memory_loops)
-            native_memory = memory_case(make(native_renderer), loops=args.memory_loops)
+            native_np_timing = (
+                time_case(native_np_fn, min_time_s=args.min_time, repeats=args.repeats)
+                if native_np_fn is not None
+                else None
+            )
+            py_memory = memory_case(py_fn, loops=args.memory_loops)
+            native_memory = memory_case(native_fn, loops=args.memory_loops)
+            native_np_memory = (
+                memory_case(native_np_fn, loops=args.memory_loops)
+                if native_np_fn is not None
+                else None
+            )
             rows.append(
                 (
                     operation,
@@ -707,8 +781,10 @@ def main() -> None:
                     token_count,
                     py_timing,
                     native_timing,
+                    native_np_timing,
                     py_memory,
                     native_memory,
+                    native_np_memory,
                 )
             )
     finally:
@@ -718,30 +794,46 @@ def main() -> None:
     print(f"tokenizer_path={tokenizer_path}")
     print()
     print(
-        "| operation | scenario | tokens | python us | native us | speedup | "
-        "python peak KiB | native peak KiB |"
+        "| operation | scenario | tokens | python us | native list us | "
+        "native np us | list speedup | np speedup | python peak KiB | "
+        "native list peak KiB | native np peak KiB |"
     )
-    print("|---|---|---:|---:|---:|---:|---:|---:|")
+    print("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for (
         operation,
         scenario,
         token_count,
         py_timing,
         native_timing,
+        native_np_timing,
         py_memory,
         native_memory,
+        native_np_memory,
     ) in rows:
         speedup = py_timing.median_ns / native_timing.median_ns
+        np_us = (
+            f"{native_np_timing.median_us:.3f}" if native_np_timing is not None else "-"
+        )
+        np_speedup = (
+            f"{py_timing.median_ns / native_np_timing.median_ns:.2f}x"
+            if native_np_timing is not None
+            else "-"
+        )
+        np_peak = (
+            f"{native_np_memory.peak_kib:.1f}" if native_np_memory is not None else "-"
+        )
         print(
             f"| `{operation}` | `{scenario}` | {token_count} | "
             f"{py_timing.median_us:.3f} | "
-            f"{native_timing.median_us:.3f} | {speedup:.2f}x | "
-            f"{py_memory.peak_kib:.1f} | {native_memory.peak_kib:.1f} |"
+            f"{native_timing.median_us:.3f} | {np_us} | "
+            f"{speedup:.2f}x | {np_speedup} | "
+            f"{py_memory.peak_kib:.1f} | {native_memory.peak_kib:.1f} | {np_peak} |"
         )
     print()
     print(
         "memory note: peak KiB uses Python tracemalloc over "
-        f"{args.memory_loops} calls; Rust allocator memory is not included."
+        f"{args.memory_loops} calls; Rust allocator and NumPy native data buffers "
+        "are not included."
     )
 
 

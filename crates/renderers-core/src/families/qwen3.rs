@@ -97,6 +97,10 @@ pub struct Qwen3Renderer {
     /// and bridge close-token sets. Two-element vector held by-value
     /// per renderer instance.
     stop_tokens: Vec<u32>,
+    newline_tokens: Vec<u32>,
+    user_tokens: Vec<u32>,
+    assistant_newline_tokens: Vec<u32>,
+    gen_prompt_no_thinking_suffix_tokens: Vec<u32>,
 }
 
 impl Qwen3Renderer {
@@ -119,6 +123,16 @@ impl Qwen3Renderer {
         let tool_response_end = tokenizer.token_to_id_strict("</tool_response>")?;
 
         let stop_tokens = vec![im_end, endoftext];
+        let newline_tokens = tokenizer.encode_no_special("\n")?.as_slice().to_vec();
+        let user_tokens = tokenizer.encode_no_special("user")?.as_slice().to_vec();
+        let assistant_newline_tokens = tokenizer
+            .encode_no_special("assistant\n")?
+            .as_slice()
+            .to_vec();
+        let gen_prompt_no_thinking_suffix_tokens = tokenizer
+            .encode_no_special(GEN_PROMPT_NO_THINKING_SUFFIX)?
+            .as_slice()
+            .to_vec();
 
         Ok(Self {
             tokenizer,
@@ -133,6 +147,10 @@ impl Qwen3Renderer {
             tool_response,
             tool_response_end,
             stop_tokens,
+            newline_tokens,
+            user_tokens,
+            assistant_newline_tokens,
+            gen_prompt_no_thinking_suffix_tokens,
         })
     }
 
@@ -177,7 +195,7 @@ impl Qwen3Renderer {
         tool_text.push_str(TOOLS_FOOTER);
         buf.text(&tool_text, sys_idx)?;
         buf.special(self.im_end, sys_idx);
-        buf.text("\n", sys_idx)?;
+        buf.ids(&self.newline_tokens, sys_idx);
         Ok(())
     }
 
@@ -192,7 +210,7 @@ impl Qwen3Renderer {
         s.push_str(messages[0].text_content());
         buf.text(&s, 0)?;
         buf.special(self.im_end, 0);
-        buf.text("\n", 0)?;
+        buf.ids(&self.newline_tokens, 0);
         Ok(())
     }
 
@@ -208,7 +226,7 @@ impl Qwen3Renderer {
         s.push_str(content);
         buf.text(&s, idx)?;
         buf.special(self.im_end, idx);
-        buf.text("\n", idx)?;
+        buf.ids(&self.newline_tokens, idx);
         Ok(())
     }
 
@@ -224,7 +242,7 @@ impl Qwen3Renderer {
         s.push_str(content);
         buf.text(&s, idx)?;
         buf.special(self.im_end, idx);
-        buf.text("\n", idx)?;
+        buf.ids(&self.newline_tokens, idx);
         Ok(())
     }
 
@@ -241,9 +259,9 @@ impl Qwen3Renderer {
 
         if !prev_is_tool {
             buf.special(self.im_start, idx);
-            buf.text("user", idx)?;
+            buf.ids(&self.user_tokens, idx);
         }
-        buf.text("\n", idx)?;
+        buf.ids(&self.newline_tokens, idx);
         buf.special(self.tool_response, idx);
         let mut wrapped = String::with_capacity(content.len() + 2);
         wrapped.push('\n');
@@ -253,7 +271,7 @@ impl Qwen3Renderer {
         buf.special(self.tool_response_end, idx);
         if !next_is_tool {
             buf.special(self.im_end, idx);
-            buf.text("\n", idx)?;
+            buf.ids(&self.newline_tokens, idx);
         }
         Ok(())
     }
@@ -350,7 +368,7 @@ impl Qwen3Renderer {
         }
 
         buf.special(self.im_end, idx);
-        buf.text("\n", idx)?;
+        buf.ids(&self.newline_tokens, idx);
         Ok(())
     }
 
@@ -434,9 +452,9 @@ impl Qwen3Renderer {
         // 4. Generation prompt.
         if add_generation_prompt {
             buf.scaffold_special(self.im_start);
-            buf.scaffold_text("assistant\n")?;
+            buf.ids(&self.assistant_newline_tokens, SCAFFOLD_IDX);
             if !self.enable_thinking {
-                buf.scaffold_text(GEN_PROMPT_NO_THINKING_SUFFIX)?;
+                buf.ids(&self.gen_prompt_no_thinking_suffix_tokens, SCAFFOLD_IDX);
             }
         }
 
@@ -510,7 +528,7 @@ impl Renderer for Qwen3Renderer {
         let mut buf = RenderBuf::new_token_ids_only(&self.tokenizer, cap);
 
         // Trailing `\n` after the prior turn's close token.
-        buf.scaffold_text("\n")?;
+        buf.ids(&self.newline_tokens, SCAFFOLD_IDX);
 
         for (i, msg) in new_messages.iter().enumerate() {
             let content = msg.text_content();
@@ -524,9 +542,9 @@ impl Renderer for Qwen3Renderer {
         }
 
         buf.scaffold_special(self.im_start);
-        buf.scaffold_text("assistant\n")?;
+        buf.ids(&self.assistant_newline_tokens, SCAFFOLD_IDX);
         if !self.enable_thinking {
-            buf.scaffold_text(GEN_PROMPT_NO_THINKING_SUFFIX)?;
+            buf.ids(&self.gen_prompt_no_thinking_suffix_tokens, SCAFFOLD_IDX);
         }
 
         let ext = buf.into_token_ids();

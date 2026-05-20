@@ -23,9 +23,10 @@ use crate::emit::RenderBuf;
 use crate::parsing::qwen35::parse_qwen35;
 use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
-use crate::traits::Renderer;
+use crate::traits::{MultimodalRenderer, Renderer};
 use crate::types::{
-    Message, ParsedResponse, RenderError, RenderedTokens, ToolArguments, ToolSpec, SCAFFOLD_IDX,
+    MediaBundle, MediaItem, Message, Modality, MultiModalData, ParsedResponse, PlaceholderRange,
+    RenderError, RenderedTokens, ToolArguments, ToolSpec, SCAFFOLD_IDX,
 };
 
 const TOOLS_HEADER: &str = "# Tools\n\nYou have access to the following functions:\n\n<tools>";
@@ -101,6 +102,18 @@ pub struct Qwen35Renderer {
     tool_response: u32,
     tool_response_end: u32,
 
+    // Multimodal placeholder tokens — resolved as optional so the
+    // text-only Qwen3.5 tokenizers (which don't ship the vision
+    // specials) still construct cleanly. `as_multimodal()` returns None
+    // when these are absent.
+    vision_start: Option<u32>,
+    vision_end: Option<u32>,
+    image_pad: Option<u32>,
+    video_pad: Option<u32>,
+    /// `[(token_id, modality_marker)]` — 1 = image, 2 = video. Empty
+    /// when this tokenizer doesn't have the vision specials.
+    mm_token_type_ids: Vec<(u32, u8)>,
+
     stop_tokens: Vec<u32>,
 }
 
@@ -124,6 +137,22 @@ impl Qwen35Renderer {
         let tool_response = tokenizer.token_to_id_strict("<tool_response>")?;
         let tool_response_end = tokenizer.token_to_id_strict("</tool_response>")?;
 
+        // Multimodal tokens are optional — text-only tokenizers (e.g.
+        // Qwen3.5-9B, no `-VL` suffix) don't ship them. Resolve via
+        // `token_to_id` (non-strict) so the renderer constructs in both
+        // cases.
+        let vision_start = tokenizer.token_to_id("<|vision_start|>");
+        let vision_end = tokenizer.token_to_id("<|vision_end|>");
+        let image_pad = tokenizer.token_to_id("<|image_pad|>");
+        let video_pad = tokenizer.token_to_id("<|video_pad|>");
+        let mut mm_token_type_ids: Vec<(u32, u8)> = Vec::new();
+        if let Some(p) = image_pad {
+            mm_token_type_ids.push((p, 1));
+        }
+        if let Some(p) = video_pad {
+            mm_token_type_ids.push((p, 2));
+        }
+
         Ok(Self {
             tokenizer,
             enable_thinking: cfg.enable_thinking,
@@ -139,8 +168,21 @@ impl Qwen35Renderer {
             tool_call_end,
             tool_response,
             tool_response_end,
+            vision_start,
+            vision_end,
+            image_pad,
+            video_pad,
+            mm_token_type_ids,
             stop_tokens: vec![im_end, endoftext],
         })
+    }
+
+    /// True when the underlying tokenizer ships the vision special
+    /// tokens. Used by [`Renderer::as_multimodal`].
+    pub fn supports_multimodal(&self) -> bool {
+        self.vision_start.is_some()
+            && self.vision_end.is_some()
+            && self.image_pad.is_some()
     }
 
     /// Index of the most recent non-tool-response user message;
@@ -551,4 +593,211 @@ impl Renderer for Qwen35Renderer {
             multi_modal_data: None,
         }))
     }
+
+    fn as_multimodal(&self) -> Option<&dyn MultimodalRenderer> {
+        if self.supports_multimodal() {
+            Some(self)
+        } else {
+            None
+        }
+    }
 }
+
+// ── Multimodal implementation ─────────────────────────────────────────
+//
+// Qwen3.5-VL emits the canonical Qwen-style placeholder block per image:
+//     <|vision_start|> + num_tokens × <|image_pad|> + <|vision_end|>
+//
+// where `num_tokens` is the pre-computed expansion the caller obtained
+// from the HF processor (image_grid_thw.prod() / merge_size²). The
+// renderer never touches pixel data; `MediaItem::hf_payload` rides
+// through as opaque JSON into `MultiModalData::mm_items`.
+
+impl Qwen35Renderer {
+    /// Walk the user-message content parts and pop matching media items
+    /// from `bundle`, emitting placeholder spans inline. Stops at
+    /// content boundaries and accumulates `MultiModalData` side-by-side
+    /// with the token buffer.
+    fn emit_user_with_media(
+        &self,
+        buf: &mut RenderBuf<'_>,
+        msg_idx: usize,
+        content: &str,
+        media: &MediaBundle,
+        mm: &mut MultiModalData,
+    ) -> Result<(), RenderError> {
+        let idx = msg_idx as i32;
+        buf.special(self.im_start, idx);
+        buf.text("user\n", idx)?;
+        // Emit the text body
+        if !content.is_empty() {
+            buf.text(content, idx)?;
+        }
+        // Then any media items attached to this message
+        for (m_idx, item) in &media.items {
+            if *m_idx != msg_idx {
+                continue;
+            }
+            self.emit_media_item(buf, idx, item, mm)?;
+        }
+        buf.special(self.im_end, idx);
+        buf.text("\n", idx)?;
+        Ok(())
+    }
+
+    fn emit_media_item(
+        &self,
+        buf: &mut RenderBuf<'_>,
+        idx: i32,
+        item: &MediaItem,
+        mm: &mut MultiModalData,
+    ) -> Result<(), RenderError> {
+        let pad = match item.modality {
+            Modality::Image => self.image_pad,
+            Modality::Video => self.video_pad,
+        }
+        .ok_or_else(|| {
+            RenderError::MissingSpecialToken(match item.modality {
+                Modality::Image => "<|image_pad|>".into(),
+                Modality::Video => "<|video_pad|>".into(),
+            })
+        })?;
+        let vs = self
+            .vision_start
+            .ok_or_else(|| RenderError::MissingSpecialToken("<|vision_start|>".into()))?;
+        let ve = self
+            .vision_end
+            .ok_or_else(|| RenderError::MissingSpecialToken("<|vision_end|>".into()))?;
+
+        buf.special(vs, idx);
+        let offset = buf.len();
+        for _ in 0..item.num_tokens {
+            buf.special(pad, idx);
+        }
+        buf.special(ve, idx);
+
+        // Update MultiModalData. Key by modality string ("image" /
+        // "video") so the inference engine glue can route per-key.
+        let key = item.modality.as_str().to_string();
+        mm.mm_hashes.entry(key.clone()).or_default().push(item.hash.clone());
+        mm.mm_placeholders
+            .entry(key.clone())
+            .or_default()
+            .push(PlaceholderRange {
+                offset,
+                length: item.num_tokens,
+            });
+        mm.mm_items.entry(key).or_default().push(item.hf_payload.clone());
+        Ok(())
+    }
+}
+
+impl MultimodalRenderer for Qwen35Renderer {
+    fn mm_token_type_id_map(&self) -> &[(u32, u8)] {
+        &self.mm_token_type_ids
+    }
+
+    fn render_with_media(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        media: &MediaBundle,
+        add_generation_prompt: bool,
+    ) -> Result<RenderedTokens, RenderError> {
+        // Fast path: no media → defer to the text-only render.
+        if media.is_empty() {
+            return self.render(messages, tools, add_generation_prompt);
+        }
+        if messages.is_empty() {
+            return Err(RenderError::EmptyMessages);
+        }
+        let mut buf = RenderBuf::new(&self.tokenizer, Self::estimate_capacity(messages, tools));
+        let first_is_system = messages[0].role == "system";
+
+        match tools {
+            Some(t) if !t.is_empty() => {
+                self.emit_system_with_tools(&mut buf, messages, t, first_is_system)?;
+            }
+            _ => {
+                if first_is_system {
+                    self.emit_system_no_tools(&mut buf, messages)?;
+                }
+            }
+        }
+
+        let last_qi = Self::last_query_index(messages);
+        let mut mm = MultiModalData::default();
+
+        for (i, msg) in messages.iter().enumerate() {
+            let content = msg.text_content().trim();
+            match msg.role.as_str() {
+                "system" => {
+                    if i != 0 {
+                        return Err(RenderError::Invalid(
+                            "system message must be at the beginning".into(),
+                        ));
+                    }
+                }
+                "user" => {
+                    // Check if this message has attached media; if so, use
+                    // the multimodal emit path.
+                    let has_media = media.items.iter().any(|(idx, _)| *idx == i);
+                    if has_media {
+                        self.emit_user_with_media(&mut buf, i, content, media, &mut mm)?;
+                    } else {
+                        self.emit_user(&mut buf, content, i as i32)?;
+                    }
+                }
+                "assistant" => {
+                    let preserve_thinking = should_preserve_past_thinking(
+                        messages,
+                        i,
+                        self.preserve_all_thinking,
+                        self.preserve_thinking_between_tool_calls,
+                    );
+                    self.emit_assistant(&mut buf, msg, i, last_qi, preserve_thinking)?;
+                }
+                "tool" => self.emit_tool(&mut buf, messages, i, content)?,
+                _ => {
+                    return Err(RenderError::Invalid(format!(
+                        "unexpected message role: {}",
+                        msg.role
+                    )));
+                }
+            }
+        }
+
+        if add_generation_prompt {
+            self.emit_generation_prompt(&mut buf)?;
+        }
+
+        let mut out = buf.into_rendered();
+        if !mm.is_empty() {
+            out.multi_modal_data = Some(mm);
+        }
+        Ok(out)
+    }
+
+    fn bridge_to_next_turn_with_media(
+        &self,
+        previous_prompt_ids: &[u32],
+        previous_completion_ids: &[u32],
+        new_messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        _new_media: &MediaBundle,
+        _previous_multi_modal_data: Option<&MultiModalData>,
+    ) -> Result<Option<RenderedTokens>, RenderError> {
+        // Phase 5a scope: bridge ignores media on the new-turn side
+        // (the prior turn's mm_data is carried forward by the caller's
+        // glue layer, not by this function). When new_media is
+        // non-empty, fall back to a full re-render — bridging
+        // image-bearing turns through a verbatim prefix is fragile
+        // because placeholder offsets shift if the prior turn was
+        // truncated mid-image. Phase 5b can revisit.
+        if !_new_media.is_empty() {
+            return Ok(None);
+        }
+        self.bridge_to_next_turn(previous_prompt_ids, previous_completion_ids, new_messages, tools)
+    }
+}
+

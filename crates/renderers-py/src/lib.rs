@@ -18,6 +18,7 @@ use renderers_core::families::{
     KimiK25RendererBuilder, KimiK2RendererBuilder, MiniMaxM2RendererBuilder,
     Nemotron3RendererBuilder, Qwen35RendererBuilder, Qwen36RendererBuilder, Qwen3RendererBuilder,
 };
+use renderers_core::types::{MediaBundle, MediaItem, Modality};
 use renderers_core::tokenizer::Tokenizer;
 use renderers_core::types::{
     Message, ParsedResponse, ParsedToolCall, RenderedTokens, ToolArguments, ToolCallParseStatus,
@@ -51,6 +52,48 @@ fn parse_tools(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<ToolSpec>>
     let parsed: Vec<ToolSpec> = serde_json::from_value(value)
         .map_err(|e| invalid(format!("tools shape mismatch: {e}")))?;
     Ok(Some(parsed))
+}
+
+/// Decode a Python list of media-item dicts into a [`MediaBundle`].
+fn parse_media_bundle(obj: &Bound<'_, PyAny>) -> PyResult<MediaBundle> {
+    let value: serde_json::Value = pythonize::depythonize(obj)
+        .map_err(|e| invalid(format!("media must be a list of dicts: {e}")))?;
+    let arr = match value {
+        serde_json::Value::Array(a) => a,
+        _ => return Err(invalid("media must be a list")),
+    };
+    let mut bundle = MediaBundle::new();
+    for item in arr {
+        let obj = item.as_object().ok_or_else(|| invalid("media item must be a dict"))?;
+        let message_idx = obj
+            .get("message_idx")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| invalid("media item missing message_idx"))? as usize;
+        let modality_str = obj
+            .get("modality")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid("media item missing modality"))?;
+        let modality = match modality_str {
+            "image" => Modality::Image,
+            "video" => Modality::Video,
+            other => return Err(invalid(format!("unknown modality: {other}"))),
+        };
+        let num_tokens = obj
+            .get("num_tokens")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| invalid("media item missing num_tokens"))? as usize;
+        let hash = obj
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let hf_payload = obj.get("hf_payload").cloned().unwrap_or(serde_json::Value::Null);
+        bundle.push(
+            message_idx,
+            MediaItem { modality, hash, num_tokens, hf_payload },
+        );
+    }
+    Ok(bundle)
 }
 
 fn parse_u32_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
@@ -736,6 +779,52 @@ impl PyRenderer {
 
     fn get_stop_token_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
         PyList::new_bound(py, self.inner.stop_token_ids().iter().map(|&t| t as i64))
+    }
+
+    /// Render with pre-resolved multimodal media items.
+    ///
+    /// `media` is a list of dicts each shaped like
+    /// ``{"message_idx": int, "modality": "image" | "video",
+    ///    "num_tokens": int, "hash": str, "hf_payload": <any>}``.
+    /// `num_tokens` is the placeholder expansion count pre-computed by
+    /// the caller's vision processor (HF
+    /// ``image_grid_thw.prod()/merge_size**2`` for Qwen-VL). The Rust
+    /// renderer never touches pixel data — `hf_payload` rides through
+    /// as opaque JSON into `multi_modal_data.mm_items`.
+    ///
+    /// Raises ``RuntimeError`` when the underlying family doesn't
+    /// support multimodal (e.g. a Qwen3.5 text-only tokenizer that
+    /// doesn't ship the ``<|vision_start|>`` token).
+    #[pyo3(signature = (messages, media, *, tools = None, add_generation_prompt = false))]
+    fn render_with_media(
+        &self,
+        py: Python<'_>,
+        messages: &Bound<'_, PyAny>,
+        media: &Bound<'_, PyAny>,
+        tools: Option<&Bound<'_, PyAny>>,
+        add_generation_prompt: bool,
+    ) -> PyResult<PyRenderedTokens> {
+        let msgs = parse_messages(messages)?;
+        let tools = parse_tools(tools)?;
+        let bundle = parse_media_bundle(media)?;
+        let renderer = self.inner.clone();
+        let out = py
+            .allow_threads(move || -> Result<_, renderers_core::types::RenderError> {
+                let mm = renderer
+                    .as_multimodal()
+                    .ok_or_else(|| renderers_core::types::RenderError::Invalid(
+                        "this renderer does not support multimodal — use a -VL tokenizer or check supports_multimodal()".into(),
+                    ))?;
+                mm.render_with_media(&msgs, tools.as_deref(), &bundle, add_generation_prompt)
+            })
+            .map_err(render_err)?;
+        Ok(PyRenderedTokens { inner: out })
+    }
+
+    /// True when the underlying family supports the multimodal trait
+    /// AND the loaded tokenizer ships the modality special tokens.
+    fn supports_multimodal(&self) -> bool {
+        self.inner.as_multimodal().is_some()
     }
 
     #[pyo3(signature = (previous_prompt_ids, previous_completion_ids, new_messages, *, tools = None))]

@@ -131,7 +131,7 @@ fn parse_kimi_k2_calls(
         let block_text = decode(tokenizer, &ids[i + 1..tc_end]).unwrap_or_default();
         let span = Range {
             start: section_offset + i,
-            end: section_offset + tc_end + if unclosed { 0 } else { 1 },
+            end: section_offset + tc_end + usize::from(!unclosed),
         };
 
         // Extract function name from "functions.{name}:{index}"

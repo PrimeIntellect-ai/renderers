@@ -376,7 +376,7 @@ impl Nemotron3Renderer {
         buf.text("assistant\n", msg_orig_idx)?;
 
         let tool_calls = &msg.tool_calls;
-        let content_suffix = if !tool_calls.is_empty() { "\n" } else { "" };
+        let content_suffix = if tool_calls.is_empty() { "" } else { "\n" };
 
         if !reasoning_content.is_empty() && (is_last_turn || preserve_thinking) {
             buf.special(self.think, msg_orig_idx);
@@ -501,7 +501,10 @@ impl Renderer for Nemotron3Renderer {
         // Normalise: prepend empty system message if none is present.
         let mut normalised: Vec<Message>;
         let auto_system_injected: bool;
-        let messages_ref: &[Message] = if messages[0].role != "system" {
+        let messages_ref: &[Message] = if messages[0].role == "system" {
+            auto_system_injected = false;
+            messages
+        } else {
             auto_system_injected = true;
             normalised = Vec::with_capacity(messages.len() + 1);
             normalised.push(Message {
@@ -511,9 +514,6 @@ impl Renderer for Nemotron3Renderer {
             });
             normalised.extend_from_slice(messages);
             &normalised
-        } else {
-            auto_system_injected = false;
-            messages
         };
 
         // Map normalised index back to caller's original index. Injected

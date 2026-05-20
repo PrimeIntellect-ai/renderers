@@ -74,9 +74,8 @@ impl Content {
     /// `""` for `Parts` variants (Qwen3 ignores list content entirely).
     pub fn as_text(&self) -> &str {
         match self {
-            Content::Null => "",
             Content::Text(s) => s.as_str(),
-            Content::Parts(_) => "",
+            Content::Null | Content::Parts(_) => "",
         }
     }
 

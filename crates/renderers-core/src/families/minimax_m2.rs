@@ -192,7 +192,7 @@ impl Renderer for MiniMaxM2Renderer {
         buf.text("\n", sys_idx)?;
 
         // Conversation messages — skip the leading system if present
-        let conversation_start = if first_is_system { 1 } else { 0 };
+        let conversation_start = usize::from(first_is_system);
         let conversation = &messages[conversation_start..];
 
         // last_user_index relative to the conversation
@@ -393,7 +393,9 @@ impl MiniMaxM2Renderer {
             s
         };
 
-        if !tool_calls.is_empty() {
+        if tool_calls.is_empty() {
+            buf.text(&after_think, orig_idx)?;
+        } else {
             // \n before <minimax:tool_call> contiguous with preceding text
             let mut head = after_think;
             head.push('\n');
@@ -424,8 +426,6 @@ impl MiniMaxM2Renderer {
             }
             buf.text(&invoke_block, orig_idx)?;
             buf.special(self.tool_call_end, orig_idx);
-        } else {
-            buf.text(&after_think, orig_idx)?;
         }
 
         buf.special(self.eos, orig_idx);

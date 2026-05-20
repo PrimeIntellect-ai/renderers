@@ -92,7 +92,7 @@ impl std::fmt::Debug for DefaultRenderer {
         f.debug_struct("DefaultRenderer")
             .field("stop_token_ids", &self.stop_token_ids)
             .field("extra_context_keys", &self.extra_context.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -149,7 +149,7 @@ impl DefaultRenderer {
             serde_json::to_value(messages_to_value(messages)?).unwrap_or(JsonValue::Null),
         );
         let tools_value: MjValue = match tools {
-            Some(t) => tools_to_value(t)?,
+            Some(t) => tools_to_value(t),
             None => MjValue::from(Vec::<MjValue>::new()),
         };
         ctx_map.insert(
@@ -347,7 +347,7 @@ fn messages_to_value(messages: &[Message]) -> Result<MjValue, RenderError> {
     Ok(MjValue::from(out))
 }
 
-fn tools_to_value(tools: &[ToolSpec]) -> Result<MjValue, RenderError> {
+fn tools_to_value(tools: &[ToolSpec]) -> MjValue {
     let mut out: Vec<MjValue> = Vec::with_capacity(tools.len());
     for t in tools {
         let v = serde_json::json!({
@@ -360,5 +360,5 @@ fn tools_to_value(tools: &[ToolSpec]) -> Result<MjValue, RenderError> {
         });
         out.push(MjValue::from_serialize(v));
     }
-    Ok(MjValue::from(out))
+    MjValue::from(out)
 }

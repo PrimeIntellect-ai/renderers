@@ -171,7 +171,7 @@ impl Renderer for DeepSeekV3Renderer {
         // before any role marker, attributed to message index 0.
         let mut first_non_sys = 0usize;
         let mut sys_parts: Vec<&str> = Vec::new();
-        for msg in messages.iter() {
+        for msg in messages {
             if msg.role != "system" {
                 break;
             }

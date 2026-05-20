@@ -23,7 +23,7 @@ pub struct RenderBuf<'tok> {
     scratch_offsets: Vec<usize>,
 }
 
-impl<'tok> std::fmt::Debug for RenderBuf<'tok> {
+impl std::fmt::Debug for RenderBuf<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RenderBuf")
             .field("tokens_len", &self.tokens.len())

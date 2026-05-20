@@ -91,7 +91,7 @@ fn parse_media_bundle(obj: &Bound<'_, PyAny>) -> PyResult<MediaBundle> {
             .ok_or_else(|| invalid("media item must be a dict"))?;
         let message_idx =
             obj.get("message_idx")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .ok_or_else(|| invalid("media item missing message_idx"))? as usize;
         let modality_str = obj
             .get("modality")
@@ -104,12 +104,12 @@ fn parse_media_bundle(obj: &Bound<'_, PyAny>) -> PyResult<MediaBundle> {
         };
         let num_tokens =
             obj.get("num_tokens")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .ok_or_else(|| invalid("media item missing num_tokens"))? as usize;
         let hash = obj
             .get("hash")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .map(str::to_string)
             .unwrap_or_default();
         let hf_payload = obj
             .get("hf_payload")
@@ -317,7 +317,10 @@ impl PyToolCallParseStatus {
     #[classattr]
     const MALFORMED_STRUCTURE: &'static str = "malformed_structure";
 
+    // PyO3 #[getter] requires `&self`; the Copy enum is 1 byte so clippy
+    // suggests by-value, but the macro shape is fixed.
     #[getter]
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     fn value(&self) -> &'static str {
         self.inner.as_wire()
     }
@@ -382,7 +385,7 @@ impl PyRenderer {
         preserve_thinking_between_tool_calls = false,
     ))]
     fn qwen3_vl(
-        _cls: &Bound<'_, PyType>,
+        cls: &Bound<'_, PyType>,
         py: Python<'_>,
         tokenizer_path: &str,
         enable_thinking: bool,
@@ -390,7 +393,7 @@ impl PyRenderer {
         preserve_thinking_between_tool_calls: bool,
     ) -> PyResult<Self> {
         Self::qwen35(
-            _cls,
+            cls,
             py,
             tokenizer_path,
             enable_thinking,
@@ -977,7 +980,7 @@ impl PyQwen3VlImageProcessor {
         patch_size: Option<u32>,
         temporal_patch_size: Option<u32>,
         merge_size: Option<u32>,
-    ) -> PyResult<Self> {
+    ) -> Self {
         let mut p = Qwen3VlImageProcessor::default();
         if let Some(v) = min_pixels {
             p.min_pixels = v;
@@ -994,7 +997,7 @@ impl PyQwen3VlImageProcessor {
         if let Some(v) = merge_size {
             p.merge_size = v;
         }
-        Ok(Self { inner: p })
+        Self { inner: p }
     }
 
     /// Compute the resized `(height, width)` for an input image

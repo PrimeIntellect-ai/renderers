@@ -259,19 +259,12 @@ impl GptOssRenderer {
         }
     }
 
-    fn message_to_harmony(&self, msg: &Message, preserve_thinking: bool) -> Vec<HarmonyMessage> {
+    fn message_to_harmony(msg: &Message, preserve_thinking: bool) -> Vec<HarmonyMessage> {
         match msg.role.as_str() {
             "user" => vec![HarmonyMessage::from_role_and_content(
                 HarmonyRole::User,
                 msg.text_content().to_string(),
             )],
-            "system" | "developer" => {
-                let dev = DeveloperContent::new().with_instructions(msg.text_content());
-                vec![HarmonyMessage::from_role_and_content(
-                    HarmonyRole::Developer,
-                    dev,
-                )]
-            }
             "tool" => {
                 let m = HarmonyMessage::from_author_and_content(
                     Self::tool_author(msg),
@@ -281,7 +274,9 @@ impl GptOssRenderer {
                 .with_channel("commentary");
                 vec![m]
             }
-            "assistant" => self.assistant_to_harmony(msg, preserve_thinking),
+            "assistant" => Self::assistant_to_harmony(msg, preserve_thinking),
+            // Default branch covers "system", "developer", and any
+            // unknown role, all of which route to the Developer channel.
             _ => {
                 let dev = DeveloperContent::new().with_instructions(msg.text_content());
                 vec![HarmonyMessage::from_role_and_content(
@@ -292,7 +287,7 @@ impl GptOssRenderer {
         }
     }
 
-    fn assistant_to_harmony(&self, msg: &Message, preserve_thinking: bool) -> Vec<HarmonyMessage> {
+    fn assistant_to_harmony(msg: &Message, preserve_thinking: bool) -> Vec<HarmonyMessage> {
         let mut out: Vec<HarmonyMessage> = Vec::new();
 
         if preserve_thinking {
@@ -464,7 +459,7 @@ impl Renderer for GptOssRenderer {
                     self.preserve_all_thinking,
                     self.preserve_thinking_between_tool_calls,
                 );
-            for hm in self.message_to_harmony(msg, preserve_thinking) {
+            for hm in Self::message_to_harmony(msg, preserve_thinking) {
                 self.emit_render(&mut tokens, &mut indices, i as i32, &hm)?;
             }
         }
@@ -642,7 +637,7 @@ impl Renderer for GptOssRenderer {
                 "tool" | "user" | "system" | "developer" => {}
                 _ => return Ok(None),
             }
-            for hm in self.message_to_harmony(msg, false) {
+            for hm in Self::message_to_harmony(msg, false) {
                 let mut out: Vec<u32> = Vec::new();
                 self.enc
                     .render_into(&hm, &mut out, None)

@@ -24,6 +24,7 @@
 //! is required (e.g. for regression tests against PIL-rendered
 //! fixtures) keep the Python processor on the path.
 
+use std::fmt::Write as _;
 use std::io::Cursor;
 
 use ndarray::{Array2, Array3};
@@ -148,7 +149,10 @@ impl Qwen3VlImageProcessor {
         h.update(format!("({}, {})", rgb.width(), rgb.height()).as_bytes());
         let digest = h.finalize();
         // Trim to 32 hex chars to match the Python implementation.
-        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        let mut hex = String::with_capacity(digest.len() * 2);
+        for b in &digest {
+            write!(&mut hex, "{b:02x}").expect("writing to String never fails");
+        }
         hex[..32].to_string()
     }
 

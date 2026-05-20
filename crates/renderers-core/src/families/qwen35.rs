@@ -878,7 +878,7 @@ impl MultimodalRenderer for Qwen35Renderer {
         previous_completion_ids: &[u32],
         new_messages: &[Message],
         tools: Option<&[ToolSpec]>,
-        _new_media: &MediaBundle,
+        new_media: &MediaBundle,
         _previous_multi_modal_data: Option<&MultiModalData>,
     ) -> Result<Option<RenderedTokens>, RenderError> {
         // Phase 5a scope: bridge ignores media on the new-turn side
@@ -888,7 +888,7 @@ impl MultimodalRenderer for Qwen35Renderer {
         // image-bearing turns through a verbatim prefix is fragile
         // because placeholder offsets shift if the prior turn was
         // truncated mid-image. Phase 5b can revisit.
-        if !_new_media.is_empty() {
+        if !new_media.is_empty() {
             return Ok(None);
         }
         self.bridge_to_next_turn(

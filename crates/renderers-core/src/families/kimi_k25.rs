@@ -232,7 +232,6 @@ impl KimiK25Renderer {
     }
 
     fn emit_tool_body(
-        &self,
         buf: &mut RenderBuf<'_>,
         msg: &Message,
         msg_idx: i32,
@@ -301,7 +300,7 @@ impl Renderer for KimiK25Renderer {
                     );
                     self.emit_assistant_body(&mut buf, msg, idx, is_suffix, preserve_thinking)?;
                 }
-                "tool" => self.emit_tool_body(&mut buf, msg, idx)?,
+                "tool" => Self::emit_tool_body(&mut buf, msg, idx)?,
                 _ => {
                     let content = msg.text_content();
                     if !content.is_empty() {
@@ -383,7 +382,7 @@ impl Renderer for KimiK25Renderer {
                         buf.text(content, idx)?;
                     }
                 }
-                "tool" => self.emit_tool_body(&mut buf, msg, idx)?,
+                "tool" => Self::emit_tool_body(&mut buf, msg, idx)?,
                 _ => return Ok(None),
             }
             buf.special(self.im_end, idx);
@@ -590,7 +589,7 @@ impl MultimodalRenderer for KimiK25Renderer {
                     );
                     self.emit_assistant_body(&mut buf, msg, idx, is_suffix, preserve_thinking)?;
                 }
-                "tool" => self.emit_tool_body(&mut buf, msg, idx)?,
+                "tool" => Self::emit_tool_body(&mut buf, msg, idx)?,
                 _ => {
                     // user / system / other — interleave media inline
                     let mut media_iter = media

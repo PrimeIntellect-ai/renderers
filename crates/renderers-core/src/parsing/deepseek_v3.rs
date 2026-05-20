@@ -121,7 +121,7 @@ fn parse_deepseek_tool_calls(
         let block_text = decode(tokenizer, call_ids).unwrap_or_default();
         let span = Range {
             start: inner_offset + i,
-            end: inner_offset + end + if unclosed { 0 } else { 1 },
+            end: inner_offset + end + usize::from(!unclosed),
         };
 
         let Some(sep_pos) = find(call_ids, sep_id) else {

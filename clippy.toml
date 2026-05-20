@@ -1,0 +1,10 @@
+# Renderer functions can grow long: the family-specific render/parse
+# paths string together many small steps and reading them top-to-bottom
+# is the point. Bumped from the default 100 to accommodate our longest
+# real function (parse_minimax at 121 lines) without giving up the lint.
+too-many-lines-threshold = 130
+
+# Config builders carry several independent bool toggles (enable_thinking,
+# preserve_all_thinking, preserve_thinking_between_tool_calls, ...). Four
+# is the natural shape; five+ would warrant a flags struct.
+max-struct-bools = 4

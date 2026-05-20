@@ -7,7 +7,9 @@
 pub mod deepseek_v3;
 pub mod qwen3;
 pub mod qwen35;
+pub mod qwen36;
 
 pub use deepseek_v3::{DeepSeekV3Renderer, DeepSeekV3RendererBuilder};
 pub use qwen3::{Qwen3Renderer, Qwen3RendererBuilder};
 pub use qwen35::{Qwen35Renderer, Qwen35RendererBuilder};
+pub use qwen36::{Qwen36Renderer, Qwen36RendererBuilder};

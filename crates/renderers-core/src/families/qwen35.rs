@@ -37,6 +37,12 @@ pub struct Qwen35RendererBuilder {
     enable_thinking: bool,
     preserve_all_thinking: bool,
     preserve_thinking_between_tool_calls: bool,
+    /// When `true`, every non-string tool-call argument is serialised via
+    /// `serde_json::to_string` instead of Python's `str(...)` rules. This
+    /// is the only behavioural change Qwen3.6 introduces vs Qwen3.5 —
+    /// kept as a flag here so Qwen3.6 is a config delta, not a code
+    /// duplicate.
+    args_as_json: bool,
 }
 
 impl Default for Qwen35RendererBuilder {
@@ -48,6 +54,7 @@ impl Default for Qwen35RendererBuilder {
             enable_thinking: true,
             preserve_all_thinking: false,
             preserve_thinking_between_tool_calls: false,
+            args_as_json: false,
         }
     }
 }
@@ -65,6 +72,11 @@ impl Qwen35RendererBuilder {
         self.preserve_thinking_between_tool_calls = on;
         self
     }
+    /// Qwen3.6 flag — JSON-serialise every non-string tool argument.
+    pub fn args_as_json(mut self, on: bool) -> Self {
+        self.args_as_json = on;
+        self
+    }
     pub fn build(self, tokenizer: Tokenizer) -> Result<Qwen35Renderer, RenderError> {
         Qwen35Renderer::new_with(tokenizer, self)
     }
@@ -76,6 +88,7 @@ pub struct Qwen35Renderer {
     enable_thinking: bool,
     preserve_all_thinking: bool,
     preserve_thinking_between_tool_calls: bool,
+    args_as_json: bool,
 
     im_start: u32,
     im_end: u32,
@@ -116,6 +129,7 @@ impl Qwen35Renderer {
             enable_thinking: cfg.enable_thinking,
             preserve_all_thinking: cfg.preserve_all_thinking,
             preserve_thinking_between_tool_calls: cfg.preserve_thinking_between_tool_calls,
+            args_as_json: cfg.args_as_json,
             im_start,
             im_end,
             endoftext,
@@ -250,21 +264,30 @@ impl Qwen35Renderer {
         Ok(())
     }
 
-    fn render_arg_value(arg_value: &serde_json::Value) -> String {
-        // Mirrors the Python `_render_arg_value`: dict/list → compact
-        // JSON; everything else → `str(...)` (Python's str() for bool,
-        // int, None, etc. — handled here by matching each scalar).
-        match arg_value {
-            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                serde_json::to_string(arg_value).unwrap_or_default()
+    fn render_arg_value(arg_value: &serde_json::Value, args_as_json: bool) -> String {
+        if args_as_json {
+            // Qwen3.6: every non-string serialises via serde_json (bools
+            // become "true"/"false", None becomes "null"). Strings still
+            // render verbatim — JSON would re-quote them.
+            match arg_value {
+                serde_json::Value::String(s) => s.clone(),
+                _ => serde_json::to_string(arg_value).unwrap_or_default(),
             }
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Bool(b) => {
-                // Python str(True) == "True", str(False) == "False"
-                if *b { "True".to_string() } else { "False".to_string() }
+        } else {
+            // Qwen3.5: Python's str() rules — dict/list go through JSON,
+            // bools become "True"/"False", None becomes "None", numbers
+            // and strings render verbatim.
+            match arg_value {
+                serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                    serde_json::to_string(arg_value).unwrap_or_default()
+                }
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Bool(b) => {
+                    if *b { "True".to_string() } else { "False".to_string() }
+                }
+                serde_json::Value::Null => "None".to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
             }
-            serde_json::Value::Null => "None".to_string(),
-            serde_json::Value::Number(n) => n.to_string(),
         }
     }
 
@@ -347,7 +370,7 @@ impl Qwen35Renderer {
             };
             if let Some(obj) = args_value.as_object() {
                 for (arg_name, arg_value) in obj {
-                    let value_str = Self::render_arg_value(arg_value);
+                    let value_str = Self::render_arg_value(arg_value, self.args_as_json);
                     let mut param = String::with_capacity(arg_name.len() + value_str.len() + 24);
                     param.push_str("<parameter=");
                     param.push_str(arg_name);

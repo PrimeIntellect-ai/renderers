@@ -1,0 +1,25 @@
+[package]
+name = "renderers-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Deterministic message-to-token rendering for LLM training/inference (Rust core)."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tokenizers = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+thiserror = { workspace = true }
+smallvec = { workspace = true }
+bumpalo = { workspace = true }
+phf = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

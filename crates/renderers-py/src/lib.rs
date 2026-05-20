@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use numpy::{IntoPyArray, PyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyType};
@@ -22,11 +22,11 @@ use renderers_core::families::{
 };
 use renderers_core::processing::{ProcessedImage, Qwen3VlImageProcessor};
 use renderers_core::tokenizer::Tokenizer;
-use renderers_core::types::{MediaBundle, MediaItem, Modality};
 use renderers_core::types::{
-    Message, ParsedResponse, ParsedToolCall, RenderedTokens, ToolArguments, ToolCallParseStatus,
-    ToolSpec,
+    Content, Message, ParsedResponse, ParsedToolCall, RenderedTokens, ToolArguments,
+    ToolCallParseStatus, ToolSpec,
 };
+use renderers_core::types::{MediaBundle, MediaItem, Modality};
 
 // Kept by-value so call sites can use the bare fn pointer
 // `.map_err(render_err)` (closures would be needed for `&E`).
@@ -39,14 +39,64 @@ fn invalid(msg: impl Into<String>) -> PyErr {
     PyValueError::new_err(msg.into())
 }
 
-/// Decode a Python `list[dict]` of messages via pythonize.
+/// Decode a Python `list[dict]` of messages.
+///
+/// The hot path is plain OpenAI-style dictionaries with string fields.
+/// Hand-parsing that shape avoids routing every render through generic
+/// serde conversion while still falling back to `pythonize` for structured
+/// content parts and tool-call lists.
 fn parse_messages(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Message>> {
-    let value: serde_json::Value = pythonize::depythonize(obj).map_err(|e| {
-        invalid(format!(
-            "messages must be a list of dicts (decode failed: {e})"
-        ))
-    })?;
-    serde_json::from_value(value).map_err(|e| invalid(format!("messages shape mismatch: {e}")))
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| invalid("messages must be a list of dicts"))?;
+    let mut parsed = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        let dict = item
+            .cast::<PyDict>()
+            .map_err(|_| invalid("messages must be a list of dicts"))?;
+        let role = dict
+            .get_item("role")?
+            .ok_or_else(|| invalid("message missing role"))?
+            .extract::<String>()?;
+
+        let content = match dict.get_item("content")? {
+            None => Content::default(),
+            Some(value) if value.is_none() => Content::Null,
+            Some(value) => match value.extract::<String>() {
+                Ok(text) => Content::Text(text),
+                Err(_) => pythonize::depythonize(&value)
+                    .map_err(|e| invalid(format!("message content decode failed: {e}")))?,
+            },
+        };
+
+        let tool_calls = match dict.get_item("tool_calls")? {
+            None => Vec::new(),
+            Some(value) if value.is_none() => Vec::new(),
+            Some(value) => pythonize::depythonize(&value)
+                .map_err(|e| invalid(format!("message tool_calls decode failed: {e}")))?,
+        };
+        let tool_call_id = optional_string(dict, "tool_call_id")?;
+        let name = optional_string(dict, "name")?;
+        let reasoning_content = optional_string(dict, "reasoning_content")?;
+
+        parsed.push(Message {
+            role,
+            content,
+            tool_calls,
+            tool_call_id,
+            name,
+            reasoning_content,
+        });
+    }
+    Ok(parsed)
+}
+
+fn optional_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
+    match dict.get_item(key)? {
+        None => Ok(None),
+        Some(value) if value.is_none() => Ok(None),
+        Some(value) => value.extract::<String>().map(Some),
+    }
 }
 
 fn parse_tools(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<ToolSpec>>> {
@@ -54,27 +104,44 @@ fn parse_tools(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<ToolSpec>>
     if obj.is_none() {
         return Ok(None);
     }
-    let mut value: serde_json::Value = pythonize::depythonize(obj).map_err(|e| {
-        invalid(format!(
-            "tools must be a list of dicts (decode failed: {e})"
-        ))
-    })?;
-    let arr = value
-        .as_array_mut()
-        .ok_or_else(|| invalid("tools must be a list of dicts"))?;
-    let mut envelopes = Vec::with_capacity(arr.len());
-    for item in arr {
-        if let Some(function) = item.get("function").and_then(|v| v.as_object()) {
-            envelopes.push(true);
-            *item = serde_json::Value::Object(function.clone());
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| invalid("tools must be a list of dicts"))?;
+    let mut parsed = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        let dict = item
+            .cast::<PyDict>()
+            .map_err(|_| invalid("tools must be a list of dicts"))?;
+        let mut openai_envelope = false;
+        let spec = if let Some(function) = dict.get_item("function")? {
+            if let Ok(function_dict) = function.cast::<PyDict>() {
+                openai_envelope = true;
+                function_dict.clone()
+            } else {
+                dict.clone()
+            }
         } else {
-            envelopes.push(false);
-        }
-    }
-    let mut parsed: Vec<ToolSpec> =
-        serde_json::from_value(value).map_err(|e| invalid(format!("tools shape mismatch: {e}")))?;
-    for (tool, openai_envelope) in parsed.iter_mut().zip(envelopes) {
-        tool.openai_envelope = openai_envelope;
+            dict.clone()
+        };
+        let name = spec
+            .get_item("name")?
+            .ok_or_else(|| invalid("tool spec missing name"))?
+            .extract::<String>()?;
+        let description = match spec.get_item("description")? {
+            Some(value) => value.extract::<String>()?,
+            None => String::new(),
+        };
+        let parameters = match spec.get_item("parameters")? {
+            Some(value) => pythonize::depythonize(&value)
+                .map_err(|e| invalid(format!("tool parameters decode failed: {e}")))?,
+            None => serde_json::Value::Object(serde_json::Map::new()),
+        };
+        parsed.push(ToolSpec {
+            name,
+            description,
+            parameters,
+            openai_envelope,
+        });
     }
     Ok(Some(parsed))
 }
@@ -137,11 +204,15 @@ fn parse_u32_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
         .map_err(|_| invalid("expected list[int]"))?;
     let mut out = Vec::with_capacity(list.len());
     for item in list.iter() {
-        let v: i64 = item.extract()?;
-        let id = u32::try_from(v).map_err(|_| invalid(format!("token id out of range: {v}")))?;
-        out.push(id);
+        out.push(item.extract::<u32>()?);
     }
     Ok(out)
+}
+
+fn numpy_u32_slice<'py>(array: &'py PyReadonlyArray1<'py, u32>) -> PyResult<&'py [u32]> {
+    array
+        .as_slice()
+        .map_err(|e| invalid(format!("expected a contiguous uint32 numpy array: {e}")))
 }
 
 #[pyclass(
@@ -157,16 +228,13 @@ struct PyRenderedTokens {
 #[pymethods]
 impl PyRenderedTokens {
     #[getter]
-    fn token_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
-        // Cast u32 -> i64 for Python `int` compatibility. PyList::new is
-        // the fastest path; per-element extract is unavoidable until
-        // numpy support is added.
-        PyList::new_bound(py, self.inner.token_ids.iter().copied().map(i64::from))
+    fn token_ids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        PyList::new(py, &self.inner.token_ids)
     }
 
     #[getter]
-    fn message_indices<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
-        PyList::new_bound(py, self.inner.message_indices.iter().copied())
+    fn message_indices<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        PyList::new(py, self.inner.message_indices.iter().copied())
     }
 
     #[getter]
@@ -221,7 +289,11 @@ impl PyParsedToolCall {
             Some(ToolArguments::Object(v)) => {
                 pythonize::pythonize(py, v).map_err(|e| invalid(format!("args serialisation: {e}")))
             }
-            Some(ToolArguments::Raw(s)) => Ok(s.clone().into_py(py).into_bound(py)),
+            Some(ToolArguments::Raw(s)) => Ok(s
+                .as_str()
+                .into_pyobject(py)
+                .map_err(|e| invalid(format!("string into pyobject: {e}")))?
+                .into_any()),
         }
     }
 
@@ -863,7 +935,30 @@ impl PyRenderer {
         let ids = py
             .detach(move || renderer.render_ids(&msgs, tools.as_deref(), add_generation_prompt))
             .map_err(render_err)?;
-        Ok(PyList::new_bound(py, ids.iter().copied().map(i64::from)))
+        PyList::new(py, ids)
+    }
+
+    /// Render token ids as a `numpy.ndarray[np.uint32]`.
+    ///
+    /// This transfers the Rust `Vec<u32>` allocation into `NumPy` instead of
+    /// materialising a Python `list[int]`, which is the preferred hot-path
+    /// API for benchmark loops and inference clients that already operate on
+    /// array buffers.
+    #[pyo3(signature = (messages, *, tools = None, add_generation_prompt = false))]
+    fn render_ids_np<'py>(
+        &self,
+        py: Python<'py>,
+        messages: &Bound<'_, PyAny>,
+        tools: Option<&Bound<'_, PyAny>>,
+        add_generation_prompt: bool,
+    ) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let msgs = parse_messages(messages)?;
+        let tools = parse_tools(tools)?;
+        let renderer = self.inner.clone();
+        let ids = py
+            .detach(move || renderer.render_ids(&msgs, tools.as_deref(), add_generation_prompt))
+            .map_err(render_err)?;
+        Ok(ids.into_pyarray(py))
     }
 
     fn parse_response(
@@ -877,11 +972,22 @@ impl PyRenderer {
         Ok(PyParsedResponse { inner: parsed })
     }
 
-    fn get_stop_token_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
-        PyList::new_bound(
-            py,
-            self.inner.stop_token_ids().iter().copied().map(i64::from),
-        )
+    /// Parse completion ids from a contiguous `numpy.ndarray[np.uint32]`.
+    ///
+    /// The input buffer is borrowed directly, avoiding the Python-list scan and
+    /// temporary Rust `Vec<u32>` used by `parse_response`.
+    #[allow(clippy::needless_pass_by_value)]
+    fn parse_response_np(
+        &self,
+        token_ids: PyReadonlyArray1<'_, u32>,
+    ) -> PyResult<PyParsedResponse> {
+        let ids = numpy_u32_slice(&token_ids)?;
+        let parsed = self.inner.parse_response(ids);
+        Ok(PyParsedResponse { inner: parsed })
+    }
+
+    fn get_stop_token_ids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        PyList::new(py, self.inner.stop_token_ids())
     }
 
     /// Render with pre-resolved multimodal media items.
@@ -948,6 +1054,32 @@ impl PyRenderer {
             .detach(move || renderer.bridge_to_next_turn(&prev_p, &prev_c, &msgs, tools.as_deref()))
             .map_err(render_err)?;
         Ok(bridged.map(|rt| PyRenderedTokens { inner: rt }))
+    }
+
+    /// Bridge using `NumPy` token buffers and return a `NumPy` token buffer.
+    ///
+    /// Previous prompt/completion ids are borrowed directly from contiguous
+    /// `uint32` arrays, and the bridged Rust `Vec<u32>` is transferred into
+    /// `NumPy` on output. This is the lowest-overhead Python-facing bridge path.
+    #[allow(clippy::needless_pass_by_value)]
+    #[pyo3(signature = (previous_prompt_ids, previous_completion_ids, new_messages, *, tools = None))]
+    fn bridge_to_next_turn_np<'py>(
+        &self,
+        py: Python<'py>,
+        previous_prompt_ids: PyReadonlyArray1<'_, u32>,
+        previous_completion_ids: PyReadonlyArray1<'_, u32>,
+        new_messages: &Bound<'_, PyAny>,
+        tools: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<Bound<'py, PyArray1<u32>>>> {
+        let prev_p = numpy_u32_slice(&previous_prompt_ids)?;
+        let prev_c = numpy_u32_slice(&previous_completion_ids)?;
+        let msgs = parse_messages(new_messages)?;
+        let tools = parse_tools(tools)?;
+        let bridged = self
+            .inner
+            .bridge_to_next_turn(prev_p, prev_c, &msgs, tools.as_deref())
+            .map_err(render_err)?;
+        Ok(bridged.map(|rt| rt.token_ids.into_pyarray(py)))
     }
 }
 

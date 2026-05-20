@@ -14,7 +14,7 @@ use crate::types::{RenderError, RenderedTokens, SCAFFOLD_IDX};
 /// All emits are O(1) amortised against the pre-allocated capacity.
 pub struct RenderBuf<'tok> {
     tokens: Vec<u32>,
-    indices: Vec<i32>,
+    indices: Option<Vec<i32>>,
     tokenizer: &'tok Tokenizer,
     /// Scratch `Vec` reused across `encode` calls so each text segment
     /// doesn't allocate. The tokenizer's `encode` API returns its own
@@ -27,7 +27,7 @@ impl std::fmt::Debug for RenderBuf<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RenderBuf")
             .field("tokens_len", &self.tokens.len())
-            .field("indices_len", &self.indices.len())
+            .field("indices_len", &self.indices.as_ref().map(Vec::len))
             .finish()
     }
 }
@@ -36,7 +36,16 @@ impl<'tok> RenderBuf<'tok> {
     pub fn new(tokenizer: &'tok Tokenizer, hint: usize) -> Self {
         Self {
             tokens: Vec::with_capacity(hint),
-            indices: Vec::with_capacity(hint),
+            indices: Some(Vec::with_capacity(hint)),
+            tokenizer,
+            scratch_offsets: Vec::new(),
+        }
+    }
+
+    pub fn new_token_ids_only(tokenizer: &'tok Tokenizer, hint: usize) -> Self {
+        Self {
+            tokens: Vec::with_capacity(hint),
+            indices: None,
             tokenizer,
             scratch_offsets: Vec::new(),
         }
@@ -51,7 +60,9 @@ impl<'tok> RenderBuf<'tok> {
     #[inline]
     pub fn special(&mut self, token_id: u32, msg_idx: i32) {
         self.tokens.push(token_id);
-        self.indices.push(msg_idx);
+        if let Some(indices) = &mut self.indices {
+            indices.push(msg_idx);
+        }
     }
 
     /// Append a span of token ids to the buffer, all attributed to the
@@ -61,8 +72,10 @@ impl<'tok> RenderBuf<'tok> {
         self.tokens.extend_from_slice(token_ids);
         // `resize` with a Copy fill is the cheapest way to extend the
         // indices vector by N elements of the same value.
-        let new_len = self.indices.len() + token_ids.len();
-        self.indices.resize(new_len, msg_idx);
+        if let Some(indices) = &mut self.indices {
+            let new_len = indices.len() + token_ids.len();
+            indices.resize(new_len, msg_idx);
+        }
     }
 
     /// Encode `text` and append the resulting tokens, attributing all of
@@ -93,11 +106,12 @@ impl<'tok> RenderBuf<'tok> {
 
     /// Consume the buffer and return a [`RenderedTokens`].
     pub fn into_rendered(self) -> RenderedTokens {
-        debug_assert_eq!(self.tokens.len(), self.indices.len());
+        let indices = self.indices.unwrap_or_default();
+        debug_assert_eq!(self.tokens.len(), indices.len());
         let _ = self.scratch_offsets; // keep the field but ignore
         RenderedTokens {
             token_ids: self.tokens,
-            message_indices: self.indices,
+            message_indices: indices,
             multi_modal_data: None,
         }
     }

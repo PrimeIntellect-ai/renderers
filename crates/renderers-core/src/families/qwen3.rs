@@ -362,31 +362,28 @@ impl Qwen3Renderer {
         let tools_bonus = tools.map_or(0, |t| 256 * t.len().max(1));
         base + tools_bonus
     }
-}
 
-impl Renderer for Qwen3Renderer {
-    fn render(
+    fn render_into_buf(
         &self,
+        buf: &mut RenderBuf<'_>,
         messages: &[Message],
         tools: Option<&[ToolSpec]>,
         add_generation_prompt: bool,
-    ) -> Result<RenderedTokens, RenderError> {
+    ) -> Result<(), RenderError> {
         if messages.is_empty() {
             return Err(RenderError::EmptyMessages);
         }
-        let cap = Self::estimate_capacity(messages, tools);
-        let mut buf = RenderBuf::new(&self.tokenizer, cap);
 
         let first_is_system = messages[0].role == "system";
 
         // 1. System + tools header.
         match tools {
             Some(t) if !t.is_empty() => {
-                self.emit_system_with_tools(&mut buf, messages, t, first_is_system)?;
+                self.emit_system_with_tools(buf, messages, t, first_is_system)?;
             }
             _ => {
                 if first_is_system {
-                    self.emit_system_no_tools(&mut buf, messages)?;
+                    self.emit_system_no_tools(buf, messages)?;
                 }
             }
         }
@@ -403,10 +400,10 @@ impl Renderer for Qwen3Renderer {
                     if i == 0 {
                         continue;
                     }
-                    self.emit_non_initial_system(&mut buf, content, i as i32)?;
+                    self.emit_non_initial_system(buf, content, i as i32)?;
                 }
                 "user" => {
-                    self.emit_user(&mut buf, content, i as i32)?;
+                    self.emit_user(buf, content, i as i32)?;
                 }
                 "assistant" => {
                     let preserve_thinking = should_preserve_past_thinking(
@@ -416,7 +413,7 @@ impl Renderer for Qwen3Renderer {
                         self.preserve_thinking_between_tool_calls,
                     );
                     self.emit_assistant(
-                        &mut buf,
+                        buf,
                         msg,
                         i,
                         last_qi,
@@ -425,7 +422,7 @@ impl Renderer for Qwen3Renderer {
                     )?;
                 }
                 "tool" => {
-                    self.emit_tool(&mut buf, messages, i, content)?;
+                    self.emit_tool(buf, messages, i, content)?;
                 }
                 _ => {
                     // Unknown role: skip silently (matches Python which
@@ -443,7 +440,33 @@ impl Renderer for Qwen3Renderer {
             }
         }
 
+        Ok(())
+    }
+}
+
+impl Renderer for Qwen3Renderer {
+    fn render(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        add_generation_prompt: bool,
+    ) -> Result<RenderedTokens, RenderError> {
+        let cap = Self::estimate_capacity(messages, tools);
+        let mut buf = RenderBuf::new(&self.tokenizer, cap);
+        self.render_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
         Ok(buf.into_rendered())
+    }
+
+    fn render_ids(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        add_generation_prompt: bool,
+    ) -> Result<Vec<u32>, RenderError> {
+        let cap = Self::estimate_capacity(messages, tools);
+        let mut buf = RenderBuf::new_token_ids_only(&self.tokenizer, cap);
+        self.render_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
+        Ok(buf.into_token_ids())
     }
 
     fn parse_response(&self, token_ids: &[u32]) -> ParsedResponse {
@@ -484,7 +507,7 @@ impl Renderer for Qwen3Renderer {
         };
 
         let cap = Self::estimate_capacity(new_messages, None);
-        let mut buf = RenderBuf::new(&self.tokenizer, cap);
+        let mut buf = RenderBuf::new_token_ids_only(&self.tokenizer, cap);
 
         // Trailing `\n` after the prior turn's close token.
         buf.scaffold_text("\n")?;

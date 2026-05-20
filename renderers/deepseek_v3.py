@@ -16,6 +16,11 @@ import json
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
+from renderers._native_router import (
+    load_native,
+    native_enabled,
+    resolve_tokenizer_path,
+)
 from renderers.base import (
     Message,
     ParsedResponse,
@@ -51,6 +56,24 @@ class DeepSeekV3Renderer:
     ``reasoning_content`` is provided, so ``preserve_*`` flags are
     no-ops here too; stored for protocol uniformity.
     """
+
+    def __new__(
+        cls,
+        tokenizer: PreTrainedTokenizer,
+        *,
+        enable_thinking: bool = True,
+        preserve_all_thinking: bool = False,
+        preserve_thinking_between_tool_calls: bool = False,
+    ):
+        if native_enabled("deepseek_v3") or native_enabled("deepseek-v3"):
+            native = load_native()
+            if native is not None:
+                path = resolve_tokenizer_path(tokenizer)
+                return native.Renderer.deepseek_v3(
+                    path,
+                    enable_thinking=enable_thinking,
+                )
+        return super().__new__(cls)
 
     def __init__(
         self,

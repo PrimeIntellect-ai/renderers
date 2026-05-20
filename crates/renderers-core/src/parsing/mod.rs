@@ -9,6 +9,7 @@
 //! All helpers operate on `&[u32]` slices and are `#[inline]`-marked so
 //! they vanish into the family parsers at -O.
 
+pub mod deepseek_v3;
 pub mod qwen3;
 pub mod qwen35;
 

@@ -76,7 +76,7 @@ shim logs a one-shot info message and falls back to Python.
 | Qwen3        | ✅ ported (Phase 2)                              |
 | Qwen3.5      | ✅ ported text-only (Phase 3) — multimodal Phase 5 |
 | GLM 4.5 / 5  | planned (Phase 3)                                |
-| DeepSeek V3  | planned (Phase 3)                                |
+| DeepSeek V3  | ✅ ported (Phase 3)                              |
 | Nemotron3    | planned (Phase 3)                                |
 | Kimi K2      | planned (Phase 4)                                |
 | Kimi K2.5    | planned (Phase 4 — text; multimodal Phase 5)    |

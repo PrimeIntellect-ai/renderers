@@ -4,7 +4,7 @@
 //! families ported to Rust so far. New families slot in by adding a
 //! match arm in [`create_renderer`].
 
-use crate::families::{Qwen35Renderer, Qwen3Renderer};
+use crate::families::{DeepSeekV3Renderer, Qwen35Renderer, Qwen3Renderer};
 use crate::tokenizer::Tokenizer;
 use crate::traits::Renderer;
 use crate::types::RenderError;
@@ -15,6 +15,7 @@ use crate::types::RenderError;
 pub enum RendererKind {
     Qwen3,
     Qwen35,
+    DeepSeekV3,
 }
 
 impl RendererKind {
@@ -22,6 +23,7 @@ impl RendererKind {
         match name {
             "qwen3" | "Qwen3" => Some(Self::Qwen3),
             "qwen35" | "qwen3.5" | "Qwen3.5" => Some(Self::Qwen35),
+            "deepseek_v3" | "deepseek-v3" | "DeepSeekV3" => Some(Self::DeepSeekV3),
             _ => None,
         }
     }
@@ -55,6 +57,13 @@ pub fn create_renderer(
             let mut b = Qwen35Renderer::builder()
                 .preserve_all_thinking(cfg.preserve_all_thinking)
                 .preserve_thinking_between_tool_calls(cfg.preserve_thinking_between_tool_calls);
+            if let Some(en) = cfg.enable_thinking {
+                b = b.enable_thinking(en);
+            }
+            Ok(Box::new(b.build(tokenizer)?))
+        }
+        RendererKind::DeepSeekV3 => {
+            let mut b = DeepSeekV3Renderer::builder();
             if let Some(en) = cfg.enable_thinking {
                 b = b.enable_thinking(en);
             }

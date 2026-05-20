@@ -41,6 +41,7 @@ pytestmark = pytest.mark.parity
 NATIVE_PARITY_FAMILIES = [
     ("Qwen/Qwen3-8B", "qwen3", {}),
     ("Qwen/Qwen3.5-9B", "qwen35", {}),
+    ("deepseek-ai/DeepSeek-V3", "deepseek_v3", {}),
 ]
 
 
@@ -88,6 +89,10 @@ def native_pair(request, native_module):
             from renderers.qwen35 import Qwen35Renderer
 
             py_renderer = Qwen35Renderer(tokenizer, **extra)
+        elif family == "deepseek_v3":
+            from renderers.deepseek_v3 import DeepSeekV3Renderer
+
+            py_renderer = DeepSeekV3Renderer(tokenizer, **extra)
         else:
             pytest.skip(f"no python builder wired for {family}")
     finally:
@@ -100,6 +105,8 @@ def native_pair(request, native_module):
         native_renderer = native_module.Renderer.qwen3(tok_path, **extra)
     elif family == "qwen35":
         native_renderer = native_module.Renderer.qwen35(tok_path, **extra)
+    elif family == "deepseek_v3":
+        native_renderer = native_module.Renderer.deepseek_v3(tok_path, **extra)
     else:
         pytest.skip(f"no native builder wired for {family}")
 

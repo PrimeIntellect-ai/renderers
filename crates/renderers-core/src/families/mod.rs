@@ -4,8 +4,10 @@
 //! stays focused. New families slot in by adding a module here and a
 //! registry entry in [`crate::registry`].
 
+pub mod deepseek_v3;
 pub mod qwen3;
 pub mod qwen35;
 
+pub use deepseek_v3::{DeepSeekV3Renderer, DeepSeekV3RendererBuilder};
 pub use qwen3::{Qwen3Renderer, Qwen3RendererBuilder};
 pub use qwen35::{Qwen35Renderer, Qwen35RendererBuilder};

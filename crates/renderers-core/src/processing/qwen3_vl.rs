@@ -1,7 +1,7 @@
 //! Vision image processing for Qwen-VL family models (Qwen2-VL,
 //! Qwen3-VL, Qwen3.5-VL).
 //!
-//! Port of the HuggingFace `Qwen2VLImageProcessor` / `Qwen3VLImageProcessor`
+//! Port of the `HuggingFace` `Qwen2VLImageProcessor` / `Qwen3VLImageProcessor`
 //! pipeline. Given an image (bytes or decoded RGB), produces:
 //!
 //! - `pixel_values`: `ndarray::Array2<f32>` of shape
@@ -15,9 +15,9 @@
 //!
 //! # Parity caveat
 //!
-//! The grid dimensions, num_tokens, and tensor shape match HF exactly.
+//! The grid dimensions, `num_tokens`, and tensor shape match HF exactly.
 //! The pixel values themselves use the `image` crate's bicubic
-//! (CatmullRom) resize, which differs from PIL's bicubic in the last
+//! (`CatmullRom`) resize, which differs from PIL's bicubic in the last
 //! few decimals — typical RMS difference ≈ 1e-3 on normalized pixels.
 //! Downstream models tolerate this level of noise (it's far below the
 //! quantization floor of vision encoders); but if exact pixel parity
@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 
 use crate::types::RenderError;
 
-/// OpenAI CLIP normalisation constants — Qwen-VL inherits these.
+/// `OpenAI` CLIP normalisation constants — Qwen-VL inherits these.
 pub const CLIP_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
 pub const CLIP_STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
 
@@ -78,7 +78,7 @@ impl Default for Qwen3VlImageProcessor {
 /// Output of one image's processing run.
 #[derive(Debug, Clone)]
 pub struct ProcessedImage {
-    /// Flattened patches: shape (grid_h * grid_w, channel * temporal * patch²).
+    /// Flattened patches: shape (`grid_h` * `grid_w`, channel * temporal * patch²).
     pub pixel_values: Array2<f32>,
     /// `[1, grid_h, grid_w]` — temporal × height × width patch count.
     pub image_grid_thw: [u32; 3],
@@ -96,7 +96,7 @@ impl Qwen3VlImageProcessor {
     /// `factor = patch_size * merge_size` (28 by default).
     pub fn smart_resize(&self, height: u32, width: u32) -> Result<(u32, u32), RenderError> {
         let factor = self.patch_size * self.merge_size;
-        let (h, w) = (height as f64, width as f64);
+        let (h, w) = (f64::from(height), f64::from(width));
         let max_dim = h.max(w);
         let min_dim = h.min(w);
         if min_dim == 0.0 {
@@ -108,12 +108,12 @@ impl Qwen3VlImageProcessor {
                 max_dim / min_dim
             )));
         }
-        let f = factor as f64;
+        let f = f64::from(factor);
         let mut h_bar = (h / f).round() * f;
         let mut w_bar = (w / f).round() * f;
 
-        let max_pixels = self.max_pixels as f64;
-        let min_pixels = self.min_pixels as f64;
+        let max_pixels = f64::from(self.max_pixels);
+        let min_pixels = f64::from(self.min_pixels);
 
         if h_bar * w_bar > max_pixels {
             let beta = ((h * w) / max_pixels).sqrt();
@@ -126,6 +126,8 @@ impl Qwen3VlImageProcessor {
             h_bar = ((h * beta) / f).ceil() * f;
             w_bar = ((w * beta) / f).ceil() * f;
         }
+        // smart_resize math keeps h_bar/w_bar positive (clamped to `f`).
+        #[allow(clippy::cast_sign_loss)]
         Ok((h_bar as u32, w_bar as u32))
     }
 
@@ -173,7 +175,7 @@ impl Qwen3VlImageProcessor {
             for x in 0..w {
                 let p = resized.get_pixel(x as u32, y as u32);
                 for c in 0..3 {
-                    let v = (p[c] as f32) * self.rescale_factor;
+                    let v = f32::from(p[c]) * self.rescale_factor;
                     chw[(c, y, x)] = (v - self.image_mean[c]) / self.image_std[c];
                 }
             }

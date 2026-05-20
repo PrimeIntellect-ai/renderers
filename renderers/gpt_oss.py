@@ -54,7 +54,6 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from renderers._native_router import (
     load_native,
     native_enabled,
-    resolve_tokenizer_path,
 )
 from renderers.base import (
     Message,

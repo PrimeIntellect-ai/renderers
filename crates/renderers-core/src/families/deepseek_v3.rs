@@ -1,4 +1,4 @@
-//! DeepSeek V3 renderer. Port of `renderers/deepseek_v3.py`.
+//! `DeepSeek` V3 renderer. Port of `renderers/deepseek_v3.py`.
 //!
 //! Key differences from the Qwen-family renderers:
 //!
@@ -56,7 +56,7 @@ impl DeepSeekV3RendererBuilder {
         self
     }
     pub fn build(self, tokenizer: Tokenizer) -> Result<DeepSeekV3Renderer, RenderError> {
-        DeepSeekV3Renderer::new_with(tokenizer, self)
+        DeepSeekV3Renderer::new_with(tokenizer, &self)
     }
 }
 
@@ -90,7 +90,7 @@ impl DeepSeekV3Renderer {
         DeepSeekV3RendererBuilder::default()
     }
 
-    /// Encode a DeepSeek special token via the tokenizer's encode path and
+    /// Encode a `DeepSeek` special token via the tokenizer's encode path and
     /// assert it maps to exactly one id. Matches the Python
     /// `_get_special_token` helper — required because the tokenizer
     /// doesn't expose these by `token_to_id` directly (the fullwidth
@@ -105,7 +105,14 @@ impl DeepSeekV3Renderer {
         Ok(ids[0])
     }
 
-    fn new_with(tokenizer: Tokenizer, cfg: DeepSeekV3RendererBuilder) -> Result<Self, RenderError> {
+    // Paired begin/end token ids share semantic prefixes (tool_call,
+    // tool_calls, tool_output, tool_outputs); the similarity is the
+    // structural relationship, so renaming would lose information.
+    #[allow(clippy::similar_names)]
+    fn new_with(
+        tokenizer: Tokenizer,
+        cfg: &DeepSeekV3RendererBuilder,
+    ) -> Result<Self, RenderError> {
         let bos = Self::resolve(&tokenizer, &format!("begin{US}of{US}sentence"))?;
         let eos = Self::resolve(&tokenizer, &format!("end{US}of{US}sentence"))?;
         let user_token = Self::resolve(&tokenizer, "User")?;
@@ -204,7 +211,7 @@ impl Renderer for DeepSeekV3Renderer {
 
         // Generation prompt — skip <｜Assistant｜> after a tool output
         if add_generation_prompt {
-            let last_role = messages.last().map(|m| m.role.as_str()).unwrap_or("");
+            let last_role = messages.last().map_or("", |m| m.role.as_str());
             if last_role != "tool" {
                 buf.scaffold_special(self.assistant_token);
             }
@@ -284,7 +291,7 @@ impl Renderer for DeepSeekV3Renderer {
             }
         }
 
-        let last_role = new_messages.last().map(|m| m.role.as_str()).unwrap_or("");
+        let last_role = new_messages.last().map_or("", |m| m.role.as_str());
         if last_role != "tool" {
             buf.scaffold_special(self.assistant_token);
         }

@@ -53,26 +53,23 @@ pub fn parse_kimi_k2(
     };
 
     let text = decode(tokenizer, content_ids).unwrap_or_default();
-    let (reasoning, content) = match text.split_once("</think>") {
-        Some((before, after)) => {
-            let raw = before.replacen("<think>", "", 1);
+    let (reasoning, content) = if let Some((before, after)) = text.split_once("</think>") {
+        let raw = before.replacen("<think>", "", 1);
+        let r = raw.trim_matches('\n').trim().to_string();
+        let c = after.trim_matches('\n').to_string();
+        (Some(r).filter(|s| !s.is_empty()), c)
+    } else {
+        if let Some(think_at) = text.find("<think>") {
+            // Truncated thinking — no closing tag
+            let raw = &text[think_at + "<think>".len()..];
             let r = raw.trim_matches('\n').trim().to_string();
-            let c = after.trim_matches('\n').to_string();
-            (Some(r).filter(|s| !s.is_empty()), c)
+            return ParsedResponse {
+                content: String::new(),
+                reasoning_content: Some(r).filter(|s| !s.is_empty()),
+                tool_calls: Vec::new(),
+            };
         }
-        None => {
-            if let Some(think_at) = text.find("<think>") {
-                // Truncated thinking — no closing tag
-                let raw = &text[think_at + "<think>".len()..];
-                let r = raw.trim_matches('\n').trim().to_string();
-                return ParsedResponse {
-                    content: String::new(),
-                    reasoning_content: Some(r).filter(|s| !s.is_empty()),
-                    tool_calls: Vec::new(),
-                };
-            }
-            (None, text)
-        }
+        (None, text)
     };
 
     ParsedResponse {
@@ -98,21 +95,18 @@ fn parse_kimi_k2_calls(
             i += 1;
             continue;
         }
-        let arg_begin = match find_from(ids, tc_arg_begin_id, i + 1) {
-            Some(v) => v,
-            None => {
-                let raw = decode(tokenizer, &ids[i + 1..]).unwrap_or_default();
-                out.push(ParsedToolCall {
-                    raw,
-                    token_span: Some(Range {
-                        start: section_offset + i,
-                        end: section_offset + ids.len(),
-                    }),
-                    status: ToolCallParseStatus::MalformedStructure,
-                    ..Default::default()
-                });
-                break;
-            }
+        let Some(arg_begin) = find_from(ids, tc_arg_begin_id, i + 1) else {
+            let raw = decode(tokenizer, &ids[i + 1..]).unwrap_or_default();
+            out.push(ParsedToolCall {
+                raw,
+                token_span: Some(Range {
+                    start: section_offset + i,
+                    end: section_offset + ids.len(),
+                }),
+                status: ToolCallParseStatus::MalformedStructure,
+                ..Default::default()
+            });
+            break;
         };
 
         let (tc_end, unclosed) = match find_from(ids, tc_end_id, arg_begin + 1) {
@@ -143,12 +137,11 @@ fn parse_kimi_k2_calls(
         };
 
         let mut invalid_json = false;
-        let arguments = match serde_json::from_str::<serde_json::Value>(&args_str) {
-            Ok(v) => ToolArguments::Object(v),
-            Err(_) => {
-                invalid_json = true;
-                ToolArguments::Raw(args_str.clone())
-            }
+        let arguments = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args_str) {
+            ToolArguments::Object(v)
+        } else {
+            invalid_json = true;
+            ToolArguments::Raw(args_str.clone())
         };
 
         let status = if unclosed {

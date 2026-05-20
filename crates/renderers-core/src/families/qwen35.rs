@@ -81,7 +81,7 @@ impl Qwen35RendererBuilder {
         self
     }
     pub fn build(self, tokenizer: Tokenizer) -> Result<Qwen35Renderer, RenderError> {
-        Qwen35Renderer::new_with(tokenizer, self)
+        Qwen35Renderer::new_with(tokenizer, &self)
     }
 }
 
@@ -128,7 +128,7 @@ impl Qwen35Renderer {
         Qwen35RendererBuilder::default()
     }
 
-    fn new_with(tokenizer: Tokenizer, cfg: Qwen35RendererBuilder) -> Result<Self, RenderError> {
+    fn new_with(tokenizer: Tokenizer, cfg: &Qwen35RendererBuilder) -> Result<Self, RenderError> {
         let im_start = tokenizer.token_to_id_strict("<|im_start|>")?;
         let im_end = tokenizer.token_to_id_strict("<|im_end|>")?;
         let endoftext = tokenizer.token_to_id_strict("<|endoftext|>")?;
@@ -436,9 +436,8 @@ impl Qwen35Renderer {
             // Arguments — accept JSON string (decode first) or object
             let args_value = match &tc.function.arguments {
                 ToolArguments::Object(v) => v.clone(),
-                ToolArguments::Raw(s) => {
-                    serde_json::from_str(s).unwrap_or(serde_json::Value::Object(Default::default()))
-                }
+                ToolArguments::Raw(s) => serde_json::from_str(s)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
             };
             if let Some(obj) = args_value.as_object() {
                 for (arg_name, arg_value) in obj {
@@ -479,7 +478,7 @@ impl Qwen35Renderer {
 
     fn estimate_capacity(messages: &[Message], tools: Option<&[ToolSpec]>) -> usize {
         let base = messages.len().max(1) * 256;
-        let tools_bonus = tools.map(|t| 256 * t.len().max(1) + 512).unwrap_or(0);
+        let tools_bonus = tools.map_or(0, |t| 256 * t.len().max(1) + 512);
         base + tools_bonus
     }
 }

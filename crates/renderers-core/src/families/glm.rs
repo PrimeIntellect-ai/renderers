@@ -22,7 +22,7 @@
 //! | newlines inside tool-call     | no    | no      | yes     |
 //! | `/nothink` user suffix        | no    | no      | yes     |
 //! | empty `<think></think>` wrap  | no    | yes     | no      |
-//! | unwrap OpenAI tool envelope   | no    | yes     | no      |
+//! | unwrap `OpenAI` tool envelope   | no    | yes     | no      |
 //!
 //! The flags are surfaced on the builder; the three variants pick
 //! their own combination at construction time.
@@ -94,7 +94,7 @@ impl GlmRendererBuilder {
         self
     }
     pub fn build(self, tokenizer: Tokenizer) -> Result<GlmRenderer, RenderError> {
-        GlmRenderer::new_with(tokenizer, self)
+        GlmRenderer::new_with(tokenizer, &self)
     }
 }
 
@@ -139,7 +139,7 @@ impl GlmRenderer {
         GlmRendererBuilder::glm45().build(tokenizer)
     }
 
-    fn new_with(tokenizer: Tokenizer, cfg: GlmRendererBuilder) -> Result<Self, RenderError> {
+    fn new_with(tokenizer: Tokenizer, cfg: &GlmRendererBuilder) -> Result<Self, RenderError> {
         let gmask = tokenizer.token_to_id_strict("[gMASK]")?;
         let sop = tokenizer.token_to_id_strict("<sop>")?;
         let system = tokenizer.token_to_id_strict("<|system|>")?;
@@ -247,7 +247,7 @@ impl Renderer for GlmRenderer {
         let nl = self.nl_after_role();
         let mut buf = RenderBuf::new(
             &self.tokenizer,
-            messages.len().max(1) * 256 + tools.map(|t| t.len() * 256 + 256).unwrap_or(0),
+            messages.len().max(1) * 256 + tools.map_or(0, |t| t.len() * 256 + 256),
         );
 
         // Prefix
@@ -547,7 +547,7 @@ impl GlmRenderer {
             let args_value = match &tc.function.arguments {
                 ToolArguments::Object(v) => v.clone(),
                 ToolArguments::Raw(s) => {
-                    serde_json::from_str(s).unwrap_or(JsonValue::Object(Default::default()))
+                    serde_json::from_str(s).unwrap_or(JsonValue::Object(serde_json::Map::new()))
                 }
             };
             if let Some(obj) = args_value.as_object() {
@@ -616,7 +616,7 @@ impl GlmRenderer {
             let args_value = match &tc.function.arguments {
                 ToolArguments::Object(v) => v.clone(),
                 ToolArguments::Raw(s) => {
-                    serde_json::from_str(s).unwrap_or(JsonValue::Object(Default::default()))
+                    serde_json::from_str(s).unwrap_or(JsonValue::Object(serde_json::Map::new()))
                 }
             };
             if let Some(obj) = args_value.as_object() {

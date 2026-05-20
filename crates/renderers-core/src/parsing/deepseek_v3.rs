@@ -1,4 +1,4 @@
-//! DeepSeek V3 tool-call parser. Port of
+//! `DeepSeek` V3 tool-call parser. Port of
 //! `renderers/parsing.py:parse_deepseek_v3` + `_parse_deepseek_tool_calls`.
 //!
 //! Structural shape:
@@ -14,7 +14,7 @@
 //! <｜tool▁calls▁end｜>
 //! ```
 //!
-//! Thinking is **text tags** (not special tokens) — DeepSeek emits
+//! Thinking is **text tags** (not special tokens) — `DeepSeek` emits
 //! `<think>...</think>` as decoded text. Tool calls are special-token
 //! delimited. The fenced JSON inside is parsed with a small anchored regex.
 
@@ -32,7 +32,10 @@ static JSON_FENCE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)^```(?:json)?\s*(.*?)\s*```$").expect("json-fence regex")
 });
 
-#[allow(clippy::too_many_arguments)]
+// Paired begin/end token ids (tool_call vs tool_calls, with matching
+// _end suffixes) carry distinct meaning — the singular/plural distinction
+// is the actual semantic. Renaming would obscure the structure.
+#[allow(clippy::too_many_arguments, clippy::similar_names)]
 pub fn parse_deepseek_v3(
     tokenizer: &Tokenizer,
     token_ids: &[u32],
@@ -145,11 +148,7 @@ fn parse_deepseek_tool_calls(
                 let n = after_sep[..nl].trim().to_string();
                 let rest = after_sep[nl + 1..].trim();
                 let args = match JSON_FENCE_RE.captures(rest) {
-                    Some(c) => c
-                        .get(1)
-                        .map(|m| m.as_str().trim())
-                        .unwrap_or("")
-                        .to_string(),
+                    Some(c) => c.get(1).map_or("", |m| m.as_str().trim()).to_string(),
                     None => rest.to_string(),
                 };
                 (n, args)
@@ -159,15 +158,12 @@ fn parse_deepseek_tool_calls(
 
         let mut invalid_json = false;
         let arguments = if args_str.is_empty() {
-            ToolArguments::Object(serde_json::Value::Object(Default::default()))
+            ToolArguments::Object(serde_json::Value::Object(serde_json::Map::new()))
+        } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args_str) {
+            ToolArguments::Object(v)
         } else {
-            match serde_json::from_str::<serde_json::Value>(&args_str) {
-                Ok(v) => ToolArguments::Object(v),
-                Err(_) => {
-                    invalid_json = true;
-                    ToolArguments::Raw(args_str.clone())
-                }
-            }
+            invalid_json = true;
+            ToolArguments::Raw(args_str.clone())
         };
 
         let status = if unclosed {

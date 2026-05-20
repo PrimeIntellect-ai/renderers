@@ -48,7 +48,7 @@ pub struct RendererConfig {
 pub fn create_renderer(
     kind: RendererKind,
     tokenizer: Tokenizer,
-    cfg: RendererConfig,
+    cfg: &RendererConfig,
 ) -> Result<Box<dyn Renderer>, RenderError> {
     match kind {
         RendererKind::Qwen3 => Ok(Box::new(

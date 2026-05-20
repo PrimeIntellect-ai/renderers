@@ -10,7 +10,7 @@
 //! - Holds a [`HarmonyEncoding`] (lazily loaded from
 //!   [`HarmonyEncodingName::HarmonyGptOss`]) and a cache of the
 //!   special-token ids it exposes.
-//! - `render` builds a prefix conversation (SystemContent + DeveloperContent
+//! - `render` builds a prefix conversation (`SystemContent` + `DeveloperContent`
 //!   when a system message or tools are present) via
 //!   `render_conversation`, then walks the remaining messages and renders
 //!   each one individually via `render(msg)` so per-token attribution
@@ -19,7 +19,7 @@
 //!   (token-id based) — matching what `renderers/parsing.py:parse_gpt_oss`
 //!   does — so we don't need to manage a `StreamableParser`'s lifetime.
 //!
-//! This renderer does NOT need a HuggingFace `tokenizer.json`; the
+//! This renderer does NOT need a `HuggingFace` `tokenizer.json`; the
 //! harmony encoding embeds its own tiktoken-based tokenizer.
 
 use std::sync::Arc;
@@ -212,7 +212,7 @@ impl GptOssRenderer {
     }
 
     /// Encode a UTF-8 string via the harmony tokenizer, returning u32 ids.
-    /// Helper so the call sites don't need to name CoreBPE (which is not
+    /// Helper so the call sites don't need to name `CoreBPE` (which is not
     /// re-exported from the harmony crate).
     fn encode_text(&self, text: &str) -> Vec<u32> {
         // `Rank` is `u32`; encode_with_special_tokens already returns Vec<u32>.
@@ -416,7 +416,7 @@ impl Renderer for GptOssRenderer {
                 sys,
             ));
         }
-        let has_dev = first_system_idx.is_some() || tools.map(|t| !t.is_empty()).unwrap_or(false);
+        let has_dev = first_system_idx.is_some() || tools.is_some_and(|t| !t.is_empty());
         if has_dev {
             let mut dev = DeveloperContent::new();
             if let Some(idx) = first_system_idx {
@@ -439,7 +439,7 @@ impl Renderer for GptOssRenderer {
         }
         if !prefix_msgs.is_empty() {
             let prefix_tokens = self.render_conversation_tokens(prefix_msgs)?;
-            let attr_idx: i32 = first_system_idx.map(|i| i as i32).unwrap_or(SCAFFOLD_IDX);
+            let attr_idx: i32 = first_system_idx.map_or(SCAFFOLD_IDX, |i| i as i32);
             for id in prefix_tokens {
                 tokens.push(id);
                 indices.push(attr_idx);
@@ -523,8 +523,7 @@ impl Renderer for GptOssRenderer {
             let body_end = ids[body_start..]
                 .iter()
                 .position(|&t| t == self.start || t == self.end || t == self.call)
-                .map(|p| p + body_start)
-                .unwrap_or(ids.len());
+                .map_or(ids.len(), |p| p + body_start);
             let body_closed =
                 body_end < ids.len() && (ids[body_end] == self.end || ids[body_end] == self.call);
             let body_text = self.decode_text(&ids[body_start..body_end]);
@@ -670,8 +669,7 @@ fn today_yyyy_mm_dd() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let days = secs / 86_400;
     // 1970-01-01 + days
     let (y, m, d) = civil_from_days(days as i64);
@@ -680,6 +678,7 @@ fn today_yyyy_mm_dd() -> String {
 
 /// Convert days since 1970-01-01 to (year, month, day) — Howard Hinnant's
 /// algorithm, public-domain.
+#[allow(clippy::cast_sign_loss)] // remainder mod 146_097 is in [0, 146_097)
 fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

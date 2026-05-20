@@ -1,4 +1,4 @@
-//! Vision processors — port of the HuggingFace image processor pipelines.
+//! Vision processors — port of the `HuggingFace` image processor pipelines.
 //!
 //! Phase 5b: actual pixel-data preprocessing in Rust. Decode image bytes,
 //! smart-resize, normalise, patch-extract, and produce the tensors the
@@ -12,7 +12,7 @@
 //!
 //! Future:
 //!
-//! - Kimi K2.5 — different smart_resize defaults and a single-pad
+//! - Kimi K2.5 — different `smart_resize` defaults and a single-pad
 //!   placeholder convention (Phase 5b follow-up).
 //! - Video frame sampling — needs `video-rs` or `ffmpeg-next` (Phase 5c).
 

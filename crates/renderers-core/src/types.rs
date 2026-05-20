@@ -1,7 +1,7 @@
 //! Core data types for renderers.
 //!
 //! The shapes mirror the Python `renderers.base` types so JSON round-trips
-//! and PyO3 wrapping stay mechanical. Strings are owned (`String`) — PyO3
+//! and `PyO3` wrapping stay mechanical. Strings are owned (`String`) — `PyO3`
 //! always materialises strings on entry, so `Cow<'a, str>` would only
 //! propagate lifetimes for no win. The few `&str` borrows that pay off are
 //! taken locally inside renderer implementations from `&[Message]` slices.
@@ -108,7 +108,7 @@ pub struct ToolCallFunction {
     pub arguments: ToolArguments,
 }
 
-/// Structured tool invocation in OpenAI function-calling format.
+/// Structured tool invocation in `OpenAI` function-calling format.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ToolCall {
     #[serde(default = "default_tool_type", rename = "type")]
@@ -122,7 +122,7 @@ fn default_tool_type() -> String {
     "function".to_string()
 }
 
-/// Tool specification (OpenAI function-calling format) passed to
+/// Tool specification (`OpenAI` function-calling format) passed to
 /// [`Renderer::render`](crate::Renderer::render).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ToolSpec {
@@ -167,7 +167,7 @@ impl Message {
 }
 
 /// Tool-call argument payload. The JSON-object case is the common path;
-/// the raw-string case preserves the OpenAI quirk where some clients
+/// the raw-string case preserves the `OpenAI` quirk where some clients
 /// pre-serialise arguments to a string.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -178,7 +178,7 @@ pub enum ToolArguments {
 
 impl Default for ToolArguments {
     fn default() -> Self {
-        ToolArguments::Object(serde_json::Value::Object(Default::default()))
+        ToolArguments::Object(serde_json::Value::Object(serde_json::Map::new()))
     }
 }
 
@@ -213,7 +213,7 @@ pub struct MultiModalData {
     pub mm_placeholders: std::collections::BTreeMap<String, Vec<PlaceholderRange>>,
     /// Per-item processor outputs. The values are passed through as opaque
     /// JSON to keep this crate framework-agnostic; vision processors live
-    /// behind the PyO3 boundary in the current Phase 1 design.
+    /// behind the `PyO3` boundary in the current Phase 1 design.
     #[serde(default)]
     pub mm_items: std::collections::BTreeMap<String, Vec<serde_json::Value>>,
 }
@@ -281,7 +281,7 @@ pub enum ToolCallParseStatus {
 
 impl ToolCallParseStatus {
     /// Wire string matching the Python enum values
-    /// (`"ok" | "invalid_json" | ...`) so PyO3 can round-trip them.
+    /// (`"ok" | "invalid_json" | ...`) so `PyO3` can round-trip them.
     pub fn as_wire(&self) -> &'static str {
         match self {
             Self::Ok => "ok",

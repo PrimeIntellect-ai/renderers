@@ -5,7 +5,7 @@
 //! pyclasses wrap `RenderedTokens` / `ParsedResponse` / `ParsedToolCall`
 //! with `#[getter]` accessors. Argument unpacking is done by
 //! `pythonize` so callers can pass plain dicts / lists for messages and
-//! tools without per-field PyO3 conversion.
+//! tools without per-field `PyO3` conversion.
 
 use std::sync::Arc;
 
@@ -28,6 +28,9 @@ use renderers_core::types::{
     ToolSpec,
 };
 
+// Kept by-value so call sites can use the bare fn pointer
+// `.map_err(render_err)` (closures would be needed for `&E`).
+#[allow(clippy::needless_pass_by_value)]
 fn render_err(e: renderers_core::types::RenderError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
@@ -80,9 +83,8 @@ fn parse_tools(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<ToolSpec>>
 fn parse_media_bundle(obj: &Bound<'_, PyAny>) -> PyResult<MediaBundle> {
     let value: serde_json::Value = pythonize::depythonize(obj)
         .map_err(|e| invalid(format!("media must be a list of dicts: {e}")))?;
-    let arr = match value {
-        serde_json::Value::Array(a) => a,
-        _ => return Err(invalid("media must be a list")),
+    let serde_json::Value::Array(arr) = value else {
+        return Err(invalid("media must be a list"));
     };
     let mut bundle = MediaBundle::new();
     for item in arr {
@@ -136,10 +138,8 @@ fn parse_u32_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
     let mut out = Vec::with_capacity(list.len());
     for item in list.iter() {
         let v: i64 = item.extract()?;
-        if v < 0 || v > u32::MAX as i64 {
-            return Err(invalid(format!("token id out of range: {v}")));
-        }
-        out.push(v as u32);
+        let id = u32::try_from(v).map_err(|_| invalid(format!("token id out of range: {v}")))?;
+        out.push(id);
     }
     Ok(out)
 }
@@ -161,7 +161,7 @@ impl PyRenderedTokens {
         // Cast u32 -> i64 for Python `int` compatibility. PyList::new is
         // the fastest path; per-element extract is unavoidable until
         // numpy support is added.
-        PyList::new_bound(py, self.inner.token_ids.iter().map(|&t| t as i64))
+        PyList::new_bound(py, self.inner.token_ids.iter().copied().map(i64::from))
     }
 
     #[getter]
@@ -566,7 +566,7 @@ impl PyRenderer {
         })
     }
 
-    /// Build a MiniMax M2 / M2.5 renderer from a tokenizer.json.
+    /// Build a `MiniMax` M2 / M2.5 renderer from a tokenizer.json.
     #[classmethod]
     #[pyo3(signature = (
         tokenizer_path,
@@ -595,7 +595,7 @@ impl PyRenderer {
         })
     }
 
-    /// Build a DefaultRenderer (Jinja fallback via minijinja).
+    /// Build a `DefaultRenderer` (Jinja fallback via minijinja).
     ///
     /// `chat_template` is the model's Jinja chat template (usually the
     /// `chat_template` field of `tokenizer_config.json` or the contents
@@ -646,7 +646,7 @@ impl PyRenderer {
 
     /// Build a GPT-OSS (Harmony) renderer.
     ///
-    /// Unlike the other families, GPT-OSS doesn't need a HuggingFace
+    /// Unlike the other families, GPT-OSS doesn't need a `HuggingFace`
     /// `tokenizer.json` — the harmony encoding embeds its own
     /// tiktoken-based tokenizer. The `tokenizer_path` argument is
     /// ignored on this path but kept for API uniformity with the other
@@ -806,7 +806,7 @@ impl PyRenderer {
         })
     }
 
-    /// Build a DeepSeek V3 renderer from a tokenizer.json.
+    /// Build a `DeepSeek` V3 renderer from a tokenizer.json.
     ///
     /// `enable_thinking=True` (default) prefills the generation prompt
     /// with `<think>\n` to trigger reasoning. The Python shim mirrors
@@ -863,7 +863,7 @@ impl PyRenderer {
         let ids = py
             .detach(move || renderer.render_ids(&msgs, tools.as_deref(), add_generation_prompt))
             .map_err(render_err)?;
-        Ok(PyList::new_bound(py, ids.iter().map(|&t| t as i64)))
+        Ok(PyList::new_bound(py, ids.iter().copied().map(i64::from)))
     }
 
     fn parse_response(
@@ -878,7 +878,10 @@ impl PyRenderer {
     }
 
     fn get_stop_token_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
-        PyList::new_bound(py, self.inner.stop_token_ids().iter().map(|&t| t as i64))
+        PyList::new_bound(
+            py,
+            self.inner.stop_token_ids().iter().copied().map(i64::from),
+        )
     }
 
     /// Render with pre-resolved multimodal media items.
@@ -952,11 +955,11 @@ impl PyRenderer {
 
 /// Rust port of HF's `Qwen3VLImageProcessor` / `Qwen2VLImageProcessor`.
 ///
-/// Decodes image bytes, smart-resizes, normalises with the OpenAI CLIP
+/// Decodes image bytes, smart-resizes, normalises with the `OpenAI` CLIP
 /// mean / std, and produces `pixel_values` + `image_grid_thw` tensors
 /// in the exact shape the model expects. Equivalent to the Python
-/// processor end-to-end; pixel-byte parity is approximate (CatmullRom
-/// vs PIL bicubic), but grid dims, num_tokens, and tensor shape match
+/// processor end-to-end; pixel-byte parity is approximate (`CatmullRom`
+/// vs PIL bicubic), but grid dims, `num_tokens`, and tensor shape match
 /// exactly.
 #[pyclass(name = "Qwen3VlImageProcessor", module = "renderers_native")]
 struct PyQwen3VlImageProcessor {
@@ -1072,7 +1075,7 @@ fn processed_to_pyobject<'py>(py: Python<'py>, p: ProcessedImage) -> PyResult<Bo
     let pixel_array: Bound<'py, PyArray2<f32>> = p.pixel_values.into_pyarray(py);
     let grid_array: Bound<'py, PyArray2<i64>> = ndarray::Array2::from_shape_vec(
         (1, 3),
-        p.image_grid_thw.iter().map(|&v| v as i64).collect(),
+        p.image_grid_thw.iter().copied().map(i64::from).collect(),
     )
     .expect("image_grid_thw is always shape [1,3]")
     .into_pyarray(py);

@@ -43,31 +43,28 @@ pub fn parse_glm(
     let mut reasoning: Option<String> = None;
     let mut parse_offset = 0usize;
     let working_ids: Vec<u32>;
-    let ids: &[u32] = match find(stripped, think_end_id) {
-        Some(think_end) => {
-            let reasoning_ids: Vec<u32> = stripped[..think_end]
-                .iter()
-                .copied()
-                .filter(|&t| t != think_id)
-                .collect();
-            let txt = decode(tokenizer, &reasoning_ids).unwrap_or_default();
-            reasoning = Some(txt.trim().to_string()).filter(|s| !s.is_empty());
-            parse_offset = think_end + 1;
-            &stripped[think_end + 1..]
+    let ids: &[u32] = if let Some(think_end) = find(stripped, think_end_id) {
+        let reasoning_ids: Vec<u32> = stripped[..think_end]
+            .iter()
+            .copied()
+            .filter(|&t| t != think_id)
+            .collect();
+        let txt = decode(tokenizer, &reasoning_ids).unwrap_or_default();
+        reasoning = Some(txt.trim().to_string()).filter(|s| !s.is_empty());
+        parse_offset = think_end + 1;
+        &stripped[think_end + 1..]
+    } else {
+        // Truncated reasoning — <think> without </think>
+        if let Some(think_start) = find(stripped, think_id) {
+            let txt = decode(tokenizer, &stripped[think_start + 1..]).unwrap_or_default();
+            return ParsedResponse {
+                content: String::new(),
+                reasoning_content: Some(txt.trim().to_string()).filter(|s| !s.is_empty()),
+                tool_calls: Vec::new(),
+            };
         }
-        None => {
-            // Truncated reasoning — <think> without </think>
-            if let Some(think_start) = find(stripped, think_id) {
-                let txt = decode(tokenizer, &stripped[think_start + 1..]).unwrap_or_default();
-                return ParsedResponse {
-                    content: String::new(),
-                    reasoning_content: Some(txt.trim().to_string()).filter(|s| !s.is_empty()),
-                    tool_calls: Vec::new(),
-                };
-            }
-            working_ids = stripped.to_vec();
-            &working_ids
-        }
+        working_ids = stripped.to_vec();
+        &working_ids
     };
 
     let (content_text, tool_calls) = match find(ids, tool_call_id) {
@@ -105,7 +102,10 @@ pub fn parse_glm(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+// Abbreviated arg-key/arg-value begin/end ids (ak/ake/av/ave) are tight
+// pairs by design — the abbreviations keep call sites readable, and the
+// surface fn (parse_glm) uses full names.
+#[allow(clippy::too_many_arguments, clippy::similar_names)]
 fn parse_glm_tool_calls(
     tokenizer: &Tokenizer,
     ids: &[u32],
@@ -127,21 +127,18 @@ fn parse_glm_tool_calls(
         }
         let span_start = section_offset + i;
 
-        let end = match find_from(ids, tc_end_id, i + 1) {
-            Some(end) => end,
-            None => {
-                let raw = decode(tokenizer, &ids[i + 1..]).unwrap_or_default();
-                out.push(ParsedToolCall {
-                    raw,
-                    token_span: Some(Range {
-                        start: span_start,
-                        end: section_offset + ids.len(),
-                    }),
-                    status: ToolCallParseStatus::UnclosedBlock,
-                    ..Default::default()
-                });
-                break;
-            }
+        let Some(end) = find_from(ids, tc_end_id, i + 1) else {
+            let raw = decode(tokenizer, &ids[i + 1..]).unwrap_or_default();
+            out.push(ParsedToolCall {
+                raw,
+                token_span: Some(Range {
+                    start: span_start,
+                    end: section_offset + ids.len(),
+                }),
+                status: ToolCallParseStatus::UnclosedBlock,
+                ..Default::default()
+            });
+            break;
         };
 
         let block = &ids[i + 1..end];
@@ -191,12 +188,11 @@ fn parse_glm_tool_calls(
                         .unwrap_or_default()
                         .trim()
                         .to_string();
-                    let val = match serde_json::from_str::<serde_json::Value>(&val_text) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            any_json_fallback = true;
-                            serde_json::Value::String(val_text)
-                        }
+                    let val = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&val_text) {
+                        v
+                    } else {
+                        any_json_fallback = true;
+                        serde_json::Value::String(val_text)
                     };
                     arguments.insert(key, val);
                     j = ave + 1;

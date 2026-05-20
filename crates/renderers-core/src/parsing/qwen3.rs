@@ -116,9 +116,8 @@ pub fn parse_qwen3(
 /// emitted) out of a parsed tool-call JSON value. Matches the Python
 /// `parsed.get("name", "")` / `parsed.get("arguments", {})` semantics.
 fn extract_name_and_args(value: &serde_json::Value) -> (String, ToolArguments) {
-    let obj = match value.as_object() {
-        Some(o) => o,
-        None => return (String::new(), ToolArguments::default()),
+    let Some(obj) = value.as_object() else {
+        return (String::new(), ToolArguments::default());
     };
     let name = obj
         .get("name")

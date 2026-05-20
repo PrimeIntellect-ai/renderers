@@ -121,7 +121,7 @@ def resolve_tokenizer_path(tokenizer: Any) -> str:
         )
 
     cached = try_to_load_from_cache(repo_id=name_or_path, filename="tokenizer.json")
-    if cached is None or cached is False:
+    if not isinstance(cached, (str, os.PathLike)):
         raise ValueError(
             f"tokenizer.json not available in the local HF cache for {name_or_path}. "
             "Run `snapshot_download` first or pass an explicit path."

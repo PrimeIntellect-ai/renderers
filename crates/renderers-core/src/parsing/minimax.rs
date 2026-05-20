@@ -1,4 +1,4 @@
-//! MiniMax M2 tool-call parser. Port of
+//! `MiniMax` M2 tool-call parser. Port of
 //! `renderers/parsing.py:parse_minimax`.
 //!
 //! Structural shape:
@@ -52,30 +52,27 @@ pub fn parse_minimax(
     let mut reasoning: Option<String> = None;
     let mut parse_offset = 0usize;
     let working: Vec<u32>;
-    let ids: &[u32] = match find(stripped, think_end_id) {
-        Some(think_end) => {
-            let reasoning_ids: Vec<u32> = stripped[..think_end]
-                .iter()
-                .copied()
-                .filter(|&t| t != think_id)
-                .collect();
-            let txt = decode(tokenizer, &reasoning_ids).unwrap_or_default();
-            reasoning = Some(txt.trim().to_string()).filter(|s| !s.is_empty());
-            parse_offset = think_end + 1;
-            &stripped[think_end + 1..]
+    let ids: &[u32] = if let Some(think_end) = find(stripped, think_end_id) {
+        let reasoning_ids: Vec<u32> = stripped[..think_end]
+            .iter()
+            .copied()
+            .filter(|&t| t != think_id)
+            .collect();
+        let txt = decode(tokenizer, &reasoning_ids).unwrap_or_default();
+        reasoning = Some(txt.trim().to_string()).filter(|s| !s.is_empty());
+        parse_offset = think_end + 1;
+        &stripped[think_end + 1..]
+    } else {
+        if let Some(think_start) = find(stripped, think_id) {
+            let txt = decode(tokenizer, &stripped[think_start + 1..]).unwrap_or_default();
+            return ParsedResponse {
+                content: String::new(),
+                reasoning_content: Some(txt.trim().to_string()).filter(|s| !s.is_empty()),
+                tool_calls: Vec::new(),
+            };
         }
-        None => {
-            if let Some(think_start) = find(stripped, think_id) {
-                let txt = decode(tokenizer, &stripped[think_start + 1..]).unwrap_or_default();
-                return ParsedResponse {
-                    content: String::new(),
-                    reasoning_content: Some(txt.trim().to_string()).filter(|s| !s.is_empty()),
-                    tool_calls: Vec::new(),
-                };
-            }
-            working = stripped.to_vec();
-            &working
-        }
+        working = stripped.to_vec();
+        &working
     };
 
     let mut tool_calls: Vec<ParsedToolCall> = Vec::new();
@@ -97,21 +94,18 @@ pub fn parse_minimax(
                 }
                 let span_start = parse_offset + i;
 
-                let end = match find_from(ids, tool_call_end_id, i + 1) {
-                    Some(end) => end,
-                    None => {
-                        let raw = decode(tokenizer, &ids[i + 1..]).unwrap_or_default();
-                        tool_calls.push(ParsedToolCall {
-                            raw,
-                            token_span: Some(Range {
-                                start: span_start,
-                                end: parse_offset + ids.len(),
-                            }),
-                            status: ToolCallParseStatus::UnclosedBlock,
-                            ..Default::default()
-                        });
-                        break;
-                    }
+                let Some(end) = find_from(ids, tool_call_end_id, i + 1) else {
+                    let raw = decode(tokenizer, &ids[i + 1..]).unwrap_or_default();
+                    tool_calls.push(ParsedToolCall {
+                        raw,
+                        token_span: Some(Range {
+                            start: span_start,
+                            end: parse_offset + ids.len(),
+                        }),
+                        status: ToolCallParseStatus::UnclosedBlock,
+                        ..Default::default()
+                    });
+                    break;
                 };
                 let block_text = decode(tokenizer, &ids[i + 1..end]).unwrap_or_default();
                 let span = Range {
@@ -129,19 +123,18 @@ pub fn parse_minimax(
                     });
                 } else {
                     for inv in invokes {
-                        let name = inv.get(1).map(|m| m.as_str()).unwrap_or("");
-                        let body = inv.get(2).map(|m| m.as_str()).unwrap_or("");
+                        let name = inv.get(1).map_or("", |m| m.as_str());
+                        let body = inv.get(2).map_or("", |m| m.as_str());
                         let mut arguments = serde_json::Map::new();
                         let mut any_json_fallback = false;
                         for pm in PARAMETER_RE.captures_iter(body) {
-                            let pname = pm.get(1).map(|m| m.as_str()).unwrap_or("");
-                            let pval = pm.get(2).map(|m| m.as_str().trim()).unwrap_or("");
-                            let v = match serde_json::from_str::<serde_json::Value>(pval) {
-                                Ok(v) => v,
-                                Err(_) => {
-                                    any_json_fallback = true;
-                                    serde_json::Value::String(pval.to_string())
-                                }
+                            let pname = pm.get(1).map_or("", |m| m.as_str());
+                            let pval = pm.get(2).map_or("", |m| m.as_str().trim());
+                            let v = if let Ok(v) = serde_json::from_str::<serde_json::Value>(pval) {
+                                v
+                            } else {
+                                any_json_fallback = true;
+                                serde_json::Value::String(pval.to_string())
                             };
                             arguments.insert(pname.to_string(), v);
                         }

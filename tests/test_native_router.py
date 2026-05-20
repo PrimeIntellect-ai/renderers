@@ -9,6 +9,8 @@ class surface.
 from __future__ import annotations
 
 import os
+import sys
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -72,6 +74,32 @@ def test_resolve_tokenizer_path_from_exact_file(tmp_path):
     f.write_text("{}")
     # Pass a file path directly — return as-is.
     assert router.resolve_tokenizer_path(str(f)) == str(f)
+
+
+def test_resolve_tokenizer_path_rejects_hf_missing_sentinel(monkeypatch):
+    tokenizer = SimpleNamespace(name_or_path="org/custom-tokenizer")
+    fake_hf = SimpleNamespace(try_to_load_from_cache=lambda **_kwargs: object())
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    with pytest.raises(ValueError, match="tokenizer.json not available"):
+        router.resolve_tokenizer_path(tokenizer)
+
+
+def test_kimi_k2_constructor_falls_back_without_tokenizer_path(monkeypatch):
+    from renderers.kimi_k2 import KimiK2Renderer
+
+    fake_native = mock.Mock()
+    monkeypatch.setattr("renderers.kimi_k2.native_enabled", lambda _family: True)
+    monkeypatch.setattr("renderers.kimi_k2.load_native", lambda: fake_native)
+    monkeypatch.setattr(
+        "renderers.kimi_k2.try_resolve_tokenizer_path",
+        lambda _tokenizer, _family: None,
+    )
+
+    inst = KimiK2Renderer.__new__(KimiK2Renderer, object())
+
+    assert isinstance(inst, KimiK2Renderer)
+    fake_native.Renderer.kimi_k2.assert_not_called()
 
 
 def test_kimi_k25_constructor_does_not_route_eagerly(monkeypatch):

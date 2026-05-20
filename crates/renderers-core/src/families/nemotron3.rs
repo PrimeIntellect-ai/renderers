@@ -65,7 +65,7 @@ impl Nemotron3RendererBuilder {
         self
     }
     pub fn build(self, tokenizer: Tokenizer) -> Result<Nemotron3Renderer, RenderError> {
-        Nemotron3Renderer::new_with(tokenizer, self)
+        Nemotron3Renderer::new_with(tokenizer, &self)
     }
 }
 
@@ -99,7 +99,7 @@ impl Nemotron3Renderer {
         Nemotron3RendererBuilder::default()
     }
 
-    fn new_with(tokenizer: Tokenizer, cfg: Nemotron3RendererBuilder) -> Result<Self, RenderError> {
+    fn new_with(tokenizer: Tokenizer, cfg: &Nemotron3RendererBuilder) -> Result<Self, RenderError> {
         let im_start = tokenizer.token_to_id_strict("<|im_start|>")?;
         let im_end = tokenizer.token_to_id_strict("<|im_end|>")?;
         let endoftext = tokenizer.token_to_id("<|endoftext|>");
@@ -424,7 +424,7 @@ impl Nemotron3Renderer {
             let args_value = match &tc.function.arguments {
                 ToolArguments::Object(v) => v.clone(),
                 ToolArguments::Raw(s) => {
-                    serde_json::from_str(s).unwrap_or(JsonValue::Object(Default::default()))
+                    serde_json::from_str(s).unwrap_or(JsonValue::Object(serde_json::Map::new()))
                 }
             };
             if let Some(obj) = args_value.as_object() {
@@ -481,7 +481,7 @@ impl Nemotron3Renderer {
 
     fn estimate_capacity(messages: &[Message], tools: Option<&[ToolSpec]>) -> usize {
         let base = messages.len().max(1) * 256;
-        let tools_bonus = tools.map(|t| 384 * t.len().max(1) + 512).unwrap_or(0);
+        let tools_bonus = tools.map_or(0, |t| 384 * t.len().max(1) + 512);
         base + tools_bonus
     }
 }
@@ -569,6 +569,8 @@ impl Renderer for Nemotron3Renderer {
                 "user" => self.emit_user(&mut buf, content, oi)?,
                 "assistant" => {
                     let is_last_turn = (i as i32) >= last_plain_assistant_idx;
+                    // oi >= 0 guard above makes the usize cast safe.
+                    #[allow(clippy::cast_sign_loss)]
                     let preserve_thinking = oi >= 0
                         && should_preserve_past_thinking(
                             messages,

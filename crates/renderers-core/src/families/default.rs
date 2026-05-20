@@ -1,4 +1,4 @@
-//! DefaultRenderer — Jinja-template fallback for models without a
+//! `DefaultRenderer` — Jinja-template fallback for models without a
 //! hand-coded family.
 //!
 //! Port of `renderers/default.py`. Two key differences from the Python
@@ -18,7 +18,7 @@
 //!
 //! `parse_response` is intentionally basic: strip stop tokens, decode,
 //! split on `</think>` if present. Models with structured tool calls
-//! need a hand-coded family — DefaultRenderer doesn't try to guess.
+//! need a hand-coded family — `DefaultRenderer` doesn't try to guess.
 //!
 //! `bridge_to_next_turn` returns `None` unconditionally: without
 //! template-specific knowledge of the turn-close token, the bridge

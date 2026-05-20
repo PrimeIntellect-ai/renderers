@@ -60,7 +60,7 @@ impl KimiK2RendererBuilder {
         self
     }
     pub fn build(self, tokenizer: Tokenizer) -> Result<KimiK2Renderer, RenderError> {
-        KimiK2Renderer::new_with(tokenizer, self)
+        KimiK2Renderer::new_with(tokenizer, &self)
     }
 }
 
@@ -97,7 +97,7 @@ impl KimiK2Renderer {
         KimiK2RendererBuilder::default()
     }
 
-    fn new_with(tokenizer: Tokenizer, cfg: KimiK2RendererBuilder) -> Result<Self, RenderError> {
+    fn new_with(tokenizer: Tokenizer, cfg: &KimiK2RendererBuilder) -> Result<Self, RenderError> {
         let im_user = tokenizer.token_to_id_strict("<|im_user|>")?;
         let im_assistant = tokenizer.token_to_id_strict("<|im_assistant|>")?;
         let im_system = tokenizer.token_to_id_strict("<|im_system|>")?;
@@ -212,7 +212,7 @@ impl Renderer for KimiK2Renderer {
 
         // tool_declare goes first if tools were provided and the caller
         // didn't already include a tool_declare message.
-        let tools_pending = tools.map(|t| !t.is_empty()).unwrap_or(false);
+        let tools_pending = tools.is_some_and(|t| !t.is_empty());
         let already_has_tool_declare = !messages.is_empty() && messages[0].role == "tool_declare";
         if tools_pending && !already_has_tool_declare {
             working.push(Message {
@@ -305,7 +305,7 @@ impl Renderer for KimiK2Renderer {
 
         let mut buf = RenderBuf::new(
             &self.tokenizer,
-            working.len().max(1) * 256 + tools.map(|t| 64 * t.len() + 256).unwrap_or(0),
+            working.len().max(1) * 256 + tools.map_or(0, |t| 64 * t.len() + 256),
         );
 
         for (i, msg) in working.iter().enumerate() {

@@ -8,8 +8,8 @@
 //!
 //! Distinctive features vs Kimi K2:
 //!
-//! - Generation prompt prefills `<think>` (enable_thinking=True) or the
-//!   empty block `<think></think>` (enable_thinking=False) to control
+//! - Generation prompt prefills `<think>` (`enable_thinking=True`) or the
+//!   empty block `<think></think>` (`enable_thinking=False`) to control
 //!   thinking mode at sample time. `<think>` and `</think>` may be
 //!   multi-token; the renderer encodes them as text.
 //! - Assistant body uses the hist/suffix split: the last non-tool-call
@@ -61,7 +61,7 @@ impl KimiK25RendererBuilder {
         self
     }
     pub fn build(self, tokenizer: Tokenizer) -> Result<KimiK25Renderer, RenderError> {
-        KimiK25Renderer::new_with(tokenizer, self)
+        KimiK25Renderer::new_with(tokenizer, &self)
     }
 }
 
@@ -102,7 +102,7 @@ impl KimiK25Renderer {
         KimiK25RendererBuilder::default()
     }
 
-    fn new_with(tokenizer: Tokenizer, cfg: KimiK25RendererBuilder) -> Result<Self, RenderError> {
+    fn new_with(tokenizer: Tokenizer, cfg: &KimiK25RendererBuilder) -> Result<Self, RenderError> {
         let im_user = tokenizer.token_to_id_strict("<|im_user|>")?;
         let im_assistant = tokenizer.token_to_id_strict("<|im_assistant|>")?;
         let im_system = tokenizer.token_to_id_strict("<|im_system|>")?;
@@ -264,7 +264,7 @@ impl Renderer for KimiK25Renderer {
         // (~270 lines) isn't ported yet. The Python shim avoids native
         // routing when tools are present, so this is a hard error if we
         // got here with tools.
-        if tools.map(|t| !t.is_empty()).unwrap_or(false) {
+        if tools.is_some_and(|t| !t.is_empty()) {
             return Err(RenderError::Invalid(
                 "Kimi K2.5 with tools not supported on the native path yet; the Python shim should route to pure Python in this case".into(),
             ));
@@ -551,7 +551,7 @@ impl MultimodalRenderer for KimiK25Renderer {
         if messages.is_empty() {
             return Err(RenderError::EmptyMessages);
         }
-        if tools.map(|t| !t.is_empty()).unwrap_or(false) {
+        if tools.is_some_and(|t| !t.is_empty()) {
             return Err(RenderError::Invalid(
                 "Kimi K2.5 with tools not supported on the native path yet".into(),
             ));

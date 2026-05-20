@@ -1,4 +1,4 @@
-//! MiniMax M2.5 renderer. Port of `renderers/minimax_m2.py`.
+//! `MiniMax` M2.5 renderer. Port of `renderers/minimax_m2.py`.
 //!
 //! Unique characteristics:
 //!
@@ -6,7 +6,7 @@
 //!   Role "assistant" is rendered as "ai".
 //! - System block always present — default system message
 //!   ("You are a helpful assistant. Your name is MiniMax-M2.5 and is
-//!   built by MiniMax.") auto-injected if missing.
+//!   built by `MiniMax`.") auto-injected if missing.
 //! - Tools, when supplied, are appended to the system message as
 //!   `<tool>{json}</tool>` lines inside a `<tools>...</tools>` block,
 //!   followed by a verbose instructions block.
@@ -16,7 +16,7 @@
 //! - Tool responses wrapped in literal `<response>...</response>`
 //!   (plain text, no special token).
 //! - Thinking emitted only for assistants after the last user turn
-//!   (or when preserve_all_thinking is on).
+//!   (or when `preserve_all_thinking` is on).
 
 use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
 use crate::emit::RenderBuf;
@@ -154,7 +154,7 @@ impl MiniMaxM2Renderer {
         match args {
             ToolArguments::Object(v) => v.clone(),
             ToolArguments::Raw(s) => {
-                serde_json::from_str(s).unwrap_or(serde_json::Value::Object(Default::default()))
+                serde_json::from_str(s).unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
             }
         }
     }
@@ -172,7 +172,7 @@ impl Renderer for MiniMaxM2Renderer {
         }
         let mut buf = RenderBuf::new(
             &self.tokenizer,
-            messages.len().max(1) * 256 + tools.map(|t| t.len() * 256 + 512).unwrap_or(0),
+            messages.len().max(1) * 256 + tools.map_or(0, |t| t.len() * 256 + 512),
         );
 
         let first_is_system = messages[0].role == "system";
@@ -217,6 +217,8 @@ impl Renderer for MiniMaxM2Renderer {
                     buf.text("\n", orig_idx)?;
                 }
                 "assistant" => {
+                    // orig_idx was just cast from a usize; non-negative by construction.
+                    #[allow(clippy::cast_sign_loss)]
                     let preserve_thinking = should_preserve_past_thinking(
                         messages,
                         orig_idx as usize,

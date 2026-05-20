@@ -69,7 +69,7 @@ impl Qwen3RendererBuilder {
     }
 
     pub fn build(self, tokenizer: Tokenizer) -> Result<Qwen3Renderer, RenderError> {
-        Qwen3Renderer::new_with(tokenizer, self)
+        Qwen3Renderer::new_with(tokenizer, &self)
     }
 }
 
@@ -109,7 +109,7 @@ impl Qwen3Renderer {
         Qwen3RendererBuilder::default()
     }
 
-    fn new_with(tokenizer: Tokenizer, cfg: Qwen3RendererBuilder) -> Result<Self, RenderError> {
+    fn new_with(tokenizer: Tokenizer, cfg: &Qwen3RendererBuilder) -> Result<Self, RenderError> {
         let im_start = tokenizer.token_to_id_strict("<|im_start|>")?;
         let im_end = tokenizer.token_to_id_strict("<|im_end|>")?;
         let endoftext = tokenizer.token_to_id_strict("<|endoftext|>")?;
@@ -359,7 +359,7 @@ impl Qwen3Renderer {
         // tools block (it can be substantial). Realloc once if we
         // underestimate; the cost of over-allocating is a few KB.
         let base = messages.len().max(1) * 256;
-        let tools_bonus = tools.map(|t| 256 * t.len().max(1)).unwrap_or(0);
+        let tools_bonus = tools.map_or(0, |t| 256 * t.len().max(1));
         base + tools_bonus
     }
 }

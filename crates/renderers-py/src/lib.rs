@@ -18,6 +18,7 @@ use renderers_core::families::{
     KimiK25RendererBuilder, KimiK2RendererBuilder, MiniMaxM2RendererBuilder,
     Nemotron3RendererBuilder, Qwen35RendererBuilder, Qwen36RendererBuilder, Qwen3RendererBuilder,
 };
+use renderers_core::processing::{ProcessedImage, Qwen3VlImageProcessor};
 use renderers_core::types::{MediaBundle, MediaItem, Modality};
 use renderers_core::tokenizer::Tokenizer;
 use renderers_core::types::{
@@ -850,6 +851,133 @@ impl PyRenderer {
     }
 }
 
+// ── Vision: Qwen3-VL image processor ──────────────────────────────────
+
+/// Rust port of HF's `Qwen3VLImageProcessor` / `Qwen2VLImageProcessor`.
+///
+/// Decodes image bytes, smart-resizes, normalises with the OpenAI CLIP
+/// mean / std, and produces `pixel_values` + `image_grid_thw` tensors
+/// in the exact shape the model expects. Equivalent to the Python
+/// processor end-to-end; pixel-byte parity is approximate (CatmullRom
+/// vs PIL bicubic), but grid dims, num_tokens, and tensor shape match
+/// exactly.
+#[pyclass(name = "Qwen3VlImageProcessor", module = "renderers_native")]
+struct PyQwen3VlImageProcessor {
+    inner: Qwen3VlImageProcessor,
+}
+
+#[pymethods]
+impl PyQwen3VlImageProcessor {
+    #[new]
+    #[pyo3(signature = (
+        *,
+        min_pixels = None,
+        max_pixels = None,
+        patch_size = None,
+        temporal_patch_size = None,
+        merge_size = None,
+    ))]
+    fn new(
+        min_pixels: Option<u32>,
+        max_pixels: Option<u32>,
+        patch_size: Option<u32>,
+        temporal_patch_size: Option<u32>,
+        merge_size: Option<u32>,
+    ) -> PyResult<Self> {
+        let mut p = Qwen3VlImageProcessor::default();
+        if let Some(v) = min_pixels { p.min_pixels = v; }
+        if let Some(v) = max_pixels { p.max_pixels = v; }
+        if let Some(v) = patch_size { p.patch_size = v; }
+        if let Some(v) = temporal_patch_size { p.temporal_patch_size = v; }
+        if let Some(v) = merge_size { p.merge_size = v; }
+        Ok(Self { inner: p })
+    }
+
+    /// Compute the resized `(height, width)` for an input image
+    /// without doing any actual pixel work — useful for placeholder
+    /// counting in test harnesses.
+    fn smart_resize(&self, height: u32, width: u32) -> PyResult<(u32, u32)> {
+        self.inner.smart_resize(height, width).map_err(render_err)
+    }
+
+    /// Process raw image bytes (PNG / JPEG / WebP) into a dict shaped
+    /// for direct consumption by `Renderer.render_with_media`:
+    ///
+    /// ```python
+    /// {
+    ///     "modality":    "image",
+    ///     "num_tokens":  int,
+    ///     "hash":        str,
+    ///     "hf_payload":  {
+    ///         "pixel_values":   {"shape": [tokens, features], "data": [...]},
+    ///         "image_grid_thw": {"shape": [1, 3],             "data": [1, h, w]},
+    ///     },
+    /// }
+    /// ```
+    ///
+    /// `message_idx` is up to the caller — it's not added here.
+    fn process_bytes<'py>(
+        &self,
+        py: Python<'py>,
+        bytes: &[u8],
+    ) -> PyResult<Bound<'py, PyAny>> {
+        // Clone so the move into allow_threads is straightforward
+        let processed: ProcessedImage = py
+            .allow_threads(|| self.inner.process_bytes(bytes))
+            .map_err(render_err)?;
+        processed_to_pyobject(py, processed)
+    }
+
+    /// Convenience: read a file and process it.
+    fn process_path<'py>(&self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyAny>> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| invalid(format!("read image {path:?}: {e}")))?;
+        let processed: ProcessedImage = py
+            .allow_threads(|| self.inner.process_bytes(&bytes))
+            .map_err(render_err)?;
+        processed_to_pyobject(py, processed)
+    }
+
+    #[getter]
+    fn patch_size(&self) -> u32 { self.inner.patch_size }
+    #[getter]
+    fn merge_size(&self) -> u32 { self.inner.merge_size }
+    #[getter]
+    fn temporal_patch_size(&self) -> u32 { self.inner.temporal_patch_size }
+    #[getter]
+    fn min_pixels(&self) -> u32 { self.inner.min_pixels }
+    #[getter]
+    fn max_pixels(&self) -> u32 { self.inner.max_pixels }
+}
+
+fn processed_to_pyobject<'py>(
+    py: Python<'py>,
+    p: ProcessedImage,
+) -> PyResult<Bound<'py, PyAny>> {
+    // Serialise via serde_json::Value first, then convert to a Python
+    // dict. The shape is identical to what the HF processor produces
+    // (lists of f32 + integer dims), so downstream glue can route it
+    // unchanged.
+    let shape = p.pixel_values.shape().to_vec();
+    let value = serde_json::json!({
+        "modality":    "image",
+        "num_tokens":  p.num_tokens,
+        "hash":        p.hash,
+        "hf_payload":  {
+            "pixel_values": {
+                "shape": [shape[0] as u64, shape[1] as u64],
+                "data":  p.pixel_values.iter().copied().collect::<Vec<f32>>(),
+            },
+            "image_grid_thw": {
+                "shape": [1u32, 3u32],
+                "data":  p.image_grid_thw.to_vec(),
+            },
+        },
+    });
+    pythonize::pythonize(py, &value)
+        .map_err(|e| invalid(format!("processed image → py: {e}")))
+}
+
 #[pymodule]
 fn renderers_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = py;
@@ -858,5 +986,6 @@ fn renderers_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyParsedResponse>()?;
     m.add_class::<PyParsedToolCall>()?;
     m.add_class::<PyToolCallParseStatus>()?;
+    m.add_class::<PyQwen3VlImageProcessor>()?;
     Ok(())
 }

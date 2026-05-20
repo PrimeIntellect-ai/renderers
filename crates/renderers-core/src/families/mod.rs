@@ -7,6 +7,7 @@
 pub mod deepseek_v3;
 pub mod glm;
 pub mod kimi_k2;
+pub mod minimax_m2;
 pub mod nemotron3;
 pub mod qwen3;
 pub mod qwen35;
@@ -15,6 +16,7 @@ pub mod qwen36;
 pub use deepseek_v3::{DeepSeekV3Renderer, DeepSeekV3RendererBuilder};
 pub use glm::{GlmRenderer, GlmRendererBuilder};
 pub use kimi_k2::{KimiK2Renderer, KimiK2RendererBuilder};
+pub use minimax_m2::{MiniMaxM2Renderer, MiniMaxM2RendererBuilder};
 pub use nemotron3::{Nemotron3Renderer, Nemotron3RendererBuilder};
 pub use qwen3::{Qwen3Renderer, Qwen3RendererBuilder};
 pub use qwen35::{Qwen35Renderer, Qwen35RendererBuilder};

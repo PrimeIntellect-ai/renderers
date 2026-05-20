@@ -15,7 +15,8 @@ use pyo3::types::{PyList, PyType};
 
 use renderers_core::families::{
     DeepSeekV3RendererBuilder, GlmRendererBuilder, KimiK2RendererBuilder,
-    Nemotron3RendererBuilder, Qwen35RendererBuilder, Qwen36RendererBuilder, Qwen3RendererBuilder,
+    MiniMaxM2RendererBuilder, Nemotron3RendererBuilder, Qwen35RendererBuilder,
+    Qwen36RendererBuilder, Qwen3RendererBuilder,
 };
 use renderers_core::tokenizer::Tokenizer;
 use renderers_core::types::{
@@ -422,6 +423,33 @@ impl PyRenderer {
             .allow_threads(|| {
                 GlmRendererBuilder::glm45()
                     .enable_thinking(enable_thinking)
+                    .preserve_all_thinking(preserve_all_thinking)
+                    .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls)
+                    .build(tok)
+            })
+            .map_err(render_err)?;
+        Ok(PyRenderer { inner: Arc::new(renderer) })
+    }
+
+    /// Build a MiniMax M2 / M2.5 renderer from a tokenizer.json.
+    #[classmethod]
+    #[pyo3(signature = (
+        tokenizer_path,
+        *,
+        preserve_all_thinking = false,
+        preserve_thinking_between_tool_calls = false,
+    ))]
+    fn minimax_m2(
+        _cls: &Bound<'_, PyType>,
+        py: Python<'_>,
+        tokenizer_path: &str,
+        preserve_all_thinking: bool,
+        preserve_thinking_between_tool_calls: bool,
+    ) -> PyResult<Self> {
+        let tok = Tokenizer::from_file(tokenizer_path).map_err(render_err)?;
+        let renderer = py
+            .allow_threads(|| {
+                MiniMaxM2RendererBuilder::default()
                     .preserve_all_thinking(preserve_all_thinking)
                     .preserve_thinking_between_tool_calls(preserve_thinking_between_tool_calls)
                     .build(tok)

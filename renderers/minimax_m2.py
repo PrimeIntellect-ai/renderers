@@ -16,6 +16,11 @@ from typing import Any
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
+from renderers._native_router import (
+    load_native,
+    native_enabled,
+    resolve_tokenizer_path,
+)
 from renderers.base import (
     Message,
     ParsedResponse,
@@ -52,6 +57,30 @@ _TOOLS_INSTRUCTIONS = (
 
 class MiniMaxM2Renderer:
     """Deterministic message → token renderer for MiniMax M2 / M2.5 models."""
+
+    def __new__(
+        cls,
+        tokenizer: PreTrainedTokenizer,
+        *,
+        default_system: str = _DEFAULT_SYSTEM,
+        preserve_all_thinking: bool = False,
+        preserve_thinking_between_tool_calls: bool = False,
+    ):
+        # Native routing: only when the caller relies on the default
+        # system message; a custom default_system isn't wired through to
+        # the native classmethod yet.
+        if (
+            native_enabled("minimax_m2") or native_enabled("minimax-m2")
+        ) and default_system == _DEFAULT_SYSTEM:
+            native = load_native()
+            if native is not None:
+                path = resolve_tokenizer_path(tokenizer)
+                return native.Renderer.minimax_m2(
+                    path,
+                    preserve_all_thinking=preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                )
+        return super().__new__(cls)
 
     def __init__(
         self,

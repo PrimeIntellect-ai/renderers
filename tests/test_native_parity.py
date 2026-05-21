@@ -111,33 +111,43 @@ def _build_python_renderer(family: str, tokenizer, extra):
     """Return a pure-Python renderer for *family*, or ``None`` if missing."""
     if family == "qwen3":
         from renderers.qwen3 import Qwen3Renderer
+
         return Qwen3Renderer(tokenizer, **extra)
     if family == "qwen35":
         from renderers.qwen35 import Qwen35Renderer
+
         return Qwen35Renderer(tokenizer, **extra)
     if family == "qwen36":
         from renderers.qwen36 import Qwen36Renderer
+
         return Qwen36Renderer(tokenizer, **extra)
     if family == "glm5":
         from renderers.glm5 import GLM5Renderer
+
         return GLM5Renderer(tokenizer, **extra)
     if family == "glm51":
         from renderers.glm5 import GLM51Renderer
+
         return GLM51Renderer(tokenizer, **extra)
     if family == "glm45":
         from renderers.glm45 import GLM45Renderer
+
         return GLM45Renderer(tokenizer, **extra)
     if family == "deepseek_v3":
         from renderers.deepseek_v3 import DeepSeekV3Renderer
+
         return DeepSeekV3Renderer(tokenizer, **extra)
     if family == "kimi_k2":
         from renderers.kimi_k2 import KimiK2Renderer
+
         return KimiK2Renderer(tokenizer, **extra)
     if family == "minimax_m2":
         from renderers.minimax_m2 import MiniMaxM2Renderer
+
         return MiniMaxM2Renderer(tokenizer, **extra)
     if family == "nemotron3":
         from renderers.nemotron3 import Nemotron3Renderer
+
         return Nemotron3Renderer(tokenizer, **extra)
     return None
 
@@ -145,16 +155,16 @@ def _build_python_renderer(family: str, tokenizer, extra):
 def _build_native_renderer(native_module, family: str, tok_path: str, extra):
     """Return a native renderer for *family* via the explicit factory."""
     factory = {
-        "qwen3":       native_module.Renderer.qwen3,
-        "qwen35":      native_module.Renderer.qwen35,
-        "qwen36":      native_module.Renderer.qwen36,
-        "glm5":        native_module.Renderer.glm5,
-        "glm51":       native_module.Renderer.glm51,
-        "glm45":       native_module.Renderer.glm45,
+        "qwen3": native_module.Renderer.qwen3,
+        "qwen35": native_module.Renderer.qwen35,
+        "qwen36": native_module.Renderer.qwen36,
+        "glm5": native_module.Renderer.glm5,
+        "glm51": native_module.Renderer.glm51,
+        "glm45": native_module.Renderer.glm45,
         "deepseek_v3": native_module.Renderer.deepseek_v3,
-        "kimi_k2":     native_module.Renderer.kimi_k2,
-        "minimax_m2":  native_module.Renderer.minimax_m2,
-        "nemotron3":   native_module.Renderer.nemotron3,
+        "kimi_k2": native_module.Renderer.kimi_k2,
+        "minimax_m2": native_module.Renderer.minimax_m2,
+        "nemotron3": native_module.Renderer.nemotron3,
     }.get(family)
     if factory is None:
         return None
@@ -266,7 +276,9 @@ TOOLS = [
 # ── Tests ────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("case,messages", CONVERSATIONS, ids=lambda x: x if isinstance(x, str) else None)
+@pytest.mark.parametrize(
+    "case,messages", CONVERSATIONS, ids=lambda x: x if isinstance(x, str) else None
+)
 def test_render_ids_parity(native_pair, case, messages):
     py_renderer, native_renderer, _tok = native_pair
     py_ids = list(py_renderer.render_ids(messages))
@@ -278,7 +290,9 @@ def test_render_ids_parity(native_pair, case, messages):
     )
 
 
-@pytest.mark.parametrize("case,messages", CONVERSATIONS, ids=lambda x: x if isinstance(x, str) else None)
+@pytest.mark.parametrize(
+    "case,messages", CONVERSATIONS, ids=lambda x: x if isinstance(x, str) else None
+)
 def test_render_ids_with_gen_prompt_parity(native_pair, case, messages):
     py_renderer, native_renderer, _tok = native_pair
     py_ids = list(py_renderer.render_ids(messages, add_generation_prompt=True))
@@ -286,7 +300,9 @@ def test_render_ids_with_gen_prompt_parity(native_pair, case, messages):
     assert py_ids == rs_ids
 
 
-@pytest.mark.parametrize("case,messages", CONVERSATIONS, ids=lambda x: x if isinstance(x, str) else None)
+@pytest.mark.parametrize(
+    "case,messages", CONVERSATIONS, ids=lambda x: x if isinstance(x, str) else None
+)
 def test_render_ids_with_tools_parity(native_pair, case, messages):
     py_renderer, native_renderer, _tok = native_pair
     py_ids = list(py_renderer.render_ids(messages, tools=TOOLS))
@@ -321,7 +337,9 @@ def test_qwen35_structured_text_parts_parity(native_pair):
     assert py_ids == rs_ids
 
 
-@pytest.mark.parametrize("case,messages", CONVERSATIONS, ids=lambda x: x if isinstance(x, str) else None)
+@pytest.mark.parametrize(
+    "case,messages", CONVERSATIONS, ids=lambda x: x if isinstance(x, str) else None
+)
 def test_message_indices_parity(native_pair, case, messages):
     """Per-token attribution must match — critical for training loss masks."""
     py_renderer, native_renderer, _tok = native_pair
@@ -348,12 +366,14 @@ def test_parse_response_no_tool_calls_parity(native_pair):
     )
     # Slice out just the assistant section by re-rendering up to the user.
     prompt_ids = py_renderer.render_ids(msgs, add_generation_prompt=True)
-    assistant_ids = completion_ids[len(prompt_ids):]
+    assistant_ids = completion_ids[len(prompt_ids) :]
 
     py_parsed = py_renderer.parse_response(assistant_ids)
     rs_parsed = native_renderer.parse_response(assistant_ids)
     assert py_parsed.content == rs_parsed.content
-    assert (py_parsed.reasoning_content or None) == (rs_parsed.reasoning_content or None)
+    assert (py_parsed.reasoning_content or None) == (
+        rs_parsed.reasoning_content or None
+    )
     assert len(py_parsed.tool_calls) == len(rs_parsed.tool_calls)
 
 
@@ -364,7 +384,7 @@ def test_bridge_to_next_turn_parity(native_pair):
         {"role": "assistant", "content": "Hi! How can I help?"},
     ]
     prev_prompt_ids = py_renderer.render_ids(initial[:-1], add_generation_prompt=True)
-    prev_completion_ids = py_renderer.render_ids(initial)[len(prev_prompt_ids):]
+    prev_completion_ids = py_renderer.render_ids(initial)[len(prev_prompt_ids) :]
     new_messages = [{"role": "user", "content": "Tell me about Rust."}]
 
     py_b = py_renderer.bridge_to_next_turn(

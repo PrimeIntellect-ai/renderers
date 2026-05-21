@@ -63,7 +63,9 @@ def test_default_renderer_fallback_keeps_raw_decoded_completion_prefix():
     full_ids = renderer.render_ids(messages + [assistant])
     completion_ids = full_ids[len(prompt_ids) :]
 
-    assert renderer.bridge_to_next_turn(prompt_ids, completion_ids, new_messages) is None
+    assert (
+        renderer.bridge_to_next_turn(prompt_ids, completion_ids, new_messages) is None
+    )
 
     raw_completion = tokenizer.decode(completion_ids, skip_special_tokens=False)
     fallback_ids = renderer.render_ids(

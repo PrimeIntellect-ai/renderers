@@ -61,9 +61,15 @@ def _messages_have_media(messages: list[Message]) -> bool:
         c = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
         if isinstance(c, list):
             for p in c:
-                if isinstance(p, dict) and p.get("type") in ("image", "image_url", "video", "video_url"):
+                if isinstance(p, dict) and p.get("type") in (
+                    "image",
+                    "image_url",
+                    "video",
+                    "video_url",
+                ):
                     return True
     return False
+
 
 # ---------------------------------------------------------------------------
 # Constants

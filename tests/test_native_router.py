@@ -39,9 +39,7 @@ def test_native_on_global(value):
 
 
 def test_native_csv_specific_families():
-    with mock.patch.dict(
-        os.environ, {"RENDERERS_NATIVE": "qwen3,glm5"}, clear=True
-    ):
+    with mock.patch.dict(os.environ, {"RENDERERS_NATIVE": "qwen3,glm5"}, clear=True):
         assert router.native_enabled("qwen3")
         assert router.native_enabled("glm5")
         assert not router.native_enabled("qwen35")
@@ -95,9 +93,9 @@ def test_resolve_tokenizer_path_uses_tiktoken_export(monkeypatch, tmp_path):
     monkeypatch.setattr(
         router,
         "_export_tiktoken_tokenizer_json",
-        lambda repo_id, _loader: str(exported)
-        if repo_id == "moonshotai/Kimi-K2-Instruct"
-        else None,
+        lambda repo_id, _loader: (
+            str(exported) if repo_id == "moonshotai/Kimi-K2-Instruct" else None
+        ),
     )
 
     assert router.resolve_tokenizer_path(tokenizer) == str(exported)

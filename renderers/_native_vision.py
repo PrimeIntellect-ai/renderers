@@ -23,6 +23,7 @@ from typing import Any
 
 try:
     import renderers_native  # type: ignore[import-not-found]
+
     _NATIVE = renderers_native
 except ImportError:
     _NATIVE = None

@@ -282,12 +282,119 @@ impl PyRenderedTokens {
     }
 
     #[getter]
+    #[allow(clippy::unused_self)]
+    fn sampled_mask<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        PyList::empty(py)
+    }
+
+    #[getter]
+    #[allow(clippy::unused_self)]
+    fn is_content<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        PyList::empty(py)
+    }
+
+    #[getter]
+    #[allow(clippy::unused_self)]
+    fn message_roles<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        PyList::empty(py)
+    }
+
+    #[getter]
     fn multi_modal_data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match &self.inner.multi_modal_data {
             Some(mm) => pythonize::pythonize(py, mm)
                 .map_err(|e| invalid(format!("mm serialisation failed: {e}"))),
             None => Ok(py.None().into_bound(py)),
         }
+    }
+
+    #[pyo3(signature = (n_messages = None, *, sampled_only = false))]
+    fn tokens_per_message<'py>(
+        &self,
+        py: Python<'py>,
+        n_messages: Option<usize>,
+        sampled_only: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let n_messages = n_messages.unwrap_or(0);
+        let out = if sampled_only {
+            vec![0usize; n_messages]
+        } else {
+            let mut counts = vec![0usize; n_messages];
+            for idx in &self.inner.message_indices {
+                let Ok(msg_idx) = usize::try_from(*idx) else {
+                    continue;
+                };
+                if msg_idx < n_messages {
+                    counts[msg_idx] += 1;
+                }
+            }
+            counts
+        };
+        PyList::new(py, out)
+    }
+
+    fn message_token_spans<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let n_messages = self
+            .inner
+            .message_indices
+            .iter()
+            .copied()
+            .filter(|idx| *idx >= 0)
+            .max()
+            .map_or(0usize, |idx| usize::try_from(idx).map_or(0, |idx| idx + 1));
+        let mut firsts = vec![None::<usize>; n_messages];
+        let mut lasts = vec![None::<usize>; n_messages];
+        for (pos, idx) in self.inner.message_indices.iter().copied().enumerate() {
+            let Ok(msg_idx) = usize::try_from(idx) else {
+                continue;
+            };
+            if msg_idx >= n_messages {
+                continue;
+            }
+            if firsts[msg_idx].is_none() {
+                firsts[msg_idx] = Some(pos);
+            }
+            lasts[msg_idx] = Some(pos);
+        }
+
+        let out = PyList::empty(py);
+        for (first, last) in firsts.into_iter().zip(lasts) {
+            match (first, last) {
+                (Some(start), Some(end)) => {
+                    out.append(PyTuple::new(py, [start, end + 1])?)?;
+                }
+                _ => out.append(py.None())?,
+            }
+        }
+        Ok(out)
+    }
+
+    #[allow(clippy::unused_self)]
+    fn role_token_spans<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
+        PyDict::new(py)
+    }
+
+    #[pyo3(signature = (*, sampled_only = false))]
+    #[allow(clippy::unused_self)]
+    fn tokens_by_role<'py>(
+        &self,
+        py: Python<'py>,
+        #[allow(unused_variables)] sampled_only: bool,
+    ) -> Bound<'py, PyDict> {
+        PyDict::new(py)
+    }
+
+    #[allow(clippy::unused_self)]
+    fn content_token_spans_by_role<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
+        PyDict::new(py)
+    }
+
+    fn content_mask_for_roles<'py>(
+        &self,
+        py: Python<'py>,
+        #[allow(unused_variables)] roles: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        PyList::new(py, vec![false; self.inner.token_ids.len()])
     }
 
     fn __repr__(&self) -> String {
@@ -1327,10 +1434,12 @@ impl PyRenderer {
         Ok(ids.into_pyarray(py))
     }
 
+    #[pyo3(signature = (token_ids, *, tools = None))]
     fn parse_response(
         &self,
         py: Python<'_>,
         token_ids: &Bound<'_, PyAny>,
+        #[allow(unused_variables)] tools: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyParsedResponse> {
         let ids = parse_u32_list(token_ids)?;
         let renderer = self.inner.clone();
@@ -1343,9 +1452,11 @@ impl PyRenderer {
     /// The input buffer is borrowed directly, avoiding the Python-list scan and
     /// temporary Rust `Vec<u32>` used by `parse_response`.
     #[allow(clippy::needless_pass_by_value)]
+    #[pyo3(signature = (token_ids, *, tools = None))]
     fn parse_response_np(
         &self,
         token_ids: PyReadonlyArray1<'_, u32>,
+        #[allow(unused_variables)] tools: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyParsedResponse> {
         let ids = numpy_u32_slice(&token_ids)?;
         let parsed = self.inner.parse_response(ids);

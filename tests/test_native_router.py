@@ -8,6 +8,7 @@ class surface.
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 from types import SimpleNamespace
@@ -175,3 +176,34 @@ def test_native_status_constants(native):
     assert s.UNCLOSED_BLOCK == "unclosed_block"
     assert s.MISSING_NAME == "missing_name"
     assert s.MALFORMED_STRUCTURE == "malformed_structure"
+
+
+def test_native_base_api_surface(native):
+    renderer_methods = [
+        "render",
+        "render_ids",
+        "parse_response",
+        "get_stop_token_ids",
+        "bridge_to_next_turn",
+    ]
+    rendered_tokens_attrs = [
+        "token_ids",
+        "message_indices",
+        "sampled_mask",
+        "is_content",
+        "message_roles",
+        "multi_modal_data",
+        "tokens_per_message",
+        "message_token_spans",
+        "role_token_spans",
+        "tokens_by_role",
+        "content_token_spans_by_role",
+        "content_mask_for_roles",
+    ]
+
+    for name in renderer_methods:
+        assert hasattr(native.Renderer, name), f"missing Renderer.{name}"
+    for name in rendered_tokens_attrs:
+        assert hasattr(native.RenderedTokens, name), f"missing RenderedTokens.{name}"
+
+    assert "tools" in inspect.signature(native.Renderer.parse_response).parameters

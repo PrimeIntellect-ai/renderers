@@ -34,6 +34,7 @@ RENDERER_MODELS = [
     ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
+    ("Zyphra/ZAYA1-8B", "auto"),
     ("Qwen/Qwen2.5-0.5B-Instruct", "default"),
 ]
 

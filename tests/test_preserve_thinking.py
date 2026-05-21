@@ -43,6 +43,7 @@ NO_OP_MODELS = {
     "Qwen/Qwen3-VL-8B-Instruct",
     "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "poolside/Laguna-XS.2",
+    "Zyphra/ZAYA1-8B",
 }
 
 

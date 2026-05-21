@@ -127,6 +127,81 @@ def _decode(tokenizer, ids: list[int]) -> str:
     return tokenizer.decode(ids, skip_special_tokens=False)
 
 
+# ── ZAYA1: <zyphra_tool_call> <function=name> ... ────────────────
+
+
+def parse_zaya1(
+    tokenizer,
+    token_ids: list[int],
+    *,
+    stop_ids: set[int],
+    tools: list[ToolSpec] | None = None,
+) -> ParsedResponse:
+    """Parse ZAYA1 completion tokens.
+
+    ZAYA1 uses plain-text XML-ish tool-call tags rather than dedicated
+    special-token boundaries, so this parser decodes once and then parses the
+    template's native tags. Argument coercion still uses the shared schema
+    helpers used by the token-level XML parsers.
+    """
+    import re
+
+    ids = _strip_stop_tokens(token_ids, stop_ids)
+    text = _decode(tokenizer, ids)
+
+    reasoning = None
+    if "</think>" in text:
+        before, after = text.split("</think>", 1)
+        if "<think>" in before:
+            reasoning = before.split("<think>", 1)[-1].strip("\n")
+        else:
+            reasoning = before.strip("\n")
+        text = after.lstrip("\n")
+
+    param_index = _build_param_type_index(tools)
+    tool_calls: list[ParsedToolCall] = []
+
+    pattern = re.compile(
+        r"<zyphra_tool_call>\s*<function=([^>\n]+)>\s*(.*?)\s*</function>\s*</zyphra_tool_call>",
+        re.DOTALL,
+    )
+
+    def remove_call(match: re.Match[str]) -> str:
+        name = match.group(1).strip()
+        block = match.group(2)
+        params = param_index.get(name, {})
+        arguments: dict[str, Any] = {}
+        any_json_fallback = False
+        for pm in re.finditer(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>", block, re.DOTALL):
+            arg_name = pm.group(1).strip()
+            raw_value = pm.group(2).strip()
+            value, used_fallback = _coerce_arg_value(raw_value, params.get(arg_name))
+            arguments[arg_name] = value
+            any_json_fallback = any_json_fallback or used_fallback
+        tool_calls.append(
+            ParsedToolCall(
+                raw=match.group(0),
+                name=name or None,
+                arguments=arguments,
+                status=(
+                    ToolCallParseStatus.INVALID_JSON
+                    if any_json_fallback
+                    else ToolCallParseStatus.OK
+                    if name
+                    else ToolCallParseStatus.MISSING_NAME
+                ),
+            )
+        )
+        return ""
+
+    content = pattern.sub(remove_call, text).strip()
+    return ParsedResponse(
+        content=content,
+        reasoning_content=reasoning or None,
+        tool_calls=tool_calls,
+    )
+
+
 # ── Qwen3: <tool_call> JSON </tool_call> ────────────────────────────
 
 

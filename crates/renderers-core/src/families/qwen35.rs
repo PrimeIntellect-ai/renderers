@@ -19,11 +19,12 @@
 use std::borrow::Cow;
 
 use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
-use crate::emit::RenderBuf;
+use crate::emit::{RenderBuf, TokenPlanBuf, TokenSink};
 use crate::json::{to_string_python, tool_spec_template_value};
 use crate::parsing::qwen35::parse_qwen35;
 use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
+use crate::tool_cache::ToolTextCache;
 use crate::traits::{MultimodalRenderer, Renderer};
 use crate::types::{
     Content, ContentPart, MediaBundle, MediaItem, Message, Modality, MultiModalData,
@@ -117,6 +118,14 @@ pub struct Qwen35Renderer {
     mm_token_type_ids: Vec<(u32, u8)>,
 
     stop_tokens: Vec<u32>,
+    newline_tokens: Vec<u32>,
+    double_newline_tokens: Vec<u32>,
+    user_tokens: Vec<u32>,
+    user_newline_tokens: Vec<u32>,
+    system_newline_tokens: Vec<u32>,
+    assistant_newline_tokens: Vec<u32>,
+    function_close_newline_tokens: Vec<u32>,
+    tool_text_cache: ToolTextCache,
 }
 
 impl Qwen35Renderer {
@@ -154,6 +163,19 @@ impl Qwen35Renderer {
         if let Some(p) = video_pad {
             mm_token_type_ids.push((p, 2));
         }
+        let newline_tokens = tokenizer.encode_no_special("\n")?.as_slice().to_vec();
+        let double_newline_tokens = tokenizer.encode_no_special("\n\n")?.as_slice().to_vec();
+        let user_tokens = tokenizer.encode_no_special("user")?.as_slice().to_vec();
+        let user_newline_tokens = tokenizer.encode_no_special("user\n")?.as_slice().to_vec();
+        let system_newline_tokens = tokenizer.encode_no_special("system\n")?.as_slice().to_vec();
+        let assistant_newline_tokens = tokenizer
+            .encode_no_special("assistant\n")?
+            .as_slice()
+            .to_vec();
+        let function_close_newline_tokens = tokenizer
+            .encode_no_special("</function>\n")?
+            .as_slice()
+            .to_vec();
 
         Ok(Self {
             tokenizer,
@@ -176,6 +198,14 @@ impl Qwen35Renderer {
             video_pad,
             mm_token_type_ids,
             stop_tokens: vec![im_end, endoftext],
+            newline_tokens,
+            double_newline_tokens,
+            user_tokens,
+            user_newline_tokens,
+            system_newline_tokens,
+            assistant_newline_tokens,
+            function_close_newline_tokens,
+            tool_text_cache: ToolTextCache::default(),
         })
     }
 
@@ -225,46 +255,57 @@ impl Qwen35Renderer {
 
     fn emit_system_with_tools(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         messages: &[Message],
         tools: &[ToolSpec],
         first_is_system: bool,
     ) -> Result<(), RenderError> {
         let sys_idx: i32 = if first_is_system { 0 } else { SCAFFOLD_IDX };
         buf.special(self.im_start, sys_idx);
-        buf.text("system\n", sys_idx)?;
+        buf.ids(&self.system_newline_tokens, sys_idx);
 
-        let mut tool_text =
-            String::with_capacity(TOOLS_HEADER.len() + TOOLS_INSTRUCTIONS.len() + 256);
-        tool_text.push_str(TOOLS_HEADER);
-        for tool in tools {
-            tool_text.push('\n');
-            let spec = tool_spec_template_value(tool);
-            tool_text.push_str(&to_string_python(&spec).map_err(|e| {
-                RenderError::Invalid(format!("tool spec serialisation failed: {e}"))
-            })?);
-        }
-        tool_text.push_str(TOOLS_FOOTER);
-        tool_text.push_str(TOOLS_INSTRUCTIONS);
-
-        if first_is_system {
+        let system_content = if first_is_system {
             let sys_content = Self::render_content_text(&messages[0].content);
             let sys_content = sys_content.trim();
-            if !sys_content.is_empty() {
-                tool_text.push_str("\n\n");
-                tool_text.push_str(sys_content);
-            }
-        }
+            sys_content.to_string()
+        } else {
+            String::new()
+        };
+        let tool_tokens = self.tool_text_cache.get_or_insert_with(
+            &self.tokenizer,
+            tools,
+            u64::from(first_is_system),
+            &system_content,
+            || {
+                let mut tool_text =
+                    String::with_capacity(TOOLS_HEADER.len() + TOOLS_INSTRUCTIONS.len() + 256);
+                tool_text.push_str(TOOLS_HEADER);
+                for tool in tools {
+                    tool_text.push('\n');
+                    let spec = tool_spec_template_value(tool);
+                    tool_text.push_str(&to_string_python(&spec).map_err(|e| {
+                        RenderError::Invalid(format!("tool spec serialisation failed: {e}"))
+                    })?);
+                }
+                tool_text.push_str(TOOLS_FOOTER);
+                tool_text.push_str(TOOLS_INSTRUCTIONS);
 
-        buf.text(&tool_text, sys_idx)?;
+                if !system_content.is_empty() {
+                    tool_text.push_str("\n\n");
+                    tool_text.push_str(&system_content);
+                }
+                Ok(tool_text)
+            },
+        )?;
+        buf.ids(tool_tokens.as_slice(), sys_idx);
         buf.special(self.im_end, sys_idx);
-        buf.text("\n", sys_idx)?;
+        buf.ids(&self.newline_tokens, sys_idx);
         Ok(())
     }
 
     fn emit_system_no_tools(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         messages: &[Message],
     ) -> Result<(), RenderError> {
         let content = Self::render_content_text(&messages[0].content);
@@ -275,13 +316,13 @@ impl Qwen35Renderer {
         s.push_str(content);
         buf.text(&s, 0)?;
         buf.special(self.im_end, 0);
-        buf.text("\n", 0)?;
+        buf.ids(&self.newline_tokens, 0);
         Ok(())
     }
 
     fn emit_user(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         content: &str,
         idx: i32,
     ) -> Result<(), RenderError> {
@@ -291,13 +332,13 @@ impl Qwen35Renderer {
         s.push_str(content);
         buf.text(&s, idx)?;
         buf.special(self.im_end, idx);
-        buf.text("\n", idx)?;
+        buf.ids(&self.newline_tokens, idx);
         Ok(())
     }
 
     fn emit_tool(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         messages: &[Message],
         msg_idx: usize,
         content: &str,
@@ -308,9 +349,9 @@ impl Qwen35Renderer {
 
         if !prev_is_tool {
             buf.special(self.im_start, idx);
-            buf.text("user", idx)?;
+            buf.ids(&self.user_tokens, idx);
         }
-        buf.text("\n", idx)?;
+        buf.ids(&self.newline_tokens, idx);
         buf.special(self.tool_response, idx);
         let mut wrapped = String::with_capacity(content.len() + 2);
         wrapped.push('\n');
@@ -320,7 +361,7 @@ impl Qwen35Renderer {
         buf.special(self.tool_response_end, idx);
         if !next_is_tool {
             buf.special(self.im_end, idx);
-            buf.text("\n", idx)?;
+            buf.ids(&self.newline_tokens, idx);
         }
         Ok(())
     }
@@ -358,7 +399,7 @@ impl Qwen35Renderer {
 
     fn emit_assistant(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         msg: &Message,
         msg_idx: usize,
         last_query_index: i32,
@@ -396,7 +437,7 @@ impl Qwen35Renderer {
             || (preserve_thinking && !reasoning_content.is_empty());
 
         if emit_thinking {
-            buf.text("assistant\n", idx)?;
+            buf.ids(&self.assistant_newline_tokens, idx);
             buf.special(self.think, idx);
             let mut s = String::with_capacity(reasoning_content.len() + 2);
             s.push('\n');
@@ -420,10 +461,10 @@ impl Qwen35Renderer {
             // Separator before this tool call
             if tc_idx == 0 {
                 if !content.is_empty() {
-                    buf.text("\n\n", idx)?;
+                    buf.ids(&self.double_newline_tokens, idx);
                 }
             } else {
-                buf.text("\n", idx)?;
+                buf.ids(&self.newline_tokens, idx);
             }
 
             buf.special(self.tool_call, idx);
@@ -452,28 +493,27 @@ impl Qwen35Renderer {
                 }
             }
 
-            buf.text("</function>\n", idx)?;
+            buf.ids(&self.function_close_newline_tokens, idx);
             buf.special(self.tool_call_end, idx);
         }
 
         buf.special(self.im_end, idx);
-        buf.text("\n", idx)?;
+        buf.ids(&self.newline_tokens, idx);
         Ok(())
     }
 
-    fn emit_generation_prompt(&self, buf: &mut RenderBuf<'_>) -> Result<(), RenderError> {
+    fn emit_generation_prompt(&self, buf: &mut impl TokenSink) {
         buf.scaffold_special(self.im_start);
-        buf.scaffold_text("assistant\n")?;
+        buf.ids(&self.assistant_newline_tokens, SCAFFOLD_IDX);
         if self.enable_thinking {
             buf.scaffold_special(self.think);
-            buf.scaffold_text("\n")?;
+            buf.ids(&self.newline_tokens, SCAFFOLD_IDX);
         } else {
             buf.scaffold_special(self.think);
-            buf.scaffold_text("\n\n")?;
+            buf.ids(&self.double_newline_tokens, SCAFFOLD_IDX);
             buf.scaffold_special(self.think_end);
-            buf.scaffold_text("\n\n")?;
+            buf.ids(&self.double_newline_tokens, SCAFFOLD_IDX);
         }
-        Ok(())
     }
 
     fn estimate_capacity(messages: &[Message], tools: Option<&[ToolSpec]>) -> usize {
@@ -481,29 +521,31 @@ impl Qwen35Renderer {
         let tools_bonus = tools.map_or(0, |t| 256 * t.len().max(1) + 512);
         base + tools_bonus
     }
-}
 
-impl Renderer for Qwen35Renderer {
-    fn render(
+    fn should_batch_encode_text(messages: &[Message], tools: Option<&[ToolSpec]>) -> bool {
+        messages.len() >= 8 && tools.is_none_or(<[ToolSpec]>::is_empty)
+    }
+
+    fn render_text_into_buf(
         &self,
+        buf: &mut impl TokenSink,
         messages: &[Message],
         tools: Option<&[ToolSpec]>,
         add_generation_prompt: bool,
-    ) -> Result<RenderedTokens, RenderError> {
+    ) -> Result<(), RenderError> {
         if messages.is_empty() {
             return Err(RenderError::EmptyMessages);
         }
-        let mut buf = RenderBuf::new(&self.tokenizer, Self::estimate_capacity(messages, tools));
 
         let first_is_system = messages[0].role == "system";
 
         match tools {
             Some(t) if !t.is_empty() => {
-                self.emit_system_with_tools(&mut buf, messages, t, first_is_system)?;
+                self.emit_system_with_tools(buf, messages, t, first_is_system)?;
             }
             _ => {
                 if first_is_system {
-                    self.emit_system_no_tools(&mut buf, messages)?;
+                    self.emit_system_no_tools(buf, messages)?;
                 }
             }
         }
@@ -520,9 +562,8 @@ impl Renderer for Qwen35Renderer {
                             "system message must be at the beginning".into(),
                         ));
                     }
-                    // Already handled above
                 }
-                "user" => self.emit_user(&mut buf, content, i as i32)?,
+                "user" => self.emit_user(buf, content, i as i32)?,
                 "assistant" => {
                     let preserve_thinking = should_preserve_past_thinking(
                         messages,
@@ -530,9 +571,9 @@ impl Renderer for Qwen35Renderer {
                         self.preserve_all_thinking,
                         self.preserve_thinking_between_tool_calls,
                     );
-                    self.emit_assistant(&mut buf, msg, i, last_qi, preserve_thinking)?;
+                    self.emit_assistant(buf, msg, i, last_qi, preserve_thinking)?;
                 }
-                "tool" => self.emit_tool(&mut buf, messages, i, content)?,
+                "tool" => self.emit_tool(buf, messages, i, content)?,
                 _ => {
                     return Err(RenderError::Invalid(format!(
                         "unexpected message role: {}",
@@ -543,10 +584,41 @@ impl Renderer for Qwen35Renderer {
         }
 
         if add_generation_prompt {
-            self.emit_generation_prompt(&mut buf)?;
+            self.emit_generation_prompt(buf);
         }
 
+        Ok(())
+    }
+}
+
+impl Renderer for Qwen35Renderer {
+    fn render(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        add_generation_prompt: bool,
+    ) -> Result<RenderedTokens, RenderError> {
+        let mut buf = RenderBuf::new(&self.tokenizer, Self::estimate_capacity(messages, tools));
+        self.render_text_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
         Ok(buf.into_rendered())
+    }
+
+    fn render_ids(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        add_generation_prompt: bool,
+    ) -> Result<Vec<u32>, RenderError> {
+        let cap = Self::estimate_capacity(messages, tools);
+        if Self::should_batch_encode_text(messages, tools) {
+            let mut buf = TokenPlanBuf::new(&self.tokenizer, cap);
+            self.render_text_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
+            buf.into_token_ids()
+        } else {
+            let mut buf = RenderBuf::new_token_ids_only(&self.tokenizer, cap);
+            self.render_text_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
+            Ok(buf.into_token_ids())
+        }
     }
 
     fn parse_response(&self, token_ids: &[u32]) -> ParsedResponse {
@@ -588,9 +660,12 @@ impl Renderer for Qwen35Renderer {
             return Ok(None);
         };
 
-        let mut buf = RenderBuf::new(&self.tokenizer, Self::estimate_capacity(new_messages, None));
+        let mut buf = RenderBuf::new_token_ids_only(
+            &self.tokenizer,
+            Self::estimate_capacity(new_messages, None),
+        );
         // Trailing newline that the prior render emitted but vLLM stopped on
-        buf.scaffold_text("\n")?;
+        buf.ids(&self.newline_tokens, SCAFFOLD_IDX);
 
         for (i, msg) in new_messages.iter().enumerate() {
             let content = Self::render_content_text(&msg.content);
@@ -605,14 +680,14 @@ impl Renderer for Qwen35Renderer {
                     s.push_str(content);
                     buf.text(&s, idx)?;
                     buf.special(self.im_end, idx);
-                    buf.text("\n", idx)?;
+                    buf.ids(&self.newline_tokens, idx);
                 }
                 "tool" => self.emit_tool(&mut buf, new_messages, i, content)?,
                 _ => return Ok(None),
             }
         }
 
-        self.emit_generation_prompt(&mut buf)?;
+        self.emit_generation_prompt(&mut buf);
 
         let ext = buf.into_token_ids();
         let mut out = Vec::with_capacity(previous_ids.len() + ext.len());
@@ -663,7 +738,7 @@ impl Qwen35Renderer {
     ) -> Result<(), RenderError> {
         let idx = msg_idx as i32;
         buf.special(self.im_start, idx);
-        buf.text("user\n", idx)?;
+        buf.ids(&self.user_newline_tokens, idx);
 
         // Gather this message's media items in render order.
         let mut media_iter = media
@@ -724,7 +799,7 @@ impl Qwen35Renderer {
         }
 
         buf.special(self.im_end, idx);
-        buf.text("\n", idx)?;
+        buf.ids(&self.newline_tokens, idx);
         Ok(())
     }
 
@@ -861,7 +936,7 @@ impl MultimodalRenderer for Qwen35Renderer {
         }
 
         if add_generation_prompt {
-            self.emit_generation_prompt(&mut buf)?;
+            self.emit_generation_prompt(&mut buf);
         }
 
         let mut out = buf.into_rendered();

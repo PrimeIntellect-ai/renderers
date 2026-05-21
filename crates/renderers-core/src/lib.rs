@@ -34,6 +34,7 @@ pub mod processing;
 pub mod registry;
 pub mod thinking;
 pub mod tokenizer;
+pub(crate) mod tool_cache;
 pub mod traits;
 pub mod types;
 

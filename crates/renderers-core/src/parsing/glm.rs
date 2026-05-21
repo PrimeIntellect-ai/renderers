@@ -42,7 +42,6 @@ pub fn parse_glm(
     // Thinking — find </think> by token id.
     let mut reasoning: Option<String> = None;
     let mut parse_offset = 0usize;
-    let working_ids: Vec<u32>;
     let ids: &[u32] = if let Some(think_end) = find(stripped, think_end_id) {
         let reasoning_ids: Vec<u32> = stripped[..think_end]
             .iter()
@@ -63,8 +62,7 @@ pub fn parse_glm(
                 tool_calls: Vec::new(),
             };
         }
-        working_ids = stripped.to_vec();
-        &working_ids
+        stripped
     };
 
     let (content_text, tool_calls) = match find(ids, tool_call_id) {

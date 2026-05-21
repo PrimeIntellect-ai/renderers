@@ -58,7 +58,6 @@ pub fn parse_qwen35(
     // ── Thinking: find </think> by token ID ─────────────────────────
     let mut reasoning: Option<String> = None;
     let mut parse_offset: usize = 0;
-    let working_ids: Vec<u32>;
     let ids_after_think: &[u32] = if let Some(think_end) = find(ids, think_end_id) {
         // Filter out think_id tokens from the reasoning span so the
         // decoded text doesn't include the opening marker.
@@ -82,8 +81,7 @@ pub fn parse_qwen35(
                 tool_calls: Vec::new(),
             };
         }
-        working_ids = ids.to_vec();
-        &working_ids
+        ids
     };
 
     // ── Tool calls (token-bounded, regex-on-decoded-span) ───────────

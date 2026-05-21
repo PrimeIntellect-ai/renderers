@@ -30,11 +30,12 @@
 use serde_json::Value as JsonValue;
 
 use crate::bridge::reject_assistant_in_extension;
-use crate::emit::RenderBuf;
+use crate::emit::{RenderBuf, TokenPlanBuf, TokenSink};
 use crate::json::{to_string_python, tool_spec_inner_value, tool_spec_template_value};
 use crate::parsing::glm::parse_glm;
 use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
+use crate::tool_cache::ToolTextCache;
 use crate::traits::Renderer;
 use crate::types::{
     Message, ParsedResponse, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments, ToolSpec,
@@ -125,6 +126,8 @@ pub struct GlmRenderer {
     tool_response: Option<u32>,
     tool_response_end: Option<u32>,
 
+    newline_tokens: Vec<u32>,
+    tool_text_cache: ToolTextCache,
     stop_tokens: Vec<u32>,
 }
 
@@ -167,6 +170,7 @@ impl GlmRenderer {
                 Some(tokenizer.token_to_id_strict("</tool_response>")?),
             )
         };
+        let newline_tokens = tokenizer.encode_no_special("\n")?.as_slice().to_vec();
 
         Ok(Self {
             tokenizer,
@@ -191,6 +195,8 @@ impl GlmRenderer {
             arg_value_end,
             tool_response,
             tool_response_end,
+            newline_tokens,
+            tool_text_cache: ToolTextCache::default(),
             stop_tokens: vec![endoftext, user, observation],
         })
     }
@@ -216,8 +222,11 @@ impl GlmRenderer {
         -1
     }
 
-    fn format_tool_spec(&self, tool: &ToolSpec) -> Result<String, RenderError> {
-        let spec = if self.variant == Variant::Glm51 {
+    fn format_tool_spec_for_variant(
+        variant: Variant,
+        tool: &ToolSpec,
+    ) -> Result<String, RenderError> {
+        let spec = if variant == Variant::Glm51 {
             tool_spec_inner_value(tool)
         } else {
             tool_spec_template_value(tool)
@@ -232,23 +241,26 @@ impl GlmRenderer {
             _ => serde_json::to_string(arg_value).unwrap_or_default(),
         }
     }
-}
 
-impl Renderer for GlmRenderer {
-    fn render(
+    fn estimate_capacity(messages: &[Message], tools: Option<&[ToolSpec]>) -> usize {
+        messages.len().max(1) * 256 + tools.map_or(0, |t| t.len() * 256 + 256)
+    }
+
+    fn should_batch_encode_text(messages: &[Message], tools: Option<&[ToolSpec]>) -> bool {
+        messages.len() >= 8 && tools.is_none_or(<[ToolSpec]>::is_empty)
+    }
+
+    fn render_into_buf(
         &self,
+        buf: &mut impl TokenSink,
         messages: &[Message],
         tools: Option<&[ToolSpec]>,
         add_generation_prompt: bool,
-    ) -> Result<RenderedTokens, RenderError> {
+    ) -> Result<(), RenderError> {
         if messages.is_empty() {
             return Err(RenderError::EmptyMessages);
         }
         let nl = self.nl_after_role();
-        let mut buf = RenderBuf::new(
-            &self.tokenizer,
-            messages.len().max(1) * 256 + tools.map_or(0, |t| t.len() * 256 + 256),
-        );
 
         // Prefix
         buf.scaffold_special(self.gmask);
@@ -258,18 +270,32 @@ impl Renderer for GlmRenderer {
         if let Some(t) = tools {
             if !t.is_empty() {
                 buf.scaffold_special(self.system);
-                let mut s = String::with_capacity(512);
-                s.push_str(TOOLS_HEADER_GLM5);
-                for tool in t {
-                    s.push_str(&self.format_tool_spec(tool)?);
-                    s.push('\n');
-                }
-                s.push_str(if self.variant == Variant::Glm45 {
-                    TOOLS_FOOTER_GLM45
-                } else {
-                    TOOLS_FOOTER_GLM5
-                });
-                buf.scaffold_text(&s)?;
+                let variant = self.variant;
+                let tool_tokens = self.tool_text_cache.get_or_insert_with(
+                    &self.tokenizer,
+                    t,
+                    match variant {
+                        Variant::Glm45 => 45,
+                        Variant::Glm5 => 50,
+                        Variant::Glm51 => 51,
+                    },
+                    "",
+                    || {
+                        let mut s = String::with_capacity(512);
+                        s.push_str(TOOLS_HEADER_GLM5);
+                        for tool in t {
+                            s.push_str(&Self::format_tool_spec_for_variant(variant, tool)?);
+                            s.push('\n');
+                        }
+                        s.push_str(if variant == Variant::Glm45 {
+                            TOOLS_FOOTER_GLM45
+                        } else {
+                            TOOLS_FOOTER_GLM5
+                        });
+                        Ok(s)
+                    },
+                )?;
+                buf.ids(tool_tokens.as_slice(), SCAFFOLD_IDX);
             }
         }
 
@@ -306,9 +332,9 @@ impl Renderer for GlmRenderer {
                         self.preserve_all_thinking,
                         self.preserve_thinking_between_tool_calls,
                     );
-                    self.emit_assistant(&mut buf, msg, idx, last_ui, preserve_thinking)?;
+                    self.emit_assistant(buf, msg, idx, last_ui, preserve_thinking)?;
                 }
-                "tool" => self.emit_tool(&mut buf, messages, i, content, idx)?,
+                "tool" => self.emit_tool(buf, messages, i, content, idx)?,
                 _ => {} // mirror Python: silent skip
             }
         }
@@ -317,7 +343,7 @@ impl Renderer for GlmRenderer {
             buf.scaffold_special(self.assistant);
             if self.variant == Variant::Glm45 {
                 if !self.enable_thinking {
-                    buf.scaffold_text("\n")?;
+                    buf.ids(&self.newline_tokens, SCAFFOLD_IDX);
                     buf.scaffold_special(self.think);
                     buf.scaffold_special(self.think_end);
                 }
@@ -329,7 +355,38 @@ impl Renderer for GlmRenderer {
             }
         }
 
+        Ok(())
+    }
+}
+
+impl Renderer for GlmRenderer {
+    fn render(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        add_generation_prompt: bool,
+    ) -> Result<RenderedTokens, RenderError> {
+        let mut buf = RenderBuf::new(&self.tokenizer, Self::estimate_capacity(messages, tools));
+        self.render_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
         Ok(buf.into_rendered())
+    }
+
+    fn render_ids(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        add_generation_prompt: bool,
+    ) -> Result<Vec<u32>, RenderError> {
+        let cap = Self::estimate_capacity(messages, tools);
+        if Self::should_batch_encode_text(messages, tools) {
+            let mut buf = TokenPlanBuf::new(&self.tokenizer, cap);
+            self.render_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
+            buf.into_token_ids()
+        } else {
+            let mut buf = RenderBuf::new_token_ids_only(&self.tokenizer, cap);
+            self.render_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
+            Ok(buf.into_token_ids())
+        }
     }
 
     fn parse_response(&self, token_ids: &[u32]) -> ParsedResponse {
@@ -385,7 +442,8 @@ impl Renderer for GlmRenderer {
         let last_prev = *combined.last().expect("non-empty");
 
         let nl = self.nl_after_role();
-        let mut buf = RenderBuf::new(&self.tokenizer, new_messages.len().max(1) * 256);
+        let mut buf =
+            RenderBuf::new_token_ids_only(&self.tokenizer, new_messages.len().max(1) * 256);
 
         for (i, msg) in new_messages.iter().enumerate() {
             let idx = i as i32;
@@ -430,7 +488,7 @@ impl Renderer for GlmRenderer {
         buf.scaffold_special(self.assistant);
         if self.variant == Variant::Glm45 {
             if !self.enable_thinking {
-                buf.scaffold_text("\n")?;
+                buf.ids(&self.newline_tokens, SCAFFOLD_IDX);
                 buf.scaffold_special(self.think);
                 buf.scaffold_special(self.think_end);
             }
@@ -455,7 +513,7 @@ impl Renderer for GlmRenderer {
 impl GlmRenderer {
     fn emit_assistant(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         msg: &Message,
         msg_idx: i32,
         last_user_index: i32,
@@ -514,7 +572,7 @@ impl GlmRenderer {
     #[allow(clippy::too_many_arguments)]
     fn emit_assistant_glm5_family(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         msg: &Message,
         msg_idx: i32,
         reasoning_content: &str,
@@ -568,7 +626,7 @@ impl GlmRenderer {
     #[allow(clippy::too_many_arguments)]
     fn emit_assistant_glm45(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         msg: &Message,
         msg_idx: i32,
         reasoning_content: &str,
@@ -577,12 +635,12 @@ impl GlmRenderer {
         preserve_thinking: bool,
     ) -> Result<(), RenderError> {
         if (msg_idx > last_user_index || preserve_thinking) && !reasoning_content.is_empty() {
-            buf.text("\n", msg_idx)?;
+            buf.ids(&self.newline_tokens, msg_idx);
             buf.special(self.think, msg_idx);
             buf.text(reasoning_content.trim(), msg_idx)?;
             buf.special(self.think_end, msg_idx);
         } else {
-            buf.text("\n", msg_idx)?;
+            buf.ids(&self.newline_tokens, msg_idx);
             buf.special(self.think, msg_idx);
             buf.special(self.think_end, msg_idx);
         }
@@ -605,7 +663,7 @@ impl GlmRenderer {
         for tc in tool_calls {
             let name = tc.function.name.as_str();
             if trimmed.is_empty() {
-                buf.text("\n", msg_idx)?;
+                buf.ids(&self.newline_tokens, msg_idx);
             }
             buf.special(self.tool_call, msg_idx);
             let mut head = String::with_capacity(name.len() + 1);
@@ -624,11 +682,11 @@ impl GlmRenderer {
                     buf.special(self.arg_key, msg_idx);
                     buf.text(k, msg_idx)?;
                     buf.special(self.arg_key_end, msg_idx);
-                    buf.text("\n", msg_idx)?;
+                    buf.ids(&self.newline_tokens, msg_idx);
                     buf.special(self.arg_value, msg_idx);
                     buf.text(&Self::render_arg_value(v), msg_idx)?;
                     buf.special(self.arg_value_end, msg_idx);
-                    buf.text("\n", msg_idx)?;
+                    buf.ids(&self.newline_tokens, msg_idx);
                 }
             }
             buf.special(self.tool_call_end, msg_idx);
@@ -638,7 +696,7 @@ impl GlmRenderer {
 
     fn emit_tool(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         messages: &[Message],
         msg_idx: usize,
         content: &str,
@@ -653,7 +711,7 @@ impl GlmRenderer {
 
     fn emit_tool_response(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         content: &str,
         idx: i32,
     ) -> Result<(), RenderError> {

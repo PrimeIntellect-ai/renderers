@@ -19,6 +19,7 @@
 //!   ("You are Kimi, an AI assistant created by Moonshot AI.") but the
 //!   Python class doesn't auto-inject it — neither does this port.
 
+use crate::SCAFFOLD_IDX;
 use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
 use crate::emit::RenderBuf;
 use crate::parsing::kimi_k2::parse_kimi_k2;
@@ -91,6 +92,10 @@ pub struct KimiK25Renderer {
     media_end: Option<u32>,
     mm_token_type_ids: Vec<(u32, u8)>,
 
+    newline_tokens: Vec<u32>,
+    assistant_tokens: Vec<u32>,
+    think_tokens: Vec<u32>,
+    empty_think_tokens: Vec<u32>,
     stop_tokens: Vec<u32>,
 }
 
@@ -125,6 +130,16 @@ impl KimiK25Renderer {
         if let Some(p) = media_pad {
             mm_token_type_ids.push((p, 1)); // image marker; K2.5 handles video via the same pad
         }
+        let newline_tokens = tokenizer.encode_no_special("\n")?.as_slice().to_vec();
+        let assistant_tokens = tokenizer
+            .encode_no_special("assistant")?
+            .as_slice()
+            .to_vec();
+        let think_tokens = tokenizer.encode_no_special("<think>")?.as_slice().to_vec();
+        let empty_think_tokens = tokenizer
+            .encode_no_special("<think></think>")?
+            .as_slice()
+            .to_vec();
 
         Ok(Self {
             tokenizer,
@@ -146,6 +161,10 @@ impl KimiK25Renderer {
             media_pad,
             media_end,
             mm_token_type_ids,
+            newline_tokens,
+            assistant_tokens,
+            think_tokens,
+            empty_think_tokens,
             stop_tokens: vec![im_end],
         })
     }
@@ -211,7 +230,7 @@ impl KimiK25Renderer {
             s.push_str("</think>");
             buf.text(&s, msg_idx)?;
         } else {
-            buf.text("<think></think>", msg_idx)?;
+            buf.ids(&self.empty_think_tokens, msg_idx);
         }
         buf.text(&text_content, msg_idx)?;
 
@@ -314,12 +333,12 @@ impl Renderer for KimiK25Renderer {
         // Generation prompt
         if add_generation_prompt {
             buf.scaffold_special(self.im_assistant);
-            buf.scaffold_text("assistant")?;
+            buf.ids(&self.assistant_tokens, SCAFFOLD_IDX);
             buf.scaffold_special(self.im_middle);
             if self.enable_thinking {
-                buf.scaffold_text("<think>")?;
+                buf.ids(&self.think_tokens, SCAFFOLD_IDX);
             } else {
-                buf.scaffold_text("<think></think>")?;
+                buf.ids(&self.empty_think_tokens, SCAFFOLD_IDX);
             }
         }
 
@@ -368,7 +387,8 @@ impl Renderer for KimiK25Renderer {
             return Ok(None);
         };
 
-        let mut buf = RenderBuf::new(&self.tokenizer, new_messages.len().max(1) * 256);
+        let mut buf =
+            RenderBuf::new_token_ids_only(&self.tokenizer, new_messages.len().max(1) * 256);
         for (i, msg) in new_messages.iter().enumerate() {
             let idx = i as i32;
             buf.special(self.role_token(&msg.role), idx);
@@ -390,12 +410,12 @@ impl Renderer for KimiK25Renderer {
 
         // Generation prompt
         buf.scaffold_special(self.im_assistant);
-        buf.scaffold_text("assistant")?;
+        buf.ids(&self.assistant_tokens, SCAFFOLD_IDX);
         buf.scaffold_special(self.im_middle);
         if self.enable_thinking {
-            buf.scaffold_text("<think>")?;
+            buf.ids(&self.think_tokens, SCAFFOLD_IDX);
         } else {
-            buf.scaffold_text("<think></think>")?;
+            buf.ids(&self.empty_think_tokens, SCAFFOLD_IDX);
         }
 
         let ext = buf.into_token_ids();
@@ -462,7 +482,7 @@ impl KimiK25Renderer {
         let offset = buf.len();
         buf.special(pad, idx);
         buf.special(end, idx);
-        buf.text("\n", idx)?;
+        buf.ids(&self.newline_tokens, idx);
 
         // Always exactly 1 placeholder in the stream, regardless of
         // image size — that's the K2.5 convention.
@@ -609,12 +629,12 @@ impl MultimodalRenderer for KimiK25Renderer {
 
         if add_generation_prompt {
             buf.scaffold_special(self.im_assistant);
-            buf.scaffold_text("assistant")?;
+            buf.ids(&self.assistant_tokens, SCAFFOLD_IDX);
             buf.scaffold_special(self.im_middle);
             if self.enable_thinking {
-                buf.scaffold_text("<think>")?;
+                buf.ids(&self.think_tokens, SCAFFOLD_IDX);
             } else {
-                buf.scaffold_text("<think></think>")?;
+                buf.ids(&self.empty_think_tokens, SCAFFOLD_IDX);
             }
         }
 

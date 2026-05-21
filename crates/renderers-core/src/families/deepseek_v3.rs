@@ -18,7 +18,7 @@
 use serde_json::Value as JsonValue;
 
 use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
-use crate::emit::RenderBuf;
+use crate::emit::{RenderBuf, TokenPlanBuf, TokenSink};
 use crate::parsing::deepseek_v3::parse_deepseek_v3;
 use crate::tokenizer::Tokenizer;
 use crate::traits::Renderer;
@@ -157,6 +157,63 @@ impl DeepSeekV3Renderer {
     fn estimate_capacity(messages: &[Message]) -> usize {
         messages.len().max(1) * 256 + 64
     }
+
+    fn should_batch_encode_text(messages: &[Message], tools: Option<&[ToolSpec]>) -> bool {
+        messages.len() >= 8 && tools.is_none_or(<[ToolSpec]>::is_empty)
+    }
+
+    fn render_into_buf(
+        &self,
+        buf: &mut impl TokenSink,
+        messages: &[Message],
+        add_generation_prompt: bool,
+    ) -> Result<(), RenderError> {
+        if messages.is_empty() {
+            return Err(RenderError::EmptyMessages);
+        }
+
+        buf.scaffold_special(self.bos);
+
+        let mut first_non_sys = 0usize;
+        let mut sys_parts: Vec<&str> = Vec::new();
+        for msg in messages {
+            if msg.role != "system" {
+                break;
+            }
+            sys_parts.push(msg.text_content());
+            first_non_sys += 1;
+        }
+        if !sys_parts.is_empty() {
+            let joined = sys_parts.join("\n\n");
+            buf.text(&joined, 0)?;
+        }
+
+        for (i, msg) in messages.iter().enumerate().skip(first_non_sys) {
+            let idx = i as i32;
+            let content = msg.text_content();
+            match msg.role.as_str() {
+                "system" | "user" => {
+                    buf.special(self.user_token, idx);
+                    buf.text(content, idx)?;
+                }
+                "assistant" => self.emit_assistant(buf, msg, i, messages)?,
+                "tool" => self.emit_tool(buf, messages, i)?,
+                _ => {}
+            }
+        }
+
+        if add_generation_prompt {
+            let last_role = messages.last().map_or("", |m| m.role.as_str());
+            if last_role != "tool" {
+                buf.scaffold_special(self.assistant_token);
+            }
+            if self.enable_thinking {
+                buf.scaffold_text("<think>\n")?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn python_json_dumps(value: &JsonValue) -> String {
@@ -199,61 +256,27 @@ impl Renderer for DeepSeekV3Renderer {
         _tools: Option<&[ToolSpec]>,
         add_generation_prompt: bool,
     ) -> Result<RenderedTokens, RenderError> {
-        if messages.is_empty() {
-            return Err(RenderError::EmptyMessages);
-        }
         let mut buf = RenderBuf::new(&self.tokenizer, Self::estimate_capacity(messages));
-
-        // BOS
-        buf.scaffold_special(self.bos);
-
-        // Leading system messages: concat with "\n\n", emit as plain text
-        // before any role marker, attributed to message index 0.
-        let mut first_non_sys = 0usize;
-        let mut sys_parts: Vec<&str> = Vec::new();
-        for msg in messages {
-            if msg.role != "system" {
-                break;
-            }
-            sys_parts.push(msg.text_content());
-            first_non_sys += 1;
-        }
-        if !sys_parts.is_empty() {
-            let joined = sys_parts.join("\n\n");
-            buf.text(&joined, 0)?;
-        }
-
-        for (i, msg) in messages.iter().enumerate().skip(first_non_sys) {
-            let idx = i as i32;
-            let content = msg.text_content();
-            match msg.role.as_str() {
-                "system" => {
-                    // Post-initial system → treat as user
-                    buf.special(self.user_token, idx);
-                    buf.text(content, idx)?;
-                }
-                "user" => {
-                    buf.special(self.user_token, idx);
-                    buf.text(content, idx)?;
-                }
-                "assistant" => self.emit_assistant(&mut buf, msg, i, messages)?,
-                "tool" => self.emit_tool(&mut buf, messages, i)?,
-                _ => {} // mirror Python: silent skip on unknown role
-            }
-        }
-
-        // Generation prompt — skip <｜Assistant｜> after a tool output
-        if add_generation_prompt {
-            let last_role = messages.last().map_or("", |m| m.role.as_str());
-            if last_role != "tool" {
-                buf.scaffold_special(self.assistant_token);
-            }
-            if self.enable_thinking {
-                buf.scaffold_text("<think>\n")?;
-            }
-        }
-
+        self.render_into_buf(&mut buf, messages, add_generation_prompt)?;
         Ok(buf.into_rendered())
+    }
+
+    fn render_ids(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        add_generation_prompt: bool,
+    ) -> Result<Vec<u32>, RenderError> {
+        let cap = Self::estimate_capacity(messages);
+        if Self::should_batch_encode_text(messages, tools) {
+            let mut buf = TokenPlanBuf::new(&self.tokenizer, cap);
+            self.render_into_buf(&mut buf, messages, add_generation_prompt)?;
+            buf.into_token_ids()
+        } else {
+            let mut buf = RenderBuf::new_token_ids_only(&self.tokenizer, cap);
+            self.render_into_buf(&mut buf, messages, add_generation_prompt)?;
+            Ok(buf.into_token_ids())
+        }
     }
 
     fn parse_response(&self, token_ids: &[u32]) -> ParsedResponse {
@@ -296,7 +319,8 @@ impl Renderer for DeepSeekV3Renderer {
             return Ok(None);
         };
 
-        let mut buf = RenderBuf::new(&self.tokenizer, Self::estimate_capacity(new_messages));
+        let mut buf =
+            RenderBuf::new_token_ids_only(&self.tokenizer, Self::estimate_capacity(new_messages));
 
         for (i, msg) in new_messages.iter().enumerate() {
             let idx = i as i32;
@@ -347,7 +371,7 @@ impl Renderer for DeepSeekV3Renderer {
 impl DeepSeekV3Renderer {
     fn emit_assistant(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         msg: &Message,
         msg_idx: usize,
         messages: &[Message],
@@ -401,7 +425,7 @@ impl DeepSeekV3Renderer {
 
     fn emit_tool(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         messages: &[Message],
         msg_idx: usize,
     ) -> Result<(), RenderError> {

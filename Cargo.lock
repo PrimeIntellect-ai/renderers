@@ -2360,6 +2360,7 @@ dependencies = [
  "numpy",
  "pyo3",
  "pythonize",
+ "rayon",
  "renderers-core",
  "serde",
  "serde_json",

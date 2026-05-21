@@ -103,7 +103,7 @@ pub fn parse_qwen3(
     };
 
     let text = decode(tokenizer, content_ids).unwrap_or_default();
-    let (reasoning, content) = split_thinking(&text);
+    let (reasoning, content) = split_thinking(text);
 
     ParsedResponse {
         content: content.trim().to_string(),
@@ -135,7 +135,7 @@ fn extract_name_and_args(value: &serde_json::Value) -> (String, ToolArguments) {
 /// Split a decoded text segment around `</think>`. Mirrors the inline
 /// logic at `renderers/parsing.py` for Qwen3 (which has no `<think>` as
 /// special token — reasoning lives in the decoded text).
-fn split_thinking(text: &str) -> (Option<String>, String) {
+fn split_thinking(text: String) -> (Option<String>, String) {
     if let Some((before, after)) = text.split_once("</think>") {
         let reasoning = before
             .replace("<think>", "")
@@ -145,6 +145,6 @@ fn split_thinking(text: &str) -> (Option<String>, String) {
         let content = after.trim_matches('\n').to_string();
         (Some(reasoning), content)
     } else {
-        (None, text.to_string())
+        (None, text)
     }
 }

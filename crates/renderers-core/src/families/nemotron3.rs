@@ -25,6 +25,7 @@ use crate::emit::RenderBuf;
 use crate::parsing::qwen35::parse_qwen35;
 use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
+use crate::tool_cache::ToolTextCache;
 use crate::traits::Renderer;
 use crate::types::{
     Message, ParsedResponse, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments, ToolSpec,
@@ -89,6 +90,12 @@ pub struct Nemotron3Renderer {
     tool_response_end: u32,
 
     stop_tokens: Vec<u32>,
+    newline_tokens: Vec<u32>,
+    system_newline_tokens: Vec<u32>,
+    user_newline_tokens: Vec<u32>,
+    assistant_newline_tokens: Vec<u32>,
+    function_close_newline_tokens: Vec<u32>,
+    tool_text_cache: ToolTextCache,
 }
 
 impl Nemotron3Renderer {
@@ -114,6 +121,17 @@ impl Nemotron3Renderer {
         if let Some(eot) = endoftext {
             stop_tokens.push(eot);
         }
+        let newline_tokens = tokenizer.encode_no_special("\n")?.as_slice().to_vec();
+        let system_newline_tokens = tokenizer.encode_no_special("system\n")?.as_slice().to_vec();
+        let user_newline_tokens = tokenizer.encode_no_special("user\n")?.as_slice().to_vec();
+        let assistant_newline_tokens = tokenizer
+            .encode_no_special("assistant\n")?
+            .as_slice()
+            .to_vec();
+        let function_close_newline_tokens = tokenizer
+            .encode_no_special("</function>\n")?
+            .as_slice()
+            .to_vec();
 
         Ok(Self {
             tokenizer,
@@ -130,6 +148,12 @@ impl Nemotron3Renderer {
             tool_response,
             tool_response_end,
             stop_tokens,
+            newline_tokens,
+            system_newline_tokens,
+            user_newline_tokens,
+            assistant_newline_tokens,
+            function_close_newline_tokens,
+            tool_text_cache: ToolTextCache::default(),
         })
     }
 
@@ -243,34 +267,45 @@ impl Nemotron3Renderer {
     ) -> Result<(), RenderError> {
         let sys_idx: i32 = if first_is_system { 0 } else { SCAFFOLD_IDX };
         buf.special(self.im_start, sys_idx);
-        buf.text("system\n", sys_idx)?;
+        buf.ids(&self.system_newline_tokens, sys_idx);
 
-        let mut full_sys = String::with_capacity(512);
-        if first_is_system {
-            full_sys.push_str(messages[0].text_content().trim());
-        }
-        let mut tools_block = String::with_capacity(512);
-        tools_block.push_str(TOOLS_HEADER);
-        tools_block.push('\n');
-        let mut first = true;
-        for t in tools {
-            if !first {
+        let system_content = if first_is_system {
+            messages[0].text_content().trim().to_string()
+        } else {
+            String::new()
+        };
+        let tool_tokens = self.tool_text_cache.get_or_insert_with(
+            &self.tokenizer,
+            tools,
+            u64::from(first_is_system),
+            &system_content,
+            || {
+                let mut full_sys = String::with_capacity(512);
+                full_sys.push_str(&system_content);
+                let mut tools_block = String::with_capacity(512);
+                tools_block.push_str(TOOLS_HEADER);
                 tools_block.push('\n');
-            }
-            tools_block.push_str(&Self::format_tool_declaration(t));
-            first = false;
-        }
-        tools_block.push_str(TOOLS_FOOTER);
-        tools_block.push_str(TOOLS_INSTRUCTIONS);
+                let mut first = true;
+                for t in tools {
+                    if !first {
+                        tools_block.push('\n');
+                    }
+                    tools_block.push_str(&Self::format_tool_declaration(t));
+                    first = false;
+                }
+                tools_block.push_str(TOOLS_FOOTER);
+                tools_block.push_str(TOOLS_INSTRUCTIONS);
 
-        if !full_sys.is_empty() {
-            full_sys.push_str("\n\n");
-        }
-        full_sys.push_str(&tools_block);
-
-        buf.text(&full_sys, sys_idx)?;
+                if !full_sys.is_empty() {
+                    full_sys.push_str("\n\n");
+                }
+                full_sys.push_str(&tools_block);
+                Ok(full_sys)
+            },
+        )?;
+        buf.ids(tool_tokens.as_slice(), sys_idx);
         buf.special(self.im_end, sys_idx);
-        buf.text("\n", sys_idx)?;
+        buf.ids(&self.newline_tokens, sys_idx);
         Ok(())
     }
 
@@ -287,7 +322,7 @@ impl Nemotron3Renderer {
         s.push_str(content);
         buf.text(&s, sys_idx)?;
         buf.special(self.im_end, sys_idx);
-        buf.text("\n", sys_idx)?;
+        buf.ids(&self.newline_tokens, sys_idx);
         Ok(())
     }
 
@@ -303,7 +338,7 @@ impl Nemotron3Renderer {
         s.push_str(content);
         buf.text(&s, idx)?;
         buf.special(self.im_end, idx);
-        buf.text("\n", idx)?;
+        buf.ids(&self.newline_tokens, idx);
         Ok(())
     }
 
@@ -320,7 +355,7 @@ impl Nemotron3Renderer {
 
         if !prev_is_tool {
             buf.special(self.im_start, msg_orig_idx);
-            buf.text("user\n", msg_orig_idx)?;
+            buf.ids(&self.user_newline_tokens, msg_orig_idx);
         }
         buf.special(self.tool_response, msg_orig_idx);
         let mut wrapped = String::with_capacity(content.len() + 2);
@@ -330,11 +365,11 @@ impl Nemotron3Renderer {
         buf.text(&wrapped, msg_orig_idx)?;
         buf.special(self.tool_response_end, msg_orig_idx);
         // Nemotron 3: trailing \n after </tool_response>
-        buf.text("\n", msg_orig_idx)?;
+        buf.ids(&self.newline_tokens, msg_orig_idx);
 
         if !next_is_tool {
             buf.special(self.im_end, msg_orig_idx);
-            buf.text("\n", msg_orig_idx)?;
+            buf.ids(&self.newline_tokens, msg_orig_idx);
         }
         Ok(())
     }
@@ -373,7 +408,7 @@ impl Nemotron3Renderer {
         let reasoning_content = reasoning_content.trim().to_string();
 
         buf.special(self.im_start, msg_orig_idx);
-        buf.text("assistant\n", msg_orig_idx)?;
+        buf.ids(&self.assistant_newline_tokens, msg_orig_idx);
 
         let tool_calls = &msg.tool_calls;
         let content_suffix = if tool_calls.is_empty() { "" } else { "\n" };
@@ -454,29 +489,28 @@ impl Nemotron3Renderer {
                 }
             }
 
-            buf.text("</function>\n", msg_orig_idx)?;
+            buf.ids(&self.function_close_newline_tokens, msg_orig_idx);
             buf.special(self.tool_call_end, msg_orig_idx);
             // Nemotron 3: trailing \n after </tool_call>
-            buf.text("\n", msg_orig_idx)?;
+            buf.ids(&self.newline_tokens, msg_orig_idx);
         }
 
         buf.special(self.im_end, msg_orig_idx);
-        buf.text("\n", msg_orig_idx)?;
+        buf.ids(&self.newline_tokens, msg_orig_idx);
         Ok(())
     }
 
-    fn emit_generation_prompt(&self, buf: &mut RenderBuf<'_>) -> Result<(), RenderError> {
+    fn emit_generation_prompt(&self, buf: &mut RenderBuf<'_>) {
         buf.scaffold_special(self.im_start);
-        buf.scaffold_text("assistant\n")?;
+        buf.ids(&self.assistant_newline_tokens, SCAFFOLD_IDX);
         if self.enable_thinking {
             buf.scaffold_special(self.think);
-            buf.scaffold_text("\n")?;
+            buf.ids(&self.newline_tokens, SCAFFOLD_IDX);
         } else {
             // Disable-thinking suffix: <think></think> with no trailing newlines
             buf.scaffold_special(self.think);
             buf.scaffold_special(self.think_end);
         }
-        Ok(())
     }
 
     fn estimate_capacity(messages: &[Message], tools: Option<&[ToolSpec]>) -> usize {
@@ -591,7 +625,7 @@ impl Renderer for Nemotron3Renderer {
         }
 
         if add_generation_prompt {
-            self.emit_generation_prompt(&mut buf)?;
+            self.emit_generation_prompt(&mut buf);
         }
 
         Ok(buf.into_rendered())
@@ -635,8 +669,11 @@ impl Renderer for Nemotron3Renderer {
             return Ok(None);
         };
 
-        let mut buf = RenderBuf::new(&self.tokenizer, Self::estimate_capacity(new_messages, None));
-        buf.scaffold_text("\n")?;
+        let mut buf = RenderBuf::new_token_ids_only(
+            &self.tokenizer,
+            Self::estimate_capacity(new_messages, None),
+        );
+        buf.ids(&self.newline_tokens, SCAFFOLD_IDX);
 
         for (i, msg) in new_messages.iter().enumerate() {
             let content = msg.text_content().trim();
@@ -650,14 +687,14 @@ impl Renderer for Nemotron3Renderer {
                     s.push_str(content);
                     buf.text(&s, idx)?;
                     buf.special(self.im_end, idx);
-                    buf.text("\n", idx)?;
+                    buf.ids(&self.newline_tokens, idx);
                 }
                 "tool" => self.emit_tool(&mut buf, new_messages, i, content, idx)?,
                 _ => return Ok(None),
             }
         }
 
-        self.emit_generation_prompt(&mut buf)?;
+        self.emit_generation_prompt(&mut buf);
 
         let ext = buf.into_token_ids();
         let mut out = Vec::with_capacity(previous_ids.len() + ext.len());

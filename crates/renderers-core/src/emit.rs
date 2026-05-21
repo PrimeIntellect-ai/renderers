@@ -8,6 +8,22 @@
 use crate::tokenizer::Tokenizer;
 use crate::types::{RenderError, RenderedTokens, SCAFFOLD_IDX};
 
+pub trait TokenSink {
+    fn special(&mut self, token_id: u32, msg_idx: i32);
+    fn ids(&mut self, token_ids: &[u32], msg_idx: i32);
+    fn text(&mut self, text: &str, msg_idx: i32) -> Result<(), RenderError>;
+
+    #[inline]
+    fn scaffold_special(&mut self, token_id: u32) {
+        self.special(token_id, SCAFFOLD_IDX);
+    }
+
+    #[inline]
+    fn scaffold_text(&mut self, text: &str) -> Result<(), RenderError> {
+        self.text(text, SCAFFOLD_IDX)
+    }
+}
+
 /// Mutable render-time buffer paired with a tokenizer reference.
 ///
 /// Holds both the token stream and the parallel `message_indices` array.
@@ -130,5 +146,101 @@ impl<'tok> RenderBuf<'tok> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.tokens.is_empty()
+    }
+}
+
+impl TokenSink for RenderBuf<'_> {
+    #[inline]
+    fn special(&mut self, token_id: u32, msg_idx: i32) {
+        RenderBuf::special(self, token_id, msg_idx);
+    }
+
+    #[inline]
+    fn ids(&mut self, token_ids: &[u32], msg_idx: i32) {
+        RenderBuf::ids(self, token_ids, msg_idx);
+    }
+
+    #[inline]
+    fn text(&mut self, text: &str, msg_idx: i32) -> Result<(), RenderError> {
+        RenderBuf::text(self, text, msg_idx)
+    }
+}
+
+#[derive(Debug)]
+enum TokenPlanOp {
+    Ids(Vec<u32>),
+    Special(u32),
+    Text(String),
+}
+
+#[derive(Debug)]
+pub struct TokenPlanBuf<'tok> {
+    ops: Vec<TokenPlanOp>,
+    tokenizer: &'tok Tokenizer,
+    cap_hint: usize,
+    text_count: usize,
+}
+
+impl<'tok> TokenPlanBuf<'tok> {
+    pub fn new(tokenizer: &'tok Tokenizer, hint: usize) -> Self {
+        Self {
+            ops: Vec::with_capacity(hint.min(256)),
+            tokenizer,
+            cap_hint: hint,
+            text_count: 0,
+        }
+    }
+
+    pub fn into_token_ids(self) -> Result<Vec<u32>, RenderError> {
+        let encoded_texts = if self.text_count == 0 {
+            Vec::new()
+        } else {
+            let texts: Vec<&str> = self
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    TokenPlanOp::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            self.tokenizer.encode_batch_no_special(texts)?
+        };
+
+        let mut text_idx = 0;
+        let mut tokens = Vec::with_capacity(self.cap_hint);
+        for op in self.ops {
+            match op {
+                TokenPlanOp::Ids(ids) => tokens.extend_from_slice(&ids),
+                TokenPlanOp::Special(id) => tokens.push(id),
+                TokenPlanOp::Text(_) => {
+                    tokens.extend_from_slice(encoded_texts[text_idx].as_slice());
+                    text_idx += 1;
+                }
+            }
+        }
+        Ok(tokens)
+    }
+}
+
+impl TokenSink for TokenPlanBuf<'_> {
+    #[inline]
+    fn special(&mut self, token_id: u32, _msg_idx: i32) {
+        self.ops.push(TokenPlanOp::Special(token_id));
+    }
+
+    #[inline]
+    fn ids(&mut self, token_ids: &[u32], _msg_idx: i32) {
+        if !token_ids.is_empty() {
+            self.ops.push(TokenPlanOp::Ids(token_ids.to_vec()));
+        }
+    }
+
+    #[inline]
+    fn text(&mut self, text: &str, _msg_idx: i32) -> Result<(), RenderError> {
+        if !text.is_empty() {
+            self.ops.push(TokenPlanOp::Text(text.to_string()));
+            self.text_count += 1;
+        }
+        Ok(())
     }
 }

@@ -73,6 +73,22 @@ impl Tokenizer {
         Ok(Encoded { enc })
     }
 
+    /// Encode many text fragments without model special tokens. The
+    /// tokenizer crate parallelizes this internally, which avoids paying
+    /// per-fragment call overhead on render paths that can plan the whole
+    /// prompt before materialising ids.
+    pub fn encode_batch_no_special<'s, E>(&self, texts: Vec<E>) -> Result<Vec<Encoded>, RenderError>
+    where
+        E: Into<tokenizers::EncodeInput<'s>> + Send,
+    {
+        let encodings = self
+            .inner
+            .tok
+            .encode_batch_fast(texts, false)
+            .map_err(|e| RenderError::Tokenizer(e.to_string()))?;
+        Ok(encodings.into_iter().map(|enc| Encoded { enc }).collect())
+    }
+
     /// Decode `ids` to text, including special tokens (matches the
     /// Python `tokenizer.decode(ids, skip_special_tokens=False)` used
     /// across the parsing layer).

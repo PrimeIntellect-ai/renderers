@@ -12,7 +12,8 @@ use std::sync::Arc;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyType};
+use pyo3::types::{PyDict, PyList, PyTuple, PyType};
+use rayon::prelude::*;
 
 use renderers_core::Renderer as CoreRenderer;
 use renderers_core::families::{
@@ -99,14 +100,17 @@ fn optional_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<Strin
     }
 }
 
-fn parse_tools(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<ToolSpec>>> {
+fn parse_tools(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Arc<Vec<ToolSpec>>>> {
     let Some(obj) = obj else { return Ok(None) };
     if obj.is_none() {
         return Ok(None);
     }
+    if let Ok(prepared) = obj.extract::<PyRef<'_, PyPreparedTools>>() {
+        return Ok(Some(prepared.inner.clone()));
+    }
     let list = obj
         .cast::<PyList>()
-        .map_err(|_| invalid("tools must be a list of dicts"))?;
+        .map_err(|_| invalid("tools must be a list of dicts or PreparedTools"))?;
     let mut parsed = Vec::with_capacity(list.len());
     for item in list.iter() {
         let dict = item
@@ -143,7 +147,47 @@ fn parse_tools(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<ToolSpec>>
             openai_envelope,
         });
     }
-    Ok(Some(parsed))
+    Ok(Some(Arc::new(parsed)))
+}
+
+#[inline]
+fn tools_slice(tools: Option<&Arc<Vec<ToolSpec>>>) -> Option<&[ToolSpec]> {
+    tools.map(|tools| tools.as_slice())
+}
+
+fn parse_message_batch(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<Message>>> {
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| invalid("messages_batch must be a list of message lists"))?;
+    let mut parsed = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        parsed.push(parse_messages(&item)?);
+    }
+    Ok(parsed)
+}
+
+fn parse_fast_messages(
+    roles: &Bound<'_, PyAny>,
+    contents: &Bound<'_, PyAny>,
+) -> PyResult<Vec<Message>> {
+    let roles = roles
+        .cast::<PyList>()
+        .map_err(|_| invalid("roles must be a list[str]"))?;
+    let contents = contents
+        .cast::<PyList>()
+        .map_err(|_| invalid("contents must be a list[str]"))?;
+    if roles.len() != contents.len() {
+        return Err(invalid("roles and contents must have the same length"));
+    }
+    let mut parsed = Vec::with_capacity(roles.len());
+    for (role, content) in roles.iter().zip(contents.iter()) {
+        parsed.push(Message {
+            role: role.extract::<String>()?,
+            content: Content::Text(content.extract::<String>()?),
+            ..Default::default()
+        });
+    }
+    Ok(parsed)
 }
 
 /// Decode a Python list of media-item dicts into a [`MediaBundle`].
@@ -395,6 +439,156 @@ impl PyToolCallParseStatus {
     #[allow(clippy::trivially_copy_pass_by_ref)]
     fn value(&self) -> &'static str {
         self.inner.as_wire()
+    }
+}
+
+#[pyclass(
+    name = "PreparedTools",
+    module = "renderers_native",
+    skip_from_py_object
+)]
+#[derive(Clone)]
+struct PyPreparedTools {
+    inner: Arc<Vec<ToolSpec>>,
+}
+
+#[pymethods]
+impl PyPreparedTools {
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("PreparedTools(<{} tools>)", self.inner.len())
+    }
+}
+
+#[pyclass(name = "RendererSession", module = "renderers_native")]
+struct PyRendererSession {
+    renderer: Arc<dyn CoreRenderer>,
+    messages: Arc<Vec<Message>>,
+    tools: Option<Arc<Vec<ToolSpec>>>,
+    last_prompt_ids: Option<Vec<u32>>,
+}
+
+#[pymethods]
+impl PyRendererSession {
+    fn fork(&self) -> Self {
+        Self {
+            renderer: self.renderer.clone(),
+            messages: self.messages.clone(),
+            tools: self.tools.clone(),
+            last_prompt_ids: self.last_prompt_ids.clone(),
+        }
+    }
+
+    #[pyo3(signature = (*, add_generation_prompt = false))]
+    fn render_ids<'py>(
+        &mut self,
+        py: Python<'py>,
+        add_generation_prompt: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let renderer = self.renderer.clone();
+        let messages = self.messages.clone();
+        let tools = self.tools.clone();
+        let ids = py
+            .detach(move || {
+                renderer.render_ids(
+                    messages.as_slice(),
+                    tools_slice(tools.as_ref()),
+                    add_generation_prompt,
+                )
+            })
+            .map_err(render_err)?;
+        self.last_prompt_ids = Some(ids.clone());
+        PyList::new(py, ids)
+    }
+
+    #[pyo3(signature = (*, add_generation_prompt = false))]
+    fn render_ids_np<'py>(
+        &mut self,
+        py: Python<'py>,
+        add_generation_prompt: bool,
+    ) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let renderer = self.renderer.clone();
+        let messages = self.messages.clone();
+        let tools = self.tools.clone();
+        let ids = py
+            .detach(move || {
+                renderer.render_ids(
+                    messages.as_slice(),
+                    tools_slice(tools.as_ref()),
+                    add_generation_prompt,
+                )
+            })
+            .map_err(render_err)?;
+        self.last_prompt_ids = Some(ids.clone());
+        Ok(ids.into_pyarray(py))
+    }
+
+    #[pyo3(signature = (previous_completion_ids, new_messages, *, update = true))]
+    fn bridge_to_next_turn(
+        &mut self,
+        py: Python<'_>,
+        previous_completion_ids: &Bound<'_, PyAny>,
+        new_messages: &Bound<'_, PyAny>,
+        update: bool,
+    ) -> PyResult<Option<PyRenderedTokens>> {
+        let prev_p = self
+            .last_prompt_ids
+            .clone()
+            .ok_or_else(|| invalid("render_ids must be called before session bridge"))?;
+        let prev_c = parse_u32_list(previous_completion_ids)?;
+        let msgs = parse_messages(new_messages)?;
+        let renderer = self.renderer.clone();
+        let tools = self.tools.clone();
+        let bridged = py
+            .detach(move || {
+                renderer.bridge_to_next_turn(&prev_p, &prev_c, &msgs, tools_slice(tools.as_ref()))
+            })
+            .map_err(render_err)?;
+        if update && let Some(rendered) = &bridged {
+            self.last_prompt_ids = Some(rendered.token_ids.clone());
+        }
+        Ok(bridged.map(|rt| PyRenderedTokens { inner: rt }))
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[pyo3(signature = (previous_completion_ids, new_messages, *, update = true))]
+    fn bridge_to_next_turn_np<'py>(
+        &mut self,
+        py: Python<'py>,
+        previous_completion_ids: PyReadonlyArray1<'_, u32>,
+        new_messages: &Bound<'_, PyAny>,
+        update: bool,
+    ) -> PyResult<Option<Bound<'py, PyArray1<u32>>>> {
+        let prev_p = self
+            .last_prompt_ids
+            .as_deref()
+            .ok_or_else(|| invalid("render_ids must be called before session bridge"))?;
+        let prev_c = numpy_u32_slice(&previous_completion_ids)?;
+        let msgs = parse_messages(new_messages)?;
+        let bridged = self
+            .renderer
+            .bridge_to_next_turn(prev_p, prev_c, &msgs, tools_slice(self.tools.as_ref()))
+            .map_err(render_err)?;
+        if let Some(rendered) = bridged {
+            if update {
+                self.last_prompt_ids = Some(rendered.token_ids.clone());
+            }
+            Ok(Some(rendered.token_ids.into_pyarray(py)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RendererSession(messages={}, tools={}, has_prompt={})",
+            self.messages.len(),
+            self.tools.as_ref().map_or(0, |t| t.len()),
+            self.last_prompt_ids.is_some(),
+        )
     }
 }
 
@@ -904,6 +1098,172 @@ impl PyRenderer {
         })
     }
 
+    #[allow(clippy::unused_self)]
+    fn prepare_tools(&self, tools: &Bound<'_, PyAny>) -> PyResult<PyPreparedTools> {
+        let parsed = parse_tools(Some(tools))?.unwrap_or_else(|| Arc::new(Vec::new()));
+        Ok(PyPreparedTools { inner: parsed })
+    }
+
+    #[pyo3(signature = (messages, *, tools = None))]
+    fn new_session(
+        &self,
+        messages: &Bound<'_, PyAny>,
+        tools: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyRendererSession> {
+        Ok(PyRendererSession {
+            renderer: self.inner.clone(),
+            messages: Arc::new(parse_messages(messages)?),
+            tools: parse_tools(tools)?,
+            last_prompt_ids: None,
+        })
+    }
+
+    #[pyo3(signature = (messages_batch, *, tools = None, add_generation_prompt = false))]
+    fn render_batch_ids<'py>(
+        &self,
+        py: Python<'py>,
+        messages_batch: &Bound<'_, PyAny>,
+        tools: Option<&Bound<'_, PyAny>>,
+        add_generation_prompt: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let batch = parse_message_batch(messages_batch)?;
+        let tools = parse_tools(tools)?;
+        let renderer = self.inner.clone();
+        let batch_ids = py
+            .detach(move || {
+                if batch.len() >= 8 {
+                    batch
+                        .par_iter()
+                        .map(|messages| {
+                            renderer.render_ids(
+                                messages,
+                                tools_slice(tools.as_ref()),
+                                add_generation_prompt,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                } else {
+                    batch
+                        .iter()
+                        .map(|messages| {
+                            renderer.render_ids(
+                                messages,
+                                tools_slice(tools.as_ref()),
+                                add_generation_prompt,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                }
+            })
+            .map_err(render_err)?;
+        let out = PyList::empty(py);
+        for ids in batch_ids {
+            out.append(PyList::new(py, ids)?)?;
+        }
+        Ok(out)
+    }
+
+    #[pyo3(signature = (messages_batch, *, tools = None, add_generation_prompt = false))]
+    fn render_batch_ids_np_packed<'py>(
+        &self,
+        py: Python<'py>,
+        messages_batch: &Bound<'_, PyAny>,
+        tools: Option<&Bound<'_, PyAny>>,
+        add_generation_prompt: bool,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let batch = parse_message_batch(messages_batch)?;
+        let tools = parse_tools(tools)?;
+        let renderer = self.inner.clone();
+        let (ids, offsets) = py
+            .detach(
+                move || -> Result<(Vec<u32>, Vec<i64>), renderers_core::types::RenderError> {
+                    let batch_ids = if batch.len() >= 8 {
+                        batch
+                            .par_iter()
+                            .map(|messages| {
+                                renderer.render_ids(
+                                    messages,
+                                    tools_slice(tools.as_ref()),
+                                    add_generation_prompt,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        batch
+                            .iter()
+                            .map(|messages| {
+                                renderer.render_ids(
+                                    messages,
+                                    tools_slice(tools.as_ref()),
+                                    add_generation_prompt,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    let mut ids = Vec::new();
+                    let mut offsets = Vec::with_capacity(batch_ids.len() + 1);
+                    offsets.push(0);
+                    for row in batch_ids {
+                        ids.extend_from_slice(&row);
+                        offsets.push(ids.len() as i64);
+                    }
+                    Ok((ids, offsets))
+                },
+            )
+            .map_err(render_err)?;
+        let ids = ids.into_pyarray(py).into_any();
+        let offsets = offsets.into_pyarray(py).into_any();
+        PyTuple::new(py, [ids, offsets])
+    }
+
+    #[pyo3(signature = (roles, contents, *, tools = None, add_generation_prompt = false))]
+    fn render_fast_ids<'py>(
+        &self,
+        py: Python<'py>,
+        roles: &Bound<'_, PyAny>,
+        contents: &Bound<'_, PyAny>,
+        tools: Option<&Bound<'_, PyAny>>,
+        add_generation_prompt: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let messages = parse_fast_messages(roles, contents)?;
+        let tools = parse_tools(tools)?;
+        let renderer = self.inner.clone();
+        let ids = py
+            .detach(move || {
+                renderer.render_ids(
+                    &messages,
+                    tools_slice(tools.as_ref()),
+                    add_generation_prompt,
+                )
+            })
+            .map_err(render_err)?;
+        PyList::new(py, ids)
+    }
+
+    #[pyo3(signature = (roles, contents, *, tools = None, add_generation_prompt = false))]
+    fn render_fast_ids_np<'py>(
+        &self,
+        py: Python<'py>,
+        roles: &Bound<'_, PyAny>,
+        contents: &Bound<'_, PyAny>,
+        tools: Option<&Bound<'_, PyAny>>,
+        add_generation_prompt: bool,
+    ) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let messages = parse_fast_messages(roles, contents)?;
+        let tools = parse_tools(tools)?;
+        let renderer = self.inner.clone();
+        let ids = py
+            .detach(move || {
+                renderer.render_ids(
+                    &messages,
+                    tools_slice(tools.as_ref()),
+                    add_generation_prompt,
+                )
+            })
+            .map_err(render_err)?;
+        Ok(ids.into_pyarray(py))
+    }
+
     #[pyo3(signature = (messages, *, tools = None, add_generation_prompt = false))]
     fn render(
         &self,
@@ -916,7 +1276,9 @@ impl PyRenderer {
         let tools = parse_tools(tools)?;
         let renderer = self.inner.clone();
         let out = py
-            .detach(move || renderer.render(&msgs, tools.as_deref(), add_generation_prompt))
+            .detach(move || {
+                renderer.render(&msgs, tools_slice(tools.as_ref()), add_generation_prompt)
+            })
             .map_err(render_err)?;
         Ok(PyRenderedTokens { inner: out })
     }
@@ -933,7 +1295,9 @@ impl PyRenderer {
         let tools = parse_tools(tools)?;
         let renderer = self.inner.clone();
         let ids = py
-            .detach(move || renderer.render_ids(&msgs, tools.as_deref(), add_generation_prompt))
+            .detach(move || {
+                renderer.render_ids(&msgs, tools_slice(tools.as_ref()), add_generation_prompt)
+            })
             .map_err(render_err)?;
         PyList::new(py, ids)
     }
@@ -956,7 +1320,9 @@ impl PyRenderer {
         let tools = parse_tools(tools)?;
         let renderer = self.inner.clone();
         let ids = py
-            .detach(move || renderer.render_ids(&msgs, tools.as_deref(), add_generation_prompt))
+            .detach(move || {
+                renderer.render_ids(&msgs, tools_slice(tools.as_ref()), add_generation_prompt)
+            })
             .map_err(render_err)?;
         Ok(ids.into_pyarray(py))
     }
@@ -1024,7 +1390,12 @@ impl PyRenderer {
                     .ok_or_else(|| renderers_core::types::RenderError::Invalid(
                         "this renderer does not support multimodal — use a -VL tokenizer or check supports_multimodal()".into(),
                     ))?;
-                mm.render_with_media(&msgs, tools.as_deref(), &bundle, add_generation_prompt)
+                mm.render_with_media(
+                    &msgs,
+                    tools_slice(tools.as_ref()),
+                    &bundle,
+                    add_generation_prompt,
+                )
             })
             .map_err(render_err)?;
         Ok(PyRenderedTokens { inner: out })
@@ -1051,7 +1422,9 @@ impl PyRenderer {
         let tools = parse_tools(tools)?;
         let renderer = self.inner.clone();
         let bridged = py
-            .detach(move || renderer.bridge_to_next_turn(&prev_p, &prev_c, &msgs, tools.as_deref()))
+            .detach(move || {
+                renderer.bridge_to_next_turn(&prev_p, &prev_c, &msgs, tools_slice(tools.as_ref()))
+            })
             .map_err(render_err)?;
         Ok(bridged.map(|rt| PyRenderedTokens { inner: rt }))
     }
@@ -1077,7 +1450,7 @@ impl PyRenderer {
         let tools = parse_tools(tools)?;
         let bridged = self
             .inner
-            .bridge_to_next_turn(prev_p, prev_c, &msgs, tools.as_deref())
+            .bridge_to_next_turn(prev_p, prev_c, &msgs, tools_slice(tools.as_ref()))
             .map_err(render_err)?;
         Ok(bridged.map(|rt| rt.token_ids.into_pyarray(py)))
     }
@@ -1229,6 +1602,8 @@ fn processed_to_pyobject<'py>(py: Python<'py>, p: ProcessedImage) -> PyResult<Bo
 fn renderers_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = py;
     m.add_class::<PyRenderer>()?;
+    m.add_class::<PyPreparedTools>()?;
+    m.add_class::<PyRendererSession>()?;
     m.add_class::<PyRenderedTokens>()?;
     m.add_class::<PyParsedResponse>()?;
     m.add_class::<PyParsedToolCall>()?;

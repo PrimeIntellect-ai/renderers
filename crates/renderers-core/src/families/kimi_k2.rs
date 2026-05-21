@@ -22,6 +22,7 @@ use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
 use crate::emit::RenderBuf;
 use crate::parsing::kimi_k2::parse_kimi_k2;
 use crate::tokenizer::Tokenizer;
+use crate::tool_cache::ToolTextCache;
 use crate::traits::Renderer;
 use crate::types::{
     Message, ParsedResponse, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments, ToolSpec,
@@ -86,6 +87,9 @@ pub struct KimiK2Renderer {
     tool_call_argument_begin: u32,
     tool_call_end: u32,
 
+    newline_tokens: Vec<u32>,
+    assistant_tokens: Vec<u32>,
+    tool_text_cache: ToolTextCache,
     stop_tokens: Vec<u32>,
 }
 
@@ -110,6 +114,11 @@ impl KimiK2Renderer {
         let tool_call_argument_begin =
             tokenizer.token_to_id_strict("<|tool_call_argument_begin|>")?;
         let tool_call_end = tokenizer.token_to_id_strict("<|tool_call_end|>")?;
+        let newline_tokens = tokenizer.encode_no_special("\n")?.as_slice().to_vec();
+        let assistant_tokens = tokenizer
+            .encode_no_special("assistant")?
+            .as_slice()
+            .to_vec();
 
         Ok(Self {
             tokenizer,
@@ -126,6 +135,9 @@ impl KimiK2Renderer {
             tool_call_begin,
             tool_call_argument_begin,
             tool_call_end,
+            newline_tokens,
+            assistant_tokens,
+            tool_text_cache: ToolTextCache::default(),
             stop_tokens: vec![im_end],
         })
     }
@@ -230,6 +242,25 @@ impl KimiK2Renderer {
         buf.special(self.im_end, idx);
         Ok(())
     }
+
+    fn emit_tool_declare_from_tools(
+        &self,
+        buf: &mut RenderBuf<'_>,
+        tools: &[ToolSpec],
+        idx: i32,
+    ) -> Result<(), RenderError> {
+        buf.special(self.im_system, idx);
+        buf.text("tool_declare", idx)?;
+        buf.special(self.im_middle, idx);
+        let tool_tokens =
+            self.tool_text_cache
+                .get_or_insert_with(&self.tokenizer, tools, 0, "", || {
+                    Ok(Self::serialize_tools(tools))
+                })?;
+        buf.ids(tool_tokens.as_slice(), idx);
+        buf.special(self.im_end, idx);
+        Ok(())
+    }
 }
 
 impl Renderer for KimiK2Renderer {
@@ -256,7 +287,7 @@ impl Renderer for KimiK2Renderer {
         if tools_pending && !already_has_tool_declare {
             working.push(Message {
                 role: "tool_declare".to_string(),
-                content: crate::types::Content::Text(Self::serialize_tools(tools.unwrap())),
+                content: crate::types::Content::Text(String::new()),
                 ..Default::default()
             });
             injected.push(true);
@@ -354,11 +385,19 @@ impl Renderer for KimiK2Renderer {
                 "system" => {
                     self.emit_im_role(&mut buf, self.im_system, "system", content, oi)?;
                     if Some(i) == auto_system_idx {
-                        buf.text("\n", oi)?;
+                        buf.ids(&self.newline_tokens, oi);
                     }
                 }
                 "tool_declare" => {
-                    self.emit_im_role(&mut buf, self.im_system, "tool_declare", content, oi)?;
+                    if injected[i] {
+                        self.emit_tool_declare_from_tools(
+                            &mut buf,
+                            tools.expect("injected tool_declare requires tools"),
+                            oi,
+                        )?;
+                    } else {
+                        self.emit_im_role(&mut buf, self.im_system, "tool_declare", content, oi)?;
+                    }
                 }
                 "user" => {
                     self.emit_im_role(&mut buf, self.im_user, "user", content, oi)?;
@@ -374,7 +413,7 @@ impl Renderer for KimiK2Renderer {
 
         if add_generation_prompt {
             buf.scaffold_special(self.im_assistant);
-            buf.scaffold_text("assistant")?;
+            buf.ids(&self.assistant_tokens, SCAFFOLD_IDX);
             buf.scaffold_special(self.im_middle);
         }
 
@@ -420,7 +459,8 @@ impl Renderer for KimiK2Renderer {
             return Ok(None);
         };
 
-        let mut buf = RenderBuf::new(&self.tokenizer, new_messages.len().max(1) * 256);
+        let mut buf =
+            RenderBuf::new_token_ids_only(&self.tokenizer, new_messages.len().max(1) * 256);
         for (i, msg) in new_messages.iter().enumerate() {
             let idx = i as i32;
             let content = msg.text_content();
@@ -433,7 +473,7 @@ impl Renderer for KimiK2Renderer {
         }
 
         buf.scaffold_special(self.im_assistant);
-        buf.scaffold_text("assistant")?;
+        buf.ids(&self.assistant_tokens, SCAFFOLD_IDX);
         buf.scaffold_special(self.im_middle);
 
         let ext = buf.into_token_ids();
@@ -456,7 +496,7 @@ impl KimiK2Renderer {
         idx: i32,
     ) -> Result<(), RenderError> {
         buf.special(self.im_assistant, idx);
-        buf.text("assistant", idx)?;
+        buf.ids(&self.assistant_tokens, idx);
         buf.special(self.im_middle, idx);
 
         // Kimi's template renders content verbatim; reasoning_content is

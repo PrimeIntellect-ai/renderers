@@ -19,11 +19,12 @@
 //!   (or when `preserve_all_thinking` is on).
 
 use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
-use crate::emit::RenderBuf;
+use crate::emit::{RenderBuf, TokenPlanBuf, TokenSink};
 use crate::json::to_string_python;
 use crate::parsing::minimax::parse_minimax;
 use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
+use crate::tool_cache::ToolTextCache;
 use crate::traits::Renderer;
 use crate::types::{
     Message, ParsedResponse, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments, ToolSpec,
@@ -86,6 +87,10 @@ pub struct MiniMaxM2Renderer {
     tool_call: u32,
     tool_call_end: u32,
 
+    newline_tokens: Vec<u32>,
+    ai_newline_tokens: Vec<u32>,
+    tool_tokens: Vec<u32>,
+    tool_text_cache: ToolTextCache,
     stop_tokens: Vec<u32>,
 }
 
@@ -105,6 +110,9 @@ impl MiniMaxM2Renderer {
         let think_end = tokenizer.token_to_id_strict("</think>")?;
         let tool_call = tokenizer.token_to_id_strict("<minimax:tool_call>")?;
         let tool_call_end = tokenizer.token_to_id_strict("</minimax:tool_call>")?;
+        let newline_tokens = tokenizer.encode_no_special("\n")?.as_slice().to_vec();
+        let ai_newline_tokens = tokenizer.encode_no_special("ai\n")?.as_slice().to_vec();
+        let tool_tokens = tokenizer.encode_no_special("tool")?.as_slice().to_vec();
 
         Ok(Self {
             tokenizer,
@@ -118,15 +126,27 @@ impl MiniMaxM2Renderer {
             think_end,
             tool_call,
             tool_call_end,
+            newline_tokens,
+            ai_newline_tokens,
+            tool_tokens,
+            tool_text_cache: ToolTextCache::default(),
             stop_tokens: vec![eos],
         })
     }
 
     fn build_system_text(&self, sys_content: &str, tools: Option<&[ToolSpec]>) -> String {
+        Self::build_system_text_from(&self.default_system, sys_content, tools)
+    }
+
+    fn build_system_text_from(
+        default_system: &str,
+        sys_content: &str,
+        tools: Option<&[ToolSpec]>,
+    ) -> String {
         let mut s = String::with_capacity(512);
         s.push_str("system\n");
         if sys_content.is_empty() {
-            s.push_str(&self.default_system);
+            s.push_str(default_system);
         } else {
             s.push_str(sys_content);
         }
@@ -158,27 +178,29 @@ impl MiniMaxM2Renderer {
             }
         }
     }
-}
 
-impl Renderer for MiniMaxM2Renderer {
-    fn render(
+    fn estimate_capacity(messages: &[Message], tools: Option<&[ToolSpec]>) -> usize {
+        messages.len().max(1) * 256 + tools.map_or(0, |t| t.len() * 256 + 512)
+    }
+
+    fn should_batch_encode_text(messages: &[Message], tools: Option<&[ToolSpec]>) -> bool {
+        messages.len() >= 8 && tools.is_none_or(<[ToolSpec]>::is_empty)
+    }
+
+    fn render_into_buf(
         &self,
+        buf: &mut impl TokenSink,
         messages: &[Message],
         tools: Option<&[ToolSpec]>,
         add_generation_prompt: bool,
-    ) -> Result<RenderedTokens, RenderError> {
+    ) -> Result<(), RenderError> {
         if messages.is_empty() {
             return Err(RenderError::EmptyMessages);
         }
-        let mut buf = RenderBuf::new(
-            &self.tokenizer,
-            messages.len().max(1) * 256 + tools.map_or(0, |t| t.len() * 256 + 512),
-        );
 
         let first_is_system = messages[0].role == "system";
         let sys_idx: i32 = if first_is_system { 0 } else { SCAFFOLD_IDX };
 
-        // System block
         buf.special(self.bos, sys_idx);
         buf.special(self.role, sys_idx);
         let sys_content = if first_is_system {
@@ -186,16 +208,32 @@ impl Renderer for MiniMaxM2Renderer {
         } else {
             String::new()
         };
-        let system_text = self.build_system_text(&sys_content, tools);
-        buf.text(&system_text, sys_idx)?;
+        if let Some(t) = tools.filter(|t| !t.is_empty()) {
+            let default_system = self.default_system.clone();
+            let system_tokens = self.tool_text_cache.get_or_insert_with(
+                &self.tokenizer,
+                t,
+                u64::from(first_is_system),
+                &sys_content,
+                || {
+                    Ok(Self::build_system_text_from(
+                        &default_system,
+                        &sys_content,
+                        Some(t),
+                    ))
+                },
+            )?;
+            buf.ids(system_tokens.as_slice(), sys_idx);
+        } else {
+            let system_text = self.build_system_text(&sys_content, tools);
+            buf.text(&system_text, sys_idx)?;
+        }
         buf.special(self.eos, sys_idx);
-        buf.text("\n", sys_idx)?;
+        buf.ids(&self.newline_tokens, sys_idx);
 
-        // Conversation messages — skip the leading system if present
         let conversation_start = usize::from(first_is_system);
         let conversation = &messages[conversation_start..];
 
-        // last_user_index relative to the conversation
         let mut last_ui: i32 = -1;
         for (ci, m) in conversation.iter().enumerate() {
             if m.role == "user" {
@@ -214,10 +252,9 @@ impl Renderer for MiniMaxM2Renderer {
                     s.push_str(content);
                     buf.text(&s, orig_idx)?;
                     buf.special(self.eos, orig_idx);
-                    buf.text("\n", orig_idx)?;
+                    buf.ids(&self.newline_tokens, orig_idx);
                 }
                 "assistant" => {
-                    // orig_idx was just cast from a usize; non-negative by construction.
                     #[allow(clippy::cast_sign_loss)]
                     let preserve_thinking = should_preserve_past_thinking(
                         messages,
@@ -225,28 +262,52 @@ impl Renderer for MiniMaxM2Renderer {
                         self.preserve_all_thinking,
                         self.preserve_thinking_between_tool_calls,
                     );
-                    self.emit_assistant(
-                        &mut buf,
-                        msg,
-                        orig_idx,
-                        ci as i32,
-                        last_ui,
-                        preserve_thinking,
-                    )?;
+                    self.emit_assistant(buf, msg, orig_idx, ci as i32, last_ui, preserve_thinking)?;
                 }
-                "tool" => self.emit_tool(&mut buf, conversation, ci, orig_idx)?,
+                "tool" => self.emit_tool(buf, conversation, ci, orig_idx)?,
                 _ => {}
             }
         }
 
         if add_generation_prompt {
             buf.scaffold_special(self.role);
-            buf.scaffold_text("ai\n")?;
+            buf.ids(&self.ai_newline_tokens, SCAFFOLD_IDX);
             buf.scaffold_special(self.think);
-            buf.scaffold_text("\n")?;
+            buf.ids(&self.newline_tokens, SCAFFOLD_IDX);
         }
 
+        Ok(())
+    }
+}
+
+impl Renderer for MiniMaxM2Renderer {
+    fn render(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        add_generation_prompt: bool,
+    ) -> Result<RenderedTokens, RenderError> {
+        let mut buf = RenderBuf::new(&self.tokenizer, Self::estimate_capacity(messages, tools));
+        self.render_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
         Ok(buf.into_rendered())
+    }
+
+    fn render_ids(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        add_generation_prompt: bool,
+    ) -> Result<Vec<u32>, RenderError> {
+        let cap = Self::estimate_capacity(messages, tools);
+        if Self::should_batch_encode_text(messages, tools) {
+            let mut buf = TokenPlanBuf::new(&self.tokenizer, cap);
+            self.render_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
+            buf.into_token_ids()
+        } else {
+            let mut buf = RenderBuf::new_token_ids_only(&self.tokenizer, cap);
+            self.render_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
+            Ok(buf.into_token_ids())
+        }
     }
 
     fn parse_response(&self, token_ids: &[u32]) -> ParsedResponse {
@@ -287,9 +348,10 @@ impl Renderer for MiniMaxM2Renderer {
             return Ok(None);
         };
 
-        let mut buf = RenderBuf::new(&self.tokenizer, new_messages.len().max(1) * 256);
+        let mut buf =
+            RenderBuf::new_token_ids_only(&self.tokenizer, new_messages.len().max(1) * 256);
         // Trailing \n after the prior turn's [e~[
-        buf.scaffold_text("\n")?;
+        buf.ids(&self.newline_tokens, SCAFFOLD_IDX);
 
         for (i, msg) in new_messages.iter().enumerate() {
             let idx = i as i32;
@@ -302,7 +364,7 @@ impl Renderer for MiniMaxM2Renderer {
                     s.push_str(content);
                     buf.text(&s, idx)?;
                     buf.special(self.eos, idx);
-                    buf.text("\n", idx)?;
+                    buf.ids(&self.newline_tokens, idx);
                 }
                 "system" => {
                     buf.special(self.role, idx);
@@ -311,7 +373,7 @@ impl Renderer for MiniMaxM2Renderer {
                     s.push_str(content);
                     buf.text(&s, idx)?;
                     buf.special(self.eos, idx);
-                    buf.text("\n", idx)?;
+                    buf.ids(&self.newline_tokens, idx);
                 }
                 "tool" => self.emit_tool(&mut buf, new_messages, i, idx)?,
                 _ => return Ok(None),
@@ -319,9 +381,9 @@ impl Renderer for MiniMaxM2Renderer {
         }
 
         buf.scaffold_special(self.role);
-        buf.scaffold_text("ai\n")?;
+        buf.ids(&self.ai_newline_tokens, SCAFFOLD_IDX);
         buf.scaffold_special(self.think);
-        buf.scaffold_text("\n")?;
+        buf.ids(&self.newline_tokens, SCAFFOLD_IDX);
 
         let ext = buf.into_token_ids();
         let mut out = Vec::with_capacity(previous_ids.len() + ext.len());
@@ -338,7 +400,7 @@ impl Renderer for MiniMaxM2Renderer {
 impl MiniMaxM2Renderer {
     fn emit_assistant(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         msg: &Message,
         orig_idx: i32,
         conv_idx: i32,
@@ -369,7 +431,7 @@ impl MiniMaxM2Renderer {
             !reasoning_content.is_empty() && (conv_idx > last_user_index || preserve_thinking);
 
         let after_think: String = if emit_think {
-            buf.text("ai\n", orig_idx)?;
+            buf.ids(&self.ai_newline_tokens, orig_idx);
             buf.special(self.think, orig_idx);
             let mut head = String::with_capacity(reasoning_content.len() + 2);
             head.push('\n');
@@ -431,13 +493,13 @@ impl MiniMaxM2Renderer {
         }
 
         buf.special(self.eos, orig_idx);
-        buf.text("\n", orig_idx)?;
+        buf.ids(&self.newline_tokens, orig_idx);
         Ok(())
     }
 
     fn emit_tool(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         conversation: &[Message],
         conv_idx: usize,
         orig_idx: i32,
@@ -448,7 +510,7 @@ impl MiniMaxM2Renderer {
 
         if !prev_is_tool {
             buf.special(self.role, orig_idx);
-            buf.text("tool", orig_idx)?;
+            buf.ids(&self.tool_tokens, orig_idx);
         }
         let prefix = if prev_is_tool { "" } else { "\n" };
         let suffix = if next_is_tool { "\n" } else { "" };
@@ -463,7 +525,7 @@ impl MiniMaxM2Renderer {
 
         if !next_is_tool {
             buf.special(self.eos, orig_idx);
-            buf.text("\n", orig_idx)?;
+            buf.ids(&self.newline_tokens, orig_idx);
         }
         Ok(())
     }

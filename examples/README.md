@@ -13,6 +13,16 @@ backend:
 The scripts use PEP 723 `uv` headers, so backend dependencies stay local to the
 recipe and do not touch the repo `uv.lock`.
 
+When `RENDERERS_NATIVE` selects a native renderer, the vLLM and SGLang multiturn
+recipes prepare tool schemas once and use a renderer session for first render
+plus bridge. The engine-facing contract stays the same: vLLM receives
+`prompt_token_ids`, and SGLang receives `input_ids`.
+
+For local serving loops that already hold parallel role/content arrays, native
+renderers also expose `render_fast_ids(roles, contents, tools=prepared_tools)`.
+Use the regular message-dict path when structured content parts or multimodal
+items are needed.
+
 ## vLLM Multi-Turn Recipe
 
 ```bash

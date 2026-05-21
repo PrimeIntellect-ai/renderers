@@ -17,11 +17,12 @@
 //!   here.
 
 use crate::bridge::{reject_assistant_in_extension, trim_to_turn_close};
-use crate::emit::RenderBuf;
+use crate::emit::{RenderBuf, TokenPlanBuf, TokenSink};
 use crate::json::{to_string_python, tool_spec_template_value};
 use crate::parsing::qwen3::parse_qwen3;
 use crate::thinking::should_preserve_past_thinking;
 use crate::tokenizer::Tokenizer;
+use crate::tool_cache::ToolTextCache;
 use crate::traits::Renderer;
 use crate::types::{
     Message, ParsedResponse, RenderError, RenderedTokens, SCAFFOLD_IDX, ToolArguments, ToolSpec,
@@ -101,6 +102,7 @@ pub struct Qwen3Renderer {
     user_tokens: Vec<u32>,
     assistant_newline_tokens: Vec<u32>,
     gen_prompt_no_thinking_suffix_tokens: Vec<u32>,
+    tool_text_cache: ToolTextCache,
 }
 
 impl Qwen3Renderer {
@@ -151,6 +153,7 @@ impl Qwen3Renderer {
             user_tokens,
             assistant_newline_tokens,
             gen_prompt_no_thinking_suffix_tokens,
+            tool_text_cache: ToolTextCache::default(),
         })
     }
 
@@ -172,28 +175,42 @@ impl Qwen3Renderer {
 
     fn emit_system_with_tools(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         messages: &[Message],
         tools: &[ToolSpec],
         first_is_system: bool,
     ) -> Result<(), RenderError> {
         let sys_idx: i32 = if first_is_system { 0 } else { SCAFFOLD_IDX };
         buf.special(self.im_start, sys_idx);
-        let mut tool_text = String::from("system\n");
-        if first_is_system {
-            tool_text.push_str(messages[0].text_content());
-            tool_text.push_str("\n\n");
-        }
-        tool_text.push_str(TOOLS_HEADER);
-        for tool in tools {
-            tool_text.push('\n');
-            let spec = tool_spec_template_value(tool);
-            tool_text.push_str(&to_string_python(&spec).map_err(|e| {
-                RenderError::Invalid(format!("tool spec serialisation failed: {e}"))
-            })?);
-        }
-        tool_text.push_str(TOOLS_FOOTER);
-        buf.text(&tool_text, sys_idx)?;
+        let system_content = if first_is_system {
+            messages[0].text_content().to_string()
+        } else {
+            String::new()
+        };
+        let tool_tokens = self.tool_text_cache.get_or_insert_with(
+            &self.tokenizer,
+            tools,
+            u64::from(first_is_system),
+            &system_content,
+            || {
+                let mut tool_text = String::from("system\n");
+                if first_is_system {
+                    tool_text.push_str(&system_content);
+                    tool_text.push_str("\n\n");
+                }
+                tool_text.push_str(TOOLS_HEADER);
+                for tool in tools {
+                    tool_text.push('\n');
+                    let spec = tool_spec_template_value(tool);
+                    tool_text.push_str(&to_string_python(&spec).map_err(|e| {
+                        RenderError::Invalid(format!("tool spec serialisation failed: {e}"))
+                    })?);
+                }
+                tool_text.push_str(TOOLS_FOOTER);
+                Ok(tool_text)
+            },
+        )?;
+        buf.ids(tool_tokens.as_slice(), sys_idx);
         buf.special(self.im_end, sys_idx);
         buf.ids(&self.newline_tokens, sys_idx);
         Ok(())
@@ -201,7 +218,7 @@ impl Qwen3Renderer {
 
     fn emit_system_no_tools(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         messages: &[Message],
     ) -> Result<(), RenderError> {
         buf.special(self.im_start, 0);
@@ -216,7 +233,7 @@ impl Qwen3Renderer {
 
     fn emit_user(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         content: &str,
         idx: i32,
     ) -> Result<(), RenderError> {
@@ -232,7 +249,7 @@ impl Qwen3Renderer {
 
     fn emit_non_initial_system(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         content: &str,
         idx: i32,
     ) -> Result<(), RenderError> {
@@ -248,7 +265,7 @@ impl Qwen3Renderer {
 
     fn emit_tool(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         messages: &[Message],
         msg_idx: usize,
         content: &str,
@@ -279,7 +296,7 @@ impl Qwen3Renderer {
     #[allow(clippy::too_many_arguments)]
     fn emit_assistant(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         msg: &Message,
         msg_idx: usize,
         last_query_index: i32,
@@ -381,9 +398,13 @@ impl Qwen3Renderer {
         base + tools_bonus
     }
 
+    fn should_batch_encode_text(messages: &[Message], tools: Option<&[ToolSpec]>) -> bool {
+        messages.len() >= 8 && tools.is_none_or(<[ToolSpec]>::is_empty)
+    }
+
     fn render_into_buf(
         &self,
-        buf: &mut RenderBuf<'_>,
+        buf: &mut impl TokenSink,
         messages: &[Message],
         tools: Option<&[ToolSpec]>,
         add_generation_prompt: bool,
@@ -482,9 +503,15 @@ impl Renderer for Qwen3Renderer {
         add_generation_prompt: bool,
     ) -> Result<Vec<u32>, RenderError> {
         let cap = Self::estimate_capacity(messages, tools);
-        let mut buf = RenderBuf::new_token_ids_only(&self.tokenizer, cap);
-        self.render_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
-        Ok(buf.into_token_ids())
+        if Self::should_batch_encode_text(messages, tools) {
+            let mut buf = TokenPlanBuf::new(&self.tokenizer, cap);
+            self.render_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
+            buf.into_token_ids()
+        } else {
+            let mut buf = RenderBuf::new_token_ids_only(&self.tokenizer, cap);
+            self.render_into_buf(&mut buf, messages, tools, add_generation_prompt)?;
+            Ok(buf.into_token_ids())
+        }
     }
 
     fn parse_response(&self, token_ids: &[u32]) -> ParsedResponse {

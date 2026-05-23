@@ -34,8 +34,6 @@ _DEFAULT_SYSTEM = "You are Kimi, an AI assistant created by Moonshot AI."
 class KimiK2Renderer:
     """Deterministic message → token renderer for Kimi K2 models."""
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
-
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,

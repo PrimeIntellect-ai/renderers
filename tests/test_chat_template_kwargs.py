@@ -22,8 +22,13 @@ class _FakeRenderer:
         self.preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
 
 
-def test_create_renderer_forwards_model_chat_template_kwargs(monkeypatch):
+def _register_fake_renderer(monkeypatch) -> None:
+    base._populate_registry()
     monkeypatch.setitem(base.RENDERER_REGISTRY, "fake-qwen", _FakeRenderer)
+
+
+def test_create_renderer_forwards_model_chat_template_kwargs(monkeypatch):
+    _register_fake_renderer(monkeypatch)
 
     renderer = base.create_renderer(
         SimpleNamespace(name_or_path="unused"),
@@ -35,7 +40,7 @@ def test_create_renderer_forwards_model_chat_template_kwargs(monkeypatch):
 
 
 def test_create_renderer_rejects_unsupported_model_chat_template_kwargs(monkeypatch):
-    monkeypatch.setitem(base.RENDERER_REGISTRY, "fake-qwen", _FakeRenderer)
+    _register_fake_renderer(monkeypatch)
 
     with pytest.raises(ValueError, match="reasoning_effort"):
         base.create_renderer(
@@ -55,7 +60,7 @@ def test_create_renderer_rejects_constructor_kwargs_in_chat_template_kwargs():
 
 
 def test_create_renderer_auto_forwards_model_chat_template_kwargs(monkeypatch):
-    monkeypatch.setitem(base.RENDERER_REGISTRY, "fake-qwen", _FakeRenderer)
+    _register_fake_renderer(monkeypatch)
     monkeypatch.setitem(base.MODEL_RENDERER_MAP, "fake/model", "fake-qwen")
 
     renderer = base.create_renderer(

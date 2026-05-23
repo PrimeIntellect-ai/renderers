@@ -1285,7 +1285,9 @@ def create_renderer(
                 f"Unknown renderer {renderer!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
             )
         if renderer == "default":
-            return cls(tokenizer, **default_kwargs, **template_kwargs, **preserve_kwargs)
+            return cls(
+                tokenizer, **default_kwargs, **template_kwargs, **preserve_kwargs
+            )
         if default_kwargs:
             logger.info(
                 "tool_parser / reasoning_parser are only consumed by "

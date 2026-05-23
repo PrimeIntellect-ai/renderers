@@ -19,9 +19,7 @@ class _FakeRenderer:
         self.tokenizer = tokenizer
         self.enable_thinking = enable_thinking
         self.preserve_all_thinking = preserve_all_thinking
-        self.preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        self.preserve_thinking_between_tool_calls = preserve_thinking_between_tool_calls
 
 
 def test_create_renderer_forwards_model_chat_template_kwargs(monkeypatch):

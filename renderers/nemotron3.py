@@ -76,6 +76,8 @@ def _render_extra_keys(obj: dict[str, Any], handled_keys: set[str]) -> list[str]
 class Nemotron3Renderer:
     """Deterministic message → token renderer for Nemotron 3 models."""
 
+    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,

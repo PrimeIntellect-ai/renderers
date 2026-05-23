@@ -110,14 +110,15 @@ Each break fragments a rollout into multiple training samples — every fragment
 
 ## Compaction overrides
 
-`create_renderer` and `create_renderer_pool` accept two constructor-only flags:
+`create_renderer` and `create_renderer_pool` accept constructor-time template controls:
 
 ```python
+chat_template_kwargs: dict | None = None
 preserve_all_thinking: bool = False
 preserve_thinking_between_tool_calls: bool = False
 ```
 
-Defaults preserve byte-identity with the model's chat template. Flipping a flag at construction restores `reasoning_content` the template would otherwise drop:
+`chat_template_kwargs` binds template toggles that must be fixed for the renderer instance, such as `enable_thinking` and `reasoning_effort`. Defaults preserve byte-identity with the model's chat template. Flipping a preserve flag at construction restores `reasoning_content` the template would otherwise drop:
 
 - `preserve_all_thinking=True` — every past assistant's reasoning is kept.
 - `preserve_thinking_between_tool_calls=True` — reasoning is kept on assistants in the in-flight tool cycle (no-op for current renderers; reserved for future templates that drop it).

@@ -48,6 +48,8 @@ _TOOLS_FOOTER = (
 class GLM5Renderer:
     """Deterministic message → token renderer for GLM-5 models."""
 
+    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+
     # GLM-5.1 flips this on: even when the most-recent assistant has no
     # reasoning content, the template wraps it with ``<think></think>``
     # instead of just emitting ``</think>`` as a separator. Subclassed in

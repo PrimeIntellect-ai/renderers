@@ -570,6 +570,8 @@ class KimiK25Renderer:
     The tokenizer should be ``moonshotai/Kimi-K2-Instruct`` (same as K2).
     """
 
+    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,

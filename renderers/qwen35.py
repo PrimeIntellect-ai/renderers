@@ -103,6 +103,8 @@ def _detect_enable_thinking_default(tokenizer: PreTrainedTokenizer) -> bool:
 class Qwen35Renderer:
     """Deterministic message → token renderer for Qwen3.5 models."""
 
+    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,

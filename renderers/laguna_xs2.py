@@ -76,6 +76,8 @@ _TOOLS_FOOTER_NO_THINKING = (
 
 
 class LagunaXS2Renderer:
+    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,

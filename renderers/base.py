@@ -1171,6 +1171,7 @@ def create_renderer_pool(
     *,
     tool_parser: str | None = None,
     reasoning_parser: str | None = None,
+    chat_template_kwargs: dict[str, Any] | None = None,
     preserve_all_thinking: bool = False,
     preserve_thinking_between_tool_calls: bool = False,
 ) -> RendererPool:
@@ -1182,6 +1183,11 @@ def create_renderer_pool(
 
     ``tool_parser`` and ``reasoning_parser`` are forwarded to
     ``create_renderer`` when the pool falls back to ``DefaultRenderer``.
+
+    ``chat_template_kwargs`` are forwarded to each renderer constructor.
+    Hand-coded renderers accept only the kwargs they explicitly model
+    (for example ``enable_thinking`` or ``reasoning_effort``); the default
+    renderer forwards them to ``tokenizer.apply_chat_template``.
 
     ``preserve_all_thinking`` and ``preserve_thinking_between_tool_calls``
     are forwarded to each pooled renderer's constructor — every slot in
@@ -1200,6 +1206,7 @@ def create_renderer_pool(
             renderer=renderer,
             tool_parser=tool_parser,
             reasoning_parser=reasoning_parser,
+            chat_template_kwargs=chat_template_kwargs,
             preserve_all_thinking=preserve_all_thinking,
             preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
         )
@@ -1213,6 +1220,7 @@ def create_renderer(
     *,
     tool_parser: str | None = None,
     reasoning_parser: str | None = None,
+    chat_template_kwargs: dict[str, Any] | None = None,
     preserve_all_thinking: bool = False,
     preserve_thinking_between_tool_calls: bool = False,
 ) -> Renderer:
@@ -1229,6 +1237,11 @@ def create_renderer(
                   have their own parsing wired in.
         reasoning_parser: Name of a reasoning parser registered in
                   ``renderers.parsers``. Only consumed by DefaultRenderer.
+        chat_template_kwargs: Template-control kwargs bound to the renderer.
+                  Hand-coded renderers accept only the kwargs they explicitly
+                  model (for example ``enable_thinking`` or
+                  ``reasoning_effort``); DefaultRenderer forwards all kwargs
+                  to ``tokenizer.apply_chat_template``.
         preserve_all_thinking: Forwarded to the renderer's constructor.
                   When ``True``, the instance restores ``reasoning_content``
                   the chat template would otherwise drop on historical
@@ -1254,6 +1267,7 @@ def create_renderer(
         "preserve_all_thinking": preserve_all_thinking,
         "preserve_thinking_between_tool_calls": preserve_thinking_between_tool_calls,
     }
+    template_kwargs = dict(chat_template_kwargs or {})
 
     if renderer != "auto":
         cls = RENDERER_REGISTRY.get(renderer)
@@ -1262,7 +1276,7 @@ def create_renderer(
                 f"Unknown renderer {renderer!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
             )
         if renderer == "default":
-            return cls(tokenizer, **default_kwargs, **preserve_kwargs)
+            return cls(tokenizer, **default_kwargs, **template_kwargs, **preserve_kwargs)
         if default_kwargs:
             logger.info(
                 "tool_parser / reasoning_parser are only consumed by "
@@ -1270,7 +1284,11 @@ def create_renderer(
                 "built-in behavior.",
                 renderer,
             )
-        return cls(tokenizer, **preserve_kwargs)
+        return cls(
+            tokenizer,
+            **_model_renderer_chat_template_kwargs(renderer, cls, template_kwargs),
+            **preserve_kwargs,
+        )
 
     # Auto-detect from model name via exact match on the canonical HF id.
     # Fine-tunes and renamed checkpoints miss on purpose — their chat
@@ -1280,7 +1298,15 @@ def create_renderer(
     model_name = getattr(tokenizer, "name_or_path", "")
     renderer_name = MODEL_RENDERER_MAP.get(model_name)
     if renderer_name is not None:
-        return RENDERER_REGISTRY[renderer_name](tokenizer, **preserve_kwargs)
+        return RENDERER_REGISTRY[renderer_name](
+            tokenizer,
+            **_model_renderer_chat_template_kwargs(
+                renderer_name,
+                RENDERER_REGISTRY[renderer_name],
+                template_kwargs,
+            ),
+            **preserve_kwargs,
+        )
 
     # No match. For VLMs this must be fatal: DefaultRenderer only knows
     # ``apply_chat_template`` + text tokens, so it would silently drop
@@ -1307,7 +1333,25 @@ def create_renderer(
         "reasoning_parser=<name> to enable structured output parsing.",
         model_name or "<unnamed tokenizer>",
     )
-    return RENDERER_REGISTRY["default"](tokenizer, **default_kwargs, **preserve_kwargs)
+    return RENDERER_REGISTRY["default"](
+        tokenizer, **default_kwargs, **template_kwargs, **preserve_kwargs
+    )
+
+
+def _model_renderer_chat_template_kwargs(
+    renderer: str, renderer_cls: type, chat_template_kwargs: dict[str, Any]
+) -> dict[str, Any]:
+    if not chat_template_kwargs:
+        return {}
+
+    allowed = set(getattr(renderer_cls, "CHAT_TEMPLATE_KWARGS", ()))
+    unsupported = sorted(set(chat_template_kwargs) - allowed)
+    if unsupported:
+        raise ValueError(
+            f"renderer={renderer!r} does not support chat_template_kwargs: "
+            f"{', '.join(unsupported)}"
+        )
+    return dict(chat_template_kwargs)
 
 
 # ---------------------------------------------------------------------------

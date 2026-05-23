@@ -50,6 +50,8 @@ _TOOLS_FOOTER = (
 class GLM45Renderer:
     """Deterministic message → token renderer for GLM-4.5 Air models."""
 
+    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,

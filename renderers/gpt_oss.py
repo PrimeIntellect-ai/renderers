@@ -118,6 +118,8 @@ def _arguments_to_str(arguments: Any) -> str:
 class GptOssRenderer:
     """Deterministic message → token renderer for OpenAI gpt-oss (harmony)."""
 
+    CHAT_TEMPLATE_KWARGS = frozenset({"reasoning_effort"})
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,

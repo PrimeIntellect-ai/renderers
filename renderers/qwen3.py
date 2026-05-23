@@ -45,6 +45,8 @@ _TOOLS_FOOTER = (
 class Qwen3Renderer:
     """Deterministic message → token renderer for Qwen3 models."""
 
+    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,

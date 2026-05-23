@@ -47,6 +47,15 @@ def test_create_renderer_rejects_unsupported_model_chat_template_kwargs(monkeypa
         )
 
 
+def test_create_renderer_rejects_constructor_kwargs_in_chat_template_kwargs():
+    with pytest.raises(ValueError, match="preserve_all_thinking"):
+        base.create_renderer(
+            SimpleNamespace(name_or_path="unused"),
+            renderer="default",
+            chat_template_kwargs={"preserve_all_thinking": True},
+        )
+
+
 def test_create_renderer_auto_forwards_model_chat_template_kwargs(monkeypatch):
     monkeypatch.setitem(base.RENDERER_REGISTRY, "fake-qwen", _FakeRenderer)
     monkeypatch.setitem(base.MODEL_RENDERER_MAP, "fake/model", "fake-qwen")

@@ -870,6 +870,14 @@ class RendererPool:
 
 
 RENDERER_REGISTRY: dict[str, type] = {}
+_RENDERER_CONSTRUCTOR_KWARGS = frozenset(
+    {
+        "tool_parser",
+        "reasoning_parser",
+        "preserve_all_thinking",
+        "preserve_thinking_between_tool_calls",
+    }
+)
 
 # Exact canonical HF model names → renderer. We do NOT use prefix
 # matching because models with the same architecture may ship different
@@ -1276,6 +1284,7 @@ def create_renderer(
                 f"Unknown renderer {renderer!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
             )
         if renderer == "default":
+            _reject_renderer_constructor_kwargs(renderer, template_kwargs)
             return cls(tokenizer, **default_kwargs, **template_kwargs, **preserve_kwargs)
         if default_kwargs:
             logger.info(
@@ -1333,9 +1342,21 @@ def create_renderer(
         "reasoning_parser=<name> to enable structured output parsing.",
         model_name or "<unnamed tokenizer>",
     )
+    _reject_renderer_constructor_kwargs("default", template_kwargs)
     return RENDERER_REGISTRY["default"](
         tokenizer, **default_kwargs, **template_kwargs, **preserve_kwargs
     )
+
+
+def _reject_renderer_constructor_kwargs(
+    renderer: str, chat_template_kwargs: dict[str, Any]
+) -> None:
+    reserved = sorted(set(chat_template_kwargs) & _RENDERER_CONSTRUCTOR_KWARGS)
+    if reserved:
+        raise ValueError(
+            f"renderer={renderer!r} chat_template_kwargs cannot contain "
+            f"renderer constructor kwargs: {', '.join(reserved)}"
+        )
 
 
 def _model_renderer_chat_template_kwargs(
@@ -1344,6 +1365,7 @@ def _model_renderer_chat_template_kwargs(
     if not chat_template_kwargs:
         return {}
 
+    _reject_renderer_constructor_kwargs(renderer, chat_template_kwargs)
     allowed = set(getattr(renderer_cls, "CHAT_TEMPLATE_KWARGS", ()))
     unsupported = sorted(set(chat_template_kwargs) - allowed)
     if unsupported:

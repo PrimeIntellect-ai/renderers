@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import enum
+import io
 import logging
 import queue
 import threading
@@ -1049,6 +1051,10 @@ FASTOKENS_INCOMPATIBLE: frozenset[str] = frozenset(
 )
 
 
+_FASTOKENS_PATCH_LOCK = threading.Lock()
+_FASTOKENS_ANNOUNCED = False
+
+
 def _patched_load(model_name_or_path: str, **kwargs):
     """Run ``AutoTokenizer.from_pretrained`` with fastokens patched in
     process-locally — patch around the load, unpatch right after.
@@ -1058,15 +1064,39 @@ def _patched_load(model_name_or_path: str, **kwargs):
     fastokens for ``encode``/``decode`` while subsequent
     ``AutoTokenizer.from_pretrained`` calls (outside our control) go
     back to vanilla. This keeps the global side effect minimal.
+
+    fastokens itself prints ``[fastokens] patch_transformers: ...`` to
+    stdout on every patch/unpatch call. Building a pool of size N would
+    therefore emit ~N lines (more under thread contention, where some
+    threads see ``already patched``). We swallow those prints under a
+    lock — ``contextlib.redirect_stdout`` swaps ``sys.stdout``
+    process-wide, so the lock keeps unrelated stdout writes from other
+    threads from disappearing into our buffer. The patch/unpatch calls
+    are cheap; only the brief patch+unpatch is serialized, the actual
+    ``from_pretrained`` still runs concurrently across pool slots. A
+    single ``logger.info`` is emitted on the first patch so the fast
+    path is still discoverable in logs.
     """
     import fastokens
     from transformers import AutoTokenizer
 
-    fastokens.patch_transformers()
+    global _FASTOKENS_ANNOUNCED
+
+    with _FASTOKENS_PATCH_LOCK:
+        with contextlib.redirect_stdout(io.StringIO()):
+            fastokens.patch_transformers()
+        if not _FASTOKENS_ANNOUNCED:
+            logger.info(
+                "fastokens enabled — tokenizers load through the Rust BPE "
+                "fast path (~10x encode speedup)."
+            )
+            _FASTOKENS_ANNOUNCED = True
     try:
         return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
     finally:
-        fastokens.unpatch_transformers()
+        with _FASTOKENS_PATCH_LOCK:
+            with contextlib.redirect_stdout(io.StringIO()):
+                fastokens.unpatch_transformers()
 
 
 def load_tokenizer(

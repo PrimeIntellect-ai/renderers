@@ -167,3 +167,45 @@ def test_fallback_on_fastokens_load_error(monkeypatch):
     assert "Shim" not in _backend_class_name(tok)
     # Still works.
     assert len(tok.encode("hi", add_special_tokens=False)) > 0
+
+
+# ---------------------------------------------------------------------------
+# Print suppression: fastokens itself prints "[fastokens]
+# patch_transformers: ..." on every patch/unpatch call. Building a
+# RendererPool of size N would emit ~N lines (the pool factory calls
+# load_tokenizer once per slot). load_tokenizer swallows that stdout
+# chatter and emits a single INFO log on the first patch instead.
+# ---------------------------------------------------------------------------
+
+
+def test_no_fastokens_stdout_chatter(capsys, caplog):
+    """``load_tokenizer`` must not leak ``[fastokens]`` prints onto
+    stdout, and must emit exactly one INFO log per process announcing
+    the fast path (not once per call)."""
+    import logging
+
+    import renderers.base as rb
+
+    # Reset the process-wide "announced" flag so this test sees the
+    # first-call log even if another test loaded a tokenizer earlier.
+    rb._FASTOKENS_ANNOUNCED = False
+
+    with caplog.at_level(logging.INFO, logger="renderers.base"):
+        load_tokenizer(_FAST_MODEL)
+        load_tokenizer(_FAST_MODEL)
+
+    captured = capsys.readouterr()
+    assert "[fastokens]" not in captured.out, (
+        f"fastokens print leaked to stdout: {captured.out!r}"
+    )
+    assert "[fastokens]" not in captured.err, (
+        f"fastokens print leaked to stderr: {captured.err!r}"
+    )
+
+    fastokens_info = [
+        r for r in caplog.records if "fastokens enabled" in r.getMessage()
+    ]
+    assert len(fastokens_info) == 1, (
+        f"expected exactly one fastokens INFO log across two loads, "
+        f"got {len(fastokens_info)}"
+    )

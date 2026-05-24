@@ -431,19 +431,27 @@ def test_create_renderer_records_flag_state(model_name, renderer_name, tokenizer
 # ---------------------------------------------------------------------------
 
 
-def test_glm5_constructor_rejects_clear_thinking():
-    """``clear_thinking`` was a chat-template-kwarg pass-through. It is
-    superseded by the renderer-agnostic ``preserve_all_thinking`` override
-    and must no longer be accepted by the constructor — its default-True
-    semantics are now baked into the render gate."""
+def test_glm5_constructor_accepts_clear_thinking():
+    """``clear_thinking`` is a chat-template-kwarg pass-through.
+
+    The GLM-5 / GLM-5.1 Jinja templates gate historical reasoning on
+    ``clear_thinking is defined and not clear_thinking``, so the
+    renderer must accept the same kwarg name as both a constructor
+    arg AND a ``chat_template_kwargs`` entry — otherwise
+    ``apply_chat_template(messages, clear_thinking=False)`` and
+    ``create_renderer(..., chat_template_kwargs={"clear_thinking":
+    False})`` diverge. Parity is asserted in
+    ``test_chat_template_kwargs_parity``; this test pins the
+    constructor surface (a previous revision removed this kwarg in
+    favour of ``preserve_all_thinking``, which is broader but not
+    semantically equivalent — see the chat-template audit notes)."""
     from renderers.base import load_tokenizer
     from renderers.glm5 import GLM5Renderer
 
     tok = load_tokenizer("zai-org/GLM-5")
-    with pytest.raises(TypeError):
-        GLM5Renderer(tok, clear_thinking=True)  # type: ignore[call-arg]
-    with pytest.raises(TypeError):
-        GLM5Renderer(tok, clear_thinking=False)  # type: ignore[call-arg]
+    # Both values must be accepted without raising.
+    GLM5Renderer(tok, clear_thinking=True)
+    GLM5Renderer(tok, clear_thinking=False)
 
 
 def test_qwen36_constructor_rejects_preserve_thinking():

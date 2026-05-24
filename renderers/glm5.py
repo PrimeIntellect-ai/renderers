@@ -48,7 +48,7 @@ _TOOLS_FOOTER = (
 class GLM5Renderer:
     """Deterministic message → token renderer for GLM-5 models."""
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking", "clear_thinking"})
 
     # GLM-5.1 flips this on: even when the most-recent assistant has no
     # reasoning content, the template wraps it with ``<think></think>``
@@ -61,11 +61,20 @@ class GLM5Renderer:
         tokenizer: PreTrainedTokenizer,
         *,
         enable_thinking: bool = True,
+        clear_thinking: bool = True,
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
     ):
         self._tokenizer = tokenizer
         self._enable_thinking = enable_thinking
+        # ``clear_thinking=False`` keeps the ``<think>{reasoning}</think>``
+        # wrap on past-cycle assistants too. Mirrors the chat template's
+        # ``clear_thinking is defined and not clear_thinking`` gate. The
+        # renderer's ``preserve_all_thinking`` constructor kwarg is a
+        # broader override (preserves reasoning across more situations
+        # via ``should_preserve_past_thinking``); the two compose with
+        # OR. Default True matches the template's default behaviour.
+        self._clear_thinking = clear_thinking
         self._preserve_all_thinking = preserve_all_thinking
         self._preserve_thinking_between_tool_calls = (
             preserve_thinking_between_tool_calls
@@ -465,9 +474,14 @@ class GLM5Renderer:
         # ``preserve_thinking`` is the override output of
         # ``should_preserve_past_thinking`` — it adds historical assistants
         # back when the renderer was constructed with
-        # ``preserve_all_thinking=True``.
+        # ``preserve_all_thinking=True``. ``clear_thinking=False`` mirrors
+        # the template's per-call ``clear_thinking is defined and not
+        # clear_thinking`` gate: a chat_template_kwarg surface for the
+        # same behaviour, gated explicitly by the caller per render.
         include_thinking = (
-            msg_idx > last_user_index or preserve_thinking
+            msg_idx > last_user_index
+            or preserve_thinking
+            or not self._clear_thinking
         ) and reasoning_content
 
         if include_thinking:

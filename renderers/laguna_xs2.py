@@ -76,18 +76,28 @@ _TOOLS_FOOTER_NO_THINKING = (
 
 
 class LagunaXS2Renderer:
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking", "render_assistant_messages_raw"})
 
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
         *,
         enable_thinking: bool = False,
+        render_assistant_messages_raw: bool = False,
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
     ):
         self._tokenizer = tokenizer
         self._enable_thinking = enable_thinking
+        # ``render_assistant_messages_raw=True`` switches assistant
+        # rendering to a passthrough mode: the gen-prompt prefix
+        # (``<think>`` / ``</think>``) is only prepended if the content
+        # doesn't already start with it, the content bytes are emitted
+        # verbatim (no reasoning extraction, no tool-call XML
+        # synthesis), and the closing ``</assistant>`` is only
+        # appended if the content doesn't already end with it. Mirrors
+        # the upstream Jinja's ``render_assistant_messages_raw`` gate.
+        self._render_assistant_messages_raw = render_assistant_messages_raw
         # Accepted for protocol uniformity. The chat template renders
         # reasoning on every assistant message regardless, so flipping
         # these flags has no effect on the byte-level output.
@@ -449,6 +459,15 @@ class LagunaXS2Renderer:
         emit_text,
         emit_text_segments,
     ) -> None:
+        if self._render_assistant_messages_raw:
+            self._render_assistant_raw(
+                msg_idx,
+                content,
+                emit_special=emit_special,
+                emit_text=emit_text,
+            )
+            return
+
         reasoning_content = ""
         if isinstance(msg.get("reasoning_content"), str):
             reasoning_content = msg["reasoning_content"]
@@ -519,4 +538,60 @@ class LagunaXS2Renderer:
         # the sampled stream. The trailing ``\n`` is template-appended
         # between turns and never sampled.
         emit_special(self._assistant_end, msg_idx, is_sampled=True, is_content=True)
+        emit_text("\n", msg_idx, is_sampled=False, is_content=False)
+
+    def _render_assistant_raw(
+        self,
+        msg_idx: int,
+        content: str,
+        *,
+        emit_special,
+        emit_text,
+    ) -> None:
+        """Passthrough assistant rendering matching the Jinja template's
+        ``render_assistant_messages_raw`` branch.
+
+        Three pieces, each conditional on the content's own bytes:
+
+        - Open the assistant turn (``<assistant>\\n``) — always.
+        - Prepend the gen-prompt prefix (``<think>`` if
+          ``enable_thinking``, else ``</think>``) only when ``content``
+          doesn't already start with it. This lets callers ship content
+          that already includes the prefix (e.g. raw rollouts) without
+          duplicating it.
+        - Emit ``content`` verbatim. ``</think>`` and ``</assistant>``
+          land inside the content as added-vocab specials via the
+          tokenizer's default ``split_special_tokens=False`` behaviour,
+          matching what ``apply_chat_template`` does when it tokenises
+          the rendered string.
+        - Append ``\\n</assistant>`` only when ``content`` doesn't end
+          with ``</assistant>`` (or ``</assistant>\\n``), then always
+          emit the inter-turn ``\\n``.
+
+        Tool calls are deliberately ignored in raw mode — the template
+        also ignores ``message.tool_calls`` here. Callers shipping raw
+        content are expected to embed any tool-call payload in the
+        content string themselves.
+        """
+        emit_special(self._assistant, msg_idx, is_sampled=False, is_content=False)
+        emit_text("\n", msg_idx, is_sampled=False, is_content=False)
+
+        if self._enable_thinking:
+            if not content.startswith("<think>"):
+                emit_special(self._think, msg_idx, is_sampled=False, is_content=False)
+        else:
+            if not content.startswith("</think>"):
+                emit_special(
+                    self._think_end, msg_idx, is_sampled=False, is_content=False
+                )
+
+        emit_text(content, msg_idx, is_sampled=True, is_content=True)
+
+        if not (
+            content.endswith("</assistant>\n") or content.endswith("</assistant>")
+        ):
+            emit_text("\n", msg_idx, is_sampled=False, is_content=False)
+            emit_special(
+                self._assistant_end, msg_idx, is_sampled=True, is_content=True
+            )
         emit_text("\n", msg_idx, is_sampled=False, is_content=False)

@@ -76,18 +76,27 @@ def _render_extra_keys(obj: dict[str, Any], handled_keys: set[str]) -> list[str]
 class Nemotron3Renderer:
     """Deterministic message → token renderer for Nemotron 3 models."""
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking", "truncate_history_thinking"})
 
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
         *,
         enable_thinking: bool = True,
+        truncate_history_thinking: bool = True,
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
     ):
         self._tokenizer = tokenizer
         self._enable_thinking = enable_thinking
+        # ``truncate_history_thinking=False`` keeps historical assistants'
+        # ``<think>{reasoning}</think>`` instead of collapsing to the
+        # empty ``<think></think>`` marker. Mirrors the chat template's
+        # ``truncate_history_thinking`` gate. Composes with
+        # ``preserve_all_thinking`` via OR — either flag enables
+        # historical thinking preservation. Default True matches the
+        # template's default behaviour.
+        self._truncate_history_thinking = truncate_history_thinking
         self._preserve_all_thinking = preserve_all_thinking
         self._preserve_thinking_between_tool_calls = (
             preserve_thinking_between_tool_calls
@@ -643,7 +652,9 @@ class Nemotron3Renderer:
         # <tool_call>, whether the content is empty or not.
         content_suffix = "\n" if tool_calls else ""
 
-        if reasoning_content and (is_last_turn or preserve_thinking):
+        if reasoning_content and (
+            is_last_turn or preserve_thinking or not self._truncate_history_thinking
+        ):
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
             emit_text(
                 "\n" + reasoning_content + "\n",

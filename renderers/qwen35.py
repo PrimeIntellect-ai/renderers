@@ -103,7 +103,7 @@ def _detect_enable_thinking_default(tokenizer: PreTrainedTokenizer) -> bool:
 class Qwen35Renderer:
     """Deterministic message → token renderer for Qwen3.5 models."""
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking", "add_vision_id"})
 
     def __init__(
         self,
@@ -111,6 +111,7 @@ class Qwen35Renderer:
         *,
         processor: Any = None,
         enable_thinking: bool | None = None,
+        add_vision_id: bool = False,
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
         image_cache_max: int = 256,
@@ -120,6 +121,13 @@ class Qwen35Renderer:
         if enable_thinking is None:
             enable_thinking = _detect_enable_thinking_default(tokenizer)
         self._enable_thinking = enable_thinking
+        # ``add_vision_id=True`` matches the Jinja's ``image_count`` /
+        # ``video_count`` namespaces: each image / video placeholder is
+        # prefixed with ``Picture N: `` / ``Video N: `` where N is a
+        # 1-indexed counter running across the conversation (in the main
+        # render loop — system message renders never increment because
+        # the template raises on vision in system content).
+        self._add_vision_id = add_vision_id
         self._preserve_all_thinking = preserve_all_thinking
         self._preserve_thinking_between_tool_calls = (
             preserve_thinking_between_tool_calls
@@ -298,6 +306,13 @@ class Qwen35Renderer:
         mm_hashes: dict[str, list[str]] = {}
         mm_placeholders: dict[str, list[PlaceholderRange]] = {}
         mm_items: dict[str, list[dict[str, Any]]] = {}
+        # 1-indexed counters for ``add_vision_id`` (mirrors the Jinja's
+        # ``image_count`` / ``video_count`` namespaces). Increment only
+        # in the main message loop — the template renders the system
+        # message with ``do_vision_count=False`` and would raise on
+        # vision in system content anyway, so the renderer's
+        # ``emit_image`` is only reached from user / tool emission paths.
+        vision_counts = {"image": 0, "video": 0}
 
         def emit_ids(
             ids: list[int], msg_idx: int, *, is_sampled: bool, is_content: bool
@@ -352,6 +367,14 @@ class Qwen35Renderer:
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # specials are template scaffold.
             _, out, n, h = self._process_image(part)
+            vision_counts["image"] += 1
+            if self._add_vision_id:
+                emit_text(
+                    f"Picture {vision_counts['image']}: ",
+                    msg_idx,
+                    is_sampled=False,
+                    is_content=False,
+                )
             emit_special(
                 self._vision_start, msg_idx, is_sampled=False, is_content=False
             )
@@ -624,6 +647,21 @@ class Qwen35Renderer:
         new_hashes: dict[str, list[str]] = {}
         new_placeholders: dict[str, list[PlaceholderRange]] = {}
         new_items: dict[str, list[dict[str, Any]]] = {}
+        # Seed the ``add_vision_id`` counters from prior-turn images / videos
+        # so the bridged turn's first placeholder gets ``Picture {prev+1}``.
+        # Bridges can't recover the count from raw token ids, so callers
+        # must thread ``previous_multi_modal_data`` through to keep
+        # ``add_vision_id`` parity across turns.
+        prev_image_count = 0
+        prev_video_count = 0
+        if previous_multi_modal_data is not None:
+            prev_image_count = len(
+                previous_multi_modal_data.mm_items.get("image", [])
+            )
+            prev_video_count = len(
+                previous_multi_modal_data.mm_items.get("video", [])
+            )
+        vision_counts = {"image": prev_image_count, "video": prev_video_count}
 
         def emit_special(
             token_id: int,
@@ -666,6 +704,9 @@ class Qwen35Renderer:
 
         def emit_image(part: dict[str, Any], msg_idx: int = -1) -> None:
             _, out, n, h = self._process_image(part)
+            vision_counts["image"] += 1
+            if self._add_vision_id:
+                emit_text(f"Picture {vision_counts['image']}: ", msg_idx)
             emit_special(self._vision_start, msg_idx)
             offset = len(tokens)
             for _ in range(n):

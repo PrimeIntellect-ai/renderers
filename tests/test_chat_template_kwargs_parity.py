@@ -71,6 +71,33 @@ _KWARG_VALUES: dict[str, list[Any]] = {
     # gate.
     "thinking": [True, False],
     "reasoning_effort": ["low", "medium", "high"],
+    # GLM-5 / GLM-5.1 — ``clear_thinking=False`` preserves the
+    # ``<think>{reasoning}</think>`` wrap on historical assistants too
+    # (default True collapses past-cycle reasoning to ``</think>``).
+    "clear_thinking": [True, False],
+    # Nemotron-3 — mirror of ``clear_thinking`` under a different name.
+    # ``truncate_history_thinking=False`` keeps reasoning on historical
+    # assistants instead of collapsing to ``<think></think>``.
+    "truncate_history_thinking": [True, False],
+    # MiniMax-M2 — fallback persona string when no system message is
+    # supplied. Two arbitrary values to verify the renderer threads the
+    # exact bytes through (whitespace included).
+    "model_identity": [
+        "You are a helpful assistant. Your name is MiniMax-M2.5 and is built by MiniMax.",
+        "You are CustomBot, a research assistant.",
+    ],
+    # Laguna-XS.2 — switches assistant rendering to a verbatim
+    # passthrough mode. The renderer paths diverge significantly under
+    # this flag, so both values are exercised.
+    "render_assistant_messages_raw": [True, False],
+    # Qwen3.5 / Qwen3.6 / Qwen3-VL — when True, prefix each image /
+    # video placeholder with ``Picture N: `` / ``Video N: ``.
+    "add_vision_id": [True, False],
+    # gpt-oss — pin to a fixed date so the renderer's preamble matches
+    # the harmony oracle built with the same date. The default
+    # ``today's date`` is intentionally avoided here so the assertion
+    # doesn't flake on a UTC midnight crossing.
+    "conversation_start_date": ["2025-01-15"],
 }
 
 
@@ -166,6 +193,35 @@ _MESSAGE_SHAPES = [
             {"role": "assistant", "content": "It is 20 degrees."},
         ],
         {"tools": TOOLS, "add_generation_prompt": True},
+    ),
+    # ``no_system_user_gen``: no system message — exercises the
+    # template fallback persona (e.g. MiniMax-M2's ``model_identity``).
+    (
+        "no_system_user_gen",
+        [{"role": "user", "content": "Hi"}],
+        {"add_generation_prompt": True},
+    ),
+    # ``historical_reasoning``: multi-turn with ``reasoning_content`` on
+    # a historical assistant. Exercises ``clear_thinking`` /
+    # ``truncate_history_thinking`` (which only diverge from default
+    # behaviour when a past-cycle assistant carries reasoning).
+    (
+        "historical_reasoning",
+        [
+            {"role": "user", "content": "What is 2+2?"},
+            {
+                "role": "assistant",
+                "reasoning_content": "Adding small ints.",
+                "content": "4",
+            },
+            {"role": "user", "content": "Now 3+3?"},
+            {
+                "role": "assistant",
+                "reasoning_content": "Same idea.",
+                "content": "6",
+            },
+        ],
+        {},
     ),
 ]
 
@@ -336,13 +392,14 @@ def _gpt_oss_renderer(kwarg: str, value: Any):
     from renderers.gpt_oss import GptOssRenderer
 
     tok = _tokenizer("openai/gpt-oss-20b")
-    # Pin the conversation start date so the rendered preamble matches
-    # the harmony oracle built with the same fixed date.
-    return GptOssRenderer(
-        tok,
-        conversation_start_date=_DATE_FOR_PARITY,
-        **{kwarg: value},
-    )
+    # Pin a default conversation_start_date so the rendered preamble
+    # matches the harmony oracle's fixed date. Any explicit
+    # ``conversation_start_date`` from the kwarg-under-test overrides
+    # it (the per-kwarg branch replays the same value into the oracle
+    # below so the assertion still holds).
+    kwargs: dict[str, Any] = {"conversation_start_date": _DATE_FOR_PARITY}
+    kwargs[kwarg] = value
+    return GptOssRenderer(tok, **kwargs)
 
 
 def _harmony_expected(kwarg: str, value: Any, messages: list[dict[str, Any]]) -> list[int]:
@@ -356,6 +413,8 @@ def _harmony_expected(kwarg: str, value: Any, messages: list[dict[str, Any]]) ->
         load_harmony_encoding,
     )
 
+    # Base preamble pins the same default date the renderer fixture
+    # uses so the unrelated kwargs don't drift on date semantics.
     sys_content = SystemContent.new().with_conversation_start_date(_DATE_FOR_PARITY)
     if kwarg == "reasoning_effort":
         effort_enum = {
@@ -364,6 +423,9 @@ def _harmony_expected(kwarg: str, value: Any, messages: list[dict[str, Any]]) ->
             "high": ReasoningEffort.HIGH,
         }[value]
         sys_content = sys_content.with_reasoning_effort(effort_enum)
+    elif kwarg == "conversation_start_date":
+        # Override the pinned date with the value under test.
+        sys_content = sys_content.with_conversation_start_date(value)
     else:
         raise AssertionError(
             f"Harmony oracle: unhandled gpt-oss chat_template_kwarg {kwarg!r}. "

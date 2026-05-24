@@ -682,6 +682,98 @@ def test_tool_response_image_byte_parity(mm_model_name, modality, tiny_image):
         )
 
 
+def _qwen_vl_processor_input_ids_with_kwargs(
+    processor, messages, add_gp, **template_kwargs
+):
+    """Variant of ``_qwen_vl_processor_input_ids`` that forwards
+    ``template_kwargs`` to ``apply_chat_template`` so the parity oracle
+    can exercise the same chat_template_kwargs flag the renderer was
+    constructed with (e.g. ``add_vision_id=True``).
+    """
+    text = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=add_gp,
+        **template_kwargs,
+    )
+    images = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if (
+                item.get("type") in ("image", "image_url")
+                or "image" in item
+                or "image_url" in item
+            ):
+                if "image" in item and not isinstance(item["image"], dict):
+                    images.append(item["image"])
+    return processor(images=images, text=text, return_tensors="pt")["input_ids"][
+        0
+    ].tolist()
+
+
+# ``add_vision_id`` is exposed on the Qwen-VL family renderers
+# (Qwen3.5 / Qwen3.6 / Qwen3-VL) per the chat-template audit. Kimi K2.5
+# / K2.6's template has no equivalent toggle, so it's intentionally
+# absent from ``CHAT_TEMPLATE_KWARGS`` there and skipped here.
+_ADD_VISION_ID_CASES = [
+    (m, mo)
+    for m, mo in _CASES
+    if mo == "image" and _detect_family(m) == "qwen_vl"
+]
+
+
+@pytest.mark.parametrize(
+    "mm_model_name,modality",
+    _ADD_VISION_ID_CASES,
+    ids=[f"{m}|{mo}" for m, mo in _ADD_VISION_ID_CASES],
+)
+@pytest.mark.parametrize("add_vision_id", [True, False])
+def test_add_vision_id_parity_vs_processor(
+    mm_model_name, modality, add_vision_id, tiny_image
+):
+    """Parity for ``add_vision_id`` across image-bearing shapes.
+
+    When True, the renderer must prefix each image / video placeholder
+    with ``Picture N: `` / ``Video N: `` matching the Jinja template's
+    ``image_count`` / ``video_count`` namespaces. When False, the
+    prefix is suppressed entirely. Both branches must reproduce
+    ``processor.apply_chat_template(messages, add_vision_id=<value>)``
+    token-for-token after image expansion.
+    """
+    if not _hf_snapshot_cached(mm_model_name):
+        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+
+    kit = _modality_kit(modality, mm_model_name)
+    tokenizer, processor, _ = _load_processor_and_renderer(mm_model_name)
+    # Build a fresh renderer for the kwarg under test (the shared
+    # fixture has ``add_vision_id=False`` baked in).
+    renderer = create_renderer(
+        tokenizer,
+        renderer="auto",
+        chat_template_kwargs={"add_vision_id": add_vision_id},
+    )
+    if hasattr(renderer, "_processor") and renderer._processor is None:
+        renderer._processor = processor
+
+    for case in _build_cases(kit["make_part"], tiny_image):
+        messages, add_gp = case.values
+        ours = renderer.render_ids(messages, add_generation_prompt=add_gp)
+        theirs = _qwen_vl_processor_input_ids_with_kwargs(
+            processor, messages, add_gp, add_vision_id=add_vision_id
+        )
+        assert ours == theirs, (
+            f"{mm_model_name} / add_vision_id={add_vision_id} / "
+            f"case={case.id}: renderer diverges from processor.\n"
+            f"  ours[:80]={ours[:80]}\n  theirs[:80]={theirs[:80]}\n"
+            f"  len(ours)={len(ours)} len(theirs)={len(theirs)}"
+        )
+
+
 def test_qwen3_vl_renderer_exposes_image_modality():
     """The flagship multimodal renderer is concretely Qwen3VLRenderer.
 

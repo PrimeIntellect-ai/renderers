@@ -34,6 +34,13 @@ _DEFAULT_SYSTEM = "You are Kimi, an AI assistant created by Moonshot AI."
 class KimiK2Renderer:
     """Deterministic message → token renderer for Kimi K2 models."""
 
+    # Kimi K2's chat template has no template-honored kwargs (no
+    # ``thinking`` / ``enable_thinking`` / ``reasoning`` references —
+    # the template renders ``content`` verbatim with no reasoning
+    # branch). Declared explicitly so the audit is visible at the class
+    # surface rather than implicit through ``getattr(cls, ..., ())``.
+    CHAT_TEMPLATE_KWARGS = frozenset()
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,

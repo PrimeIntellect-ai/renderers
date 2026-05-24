@@ -296,6 +296,10 @@ class Qwen3VLRenderer:
             the renderer lazy-loads it via ``AutoProcessor.from_pretrained``
             keyed off ``tokenizer.name_or_path`` the first time a
             multimodal part is seen.
+        add_vision_id: When True, prefix each ``<|vision_start|>`` placeholder
+            with ``"Picture N: "`` (or ``"Video N: "``) where N is a
+            1-indexed counter that runs across the entire conversation.
+            Mirrors the upstream Jinja's ``add_vision_id`` toggle.
         preserve_all_thinking / preserve_thinking_between_tool_calls:
             No-ops on Qwen3-VL — the chat template already drops past
             ``<think>`` blocks unconditionally. Stored for Protocol parity.
@@ -305,17 +309,21 @@ class Qwen3VLRenderer:
             with large image sets where the working set exceeds the cap.
     """
 
+    CHAT_TEMPLATE_KWARGS = frozenset({"add_vision_id"})
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
         *,
         processor: Any = None,
+        add_vision_id: bool = False,
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
         image_cache_max: int = 256,
     ):
         self._tokenizer = tokenizer
         self._processor = processor
+        self._add_vision_id = add_vision_id
         self._preserve_all_thinking = preserve_all_thinking
         self._preserve_thinking_between_tool_calls = (
             preserve_thinking_between_tool_calls
@@ -452,6 +460,12 @@ class Qwen3VLRenderer:
         mm_hashes: dict[str, list[str]] = {}
         mm_placeholders: dict[str, list[PlaceholderRange]] = {}
         mm_items: dict[str, list[dict[str, Any]]] = {}
+        # ``add_vision_id`` mirrors the Jinja's ``image_count`` /
+        # ``video_count`` namespaces. Counters are 1-indexed and run
+        # across the entire conversation; they increment unconditionally
+        # on each image / video (the Qwen3-VL template increments first,
+        # then emits ``Picture N: `` only when ``add_vision_id`` is set).
+        vision_counts = {"image": 0, "video": 0}
 
         def emit_image(part: dict[str, Any]) -> None:
             # Image placeholders are prompt-side scaffolding the user
@@ -462,6 +476,13 @@ class Qwen3VLRenderer:
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # markers are renderer-emitted scaffold.
             _, out, n, h = self._process_image(part)
+            vision_counts["image"] += 1
+            if self._add_vision_id:
+                em.text(
+                    f"Picture {vision_counts['image']}: ",
+                    is_sampled=False,
+                    is_content=False,
+                )
             em.special(self._vision_start, is_sampled=False, is_content=False)
             offset = em.cursor()
             for _ in range(n):
@@ -685,9 +706,34 @@ class Qwen3VLRenderer:
         new_hashes: dict[str, list[str]] = {}
         new_placeholders: dict[str, list[PlaceholderRange]] = {}
         new_items: dict[str, list[dict[str, Any]]] = {}
+        # Seed the vision counters from any prior-turn images / videos
+        # the bridge was handed via ``previous_multi_modal_data``. The
+        # ``add_vision_id`` template numbers placeholders across the
+        # whole conversation, so a new turn's first image is
+        # ``Picture {prev_total + 1}``. The bridge can't recover this
+        # count from raw token ids, so callers must thread
+        # ``previous_multi_modal_data`` through when they want
+        # ``add_vision_id`` parity across turns.
+        prev_image_count = 0
+        prev_video_count = 0
+        if previous_multi_modal_data is not None:
+            prev_image_count = len(
+                previous_multi_modal_data.mm_items.get("image", [])
+            )
+            prev_video_count = len(
+                previous_multi_modal_data.mm_items.get("video", [])
+            )
+        vision_counts = {"image": prev_image_count, "video": prev_video_count}
 
         def emit_image(part: dict[str, Any]) -> None:
             _, out, n, h = self._process_image(part)
+            vision_counts["image"] += 1
+            if self._add_vision_id:
+                em.text(
+                    f"Picture {vision_counts['image']}: ",
+                    is_sampled=False,
+                    is_content=False,
+                )
             em.special(self._vision_start, is_sampled=False, is_content=False)
             offset = em.cursor()
             for _ in range(n):

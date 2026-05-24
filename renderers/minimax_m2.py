@@ -56,16 +56,27 @@ _TOOLS_INSTRUCTIONS = (
 class MiniMaxM2Renderer:
     """Deterministic message → token renderer for MiniMax M2 / M2.5 models."""
 
+    # The MiniMax-M2 chat template substitutes ``model_identity`` as the
+    # system body whenever no system message is supplied (or its content
+    # is falsy). Exposing it as a chat_template_kwarg lets callers swap
+    # the persona per render without rebuilding the renderer.
+    CHAT_TEMPLATE_KWARGS = frozenset({"model_identity"})
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
         *,
-        default_system: str = _DEFAULT_SYSTEM,
+        model_identity: str = _DEFAULT_SYSTEM,
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
     ):
         self._tokenizer = tokenizer
-        self._default_system = default_system
+        # Mirrors the chat template's ``model_identity`` Jinja variable —
+        # the fallback persona used when the caller omits a system
+        # message. Constructor name matches the template's so passing
+        # ``chat_template_kwargs={"model_identity": "..."}`` flows
+        # straight through.
+        self._model_identity = model_identity
         self._preserve_all_thinking = preserve_all_thinking
         self._preserve_thinking_between_tool_calls = (
             preserve_thinking_between_tool_calls
@@ -204,7 +215,7 @@ class MiniMaxM2Renderer:
         if sys_content:
             sys_segments.append((sys_content, True))
         else:
-            sys_segments.append((self._default_system, False))
+            sys_segments.append((self._model_identity, False))
 
         if tools:
             sys_segments.append((_TOOLS_HEADER, False))

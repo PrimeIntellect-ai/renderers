@@ -562,29 +562,33 @@ class KimiK25Renderer:
     """Deterministic message → token renderer for Kimi K2.5 models.
 
     Renders to the same ``<|im_*|>`` format as Kimi K2 but adds:
-    - Generation prompt prefills ``<think>`` (enable_thinking=True, default) or
-      ``<think></think>`` (enable_thinking=False) to control thinking mode.
+    - Generation prompt prefills ``<think>`` (thinking=True, default) or
+      ``<think></think>`` (thinking=False) to control thinking mode. The
+      template's native kwarg name is ``thinking`` (not the more common
+      ``enable_thinking``); we match it so passing
+      ``chat_template_kwargs={"thinking": False}`` produces the same
+      tokens as ``apply_chat_template(..., thinking=False)``.
     - Image content rendering via ``<|media_begin|>image<|media_content|>...<|media_end|>``.
     - TypeScript-style tool declarations instead of JSON.
 
     The tokenizer should be ``moonshotai/Kimi-K2-Instruct`` (same as K2).
     """
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+    CHAT_TEMPLATE_KWARGS = frozenset({"thinking"})
 
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
         *,
         processor: Any = None,
-        enable_thinking: bool = True,
+        thinking: bool = True,
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
         image_cache_max: int = 256,
     ):
         self._tokenizer = tokenizer
         self._processor = processor
-        self._enable_thinking = enable_thinking
+        self._thinking = thinking
         self._preserve_all_thinking = preserve_all_thinking
         self._preserve_thinking_between_tool_calls = (
             preserve_thinking_between_tool_calls
@@ -929,7 +933,7 @@ class KimiK25Renderer:
             emit_special(self._im_assistant, -1, is_sampled=False, is_content=False)
             emit_text("assistant", -1, is_sampled=False, is_content=False)
             emit_special(self._im_middle, -1, is_sampled=False, is_content=False)
-            if self._enable_thinking:
+            if self._thinking:
                 # Prefill open <think> tag to trigger thinking mode
                 emit_text("<think>", -1, is_sampled=False, is_content=False)
             else:
@@ -1163,7 +1167,7 @@ class KimiK25Renderer:
         emit_special(self._im_assistant, -1)
         emit_text("assistant", -1)
         emit_special(self._im_middle, -1)
-        if self._enable_thinking:
+        if self._thinking:
             emit_text("<think>", -1)
         else:
             emit_text("<think></think>", -1)

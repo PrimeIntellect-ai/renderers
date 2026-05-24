@@ -480,13 +480,23 @@ class GLM5Renderer:
                 reasoning_content.strip(), msg_idx, is_sampled=True, is_content=True
             )
             emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
-        elif self.empty_think_on_last_assistant and msg_idx > last_user_index:
+        elif (
+            self.empty_think_on_last_assistant
+            and msg_idx > last_user_index
+            and self._enable_thinking
+        ):
             # GLM-5.1: wrap the last assistant with an empty <think></think>
             # even without reasoning, matching the Jinja template. With
             # ``enable_thinking=True`` the gen prompt already includes
             # ``<think>``; the model then samples ``</think>`` to close an
             # empty think block. So ``<think>`` is scaffolding,
             # ``</think>`` is sampled.
+            #
+            # When ``enable_thinking=False`` the GLM-5.1 template skips
+            # the opening ``<think>`` for the most-recent assistant too
+            # — it emits only the lone ``</think>`` separator (and the
+            # gen prompt likewise switches to ``</think>``). Fall
+            # through to the else branch below so we match.
             emit_special(self._think, msg_idx, is_sampled=False, is_content=False)
             emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
         else:

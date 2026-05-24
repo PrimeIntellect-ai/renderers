@@ -41,7 +41,16 @@ def _ds_token(name: str) -> str:
 class DeepSeekV3Renderer:
     """Deterministic message → token renderer for DeepSeek V3 models."""
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+    # DeepSeek-V3's chat template does not consult any thinking-related
+    # variable (no ``enable_thinking`` / ``thinking`` references). The
+    # ``<think>\n`` prefill at the generation prompt is a renderer
+    # convention for the R1-distill family, controllable via the
+    # constructor kwarg, but it is intentionally NOT advertised as a
+    # ``chat_template_kwargs`` entry — passing
+    # ``chat_template_kwargs={"enable_thinking": False}`` to
+    # ``apply_chat_template`` is a no-op upstream, so exposing it here
+    # would create a parity gap users couldn't reason about.
+    CHAT_TEMPLATE_KWARGS = frozenset()
 
     def __init__(
         self,

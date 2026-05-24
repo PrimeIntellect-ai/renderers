@@ -734,12 +734,8 @@ class Qwen3VLRenderer:
         prev_image_count = 0
         prev_video_count = 0
         if previous_multi_modal_data is not None:
-            prev_image_count = len(
-                previous_multi_modal_data.mm_items.get("image", [])
-            )
-            prev_video_count = len(
-                previous_multi_modal_data.mm_items.get("video", [])
-            )
+            prev_image_count = len(previous_multi_modal_data.mm_items.get("image", []))
+            prev_video_count = len(previous_multi_modal_data.mm_items.get("video", []))
         vision_counts = {"image": prev_image_count, "video": prev_video_count}
 
         def emit_image(part: dict[str, Any]) -> None:

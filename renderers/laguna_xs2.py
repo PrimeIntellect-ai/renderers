@@ -76,7 +76,9 @@ _TOOLS_FOOTER_NO_THINKING = (
 
 
 class LagunaXS2Renderer:
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking", "render_assistant_messages_raw"})
+    CHAT_TEMPLATE_KWARGS = frozenset(
+        {"enable_thinking", "render_assistant_messages_raw"}
+    )
 
     def __init__(
         self,
@@ -587,11 +589,7 @@ class LagunaXS2Renderer:
 
         emit_text(content, msg_idx, is_sampled=True, is_content=True)
 
-        if not (
-            content.endswith("</assistant>\n") or content.endswith("</assistant>")
-        ):
+        if not (content.endswith("</assistant>\n") or content.endswith("</assistant>")):
             emit_text("\n", msg_idx, is_sampled=False, is_content=False)
-            emit_special(
-                self._assistant_end, msg_idx, is_sampled=True, is_content=True
-            )
+            emit_special(self._assistant_end, msg_idx, is_sampled=True, is_content=True)
         emit_text("\n", msg_idx, is_sampled=False, is_content=False)

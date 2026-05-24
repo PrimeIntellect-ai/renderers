@@ -402,7 +402,9 @@ def _gpt_oss_renderer(kwarg: str, value: Any):
     return GptOssRenderer(tok, **kwargs)
 
 
-def _harmony_expected(kwarg: str, value: Any, messages: list[dict[str, Any]]) -> list[int]:
+def _harmony_expected(
+    kwarg: str, value: Any, messages: list[dict[str, Any]]
+) -> list[int]:
     from openai_harmony import (
         Conversation,
         HarmonyEncodingName,
@@ -439,10 +441,14 @@ def _harmony_expected(kwarg: str, value: Any, messages: list[dict[str, Any]]) ->
         role = m["role"]
         content = m.get("content", "") or ""
         if role == "user":
-            harmony_msgs.append(HarmonyMessage.from_role_and_content(Role.USER, content))
+            harmony_msgs.append(
+                HarmonyMessage.from_role_and_content(Role.USER, content)
+            )
         elif role == "assistant":
             harmony_msgs.append(
-                HarmonyMessage.from_role_and_content(Role.ASSISTANT, content).with_channel("final")
+                HarmonyMessage.from_role_and_content(
+                    Role.ASSISTANT, content
+                ).with_channel("final")
             )
         else:
             raise AssertionError(
@@ -450,7 +456,9 @@ def _harmony_expected(kwarg: str, value: Any, messages: list[dict[str, Any]]) ->
                 "branch or constrain the shapes used for gpt-oss parity."
             )
     encoder = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
-    return encoder.render_conversation_for_training(Conversation.from_messages(harmony_msgs))
+    return encoder.render_conversation_for_training(
+        Conversation.from_messages(harmony_msgs)
+    )
 
 
 # Harmony oracle is only wired for the simplest shapes (user-only and

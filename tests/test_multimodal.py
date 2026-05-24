@@ -721,9 +721,7 @@ def _qwen_vl_processor_input_ids_with_kwargs(
 # / K2.6's template has no equivalent toggle, so it's intentionally
 # absent from ``CHAT_TEMPLATE_KWARGS`` there and skipped here.
 _ADD_VISION_ID_CASES = [
-    (m, mo)
-    for m, mo in _CASES
-    if mo == "image" and _detect_family(m) == "qwen_vl"
+    (m, mo) for m, mo in _CASES if mo == "image" and _detect_family(m) == "qwen_vl"
 ]
 
 

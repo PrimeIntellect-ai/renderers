@@ -684,6 +684,23 @@ class Qwen3VLRenderer:
         if previous_ids is None:
             return None
 
+        # ``add_vision_id`` numbers placeholders across the whole
+        # conversation. The bridge can only seed that counter from
+        # ``previous_multi_modal_data`` (raw prior token ids don't carry
+        # the image/video count back), so if the caller asks for
+        # ``add_vision_id=True`` while omitting prior mm-data on a
+        # conversation that already contains images, the bridged
+        # output would silently emit ``Picture 1:`` again. Refuse the
+        # bridge in that case — the caller falls back to a full
+        # re-render, which has the full message list and counts
+        # correctly.
+        if (
+            self._add_vision_id
+            and previous_multi_modal_data is None
+            and self._vision_start in previous_ids
+        ):
+            return None
+
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
         # and ``sampled_mask`` (uniformly ``False`` — every token the
         # bridge emits is template scaffolding for the next prompt, not

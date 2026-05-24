@@ -774,6 +774,88 @@ def test_add_vision_id_parity_vs_processor(
         )
 
 
+@pytest.mark.parametrize(
+    "mm_model_name,modality",
+    _ADD_VISION_ID_CASES,
+    ids=[f"{m}|{mo}" for m, mo in _ADD_VISION_ID_CASES],
+)
+def test_bridge_refuses_when_add_vision_id_loses_prior_count(
+    mm_model_name, modality, tiny_image
+):
+    """When ``add_vision_id=True``, the bridge needs the prior turn's
+    image / video count to keep the ``Picture N:`` numbering correct.
+    The only source of that count for the bridged turn is
+    ``previous_multi_modal_data``; raw prior token ids don't carry it
+    back unambiguously (``<|vision_start|>`` is shared between image
+    and video placeholders).
+
+    If a caller omits ``previous_multi_modal_data`` on a conversation
+    that already contains images, naively continuing the bridge would
+    emit ``Picture 1:`` again for the new turn — diverging from
+    ``apply_chat_template`` and a full re-render. The bridge must
+    refuse (return None) so the caller falls back to a full re-render.
+    """
+    if not _hf_snapshot_cached(mm_model_name):
+        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+
+    kit = _modality_kit(modality, mm_model_name)
+    tokenizer, processor, _ = _load_processor_and_renderer(mm_model_name)
+    renderer = create_renderer(
+        tokenizer,
+        renderer="auto",
+        chat_template_kwargs={"add_vision_id": True},
+    )
+    if hasattr(renderer, "_processor") and renderer._processor is None:
+        renderer._processor = processor
+
+    initial = [
+        {
+            "role": "user",
+            "content": [
+                kit["make_part"](tiny_image),
+                {"type": "text", "text": "Turn one."},
+            ],
+        }
+    ]
+    new_messages = [
+        {
+            "role": "user",
+            "content": [
+                kit["make_part"](tiny_image),
+                {"type": "text", "text": "Turn two."},
+            ],
+        }
+    ]
+
+    initial_rendered = renderer.render(initial, add_generation_prompt=True)
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    completion_ids = tokenizer.encode("Saw it.", add_special_tokens=False) + [im_end_id]
+
+    # No previous_multi_modal_data → bridge must refuse so the caller
+    # falls back to a full re-render (where the counter restarts from
+    # the full message list and lands on Picture 2: correctly).
+    bridged = renderer.bridge_to_next_turn(
+        previous_prompt_ids=initial_rendered.token_ids,
+        previous_completion_ids=completion_ids,
+        new_messages=new_messages,
+    )
+    assert bridged is None, (
+        f"{mm_model_name}: bridge should refuse when add_vision_id=True "
+        "and previous_multi_modal_data is omitted but prior contains images"
+    )
+
+    # With the prior mm_data threaded through, the bridge proceeds.
+    bridged_ok = renderer.bridge_to_next_turn(
+        previous_prompt_ids=initial_rendered.token_ids,
+        previous_completion_ids=completion_ids,
+        new_messages=new_messages,
+        previous_multi_modal_data=initial_rendered.multi_modal_data,
+    )
+    assert bridged_ok is not None, (
+        f"{mm_model_name}: bridge unexpectedly refused even with previous_multi_modal_data"
+    )
+
+
 def test_qwen3_vl_renderer_exposes_image_modality():
     """The flagship multimodal renderer is concretely Qwen3VLRenderer.
 

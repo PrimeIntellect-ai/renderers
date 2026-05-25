@@ -34,7 +34,7 @@ dependencies = [
     # the typed-config surface stays uniform with prime-rl / verifiers config
     # bases. Transitively brings pydantic, which ``renderers.configs`` also
     # imports directly.
-    "prime-pydantic-config>=0.3.0.dev0",
+    "prime-pydantic-config>=0.3.0.dev83",
 ]
 
 [tool.hatch.version]

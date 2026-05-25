@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-05-18T21:31:41.804893432Z"
+exclude-newer = "2026-05-18T21:41:29.104791013Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -1387,7 +1387,6 @@ dependencies = [
     { name = "openai" },
     { name = "openai-harmony" },
     { name = "prime-pydantic-config" },
-    { name = "pydantic" },
     { name = "tiktoken" },
     { name = "transformers" },
 ]
@@ -1412,7 +1411,6 @@ requires-dist = [
     { name = "openai", specifier = ">=1.108.1" },
     { name = "openai-harmony", specifier = ">=0.0.8" },
     { name = "prime-pydantic-config", specifier = ">=0.3.0.dev0" },
-    { name = "pydantic", specifier = ">=2" },
     { name = "tiktoken" },
     { name = "transformers", specifier = ">=4.50.0" },
 ]

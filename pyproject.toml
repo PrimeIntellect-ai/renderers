@@ -30,11 +30,10 @@ dependencies = [
     # around ``from_pretrained``, so subsequent ``AutoTokenizer`` calls
     # outside the renderers package stay vanilla.
     "fastokens>=0.2.0",
-    # Pydantic discriminated-union models in ``renderers.configs``.
-    "pydantic>=2",
     # ``BaseRendererConfig`` inherits from ``pydantic_config.BaseConfig`` so
     # the typed-config surface stays uniform with prime-rl / verifiers config
-    # bases.
+    # bases. Transitively brings pydantic, which ``renderers.configs`` also
+    # imports directly.
     "prime-pydantic-config>=0.3.0.dev0",
 ]
 

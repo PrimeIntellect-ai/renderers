@@ -31,3 +31,6 @@ coverage.xml
 .idea/
 .vscode/
 *.swp
+
+# agent harness state
+.claude/

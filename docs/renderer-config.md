@@ -150,10 +150,10 @@ that rejected it.
 To construct a config from a renderer name string (e.g. from a CLI flag):
 
 ```python
-from renderers import config_for_name
+from renderers import config_from_name
 
-cfg = config_for_name("glm-5")           # → GLM5RendererConfig() with defaults
-cfg = config_for_name("auto")            # → None, the implicit "auto" form
+cfg = config_from_name("glm-5")           # → GLM5RendererConfig() with defaults
+cfg = config_from_name("auto")            # → None, the implicit "auto" form
 ```
 
 ## Renaming a renderer is a breaking change

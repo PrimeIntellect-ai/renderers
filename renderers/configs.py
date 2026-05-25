@@ -424,7 +424,7 @@ def _config_class_for(name: str) -> type[_BaseRendererConfig]:
     return cls
 
 
-def config_for_name(name: str) -> _BaseRendererConfig | None:
+def config_from_name(name: str) -> _BaseRendererConfig | None:
     """Construct a default-valued config for the given renderer name.
 
     Convenience for callers that hold a renderer name as a string and
@@ -456,5 +456,5 @@ __all__ = [
     "Qwen3RendererConfig",
     "Qwen3VLRendererConfig",
     "RendererConfig",
-    "config_for_name",
+    "config_from_name",
 ]

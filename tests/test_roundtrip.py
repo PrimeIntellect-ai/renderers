@@ -51,11 +51,11 @@ _ROUNDTRIP_MODELS = [
 
 @lru_cache(maxsize=None)
 def _load_renderer(model_name: str, renderer_name: str):
-    from renderers import config_for_name, create_renderer
+    from renderers import config_from_name, create_renderer
     from renderers.base import load_tokenizer
 
     tok = load_tokenizer(model_name)
-    return tok, create_renderer(tok, config_for_name(renderer_name))
+    return tok, create_renderer(tok, config_from_name(renderer_name))
 
 
 def pytest_generate_tests(metafunc):

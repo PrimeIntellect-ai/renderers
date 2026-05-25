@@ -40,7 +40,7 @@ from renderers.base import (
 from renderers.client import OverlongPromptError
 from renderers.configs import (
     AutoRendererConfig,
-    config_for_name,
+    config_from_name,
     DefaultRendererConfig,
     DeepSeekV3RendererConfig,
     GLM45RendererConfig,
@@ -132,7 +132,7 @@ __all__ = [
     "attribute_text_segments",
     "build_training_sample",
     "build_trajectory_step",
-    "config_for_name",
+    "config_from_name",
     "create_renderer",
     "create_renderer_pool",
     "is_multimodal",

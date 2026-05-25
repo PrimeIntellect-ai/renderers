@@ -137,3 +137,75 @@ def test_string_arg_preserves_type(model, renderer_name, renderer, args):
     assert got == args, (
         f"{model}: tool-arg type drift — sent {args!r}, parser returned {got!r}"
     )
+
+
+# Schemas where ``string`` is one branch of a union (``anyOf`` / ``oneOf``).
+# These are common in practice — e.g. ``form_input.value: str | bool`` in
+# Pydantic serialises to ``{"anyOf": [{"type": "string"}, {"type": "boolean"}]}``.
+# Without the union-aware check, the XML parser's ``json.loads`` falls back
+# to raw text for bare strings, but flags the call ``INVALID_JSON`` because
+# no top-level ``type`` key declared a string — silently dropping otherwise
+# valid tool calls in the renderer client.
+UNION_WITH_STRING_SCHEMAS = [
+    pytest.param(
+        {"anyOf": [{"type": "string"}, {"type": "boolean"}]},
+        id="anyOf-string-boolean",
+    ),
+    pytest.param(
+        {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        id="anyOf-string-null",
+    ),
+    pytest.param(
+        {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+        id="oneOf-string-integer",
+    ),
+]
+
+
+@pytest.mark.parametrize("param_schema", UNION_WITH_STRING_SCHEMAS)
+def test_union_with_string_emits_ok_status(
+    model, renderer_name, renderer, param_schema
+):
+    """Union schemas containing ``string`` must yield ``status=OK`` when
+    the model emits a bare string. Pre-fix, ``_coerce_arg_value`` flagged
+    this as ``INVALID_JSON`` because the top-level ``type`` key was
+    absent (the string branch was under ``anyOf`` / ``oneOf``)."""
+    from renderers.base import ToolCallParseStatus
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "f",
+                "description": "Test tool with one union-typed parameter.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"x": param_schema},
+                    "required": ["x"],
+                },
+            },
+        }
+    ]
+    args = {"x": "abc"}
+    msg = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "functions.f:0",
+                "function": {"name": "f", "arguments": args},
+            }
+        ],
+    }
+    completion_ids = _extract_assistant_tokens(renderer, PROMPT, msg, tools=tools)
+    parsed = renderer.parse_response(completion_ids, tools=tools)
+
+    assert parsed.tool_calls, f"{model}: parser returned no tool_calls"
+    tc = parsed.tool_calls[0]
+    assert tc.status == ToolCallParseStatus.OK, (
+        f"{model}: union-with-string schema flagged {tc.status} on bare string"
+    )
+    got = _normalize_args(tc.arguments)
+    assert got == args, (
+        f"{model}: tool-arg drift — sent {args!r}, parser returned {got!r}"
+    )

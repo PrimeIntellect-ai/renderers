@@ -33,7 +33,16 @@ from renderers import (
     Qwen3VLRenderer,
     create_renderer,
 )
-from renderers.base import load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.configs import _config_class_for
+
+
+def _config_with_add_vision_id(model_name: str, add_vision_id: bool):
+    """Build the typed config for ``model_name`` (resolved via
+    ``MODEL_RENDERER_MAP``) with ``add_vision_id`` set. The qwen_vl
+    family — Qwen3.5 and Qwen3-VL — both expose this field."""
+    renderer_name = MODEL_RENDERER_MAP[model_name]
+    return _config_class_for(renderer_name)(add_vision_id=add_vision_id)
 
 
 pytest.importorskip("PIL", reason="Pillow required for multimodal tests")
@@ -111,7 +120,7 @@ def _load_processor_and_renderer(model_name: str):
             )
         else:
             processor = AutoProcessor.from_pretrained(model_name)
-        renderer = create_renderer(tokenizer, renderer="auto")
+        renderer = create_renderer(tokenizer)
         # Inject processor so the renderer doesn't try to fetch it lazily.
         if hasattr(renderer, "_processor") and renderer._processor is None:
             renderer._processor = processor
@@ -636,7 +645,7 @@ def test_modality_registry_models_route_to_renderer():
         if not _hf_snapshot_cached(model_name):
             continue
         tokenizer = load_tokenizer(model_name)
-        renderer = create_renderer(tokenizer, renderer="auto")
+        renderer = create_renderer(tokenizer)
         # We expect a hand-coded VL renderer, not the default fallback.
         assert not type(renderer).__name__.startswith("Default"), (
             f"{model_name} routed to DefaultRenderer despite being in "
@@ -752,8 +761,7 @@ def test_add_vision_id_parity_vs_processor(
     # fixture has ``add_vision_id=False`` baked in).
     renderer = create_renderer(
         tokenizer,
-        renderer="auto",
-        chat_template_kwargs={"add_vision_id": add_vision_id},
+        _config_with_add_vision_id(mm_model_name, add_vision_id),
     )
     if hasattr(renderer, "_processor") and renderer._processor is None:
         renderer._processor = processor
@@ -800,8 +808,7 @@ def test_bridge_refuses_when_add_vision_id_loses_prior_count(
     tokenizer, processor, _ = _load_processor_and_renderer(mm_model_name)
     renderer = create_renderer(
         tokenizer,
-        renderer="auto",
-        chat_template_kwargs={"add_vision_id": True},
+        _config_with_add_vision_id(mm_model_name, True),
     )
     if hasattr(renderer, "_processor") and renderer._processor is None:
         renderer._processor = processor
@@ -864,7 +871,7 @@ def test_qwen3_vl_renderer_exposes_image_modality():
     if not _hf_snapshot_cached(model):
         pytest.skip(f"{model}: HF snapshot not cached locally")
     tokenizer = load_tokenizer(model)
-    renderer = create_renderer(tokenizer, renderer="auto")
+    renderer = create_renderer(tokenizer)
     assert isinstance(renderer, Qwen3VLRenderer)
     assert "image" in MULTIMODAL_MODELS[model]
 

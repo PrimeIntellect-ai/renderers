@@ -23,6 +23,7 @@ from renderers.base import (
     should_preserve_past_thinking,
     trim_to_turn_close,
 )
+from renderers.configs import Qwen3RendererConfig
 from renderers.parsing import parse_qwen3
 
 _TOOLS_HEADER = (
@@ -45,22 +46,13 @@ _TOOLS_FOOTER = (
 class Qwen3Renderer:
     """Deterministic message → token renderer for Qwen3 models."""
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
-
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        *,
-        enable_thinking: bool = True,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
+        config: Qwen3RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
-        self._enable_thinking = enable_thinking
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        self.config = config or Qwen3RendererConfig()
 
         self._im_start = self._token_id("<|im_start|>")
         self._im_end = self._token_id("<|im_end|>")
@@ -215,8 +207,8 @@ class Qwen3Renderer:
                 preserve_thinking = should_preserve_past_thinking(
                     messages,
                     i,
-                    preserve_all_thinking=self._preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self._preserve_thinking_between_tool_calls,
+                    preserve_all_thinking=self.config.preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
                 )
                 self._render_assistant(
                     msg,
@@ -244,7 +236,7 @@ class Qwen3Renderer:
         if add_generation_prompt:
             emit_special(self._im_start, -1, is_sampled=False, is_content=False)
             emit_text("assistant\n", -1, is_sampled=False, is_content=False)
-            if not self._enable_thinking:
+            if not self.config.enable_thinking:
                 emit_text(
                     "<think>\n\n</think>\n\n", -1, is_sampled=False, is_content=False
                 )
@@ -401,7 +393,7 @@ class Qwen3Renderer:
 
         emit_special(self._im_start, -1)
         emit_text("assistant\n", -1)
-        if not self._enable_thinking:
+        if not self.config.enable_thinking:
             emit_text("<think>\n\n</think>\n\n", -1)
 
         total_len = len(previous_ids) + len(ext)

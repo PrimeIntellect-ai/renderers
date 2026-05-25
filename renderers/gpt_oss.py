@@ -60,6 +60,7 @@ from renderers.base import (
     should_preserve_past_thinking,
     trim_to_turn_close,
 )
+from renderers.configs import GptOssRendererConfig
 from renderers.parsing import parse_gpt_oss
 
 
@@ -118,49 +119,30 @@ def _arguments_to_str(arguments: Any) -> str:
 class GptOssRenderer:
     """Deterministic message → token renderer for OpenAI gpt-oss (harmony)."""
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"reasoning_effort", "conversation_start_date"})
-
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        *,
-        use_system_prompt: bool = True,
-        reasoning_effort: str | None = "medium",
-        conversation_start_date: str | None = None,
-        knowledge_cutoff: str | None = None,
-        model_identity: str | None = None,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
+        config: GptOssRendererConfig | None = None,
     ):
         """Initialise the renderer.
 
         Args:
             tokenizer: HuggingFace tokenizer.
-            use_system_prompt: When True (default), prepend the canonical
-                harmony SystemContent preamble. Matches HF's
-                apply_chat_template behaviour.
-            reasoning_effort: ``"low" | "medium" | "high"``. Default
-                ``"medium"`` (matches apply_chat_template).
-            conversation_start_date: Optional ISO date for the preamble.
-                Defaults to today's date in YYYY-MM-DD form.
-            knowledge_cutoff: Optional knowledge cutoff string. Harmony's
-                default is built into ``SystemContent.new()``.
-            model_identity: Optional override for the model identity line.
+            config: Typed renderer config (see
+                :class:`renderers.GptOssRendererConfig`).
         """
         self._tokenizer = tokenizer
+        self.config = config or GptOssRendererConfig()
         self._enc: HarmonyEncoding = load_harmony_encoding(
             HarmonyEncodingName.HARMONY_GPT_OSS
         )
-        self._use_system_prompt = use_system_prompt
-        self._reasoning_effort = _reasoning_effort(reasoning_effort)
-        self._conversation_start_date = (
-            conversation_start_date or datetime.now().strftime("%Y-%m-%d")
-        )
-        self._knowledge_cutoff = knowledge_cutoff
-        self._model_identity = model_identity
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
+        # Materialised harmony-enum form of reasoning_effort.
+        self._reasoning_effort_enum = _reasoning_effort(self.config.reasoning_effort)
+        # ``conversation_start_date=None`` defers to today's date —
+        # materialise once at construction so renders within the same
+        # instance use a stable date.
+        self._conversation_start_date_resolved = (
+            self.config.conversation_start_date or datetime.now().strftime("%Y-%m-%d")
         )
 
         # Cache special-token IDs for the bridge / generation-prompt path.
@@ -213,17 +195,21 @@ class GptOssRenderer:
 
         # Build the same prefix with empty instructions.
         empty_prefix_msgs: list[HarmonyMessage] = []
-        if self._use_system_prompt:
+        if self.config.use_system_prompt:
             sys_content = SystemContent.new().with_reasoning_effort(
-                self._reasoning_effort
+                self._reasoning_effort_enum
             )
             sys_content = sys_content.with_conversation_start_date(
-                self._conversation_start_date
+                self._conversation_start_date_resolved
             )
-            if self._knowledge_cutoff is not None:
-                sys_content = sys_content.with_knowledge_cutoff(self._knowledge_cutoff)
-            if self._model_identity is not None:
-                sys_content = sys_content.with_model_identity(self._model_identity)
+            if self.config.knowledge_cutoff is not None:
+                sys_content = sys_content.with_knowledge_cutoff(
+                    self.config.knowledge_cutoff
+                )
+            if self.config.model_identity is not None:
+                sys_content = sys_content.with_model_identity(
+                    self.config.model_identity
+                )
             empty_prefix_msgs.append(
                 HarmonyMessage.from_role_and_content(Role.SYSTEM, sys_content)
             )
@@ -371,17 +357,21 @@ class GptOssRenderer:
             None,
         )
         prefix_msgs: list[HarmonyMessage] = []
-        if self._use_system_prompt:
+        if self.config.use_system_prompt:
             sys_content = SystemContent.new().with_reasoning_effort(
-                self._reasoning_effort
+                self._reasoning_effort_enum
             )
             sys_content = sys_content.with_conversation_start_date(
-                self._conversation_start_date
+                self._conversation_start_date_resolved
             )
-            if self._knowledge_cutoff is not None:
-                sys_content = sys_content.with_knowledge_cutoff(self._knowledge_cutoff)
-            if self._model_identity is not None:
-                sys_content = sys_content.with_model_identity(self._model_identity)
+            if self.config.knowledge_cutoff is not None:
+                sys_content = sys_content.with_knowledge_cutoff(
+                    self.config.knowledge_cutoff
+                )
+            if self.config.model_identity is not None:
+                sys_content = sys_content.with_model_identity(
+                    self.config.model_identity
+                )
             prefix_msgs.append(
                 HarmonyMessage.from_role_and_content(Role.SYSTEM, sys_content)
             )
@@ -434,8 +424,8 @@ class GptOssRenderer:
                 should_preserve_past_thinking(
                     messages,
                     i,
-                    preserve_all_thinking=self._preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self._preserve_thinking_between_tool_calls,
+                    preserve_all_thinking=self.config.preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
                 )
             )
             for hm in self._to_harmony_messages(

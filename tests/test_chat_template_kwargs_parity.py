@@ -1,19 +1,21 @@
-"""Parity for ``chat_template_kwargs`` against the upstream chat template.
+"""Parity for typed-config template fields against the upstream chat
+template.
 
-The renderer accepts a per-renderer allowlist of template-control kwargs
-declared as ``CHAT_TEMPLATE_KWARGS`` on each renderer class and forwards
-them to the constructor. ``test_chat_template_kwargs.py`` covers the
-wiring; this file covers the only thing that matters downstream: that
-flipping a kwarg produces token streams byte-identical to
-``tokenizer.apply_chat_template(messages, chat_template_kwargs={...})``.
+Each renderer's typed config (see ``renderers.configs``) declares the
+fields that mirror chat-template kwargs via
+``Config.template_field_names()``. ``test_chat_template_kwargs.py``
+covers the typed-config wiring; this file covers the only thing that
+matters downstream: that flipping a template field on the typed config
+produces token streams byte-identical to
+``tokenizer.apply_chat_template(messages, **{field: value})``.
 
-Without this, the kwarg surface is a promise the renderer doesn't keep.
+Without this, the typed surface is a promise the renderer doesn't keep.
 
-Discovery is automatic — the parity matrix is built from each renderer
-class's ``CHAT_TEMPLATE_KWARGS`` frozenset crossed with the per-kwarg
-value list in ``_KWARG_VALUES``. To extend coverage to a new kwarg:
-declare it in the renderer's ``CHAT_TEMPLATE_KWARGS`` and add the
-values to exercise to ``_KWARG_VALUES`` below.
+Discovery is automatic — the parity matrix is built from each config
+class's ``template_field_names()`` crossed with the per-field value list
+in ``_KWARG_VALUES``. To extend coverage to a new field: declare it on
+the typed config and add the values to exercise to ``_KWARG_VALUES``
+below.
 
 ``gpt-oss`` parity is against ``openai-harmony`` (its renderer diverges
 from HF Jinja by design — see ``test_gpt_oss_harmony_parity.py``); it
@@ -31,10 +33,10 @@ import pytest
 from renderers import create_renderer
 from renderers.base import (
     MODEL_RENDERER_MAP,
-    RENDERER_REGISTRY,
     _populate_registry,
     load_tokenizer,
 )
+from renderers.configs import _config_class_for
 
 
 # Models exercised by the parity tests. Mirrors ``conftest.RENDERER_MODELS``
@@ -58,10 +60,11 @@ _RENDERER_MODELS = [
 ]
 
 
-# Per-kwarg value list. Each kwarg that appears in any renderer's
-# ``CHAT_TEMPLATE_KWARGS`` must have an entry here, or the parity matrix
-# silently skips it. The test below asserts coverage so a future kwarg
-# can't slip through without an explicit value list.
+# Per-kwarg value list. Each template field any renderer's typed config
+# declares (via ``Config.template_field_names()``) must have an entry
+# here, or the parity matrix silently skips it. The test below asserts
+# coverage so a future kwarg can't slip through without an explicit
+# value list.
 _KWARG_VALUES: dict[str, list[Any]] = {
     "enable_thinking": [True, False],
     # Kimi K2.5 / K2.6 — same semantics as ``enable_thinking`` but the
@@ -232,24 +235,29 @@ _MESSAGE_SHAPES = [
 _populate_registry()
 
 
-def _resolve_renderer_cls(model: str, renderer_name: str) -> type:
-    """Resolve ``(model, renderer_name)`` to the concrete renderer class."""
+def _resolve_renderer_name(model: str, renderer_name: str) -> str:
+    """Resolve ``(model, renderer_name)`` to the concrete renderer name."""
     if renderer_name == "auto":
-        renderer_name = MODEL_RENDERER_MAP.get(model, "default")
-    return RENDERER_REGISTRY[renderer_name]
+        return MODEL_RENDERER_MAP.get(model, "default")
+    return renderer_name
+
+
+def _template_fields_for(model: str, renderer_name: str) -> frozenset[str]:
+    """Discover the typed-config template-field set for a renderer."""
+    resolved = _resolve_renderer_name(model, renderer_name)
+    return _config_class_for(resolved).template_field_names()
 
 
 def _hf_parity_matrix() -> list[Any]:
     """Auto-derived ``(model, renderer_name, kwarg, value)`` matrix for
-    every renderer that declares a kwarg in ``CHAT_TEMPLATE_KWARGS``,
-    minus gpt-oss (handled separately against harmony).
+    every renderer with template fields, minus gpt-oss (handled
+    separately against harmony).
     """
     out = []
     for model, name in _RENDERER_MODELS:
-        cls = _resolve_renderer_cls(model, name)
         if name == "gpt-oss":
             continue
-        for kwarg in sorted(getattr(cls, "CHAT_TEMPLATE_KWARGS", ())):
+        for kwarg in sorted(_template_fields_for(model, name)):
             for value in _KWARG_VALUES.get(kwarg, []):
                 out.append(
                     pytest.param(
@@ -267,8 +275,7 @@ def _harmony_parity_matrix() -> list[Any]:
     for model, name in _RENDERER_MODELS:
         if name != "gpt-oss":
             continue
-        cls = _resolve_renderer_cls(model, name)
-        for kwarg in sorted(getattr(cls, "CHAT_TEMPLATE_KWARGS", ())):
+        for kwarg in sorted(_template_fields_for(model, name)):
             for value in _KWARG_VALUES.get(kwarg, []):
                 out.append(
                     pytest.param(
@@ -279,17 +286,16 @@ def _harmony_parity_matrix() -> list[Any]:
 
 
 def test_kwarg_values_covers_every_declared_kwarg():
-    """Every kwarg any renderer declares in ``CHAT_TEMPLATE_KWARGS`` must
-    have an entry in ``_KWARG_VALUES`` — otherwise it silently drops out
-    of parity coverage.
+    """Every template field any renderer declares must have an entry in
+    ``_KWARG_VALUES`` — otherwise it silently drops out of parity
+    coverage.
     """
     declared: set[str] = set()
     for model, name in _RENDERER_MODELS:
-        cls = _resolve_renderer_cls(model, name)
-        declared.update(getattr(cls, "CHAT_TEMPLATE_KWARGS", ()))
+        declared.update(_template_fields_for(model, name))
     missing = sorted(declared - _KWARG_VALUES.keys())
     assert not missing, (
-        f"chat_template_kwargs declared but not covered: {missing}. "
+        f"Typed-config template fields declared but not covered: {missing}. "
         f"Add a value list to _KWARG_VALUES in this file."
     )
 
@@ -305,11 +311,9 @@ def _tokenizer(model_name: str):
 @lru_cache(maxsize=None)
 def _renderer_with_kwarg(model_name: str, renderer_name: str, kwarg: str, value: Any):
     tok = _tokenizer(model_name)
-    return create_renderer(
-        tok,
-        renderer=renderer_name,
-        chat_template_kwargs={kwarg: value},
-    )
+    resolved = _resolve_renderer_name(model_name, renderer_name)
+    config = _config_class_for(resolved)(**{kwarg: value})
+    return create_renderer(tok, config)
 
 
 def _expected_hf(tokenizer, messages, *, kwarg: str, value: Any, **render_kwargs):
@@ -359,10 +363,11 @@ def test_chat_template_kwarg_parity_hf(
 ):
     tokenizer = _tokenizer(model)
     renderer = _renderer_with_kwarg(model, renderer_name, kwarg, value)
-    # Guard: the renderer must actually declare the kwarg. ``create_renderer``
-    # already enforces this at construction; asserting here gives a louder
-    # failure on a future renderer subclass that drops the declaration.
-    assert kwarg in getattr(type(renderer), "CHAT_TEMPLATE_KWARGS", frozenset())
+    # Guard: the typed config must actually declare the kwarg as a
+    # template field. Pydantic ``extra="forbid"`` already enforces this
+    # at construction; asserting here gives a louder failure on a future
+    # config subclass that drops the field.
+    assert kwarg in type(renderer.config).template_field_names()
 
     try:
         expected = _expected_hf(
@@ -389,6 +394,7 @@ _DATE_FOR_PARITY = datetime.now().strftime("%Y-%m-%d")
 
 @lru_cache(maxsize=None)
 def _gpt_oss_renderer(kwarg: str, value: Any):
+    from renderers.configs import GptOssRendererConfig
     from renderers.gpt_oss import GptOssRenderer
 
     tok = _tokenizer("openai/gpt-oss-20b")
@@ -399,7 +405,7 @@ def _gpt_oss_renderer(kwarg: str, value: Any):
     # below so the assertion still holds).
     kwargs: dict[str, Any] = {"conversation_start_date": _DATE_FOR_PARITY}
     kwargs[kwarg] = value
-    return GptOssRenderer(tok, **kwargs)
+    return GptOssRenderer(tok, GptOssRendererConfig(**kwargs))
 
 
 def _harmony_expected(
@@ -431,7 +437,7 @@ def _harmony_expected(
     else:
         raise AssertionError(
             f"Harmony oracle: unhandled gpt-oss chat_template_kwarg {kwarg!r}. "
-            "Add a branch here when extending CHAT_TEMPLATE_KWARGS on GptOssRenderer."
+            "Add a branch here when extending GptOssRendererConfig's template fields."
         )
 
     harmony_msgs: list[HarmonyMessage] = [
@@ -498,7 +504,7 @@ def test_chat_template_kwarg_parity_harmony(
     render_kwargs,
 ):
     renderer = _gpt_oss_renderer(kwarg, value)
-    assert kwarg in getattr(type(renderer), "CHAT_TEMPLATE_KWARGS", frozenset())
+    assert kwarg in type(renderer.config).template_field_names()
 
     got = renderer.render_ids(messages, **render_kwargs)
     expected = _harmony_expected(kwarg, value, messages)

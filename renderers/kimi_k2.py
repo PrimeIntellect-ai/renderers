@@ -26,38 +26,29 @@ from renderers.base import (
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
+from renderers.configs import KimiK2RendererConfig
 from renderers.parsing import parse_kimi_k2
 
 _DEFAULT_SYSTEM = "You are Kimi, an AI assistant created by Moonshot AI."
 
 
 class KimiK2Renderer:
-    """Deterministic message → token renderer for Kimi K2 models."""
+    """Deterministic message → token renderer for Kimi K2 models.
 
-    # Kimi K2's chat template has no template-honored kwargs (no
-    # ``thinking`` / ``enable_thinking`` / ``reasoning`` references —
-    # the template renders ``content`` verbatim with no reasoning
-    # branch). Declared explicitly so the audit is visible at the class
-    # surface rather than implicit through ``getattr(cls, ..., ())``.
-    CHAT_TEMPLATE_KWARGS = frozenset()
+    Kimi K2's chat template doesn't read any thinking-related variable —
+    ``content`` renders verbatim with no reasoning branch. The
+    ``enable_thinking`` / ``preserve_*`` fields on the config are stored
+    for protocol uniformity with the rest of the renderer family but
+    have no effect on the byte-level output.
+    """
 
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        *,
-        enable_thinking: bool = True,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
+        config: KimiK2RendererConfig | None = None,
     ):
-        # Kimi-K2's chat template doesn't read ``reasoning_content`` for
-        # past assistant turns, so the override flags are no-ops. Stored
-        # for introspection / Protocol parity only.
         self._tokenizer = tokenizer
-        self._enable_thinking = enable_thinking
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        self.config = config or KimiK2RendererConfig()
 
         self._im_user = self._token_id("<|im_user|>")
         self._im_assistant = self._token_id("<|im_assistant|>")

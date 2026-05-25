@@ -46,6 +46,7 @@ from renderers.base import (
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
+from renderers.configs import Qwen3VLRendererConfig
 from renderers.parsing import parse_qwen3
 
 _TOOLS_HEADER = (
@@ -291,43 +292,30 @@ class Qwen3VLRenderer:
 
     Constructor args:
         tokenizer: HF tokenizer for the model.
+        config: Typed renderer config (see
+            :class:`renderers.Qwen3VLRendererConfig`). Defaults to a
+            blank config with template defaults.
         processor: Optional ``Qwen3VLProcessor``. Required when rendering
             messages that contain image / video parts. If not supplied,
             the renderer lazy-loads it via ``AutoProcessor.from_pretrained``
             keyed off ``tokenizer.name_or_path`` the first time a
             multimodal part is seen.
-        add_vision_id: When True, prefix each ``<|vision_start|>`` placeholder
-            with ``"Picture N: "`` (or ``"Video N: "``) where N is a
-            1-indexed counter that runs across the entire conversation.
-            Mirrors the upstream Jinja's ``add_vision_id`` toggle.
-        preserve_all_thinking / preserve_thinking_between_tool_calls:
-            No-ops on Qwen3-VL — the chat template already drops past
-            ``<think>`` blocks unconditionally. Stored for Protocol parity.
-        image_cache_max: Max entries in the per-instance image-processor
-            cache (FIFO eviction). Default 256 covers typical RL pools
-            (``rollouts_per_example`` × in-flight examples). Bump for runs
-            with large image sets where the working set exceeds the cap.
-    """
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"add_vision_id"})
+    ``preserve_all_thinking`` / ``preserve_thinking_between_tool_calls``
+    on the config are no-ops here — the chat template drops past
+    ``<think>`` blocks unconditionally. Stored for Protocol parity.
+    """
 
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
+        config: Qwen3VLRendererConfig | None = None,
         *,
         processor: Any = None,
-        add_vision_id: bool = False,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
-        image_cache_max: int = 256,
     ):
         self._tokenizer = tokenizer
         self._processor = processor
-        self._add_vision_id = add_vision_id
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        self.config = config or Qwen3VLRendererConfig()
 
         self._im_start = self._token_id("<|im_start|>")
         self._im_end = self._token_id("<|im_end|>")
@@ -350,7 +338,6 @@ class Qwen3VLRenderer:
         # tuples of ``(processor_out, num_image_tokens)`` — bounded to
         # avoid unbounded growth on long-lived pools.
         self._image_cache: dict[str, tuple[Any, int]] = {}
-        self._image_cache_max = image_cache_max
 
     def _token_id(self, token: str) -> int:
         tid = self._tokenizer.convert_tokens_to_ids(token)
@@ -439,7 +426,7 @@ class Qwen3VLRenderer:
         grid_thw = out["image_grid_thw"][0]
         merge_size = proc.image_processor.merge_size
         num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)
-        if len(self._image_cache) >= self._image_cache_max:
+        if len(self._image_cache) >= self.config.image_cache_max:
             # FIFO eviction — Python dicts preserve insertion order, so
             # ``next(iter(...))`` is the oldest key.
             self._image_cache.pop(next(iter(self._image_cache)))
@@ -477,7 +464,7 @@ class Qwen3VLRenderer:
             # markers are renderer-emitted scaffold.
             _, out, n, h = self._process_image(part)
             vision_counts["image"] += 1
-            if self._add_vision_id:
+            if self.config.add_vision_id:
                 em.text(
                     f"Picture {vision_counts['image']}: ",
                     is_sampled=False,
@@ -695,7 +682,7 @@ class Qwen3VLRenderer:
         # re-render, which has the full message list and counts
         # correctly.
         if (
-            self._add_vision_id
+            self.config.add_vision_id
             and previous_multi_modal_data is None
             and self._vision_start in previous_ids
         ):
@@ -741,7 +728,7 @@ class Qwen3VLRenderer:
         def emit_image(part: dict[str, Any]) -> None:
             _, out, n, h = self._process_image(part)
             vision_counts["image"] += 1
-            if self._add_vision_id:
+            if self.config.add_vision_id:
                 em.text(
                     f"Picture {vision_counts['image']}: ",
                     is_sampled=False,

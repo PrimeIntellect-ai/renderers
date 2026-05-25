@@ -25,6 +25,7 @@ from renderers.base import (
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
+from renderers.configs import DeepSeekV3RendererConfig
 from renderers.parsing import parse_deepseek_v3
 
 # Fullwidth vertical bar used in DeepSeek special token names.
@@ -39,36 +40,25 @@ def _ds_token(name: str) -> str:
 
 
 class DeepSeekV3Renderer:
-    """Deterministic message → token renderer for DeepSeek V3 models."""
+    """Deterministic message → token renderer for DeepSeek V3 models.
 
-    # DeepSeek-V3's chat template does not consult any thinking-related
-    # variable (no ``enable_thinking`` / ``thinking`` references). The
-    # ``<think>\n`` prefill at the generation prompt is a renderer
-    # convention for the R1-distill family, controllable via the
-    # constructor kwarg, but it is intentionally NOT advertised as a
-    # ``chat_template_kwargs`` entry — passing
-    # ``chat_template_kwargs={"enable_thinking": False}`` to
-    # ``apply_chat_template`` is a no-op upstream, so exposing it here
-    # would create a parity gap users couldn't reason about.
-    CHAT_TEMPLATE_KWARGS = frozenset()
+    DeepSeek-V3's chat template does not consult any thinking-related
+    variable; the ``enable_thinking`` field on the typed config controls
+    the renderer's ``<think>\\n`` prefill at the generation prompt
+    (R1-distill convention) and is intentionally not forwarded to
+    ``apply_chat_template`` upstream — that would be a no-op. The
+    template also always emits ``<think>{reasoning}</think>`` when
+    ``reasoning_content`` is provided, so ``preserve_*`` flags are
+    no-ops here too; stored for protocol uniformity.
+    """
 
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        *,
-        enable_thinking: bool = True,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
+        config: DeepSeekV3RendererConfig | None = None,
     ):
-        # DeepSeek-V3's chat template always emits ``<think>{reasoning}</think>``
-        # when ``reasoning_content`` is provided — no drop, so the override
-        # flags are no-ops. Stored for introspection / Protocol parity only.
         self._tokenizer = tokenizer
-        self._enable_thinking = enable_thinking
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        self.config = config or DeepSeekV3RendererConfig()
 
         # ── BOS / EOS ────────────────────────────────────────────────
         self._bos = self._get_special_token(f"begin{_US}of{_US}sentence")
@@ -248,7 +238,7 @@ class DeepSeekV3Renderer:
                 emit_special(
                     self._assistant_token, -1, is_sampled=False, is_content=False
                 )
-            if self._enable_thinking:
+            if self.config.enable_thinking:
                 emit_text("<think>\n", -1, is_sampled=False, is_content=False)
 
         return RenderedTokens(
@@ -390,7 +380,7 @@ class DeepSeekV3Renderer:
         last_role = new_messages[-1].get("role") if new_messages else None
         if last_role != "tool":
             emit_special(self._assistant_token, -1)
-        if self._enable_thinking:
+        if self.config.enable_thinking:
             emit_text("<think>\n", -1)
 
         total_len = len(previous_ids) + len(ext)

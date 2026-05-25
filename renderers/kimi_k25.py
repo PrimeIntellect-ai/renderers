@@ -40,6 +40,7 @@ from renderers.base import (
     should_preserve_past_thinking,
     trim_to_turn_close,
 )
+from renderers.configs import KimiK25RendererConfig
 from renderers.parsing import parse_kimi_k2_section
 from renderers.qwen3_vl import (
     _image_hash,
@@ -574,25 +575,16 @@ class KimiK25Renderer:
     The tokenizer should be ``moonshotai/Kimi-K2-Instruct`` (same as K2).
     """
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"thinking"})
-
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
+        config: KimiK25RendererConfig | None = None,
         *,
         processor: Any = None,
-        thinking: bool = True,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
-        image_cache_max: int = 256,
     ):
         self._tokenizer = tokenizer
         self._processor = processor
-        self._thinking = thinking
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        self.config = config or KimiK25RendererConfig()
 
         # Core structural tokens — all must be single special tokens in the vocab
         self._im_user = self._token_id("<|im_user|>")
@@ -633,7 +625,6 @@ class KimiK25Renderer:
         # for Kimi (we emit a single placeholder regardless), but kept for
         # consistency / debugging.
         self._image_cache: dict[str, tuple[Any, int]] = {}
-        self._image_cache_max = image_cache_max
 
     @property
     def mm_token_type_id_map(self) -> dict[int, int]:
@@ -685,7 +676,7 @@ class KimiK25Renderer:
         # Patch count via the processor's own calculator (matches the
         # model's per-patch attention count); kept for debugging.
         num_patches = int(img_proc.media_tokens_calculator(media_item))
-        if len(self._image_cache) >= self._image_cache_max:
+        if len(self._image_cache) >= self.config.image_cache_max:
             self._image_cache.pop(next(iter(self._image_cache)))
         self._image_cache[h] = (out, num_patches)
         return pil, out, num_patches, h
@@ -883,8 +874,8 @@ class KimiK25Renderer:
                 preserve_thinking = should_preserve_past_thinking(
                     messages,
                     i,
-                    preserve_all_thinking=self._preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self._preserve_thinking_between_tool_calls,
+                    preserve_all_thinking=self.config.preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
                 )
                 self._render_assistant_body(
                     msg,
@@ -933,7 +924,7 @@ class KimiK25Renderer:
             emit_special(self._im_assistant, -1, is_sampled=False, is_content=False)
             emit_text("assistant", -1, is_sampled=False, is_content=False)
             emit_special(self._im_middle, -1, is_sampled=False, is_content=False)
-            if self._thinking:
+            if self.config.thinking:
                 # Prefill open <think> tag to trigger thinking mode
                 emit_text("<think>", -1, is_sampled=False, is_content=False)
             else:
@@ -1167,7 +1158,7 @@ class KimiK25Renderer:
         emit_special(self._im_assistant, -1)
         emit_text("assistant", -1)
         emit_special(self._im_middle, -1)
-        if self._thinking:
+        if self.config.thinking:
             emit_text("<think>", -1)
         else:
             emit_text("<think></think>", -1)

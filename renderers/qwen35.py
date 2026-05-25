@@ -31,6 +31,7 @@ from renderers.base import (
     should_preserve_past_thinking,
     trim_to_turn_close,
 )
+from renderers.configs import Qwen35RendererConfig
 from renderers.parsing import parse_qwen35
 from renderers.qwen3_vl import (
     _image_hash,
@@ -103,35 +104,27 @@ def _detect_enable_thinking_default(tokenizer: PreTrainedTokenizer) -> bool:
 class Qwen35Renderer:
     """Deterministic message → token renderer for Qwen3.5 models."""
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking", "add_vision_id"})
+    _config_cls: type = Qwen35RendererConfig
 
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
+        config: Qwen35RendererConfig | None = None,
         *,
         processor: Any = None,
-        enable_thinking: bool | None = None,
-        add_vision_id: bool = False,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
-        image_cache_max: int = 256,
     ):
         self._tokenizer = tokenizer
         self._processor = processor
-        if enable_thinking is None:
-            enable_thinking = _detect_enable_thinking_default(tokenizer)
-        self._enable_thinking = enable_thinking
-        # ``add_vision_id=True`` matches the Jinja's ``image_count`` /
-        # ``video_count`` namespaces: each image / video placeholder is
-        # prefixed with ``Picture N: `` / ``Video N: `` where N is a
-        # 1-indexed counter running across the conversation (in the main
-        # render loop — system message renders never increment because
-        # the template raises on vision in system content).
-        self._add_vision_id = add_vision_id
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        cfg = config or type(self)._config_cls()
+        # ``enable_thinking=None`` defers to the tokenizer's chat-template
+        # default (Instruct → off, Thinking → on). Materialise here so
+        # downstream reads see a concrete bool; rebind the config with
+        # the resolved value so introspection sees the same.
+        if cfg.enable_thinking is None:
+            cfg = cfg.model_copy(
+                update={"enable_thinking": _detect_enable_thinking_default(tokenizer)}
+            )
+        self.config = cfg
 
         # Look up special token IDs from the tokenizer (not hardcoded)
         self._im_start = self._token_id("<|im_start|>")
@@ -152,7 +145,6 @@ class Qwen35Renderer:
         # rationale (FIFO-bounded; same image seen across rollouts /
         # bridge re-renders).
         self._image_cache: dict[str, tuple[Any, int]] = {}
-        self._image_cache_max = image_cache_max
 
     @property
     def mm_token_type_id_map(self) -> dict[int, int]:
@@ -197,7 +189,7 @@ class Qwen35Renderer:
         grid_thw = out["image_grid_thw"][0]
         merge_size = proc.image_processor.merge_size
         num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)
-        if len(self._image_cache) >= self._image_cache_max:
+        if len(self._image_cache) >= self.config.image_cache_max:
             self._image_cache.pop(next(iter(self._image_cache)))
         self._image_cache[h] = (out, num_image_tokens)
         return pil, out, num_image_tokens, h
@@ -368,7 +360,7 @@ class Qwen35Renderer:
             # specials are template scaffold.
             _, out, n, h = self._process_image(part)
             vision_counts["image"] += 1
-            if self._add_vision_id:
+            if self.config.add_vision_id:
                 emit_text(
                     f"Picture {vision_counts['image']}: ",
                     msg_idx,
@@ -513,8 +505,8 @@ class Qwen35Renderer:
                 preserve_thinking = should_preserve_past_thinking(
                     messages,
                     i,
-                    preserve_all_thinking=self._preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self._preserve_thinking_between_tool_calls,
+                    preserve_all_thinking=self.config.preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
                 )
                 self._render_assistant(
                     msg,
@@ -545,7 +537,7 @@ class Qwen35Renderer:
         if add_generation_prompt:
             emit_special(self._im_start, -1, is_sampled=False, is_content=False)
             emit_text("assistant\n", -1, is_sampled=False, is_content=False)
-            if self._enable_thinking:
+            if self.config.enable_thinking:
                 emit_special(self._think, -1, is_sampled=False, is_content=False)
                 emit_text("\n", -1, is_sampled=False, is_content=False)
             else:
@@ -640,7 +632,7 @@ class Qwen35Renderer:
         # re-render, which has the full message list and counts from
         # scratch correctly.
         if (
-            self._add_vision_id
+            self.config.add_vision_id
             and previous_multi_modal_data is None
             and self._vision_start in previous_ids
         ):
@@ -718,7 +710,7 @@ class Qwen35Renderer:
         def emit_image(part: dict[str, Any], msg_idx: int = -1) -> None:
             _, out, n, h = self._process_image(part)
             vision_counts["image"] += 1
-            if self._add_vision_id:
+            if self.config.add_vision_id:
                 emit_text(f"Picture {vision_counts['image']}: ", msg_idx)
             emit_special(self._vision_start, msg_idx)
             offset = len(tokens)
@@ -811,7 +803,7 @@ class Qwen35Renderer:
         # Generation prompt — matches the gen-prompt branch of ``render()``.
         emit_special(self._im_start, -1)
         emit_text("assistant\n", -1)
-        if self._enable_thinking:
+        if self.config.enable_thinking:
             emit_special(self._think, -1)
             emit_text("\n", -1)
         else:

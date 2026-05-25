@@ -33,6 +33,7 @@ from openai_harmony import (
     ToolDescription,
     load_harmony_encoding,
 )
+from renderers.configs import GptOssRendererConfig
 from renderers.gpt_oss import GptOssRenderer
 from transformers import AutoTokenizer
 
@@ -49,7 +50,9 @@ def tokenizer():
 def renderer(tokenizer):
     # Pin the date so the rendered preamble matches the harmony oracle
     # built with the same fixed date.
-    return GptOssRenderer(tokenizer, conversation_start_date=DATE_FOR_PARITY)
+    return GptOssRenderer(
+        tokenizer, GptOssRendererConfig(conversation_start_date=DATE_FOR_PARITY)
+    )
 
 
 @pytest.fixture(scope="module")

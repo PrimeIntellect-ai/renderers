@@ -29,6 +29,7 @@ from renderers.base import (
     should_preserve_past_thinking,
     trim_to_turn_close,
 )
+from renderers.configs import Nemotron3RendererConfig
 from renderers.parsing import parse_qwen35
 
 # ---------------------------------------------------------------------------
@@ -76,31 +77,13 @@ def _render_extra_keys(obj: dict[str, Any], handled_keys: set[str]) -> list[str]
 class Nemotron3Renderer:
     """Deterministic message → token renderer for Nemotron 3 models."""
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking", "truncate_history_thinking"})
-
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        *,
-        enable_thinking: bool = True,
-        truncate_history_thinking: bool = True,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
+        config: Nemotron3RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
-        self._enable_thinking = enable_thinking
-        # ``truncate_history_thinking=False`` keeps historical assistants'
-        # ``<think>{reasoning}</think>`` instead of collapsing to the
-        # empty ``<think></think>`` marker. Mirrors the chat template's
-        # ``truncate_history_thinking`` gate. Composes with
-        # ``preserve_all_thinking`` via OR — either flag enables
-        # historical thinking preservation. Default True matches the
-        # template's default behaviour.
-        self._truncate_history_thinking = truncate_history_thinking
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        self.config = config or Nemotron3RendererConfig()
 
         # Look up special token IDs from the tokenizer (not hardcoded).
         # <|endoftext|> is optional: Nemotron-3 Nano / Super tokenizers ship
@@ -380,8 +363,8 @@ class Nemotron3Renderer:
                 preserve_thinking = msg_orig_idx >= 0 and should_preserve_past_thinking(
                     original_messages,
                     msg_orig_idx,
-                    preserve_all_thinking=self._preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self._preserve_thinking_between_tool_calls,
+                    preserve_all_thinking=self.config.preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
                 )
                 self._render_assistant(
                     msg,
@@ -414,7 +397,7 @@ class Nemotron3Renderer:
         if add_generation_prompt:
             emit_special(self._im_start, -1, is_sampled=False, is_content=False)
             emit_text("assistant\n", -1, is_sampled=False, is_content=False)
-            if self._enable_thinking:
+            if self.config.enable_thinking:
                 emit_special(self._think, -1, is_sampled=False, is_content=False)
                 emit_text("\n", -1, is_sampled=False, is_content=False)
             else:
@@ -583,7 +566,7 @@ class Nemotron3Renderer:
         # Generation prompt.
         emit_special(self._im_start, -1)
         emit_text("assistant\n", -1)
-        if self._enable_thinking:
+        if self.config.enable_thinking:
             emit_special(self._think, -1)
             emit_text("\n", -1)
         else:
@@ -653,7 +636,9 @@ class Nemotron3Renderer:
         content_suffix = "\n" if tool_calls else ""
 
         if reasoning_content and (
-            is_last_turn or preserve_thinking or not self._truncate_history_thinking
+            is_last_turn
+            or preserve_thinking
+            or not self.config.truncate_history_thinking
         ):
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
             emit_text(

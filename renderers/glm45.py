@@ -24,6 +24,7 @@ from renderers.base import (
     reject_assistant_in_extension,
     should_preserve_past_thinking,
 )
+from renderers.configs import GLM45RendererConfig
 from renderers.parsing import parse_glm
 
 _TOOLS_HEADER = (
@@ -50,22 +51,13 @@ _TOOLS_FOOTER = (
 class GLM45Renderer:
     """Deterministic message → token renderer for GLM-4.5 Air models."""
 
-    CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking"})
-
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        *,
-        enable_thinking: bool = True,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
+        config: GLM45RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
-        self._enable_thinking = enable_thinking
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        self.config = config or GLM45RendererConfig()
 
         self._gmask = self._token_id("[gMASK]")
         self._sop = self._token_id("<sop>")
@@ -206,7 +198,7 @@ class GLM45Renderer:
                 # ``/nothink`` suffix is scaffold the renderer injects
                 # when ``enable_thinking=False``.
                 user_segments: list[tuple[str, bool]] = [("\n", False), (content, True)]
-                if not self._enable_thinking and not content.endswith("/nothink"):
+                if not self.config.enable_thinking and not content.endswith("/nothink"):
                     user_segments.append(("/nothink", False))
                 emit_text_segments(user_segments, i, is_sampled=False)
 
@@ -214,8 +206,8 @@ class GLM45Renderer:
                 preserve_thinking = should_preserve_past_thinking(
                     messages,
                     i,
-                    preserve_all_thinking=self._preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self._preserve_thinking_between_tool_calls,
+                    preserve_all_thinking=self.config.preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
                 )
                 self._render_assistant(
                     msg,
@@ -241,7 +233,7 @@ class GLM45Renderer:
         # ── Generation prompt ───────────────────────────────────────
         if add_generation_prompt:
             emit_special(self._assistant, -1, is_sampled=False, is_content=False)
-            if not self._enable_thinking:
+            if not self.config.enable_thinking:
                 emit_text("\n", -1, is_sampled=False, is_content=False)
                 emit_special(self._think, -1, is_sampled=False, is_content=False)
                 emit_special(self._think_end, -1, is_sampled=False, is_content=False)
@@ -380,7 +372,7 @@ class GLM45Renderer:
                     ("\n", False),
                     (content, True),
                 ]
-                if not self._enable_thinking and not content.endswith("/nothink"):
+                if not self.config.enable_thinking and not content.endswith("/nothink"):
                     user_segments.append(("/nothink", False))
                 emit_text_segments(user_segments, i)
             elif role == "system":
@@ -405,7 +397,7 @@ class GLM45Renderer:
 
         # Generation prompt.
         emit_special(self._assistant, -1)
-        if not self._enable_thinking:
+        if not self.config.enable_thinking:
             emit_text("\n", -1)
             emit_special(self._think, -1)
             emit_special(self._think_end, -1)

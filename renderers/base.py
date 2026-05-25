@@ -6,7 +6,18 @@ import queue
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Protocol, TypedDict, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Literal,
+    Protocol,
+    TypedDict,
+    runtime_checkable,
+)
+
+if TYPE_CHECKING:
+    from renderers.configs import AutoRendererConfig, RendererConfig
 
 logger = logging.getLogger("renderers.base")
 
@@ -870,14 +881,6 @@ class RendererPool:
 
 
 RENDERER_REGISTRY: dict[str, type] = {}
-_RENDERER_CONSTRUCTOR_KWARGS = frozenset(
-    {
-        "tool_parser",
-        "reasoning_parser",
-        "preserve_all_thinking",
-        "preserve_thinking_between_tool_calls",
-    }
-)
 
 # Exact canonical HF model names → renderer. We do NOT use prefix
 # matching because models with the same architecture may ship different
@@ -1174,33 +1177,22 @@ def _populate_registry():
 
 def create_renderer_pool(
     tokenizer_name_or_path: str,
-    renderer: str = "auto",
-    size: int = 16,
+    config: RendererConfig | None = None,
     *,
-    tool_parser: str | None = None,
-    reasoning_parser: str | None = None,
-    chat_template_kwargs: dict[str, Any] | None = None,
-    preserve_all_thinking: bool = False,
-    preserve_thinking_between_tool_calls: bool = False,
+    size: int = 16,
 ) -> RendererPool:
     """Create a RendererPool with *size* independent tokenizer copies.
 
-    Each slot loads its own tokenizer so threads never share mutable state.
-    HuggingFace fast tokenizers release the GIL during Rust encoding, so
-    threads achieve real parallelism.
+    Each slot loads its own tokenizer so threads never share mutable
+    state. HuggingFace fast tokenizers release the GIL during Rust
+    encoding, so threads achieve real parallelism.
 
-    ``tool_parser`` and ``reasoning_parser`` are forwarded to
-    ``create_renderer`` when the pool falls back to ``DefaultRenderer``.
-
-    ``chat_template_kwargs`` are forwarded to each renderer constructor.
-    Hand-coded renderers accept only the kwargs they explicitly model
-    (for example ``enable_thinking`` or ``reasoning_effort``); the default
-    renderer forwards them to ``tokenizer.apply_chat_template``.
-
-    ``preserve_all_thinking`` and ``preserve_thinking_between_tool_calls``
-    are forwarded to each pooled renderer's constructor — every slot in
-    the pool shares one configuration. To run with a different
-    configuration, build a different pool.
+    ``config`` is the typed renderer config (one of the variants of
+    :data:`renderers.RendererConfig`). Defaults to
+    :class:`AutoRendererConfig`, which resolves to a concrete renderer
+    via ``MODEL_RENDERER_MAP`` at construction time using the loaded
+    tokenizer's name. Every slot in the pool shares the same config; to
+    run a different config, build a different pool.
 
     Tokenizers load via ``load_tokenizer`` — see its docstring for the
     ``trust_remote_code`` policy (default off; Moonshot Kimi-K2 family
@@ -1209,115 +1201,76 @@ def create_renderer_pool(
 
     def factory() -> Renderer:
         tokenizer = load_tokenizer(tokenizer_name_or_path)
-        return create_renderer(
-            tokenizer,
-            renderer=renderer,
-            tool_parser=tool_parser,
-            reasoning_parser=reasoning_parser,
-            chat_template_kwargs=chat_template_kwargs,
-            preserve_all_thinking=preserve_all_thinking,
-            preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
-        )
+        return create_renderer(tokenizer, config)
 
     return RendererPool(factory, size=size)
 
 
 def create_renderer(
     tokenizer,
-    renderer: str = "auto",
-    *,
-    tool_parser: str | None = None,
-    reasoning_parser: str | None = None,
-    chat_template_kwargs: dict[str, Any] | None = None,
-    preserve_all_thinking: bool = False,
-    preserve_thinking_between_tool_calls: bool = False,
+    config: RendererConfig | None = None,
 ) -> Renderer:
-    """Create a Renderer by name, or auto-detect from the tokenizer's model name.
+    """Create a Renderer from a typed config.
 
     Args:
         tokenizer: HuggingFace tokenizer instance.
-        renderer: Renderer name ('qwen3', 'qwen3-vl', 'qwen3.5', 'qwen3.6',
-                  'glm-5', 'glm-5.1', 'glm-4.5', 'minimax-m2', 'deepseek-v3',
-                  'kimi-k2', 'kimi-k2.5', 'laguna-xs.2', 'nemotron-3',
-                  'gpt-oss', 'default') or 'auto' to detect from model name.
-        tool_parser: Name of a tool parser registered in ``renderers.parsers``.
-                  Only consumed by DefaultRenderer. Model-specific renderers
-                  have their own parsing wired in.
-        reasoning_parser: Name of a reasoning parser registered in
-                  ``renderers.parsers``. Only consumed by DefaultRenderer.
-        chat_template_kwargs: Template-control kwargs bound to the renderer.
-                  Hand-coded renderers accept only the kwargs they explicitly
-                  model (for example ``enable_thinking`` or
-                  ``reasoning_effort``); DefaultRenderer forwards all kwargs
-                  to ``tokenizer.apply_chat_template``.
-        preserve_all_thinking: Forwarded to the renderer's constructor.
-                  When ``True``, the instance restores ``reasoning_content``
-                  the chat template would otherwise drop on historical
-                  assistants — useful when a downstream pass (e.g.
-                  compaction prompts the model with a fresh ``user`` turn
-                  asking for a summary) would lose the trajectory's
-                  reasoning. See ``Renderer.render`` and
-                  ``should_preserve_past_thinking``.
-        preserve_thinking_between_tool_calls: Forwarded to the renderer's
-                  constructor. ``True`` keeps reasoning on in-flight
-                  tool-cycle assistants when the template would drop them.
-                  See ``Renderer.render`` for semantics.
+        config: Typed renderer config — one of the variants of
+            :data:`renderers.RendererConfig`. ``None`` defaults to
+            :class:`AutoRendererConfig`, which resolves to a concrete
+            renderer using ``tokenizer.name_or_path`` against
+            ``MODEL_RENDERER_MAP``. To enable structured-output parsing
+            on the default renderer, pass :class:`DefaultRendererConfig`
+            with ``tool_parser`` / ``reasoning_parser`` set. To override
+            template-control kwargs (e.g. ``enable_thinking``), pass
+            the specific :class:`Qwen3RendererConfig`,
+            :class:`GLM5RendererConfig` etc. and set those fields.
+
+    Selecting the auto-renderer for a model without a registered
+    renderer falls back to :class:`DefaultRenderer` for text-only models
+    and raises for VLMs (where ``apply_chat_template`` would silently
+    drop images).
     """
+    from renderers.configs import AutoRendererConfig
+
     _populate_registry()
 
-    default_kwargs: dict = {}
-    if tool_parser is not None:
-        default_kwargs["tool_parser"] = tool_parser
-    if reasoning_parser is not None:
-        default_kwargs["reasoning_parser"] = reasoning_parser
+    if config is None:
+        config = AutoRendererConfig()
 
-    preserve_kwargs: dict = {
-        "preserve_all_thinking": preserve_all_thinking,
-        "preserve_thinking_between_tool_calls": preserve_thinking_between_tool_calls,
-    }
-    template_kwargs = dict(chat_template_kwargs or {})
-    _reject_renderer_constructor_kwargs(template_kwargs)
-
-    if renderer != "auto":
-        cls = RENDERER_REGISTRY.get(renderer)
+    if not isinstance(config, AutoRendererConfig):
+        cls = RENDERER_REGISTRY.get(config.name)
         if cls is None:
             raise ValueError(
-                f"Unknown renderer {renderer!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
+                f"Unknown renderer {config.name!r}. "
+                f"Available: {', '.join(sorted(RENDERER_REGISTRY))}"
             )
-        if renderer == "default":
-            return cls(
-                tokenizer, **default_kwargs, **template_kwargs, **preserve_kwargs
-            )
-        if default_kwargs:
-            logger.info(
-                "tool_parser / reasoning_parser are only consumed by "
-                "DefaultRenderer; ignoring for renderer=%r which has "
-                "built-in behavior.",
-                renderer,
-            )
-        return cls(
-            tokenizer,
-            **_model_renderer_chat_template_kwargs(renderer, cls, template_kwargs),
-            **preserve_kwargs,
-        )
+        return cls(tokenizer, config)
 
-    # Auto-detect from model name via exact match on the canonical HF id.
-    # Fine-tunes and renamed checkpoints miss on purpose — their chat
-    # template may differ from the original even when the architecture
-    # matches, so silently mapping them would produce template-parity
-    # bugs. Set ``renderer=<name>`` explicitly for those.
+    return _resolve_auto(tokenizer, config)
+
+
+def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
+    """Map ``AutoRendererConfig`` → concrete typed config via the
+    tokenizer's ``name_or_path``, then instantiate the matching renderer.
+
+    Fine-tunes and renamed checkpoints miss on purpose — their chat
+    template may differ from the original even when the architecture
+    matches, so silently mapping them would produce template-parity
+    bugs. Set ``config=<typed renderer config>`` explicitly for those.
+    """
+    from renderers.configs import DefaultRendererConfig, _config_class_for
+
     model_name = getattr(tokenizer, "name_or_path", "")
     renderer_name = MODEL_RENDERER_MAP.get(model_name)
+
+    preserve_carry = {
+        "preserve_all_thinking": auto.preserve_all_thinking,
+        "preserve_thinking_between_tool_calls": auto.preserve_thinking_between_tool_calls,
+    }
+
     if renderer_name is not None:
-        return RENDERER_REGISTRY[renderer_name](
-            tokenizer,
-            **_model_renderer_chat_template_kwargs(
-                renderer_name,
-                RENDERER_REGISTRY[renderer_name],
-                template_kwargs,
-            ),
-            **preserve_kwargs,
-        )
+        cfg_cls = _config_class_for(renderer_name)
+        return RENDERER_REGISTRY[renderer_name](tokenizer, cfg_cls(**preserve_carry))
 
     # No match. For VLMs this must be fatal: DefaultRenderer only knows
     # ``apply_chat_template`` + text tokens, so it would silently drop
@@ -1331,49 +1284,26 @@ def create_renderer(
             f"No multimodal renderer registered for {model_name!r}, and "
             f"DefaultRenderer would silently drop images. Register a "
             f"renderer in MODEL_RENDERER_MAP (currently supported VLMs: "
-            f"{supported_vlms}), or pass ``renderer='<name>'`` explicitly "
-            f"if you know what you're doing."
+            f"{supported_vlms}), or pass an explicit typed renderer "
+            f"config if you know what you're doing."
         )
 
     # Text-only fall back to default (apply_chat_template). For fine-tunes
-    # with customized chat templates this is the *correct* choice, so we don't
-    # warn. Note the pick at INFO and advertise the parser knobs.
+    # with customized chat templates this is the *correct* choice, so we
+    # don't warn. Note the pick at INFO and advertise the parser knobs.
+    if auto.preserve_all_thinking or auto.preserve_thinking_between_tool_calls:
+        raise NotImplementedError(
+            "Auto-resolved DefaultRenderer can't selectively re-emit "
+            "dropped reasoning_content. Pass an explicit typed renderer "
+            "config (model-specific) if you need preserve_*_thinking."
+        )
     logger.info(
         "No model-specific renderer matched %r. Using DefaultRenderer "
-        "(apply_chat_template). Pass tool_parser=<name> or "
-        "reasoning_parser=<name> to enable structured output parsing.",
+        "(apply_chat_template). Pass DefaultRendererConfig(tool_parser=..., "
+        "reasoning_parser=...) to enable structured output parsing.",
         model_name or "<unnamed tokenizer>",
     )
-    return RENDERER_REGISTRY["default"](
-        tokenizer, **default_kwargs, **template_kwargs, **preserve_kwargs
-    )
-
-
-def _reject_renderer_constructor_kwargs(
-    chat_template_kwargs: dict[str, Any],
-) -> None:
-    reserved = sorted(set(chat_template_kwargs) & _RENDERER_CONSTRUCTOR_KWARGS)
-    if reserved:
-        raise ValueError(
-            "chat_template_kwargs cannot contain renderer constructor kwargs: "
-            f"{', '.join(reserved)}"
-        )
-
-
-def _model_renderer_chat_template_kwargs(
-    renderer: str, renderer_cls: type, chat_template_kwargs: dict[str, Any]
-) -> dict[str, Any]:
-    if not chat_template_kwargs:
-        return {}
-
-    allowed = set(getattr(renderer_cls, "CHAT_TEMPLATE_KWARGS", ()))
-    unsupported = sorted(set(chat_template_kwargs) - allowed)
-    if unsupported:
-        raise ValueError(
-            f"renderer={renderer!r} does not support chat_template_kwargs: "
-            f"{', '.join(unsupported)}"
-        )
-    return dict(chat_template_kwargs)
+    return RENDERER_REGISTRY["default"](tokenizer, DefaultRendererConfig())
 
 
 # ---------------------------------------------------------------------------

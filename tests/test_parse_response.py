@@ -13,7 +13,7 @@ from renderers.base import ToolCallParseStatus, load_tokenizer
 @lru_cache
 def _qwen3_vl():
     tokenizer = load_tokenizer("Qwen/Qwen3-VL-4B-Instruct")
-    renderer = create_renderer(tokenizer, renderer="auto")
+    renderer = create_renderer(tokenizer)
     return tokenizer, renderer
 
 
@@ -101,7 +101,7 @@ def test_qwen3_vl_malformed_tool_call_surfaces_as_invalid_json():
 @lru_cache
 def _kimi_k25():
     tokenizer = load_tokenizer("moonshotai/Kimi-K2.5")
-    renderer = create_renderer(tokenizer, renderer="auto")
+    renderer = create_renderer(tokenizer)
     return tokenizer, renderer
 
 

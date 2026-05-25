@@ -38,6 +38,7 @@ from renderers.base import (
     attribute_text_segments,
     reject_assistant_in_extension,
 )
+from renderers.configs import LagunaXS2RendererConfig
 from renderers.parsing import parse_laguna_xs2
 
 _DEFAULT_SYSTEM_MESSAGE = (
@@ -76,37 +77,13 @@ _TOOLS_FOOTER_NO_THINKING = (
 
 
 class LagunaXS2Renderer:
-    CHAT_TEMPLATE_KWARGS = frozenset(
-        {"enable_thinking", "render_assistant_messages_raw"}
-    )
-
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        *,
-        enable_thinking: bool = False,
-        render_assistant_messages_raw: bool = False,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
+        config: LagunaXS2RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
-        self._enable_thinking = enable_thinking
-        # ``render_assistant_messages_raw=True`` switches assistant
-        # rendering to a passthrough mode: the gen-prompt prefix
-        # (``<think>`` / ``</think>``) is only prepended if the content
-        # doesn't already start with it, the content bytes are emitted
-        # verbatim (no reasoning extraction, no tool-call XML
-        # synthesis), and the closing ``</assistant>`` is only
-        # appended if the content doesn't already end with it. Mirrors
-        # the upstream Jinja's ``render_assistant_messages_raw`` gate.
-        self._render_assistant_messages_raw = render_assistant_messages_raw
-        # Accepted for protocol uniformity. The chat template renders
-        # reasoning on every assistant message regardless, so flipping
-        # these flags has no effect on the byte-level output.
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        self.config = config or LagunaXS2RendererConfig()
 
         self._eos = self._token_id("〈|EOS|〉")
         self._think = self._token_id("<think>")
@@ -239,7 +216,7 @@ class LagunaXS2Renderer:
                     tool_text += json.dumps(tool, ensure_ascii=False) + "\n"
                 tool_text += (
                     _TOOLS_FOOTER_THINKING
-                    if self._enable_thinking
+                    if self.config.enable_thinking
                     else _TOOLS_FOOTER_NO_THINKING
                 )
                 emit_text(tool_text, -1, is_sampled=False, is_content=False)
@@ -287,7 +264,7 @@ class LagunaXS2Renderer:
         if add_generation_prompt:
             emit_special(self._assistant, -1, is_sampled=False, is_content=False)
             emit_text("\n", -1, is_sampled=False, is_content=False)
-            if self._enable_thinking:
+            if self.config.enable_thinking:
                 emit_special(self._think, -1, is_sampled=False, is_content=False)
             else:
                 emit_special(self._think_end, -1, is_sampled=False, is_content=False)
@@ -437,7 +414,7 @@ class LagunaXS2Renderer:
 
         emit_special(self._assistant, -1)
         emit_text("\n", -1)
-        if self._enable_thinking:
+        if self.config.enable_thinking:
             emit_special(self._think, -1)
         else:
             emit_special(self._think_end, -1)
@@ -461,7 +438,7 @@ class LagunaXS2Renderer:
         emit_text,
         emit_text_segments,
     ) -> None:
-        if self._render_assistant_messages_raw:
+        if self.config.render_assistant_messages_raw:
             self._render_assistant_raw(
                 msg_idx,
                 content,
@@ -578,7 +555,7 @@ class LagunaXS2Renderer:
         emit_special(self._assistant, msg_idx, is_sampled=False, is_content=False)
         emit_text("\n", msg_idx, is_sampled=False, is_content=False)
 
-        if self._enable_thinking:
+        if self.config.enable_thinking:
             if not content.startswith("<think>"):
                 emit_special(self._think, msg_idx, is_sampled=False, is_content=False)
         else:

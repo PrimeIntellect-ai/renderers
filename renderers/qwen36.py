@@ -23,11 +23,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from renderers.configs import Qwen36RendererConfig
 from renderers.qwen35 import Qwen35Renderer
 
 
 class Qwen36Renderer(Qwen35Renderer):
     """Deterministic message → token renderer for Qwen3.6 models."""
+
+    _config_cls = Qwen36RendererConfig
 
     @staticmethod
     def _render_arg_value(arg_value: Any) -> str:

@@ -21,8 +21,8 @@ from renderers import (
 
 def test_per_renderer_config_rejects_unknown_fields():
     """``extra="forbid"`` on every typed variant catches bogus keys at
-    construction — replaces the old per-renderer ``CHAT_TEMPLATE_KWARGS``
-    allowlist machinery."""
+    construction: ``add_vision_id`` doesn't exist on ``Qwen3RendererConfig``
+    (Qwen3 is text-only), so passing it must raise."""
     with pytest.raises(ValidationError, match="add_vision_id"):
         Qwen3RendererConfig(add_vision_id=True)
 

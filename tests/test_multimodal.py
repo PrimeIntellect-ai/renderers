@@ -696,7 +696,7 @@ def _qwen_vl_processor_input_ids_with_kwargs(
 ):
     """Variant of ``_qwen_vl_processor_input_ids`` that forwards
     ``template_kwargs`` to ``apply_chat_template`` so the parity oracle
-    can exercise the same chat_template_kwargs flag the renderer was
+    can exercise the same typed-config template field the renderer was
     constructed with (e.g. ``add_vision_id=True``).
     """
     text = processor.apply_chat_template(

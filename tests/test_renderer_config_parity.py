@@ -3,10 +3,10 @@ template.
 
 Each renderer's typed config (see ``renderers.configs``) declares the
 fields that mirror chat-template kwargs via
-``Config.template_field_names()``. ``test_chat_template_kwargs.py``
-covers the typed-config wiring; this file covers the only thing that
-matters downstream: that flipping a template field on the typed config
-produces token streams byte-identical to
+``Config.template_field_names()``. ``test_renderer_config.py`` covers
+the typed-config wiring; this file covers the only thing that matters
+downstream: that flipping a template field on the typed config produces
+token streams byte-identical to
 ``tokenizer.apply_chat_template(messages, **{field: value})``.
 
 Without this, the typed surface is a promise the renderer doesn't keep.
@@ -69,9 +69,8 @@ _KWARG_VALUES: dict[str, list[Any]] = {
     "enable_thinking": [True, False],
     # Kimi K2.5 / K2.6 — same semantics as ``enable_thinking`` but the
     # upstream template uses ``thinking`` as the variable name. The
-    # renderer mirrors that name so passing ``thinking`` via
-    # ``chat_template_kwargs`` flows straight through to the template's
-    # gate.
+    # renderer's typed config (``KimiK25RendererConfig.thinking``)
+    # mirrors that name so the field maps 1:1 onto the template gate.
     "thinking": [True, False],
     "reasoning_effort": ["low", "medium", "high"],
     # GLM-5 / GLM-5.1 — ``clear_thinking=False`` preserves the

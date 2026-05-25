@@ -71,7 +71,7 @@ class _BaseRendererConfig(BaseModel):
 
         Default: every non-base field except ``name`` and any field
         listed in ``_internal_fields``. Used by the parity test matrix
-        (``tests/test_chat_template_kwargs_parity.py``) to discover the
+        (``tests/test_renderer_config_parity.py``) to discover the
         cells that must agree with ``apply_chat_template``.
         """
         base = frozenset(_BaseRendererConfig.model_fields)

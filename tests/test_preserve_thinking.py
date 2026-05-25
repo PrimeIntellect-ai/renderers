@@ -443,7 +443,7 @@ def test_glm5_config_accepts_clear_thinking():
     reasoning on ``clear_thinking is defined and not clear_thinking``,
     so passing ``clear_thinking=False`` here must reach the renderer's
     historical-reasoning gate. Parity vs ``apply_chat_template`` is
-    asserted in ``test_chat_template_kwargs_parity``."""
+    asserted in ``test_renderer_config_parity``."""
     from renderers import GLM5RendererConfig
     from renderers.base import load_tokenizer
     from renderers.glm5 import GLM5Renderer

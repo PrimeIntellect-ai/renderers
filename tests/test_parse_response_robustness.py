@@ -133,8 +133,7 @@ def test_tool_calls_is_list_of_parsed_tool_call(model_name, tokenizer, renderer)
 
     Empty list = "model did not emit any tool calls". A list with non-OK
     entries = "model tried and the parser caught the failure"; those are
-    deliberately preserved so verifier / RL-loss code can see them. This
-    replaces the older list-or-None convention.
+    deliberately preserved so verifier / RL-loss code can see them.
     """
     text = "Hello!"
     ids = tokenizer.encode(text, add_special_tokens=False)

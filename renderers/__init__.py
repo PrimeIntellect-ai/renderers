@@ -59,6 +59,7 @@ from renderers.configs import (
     Qwen3VLRendererConfig,
     RendererConfig,
 )
+
 # Concrete renderer classes are lazy-loaded so that consumers needing
 # only the config layer (``RendererConfig`` discriminated union) — e.g.
 # the slim ``prime-rl-configs`` install path — don't pay the
@@ -103,6 +104,7 @@ def __getattr__(name: str):
 
 def __dir__() -> list[str]:
     return sorted(set(globals().keys()) | set(_LAZY_RENDERERS))
+
 
 __all__ = [
     "AutoRendererConfig",

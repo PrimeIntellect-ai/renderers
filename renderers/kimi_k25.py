@@ -566,9 +566,10 @@ class KimiK25Renderer:
     - Generation prompt prefills ``<think>`` (thinking=True, default) or
       ``<think></think>`` (thinking=False) to control thinking mode. The
       template's native kwarg name is ``thinking`` (not the more common
-      ``enable_thinking``); we match it so passing
-      ``chat_template_kwargs={"thinking": False}`` produces the same
-      tokens as ``apply_chat_template(..., thinking=False)``.
+      ``enable_thinking``); we mirror it on
+      :class:`renderers.KimiK25RendererConfig` so
+      ``KimiK25RendererConfig(thinking=False)`` produces the same tokens
+      as ``apply_chat_template(..., thinking=False)``.
     - Image content rendering via ``<|media_begin|>image<|media_content|>...<|media_end|>``.
     - TypeScript-style tool declarations instead of JSON.
 

@@ -20,7 +20,7 @@ keys its tokenizer's template will honour, so it can't enumerate them.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, ClassVar, Literal, Union
+from typing import Annotated, ClassVar, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -456,17 +456,5 @@ __all__ = [
     "Qwen3RendererConfig",
     "Qwen3VLRendererConfig",
     "RendererConfig",
+    "config_for_name",
 ]
-
-
-def _carry_preserve_flags(
-    source: _BaseRendererConfig, target_cls: type
-) -> dict[str, Any]:
-    """Helper for ``_resolve_auto`` in ``base.py``: extract the shared
-    preserve_* fields from an :class:`AutoRendererConfig` so the resolved
-    config can be constructed with them.
-    """
-    return {
-        "preserve_all_thinking": source.preserve_all_thinking,
-        "preserve_thinking_between_tool_calls": source.preserve_thinking_between_tool_calls,
-    }

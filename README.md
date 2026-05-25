@@ -17,7 +17,7 @@ from transformers import AutoTokenizer
 from renderers import create_renderer
 
 tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
-r = create_renderer(tok, renderer="auto")           # → Qwen3Renderer
+r = create_renderer(tok)                            # → Qwen3Renderer (auto-resolved)
 
 prompt_ids = r.render_ids(
     [{"role": "user", "content": "hi"}],
@@ -71,17 +71,17 @@ Each hand-coded bridge:
 ### Picking a renderer
 
 ```python
-r = create_renderer(tok, renderer="auto")
+r = create_renderer(tok)                # AutoRendererConfig is the implicit default
 ```
 
-Auto-detect matches `tokenizer.name_or_path` against `MODEL_RENDERER_MAP` by **exact match**. Prefix matching is intentionally off — same architecture can ship different chat templates (base vs instruct, fine-tune renames). Fine-tunes must pass `renderer=<name>` explicitly; unknown names fall back to `DefaultRenderer`.
+Auto-detect matches `tokenizer.name_or_path` against `MODEL_RENDERER_MAP` by **exact match**. Prefix matching is intentionally off — same architecture can ship different chat templates (base vs instruct, fine-tune renames). Fine-tunes must pass an explicit typed config (e.g. `Qwen3RendererConfig()`); unknown names fall back to `DefaultRenderer`.
 
 ### Pools
 
 ```python
 from renderers import create_renderer_pool
 
-pool = create_renderer_pool("Qwen/Qwen3-8B", renderer="auto", size=16)
+pool = create_renderer_pool("Qwen/Qwen3-8B", size=16)
 with pool.checkout() as r:
     ids = r.render_ids(messages)
 ```

@@ -728,7 +728,7 @@ def _qwen_vl_processor_input_ids_with_kwargs(
 # ``add_vision_id`` is exposed on the Qwen-VL family renderers
 # (Qwen3.5 / Qwen3.6 / Qwen3-VL) per the chat-template audit. Kimi K2.5
 # / K2.6's template has no equivalent toggle, so it's intentionally
-# absent from ``CHAT_TEMPLATE_KWARGS`` there and skipped here.
+# absent from ``KimiK25RendererConfig`` and skipped here.
 _ADD_VISION_ID_CASES = [
     (m, mo) for m, mo in _CASES if mo == "image" and _detect_family(m) == "qwen_vl"
 ]

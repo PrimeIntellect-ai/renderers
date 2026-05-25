@@ -61,14 +61,13 @@ from renderers.configs import (
 )
 
 # Concrete renderer classes are lazy-loaded so that consumers needing
-# only the config layer (``RendererConfig`` discriminated union) — e.g.
-# the slim ``prime-rl-configs`` install path — don't pay the
-# ``transformers`` import cost. Each renderer module does ``from
-# transformers.tokenization_utils import PreTrainedTokenizer`` at module
-# level, so eager imports here would drag ``transformers`` into every
-# downstream ``import renderers``. ``__getattr__`` (PEP 562) resolves
-# the names on first attribute access, so ``from renderers import
-# DefaultRenderer`` and ``renderers.DefaultRenderer`` both work
+# only the config layer (``RendererConfig`` discriminated union) don't
+# pay the ``transformers`` import cost. Each renderer module does
+# ``from transformers.tokenization_utils import PreTrainedTokenizer``
+# at module level, so eager imports here would drag ``transformers``
+# into every downstream ``import renderers``. ``__getattr__`` (PEP 562)
+# resolves the names on first attribute access, so ``from renderers
+# import DefaultRenderer`` and ``renderers.DefaultRenderer`` both work
 # transparently. ``create_renderer`` doesn't depend on these eager
 # imports — ``renderers.base._populate_registry`` lazy-imports the
 # concrete classes itself when a renderer is instantiated.

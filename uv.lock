@@ -9,10 +9,11 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-05-18T21:31:41.804893432Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
+prime-pydantic-config = false
 fastokens = false
 
 [[package]]
@@ -1074,6 +1075,18 @@ wheels = [
 ]
 
 [[package]]
+name = "prime-pydantic-config"
+version = "0.3.0.dev83"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b3/4e/bcdb244336d3abae60c7767626aaf635ef724bdc3f2cb46e317d11b23d91/prime_pydantic_config-0.3.0.dev83.tar.gz", hash = "sha256:7446e6439ba6de2f2c332acb292ba5b53da7c1a4ad60e4a25b78393b17859fdd", size = 73322, upload-time = "2026-05-24T02:58:49.485Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/6b/372380c6f5cc3a6f0b6690acb453e9aa9d848e8c1ec421e883c1c3c7a293/prime_pydantic_config-0.3.0.dev83-py3-none-any.whl", hash = "sha256:91a8d883181aff069a4a07f56b636c399c32f1814d8177b9e167a8398643e313", size = 26259, upload-time = "2026-05-24T02:58:48.432Z" },
+]
+
+[[package]]
 name = "pydantic"
 version = "2.13.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1373,6 +1386,8 @@ dependencies = [
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "openai" },
     { name = "openai-harmony" },
+    { name = "prime-pydantic-config" },
+    { name = "pydantic" },
     { name = "tiktoken" },
     { name = "transformers" },
 ]
@@ -1396,6 +1411,8 @@ requires-dist = [
     { name = "numpy" },
     { name = "openai", specifier = ">=1.108.1" },
     { name = "openai-harmony", specifier = ">=0.0.8" },
+    { name = "prime-pydantic-config", specifier = ">=0.3.0.dev0" },
+    { name = "pydantic", specifier = ">=2" },
     { name = "tiktoken" },
     { name = "transformers", specifier = ">=4.50.0" },
 ]

@@ -40,6 +40,7 @@ from renderers.base import (
 from renderers.client import OverlongPromptError
 from renderers.configs import (
     AutoRendererConfig,
+    BaseRendererConfig,
     config_from_name,
     DefaultRendererConfig,
     DeepSeekV3RendererConfig,
@@ -75,6 +76,7 @@ from renderers.qwen36 import Qwen36Renderer
 
 __all__ = [
     "AutoRendererConfig",
+    "BaseRendererConfig",
     "Content",
     "ContentPart",
     "DeepSeekV3Renderer",

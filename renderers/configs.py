@@ -4,7 +4,7 @@ discriminated union (``RendererConfig``).
 Each renderer accepts its own typed config; bad combinations (e.g.
 ``add_vision_id`` under ``name="qwen3"``) fail at config-load time with a
 pydantic ``ValidationError`` rather than at runtime via an allowlist
-check. The shared ``preserve_*`` flags live on ``_BaseRendererConfig``
+check. The shared ``preserve_*`` flags live on ``BaseRendererConfig``
 and OR-compose with template-level toggles (e.g. GLM-5
 ``clear_thinking``) inside each renderer — they extend retention, never
 override the template into a drop.
@@ -22,11 +22,18 @@ from __future__ import annotations
 
 from typing import Annotated, ClassVar, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
+from pydantic_config import BaseConfig
 
 
-class _BaseRendererConfig(BaseModel):
+class BaseRendererConfig(BaseConfig):
     """Shared fields and config for every renderer config variant.
+
+    Inherits from ``pydantic_config.BaseConfig`` so the typed-config
+    surface stays uniform with prime-rl / verifiers config bases. The
+    BaseConfig contract includes ``extra="forbid"`` (preserved here);
+    this class adds ``frozen=True`` so configs are hashable value
+    objects.
 
     ``preserve_all_thinking`` and ``preserve_thinking_between_tool_calls``
     are renderer-internal behaviour flags — they don't map to any Jinja
@@ -38,7 +45,7 @@ class _BaseRendererConfig(BaseModel):
     of the template kwarg. See ``renderers.base.should_preserve_past_thinking``.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True)
 
     preserve_all_thinking: bool = False
     """Restore ``reasoning_content`` on every past assistant turn, even
@@ -60,9 +67,9 @@ class _BaseRendererConfig(BaseModel):
     #
     # Used by parity tests to compute the field subset that, when
     # changed, must produce token streams matching
-    # ``apply_chat_template`` — see :meth:`template_field_names`. Not
-    # exported as a public helper; the renderer is the only end-to-end
-    # consumer of these kwargs.
+    # ``apply_chat_template`` — see :meth:`template_field_names`. The
+    # renderer is the only end-to-end consumer of these fields, so this
+    # is a renderer-side bookkeeping concern rather than a public API.
     _internal_fields: ClassVar[frozenset[str]] = frozenset()
 
     @classmethod
@@ -74,11 +81,11 @@ class _BaseRendererConfig(BaseModel):
         (``tests/test_renderer_config_parity.py``) to discover the
         cells that must agree with ``apply_chat_template``.
         """
-        base = frozenset(_BaseRendererConfig.model_fields)
+        base = frozenset(BaseRendererConfig.model_fields)
         return frozenset(cls.model_fields) - base - {"name"} - cls._internal_fields
 
 
-class AutoRendererConfig(_BaseRendererConfig):
+class AutoRendererConfig(BaseRendererConfig):
     """Resolve the renderer from ``tokenizer.name_or_path`` at construction
     time via ``MODEL_RENDERER_MAP``. Carries only the shared ``preserve_*``
     fields; template kwargs require an explicit renderer choice so that
@@ -87,7 +94,7 @@ class AutoRendererConfig(_BaseRendererConfig):
     name: Literal["auto"] = "auto"
 
 
-class DefaultRendererConfig(_BaseRendererConfig):
+class DefaultRendererConfig(BaseRendererConfig):
     """Config for ``DefaultRenderer`` — the fallback wrapping
     ``tokenizer.apply_chat_template``. Accepts arbitrary extra fields
     via ``extra="allow"`` because the underlying Jinja template's kwargs
@@ -113,7 +120,7 @@ class DefaultRendererConfig(_BaseRendererConfig):
     _internal_fields = frozenset({"tool_parser", "reasoning_parser"})
 
 
-class Qwen3RendererConfig(_BaseRendererConfig):
+class Qwen3RendererConfig(BaseRendererConfig):
     """Qwen3 (text-only) renderer config."""
 
     name: Literal["qwen3"] = "qwen3"
@@ -124,7 +131,7 @@ class Qwen3RendererConfig(_BaseRendererConfig):
     ``enable_thinking`` kwarg."""
 
 
-class Qwen35RendererConfig(_BaseRendererConfig):
+class Qwen35RendererConfig(BaseRendererConfig):
     """Qwen3.5 renderer config."""
 
     name: Literal["qwen3.5"] = "qwen3.5"
@@ -148,7 +155,7 @@ class Qwen35RendererConfig(_BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
 
-class Qwen36RendererConfig(_BaseRendererConfig):
+class Qwen36RendererConfig(BaseRendererConfig):
     """Qwen3.6 renderer config. Inherits Qwen3.5's template surface."""
 
     name: Literal["qwen3.6"] = "qwen3.6"
@@ -165,7 +172,7 @@ class Qwen36RendererConfig(_BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
 
-class Qwen3VLRendererConfig(_BaseRendererConfig):
+class Qwen3VLRendererConfig(BaseRendererConfig):
     """Qwen3-VL renderer config."""
 
     name: Literal["qwen3-vl"] = "qwen3-vl"
@@ -179,7 +186,7 @@ class Qwen3VLRendererConfig(_BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
 
-class GLM5RendererConfig(_BaseRendererConfig):
+class GLM5RendererConfig(BaseRendererConfig):
     """GLM-5 renderer config."""
 
     name: Literal["glm-5"] = "glm-5"
@@ -193,10 +200,10 @@ class GLM5RendererConfig(_BaseRendererConfig):
     on past-cycle assistant turns instead of dropping them. Mirrors the
     chat template's ``clear_thinking`` toggle. OR-composes with
     ``preserve_all_thinking`` / ``preserve_thinking_between_tool_calls``
-    — see :class:`_BaseRendererConfig` for the contract."""
+    — see :class:`BaseRendererConfig` for the contract."""
 
 
-class GLM51RendererConfig(_BaseRendererConfig):
+class GLM51RendererConfig(BaseRendererConfig):
     """GLM-5.1 renderer config — same template surface as GLM-5, distinct
     discriminator so the registry can route to ``GLM51Renderer``."""
 
@@ -209,7 +216,7 @@ class GLM51RendererConfig(_BaseRendererConfig):
     """See :class:`GLM5RendererConfig.clear_thinking`."""
 
 
-class GLM45RendererConfig(_BaseRendererConfig):
+class GLM45RendererConfig(BaseRendererConfig):
     """GLM-4.5 Air renderer config."""
 
     name: Literal["glm-4.5"] = "glm-4.5"
@@ -219,7 +226,7 @@ class GLM45RendererConfig(_BaseRendererConfig):
     the chat template's ``enable_thinking`` kwarg."""
 
 
-class GptOssRendererConfig(_BaseRendererConfig):
+class GptOssRendererConfig(BaseRendererConfig):
     """OpenAI gpt-oss (harmony) renderer config.
 
     Several fields here are renderer-internal: ``use_system_prompt``,
@@ -258,7 +265,7 @@ class GptOssRendererConfig(_BaseRendererConfig):
     )
 
 
-class KimiK2RendererConfig(_BaseRendererConfig):
+class KimiK2RendererConfig(BaseRendererConfig):
     """Kimi K2 renderer config.
 
     ``enable_thinking`` is renderer-internal here — Kimi K2's chat
@@ -276,7 +283,7 @@ class KimiK2RendererConfig(_BaseRendererConfig):
     _internal_fields = frozenset({"enable_thinking"})
 
 
-class KimiK25RendererConfig(_BaseRendererConfig):
+class KimiK25RendererConfig(BaseRendererConfig):
     """Kimi K2.5 renderer config."""
 
     name: Literal["kimi-k2.5"] = "kimi-k2.5"
@@ -293,7 +300,7 @@ class KimiK25RendererConfig(_BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
 
-class LagunaXS2RendererConfig(_BaseRendererConfig):
+class LagunaXS2RendererConfig(BaseRendererConfig):
     """Laguna XS.2 renderer config."""
 
     name: Literal["laguna-xs.2"] = "laguna-xs.2"
@@ -311,7 +318,7 @@ class LagunaXS2RendererConfig(_BaseRendererConfig):
     chat template's ``render_assistant_messages_raw`` gate."""
 
 
-class MiniMaxM2RendererConfig(_BaseRendererConfig):
+class MiniMaxM2RendererConfig(BaseRendererConfig):
     """MiniMax M2 / M2.5 renderer config."""
 
     name: Literal["minimax-m2"] = "minimax-m2"
@@ -321,7 +328,7 @@ class MiniMaxM2RendererConfig(_BaseRendererConfig):
     the chat template's ``model_identity`` Jinja variable."""
 
 
-class Nemotron3RendererConfig(_BaseRendererConfig):
+class Nemotron3RendererConfig(BaseRendererConfig):
     """Nemotron 3 renderer config."""
 
     name: Literal["nemotron-3"] = "nemotron-3"
@@ -335,10 +342,10 @@ class Nemotron3RendererConfig(_BaseRendererConfig):
     assistant turns instead of dropping them. Mirrors the chat
     template's ``truncate_history_thinking`` toggle. OR-composes with
     ``preserve_all_thinking`` / ``preserve_thinking_between_tool_calls``
-    — see :class:`_BaseRendererConfig` for the contract."""
+    — see :class:`BaseRendererConfig` for the contract."""
 
 
-class DeepSeekV3RendererConfig(_BaseRendererConfig):
+class DeepSeekV3RendererConfig(BaseRendererConfig):
     """DeepSeek V3 renderer config.
 
     ``enable_thinking`` is renderer-internal here — DeepSeek-V3's chat
@@ -394,7 +401,7 @@ that renderer supports. Bogus combinations (e.g. ``add_vision_id`` under
 # resolving ``AutoRendererConfig`` against ``MODEL_RENDERER_MAP``: the
 # resolved renderer name picks the corresponding typed config, and the
 # auto config's ``preserve_*`` fields are carried over.
-_CONFIG_BY_NAME: dict[str, type[_BaseRendererConfig]] = {
+_CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "auto": AutoRendererConfig,
     "default": DefaultRendererConfig,
     "qwen3": Qwen3RendererConfig,
@@ -414,7 +421,7 @@ _CONFIG_BY_NAME: dict[str, type[_BaseRendererConfig]] = {
 }
 
 
-def _config_class_for(name: str) -> type[_BaseRendererConfig]:
+def _config_class_for(name: str) -> type[BaseRendererConfig]:
     cls = _CONFIG_BY_NAME.get(name)
     if cls is None:
         raise ValueError(
@@ -424,7 +431,7 @@ def _config_class_for(name: str) -> type[_BaseRendererConfig]:
     return cls
 
 
-def config_from_name(name: str) -> _BaseRendererConfig | None:
+def config_from_name(name: str) -> BaseRendererConfig | None:
     """Construct a default-valued config for the given renderer name.
 
     Convenience for callers that hold a renderer name as a string and
@@ -440,6 +447,7 @@ def config_from_name(name: str) -> _BaseRendererConfig | None:
 
 __all__ = [
     "AutoRendererConfig",
+    "BaseRendererConfig",
     "DefaultRendererConfig",
     "DeepSeekV3RendererConfig",
     "GLM45RendererConfig",

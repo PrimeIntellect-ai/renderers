@@ -35,6 +35,11 @@ dependencies = [
     # ``openai-harmony`` / ``transformers``; declared directly because we
     # import it.
     "pydantic>=2",
+    # ``BaseRendererConfig`` inherits from ``pydantic_config.BaseConfig`` so
+    # the typed-config surface stays uniform with prime-rl / verifiers config
+    # bases. Pulls in tyro transitively (CLI-parsing helpers used by the
+    # outer configs in those repos; harmless here).
+    "prime-pydantic-config>=0.3.0.dev0",
 ]
 
 [tool.hatch.version]
@@ -78,7 +83,7 @@ exclude-newer = "7 days"
 # MiniMax-M2's slow→fast tokenizer conversion path. Exempting it from
 # the project-wide 7-day cutoff lets the lockfile pick it up immediately
 # while the rest of the dependency graph stays gated.
-exclude-newer-package = { fastokens = false }
+exclude-newer-package = { fastokens = false, "prime-pydantic-config" = false }
 
 [tool.ty.environment]
 python-version = "3.13"

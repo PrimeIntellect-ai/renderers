@@ -125,20 +125,26 @@ class GLM45Renderer:
         sampled: list[bool] = []
         content_mask: list[bool] = []
 
-        def emit_special(token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool) -> None:
+        def emit_special(
+            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
             sampled.append(is_sampled)
             content_mask.append(is_content)
 
-        def emit_text(text: str, msg_idx: int, *, is_sampled: bool, is_content: bool) -> None:
+        def emit_text(
+            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             ids = self._encode(text)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
             content_mask.extend([is_content] * len(ids))
 
-        def emit_text_segments(segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_text_segments(
+            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
+        ) -> None:
             """Tokenize concatenated segments as one BPE pass; per-token
             ``is_content`` follows each token's source segment.
 
@@ -146,7 +152,9 @@ class GLM45Renderer:
             same way as the chat template, but attributed separately"
             without splitting the encode call (which could shift BPE
             merges at the boundary)."""
-            for tok_id, is_content in attribute_text_segments(self._tokenizer, segments):
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments
+            ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
                 sampled.append(is_sampled)
@@ -196,7 +204,9 @@ class GLM45Renderer:
                 emit_special(self._system, i, is_sampled=False, is_content=False)
                 # ``\n`` is the scaffold separator after the role tag;
                 # the body proper is the caller-provided content.
-                emit_text_segments([("\n", False), (content, True)], i, is_sampled=False)
+                emit_text_segments(
+                    [("\n", False), (content, True)], i, is_sampled=False
+                )
 
             elif role == "user":
                 emit_special(
@@ -302,14 +312,21 @@ class GLM45Renderer:
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
-        if not previous_prompt_ids or not new_messages or reject_assistant_in_extension(new_messages):
+        if (
+            not previous_prompt_ids
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
             return None
 
         # Same next-turn-marker scheme as GLM-5, but role markers are
         # followed by a literal ``\n`` in the prompt text.
         previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
         stop_ids = {self._endoftext, self._user, self._observation}
-        if not previous_ids[len(previous_prompt_ids) :] or previous_ids[-1] not in stop_ids:
+        if (
+            not previous_ids[len(previous_prompt_ids) :]
+            or previous_ids[-1] not in stop_ids
+        ):
             previous_ids.append(self._endoftext)
 
         last_prev = previous_ids[-1]
@@ -358,7 +375,9 @@ class GLM45Renderer:
             *,
             is_sampled: bool = False,
         ) -> None:
-            for tok_id, is_content in attribute_text_segments(self._tokenizer, segments):
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments
+            ):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)
                 ext_sampled.append(is_sampled)
@@ -475,7 +494,9 @@ class GLM45Renderer:
 
         if (msg_idx > last_user_index or preserve_thinking) and reasoning_content:
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
-            emit_text(reasoning_content.strip(), msg_idx, is_sampled=True, is_content=True)
+            emit_text(
+                reasoning_content.strip(), msg_idx, is_sampled=True, is_content=True
+            )
             emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
         else:
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
@@ -484,7 +505,9 @@ class GLM45Renderer:
         # Tool calls — keep content + \n contiguous to preserve BPE merges
         tool_calls = msg.get("tool_calls") or []
         if content.strip() and tool_calls:
-            emit_text("\n" + content.strip() + "\n", msg_idx, is_sampled=True, is_content=True)
+            emit_text(
+                "\n" + content.strip() + "\n", msg_idx, is_sampled=True, is_content=True
+            )
         elif content.strip():
             emit_text("\n" + content.strip(), msg_idx, is_sampled=True, is_content=True)
 
@@ -506,11 +529,17 @@ class GLM45Renderer:
                     arguments = {}
             if isinstance(arguments, dict):
                 for arg_name, arg_value in arguments.items():
-                    emit_special(self._arg_key, msg_idx, is_sampled=True, is_content=True)
+                    emit_special(
+                        self._arg_key, msg_idx, is_sampled=True, is_content=True
+                    )
                     emit_text(arg_name, msg_idx, is_sampled=True, is_content=True)
-                    emit_special(self._arg_key_end, msg_idx, is_sampled=True, is_content=True)
+                    emit_special(
+                        self._arg_key_end, msg_idx, is_sampled=True, is_content=True
+                    )
                     emit_text("\n", msg_idx, is_sampled=True, is_content=True)
-                    emit_special(self._arg_value, msg_idx, is_sampled=True, is_content=True)
+                    emit_special(
+                        self._arg_value, msg_idx, is_sampled=True, is_content=True
+                    )
                     if isinstance(arg_value, str):
                         emit_text(arg_value, msg_idx, is_sampled=True, is_content=True)
                     else:
@@ -520,9 +549,13 @@ class GLM45Renderer:
                             is_sampled=True,
                             is_content=True,
                         )
-                    emit_special(self._arg_value_end, msg_idx, is_sampled=True, is_content=True)
+                    emit_special(
+                        self._arg_value_end, msg_idx, is_sampled=True, is_content=True
+                    )
                     emit_text("\n", msg_idx, is_sampled=True, is_content=True)
-            emit_special(self._tool_call_end_tok, msg_idx, is_sampled=True, is_content=True)
+            emit_special(
+                self._tool_call_end_tok, msg_idx, is_sampled=True, is_content=True
+            )
 
     def _render_tool(
         self,

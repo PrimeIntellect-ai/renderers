@@ -220,7 +220,9 @@ class RenderedTokens:
     message_roles: list[str] = field(default_factory=list)
     multi_modal_data: "MultiModalData | None" = None
 
-    def tokens_per_message(self, n_messages: int | None = None, *, sampled_only: bool = False) -> list[int]:
+    def tokens_per_message(
+        self, n_messages: int | None = None, *, sampled_only: bool = False
+    ) -> list[int]:
         """Count rendered tokens attributed to each caller-relative message.
 
         ``out[i]`` is the number of tokens with ``message_indices[k] == i``,
@@ -1095,7 +1097,9 @@ def _patched_load(model_name_or_path: str, **kwargs):
         with contextlib.redirect_stdout(io.StringIO()):
             fastokens.patch_transformers()
         if not _FASTOKENS_ANNOUNCED:
-            logger.info("fastokens enabled — tokenizers load through the Rust BPE fast path (~10x encode speedup).")
+            logger.info(
+                "fastokens enabled — tokenizers load through the Rust BPE fast path (~10x encode speedup)."
+            )
             _FASTOKENS_ANNOUNCED = True
     try:
         return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
@@ -1265,7 +1269,9 @@ def create_renderer(
     if not isinstance(config, AutoRendererConfig):
         cls = RENDERER_REGISTRY.get(config.name)
         if cls is None:
-            raise ValueError(f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}")
+            raise ValueError(
+                f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
+            )
         return cls(tokenizer, config)
 
     return _resolve_auto(tokenizer, config)
@@ -1679,7 +1685,9 @@ def should_preserve_past_thinking(
         return False
     # The current segment must contain a tool response for it to count
     # as an in-flight tool cycle.
-    return any(messages[j].get("role") == "tool" for j in range(last_user + 1, len(messages)))
+    return any(
+        messages[j].get("role") == "tool" for j in range(last_user + 1, len(messages))
+    )
 
 
 def build_trajectory_step(
@@ -1701,7 +1709,9 @@ def build_trajectory_step(
     the completion).
     """
     has_completion = len(completion_messages) > 0
-    prompt_ids = renderer.render_ids(prompt_messages, tools=tools, add_generation_prompt=has_completion)
+    prompt_ids = renderer.render_ids(
+        prompt_messages, tools=tools, add_generation_prompt=has_completion
+    )
     full_rendered = renderer.render(prompt_messages + completion_messages, tools=tools)
     full_ids = full_rendered.token_ids
 
@@ -1716,6 +1726,9 @@ def build_trajectory_step(
         "completion_logprobs": [0.0] * len(completion_ids),
         "routed_experts": None,
     }
-    if full_rendered.multi_modal_data is not None and not full_rendered.multi_modal_data.is_empty():
+    if (
+        full_rendered.multi_modal_data is not None
+        and not full_rendered.multi_modal_data.is_empty()
+    ):
         out["multi_modal_data"] = full_rendered.multi_modal_data
     return out

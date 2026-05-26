@@ -1534,6 +1534,42 @@ def _resolve_auto_config(
 # ---------------------------------------------------------------------------
 
 
+# Match prime-rl's multimodal token type convention: 0=text, 1=image, 2=video.
+_MM_TYPE_ID: dict[str, int] = {"image": 1, "video": 2}
+
+
+@dataclass(frozen=True)
+class RenderedTrainingSample:
+    """Output of :func:`build_training_sample`.
+
+    ``token_ids`` and ``loss_mask`` are always populated. ``multi_modal_data``
+    and ``mm_token_type_ids`` are populated only when a multimodal renderer
+    actually emitted media (both ``None`` for text-only renderers and for
+    text-only samples through a VLM renderer), so the text path is unchanged.
+    """
+
+    token_ids: list[int]
+    loss_mask: list[bool]
+    multi_modal_data: "MultiModalData | None" = None
+    mm_token_type_ids: list[int] | None = None
+
+
+def _build_mm_token_type_ids(
+    mm_placeholders: dict[str, list[PlaceholderRange]], length: int
+) -> list[int]:
+    """Per-token modality flags (0=text, 1=image, 2=video) from placeholder ranges."""
+    ids = [0] * length
+    for modality, ranges in mm_placeholders.items():
+        type_id = _MM_TYPE_ID.get(modality, 0)
+        if type_id == 0:
+            continue
+        for r in ranges:
+            end = min(r.offset + r.length, length)
+            for i in range(r.offset, end):
+                ids[i] = type_id
+    return ids
+
+
 def build_training_sample(
     renderer: Renderer,
     messages: list[Message],
@@ -1541,8 +1577,12 @@ def build_training_sample(
     role_to_mask: Callable[[Message], bool] | None = None,
     tools: list[ToolSpec] | None = None,
     content_sft_roles: "set[str] | frozenset[str] | None" = None,
-) -> tuple[list[int], list[bool]]:
-    """Build (token_ids, loss_mask) for supervised training.
+) -> RenderedTrainingSample:
+    """Build a :class:`RenderedTrainingSample` for supervised training.
+
+    Returns ``token_ids`` + ``loss_mask`` (always), plus ``multi_modal_data``
+    and ``mm_token_type_ids`` when the renderer emitted media (``None`` for
+    text — the text token_ids/loss_mask are byte-identical to before).
 
     Single render() call + message_indices → per-token mask.
     Replaces build_incremental_token_mask (O(N) renders → O(1)).
@@ -1631,7 +1671,24 @@ def build_training_sample(
             loss_mask.append(True)
         else:
             loss_mask.append(role_to_mask(msg))
-    return rendered.token_ids, loss_mask
+
+    # Surface the multimodal payload for VLM renderers. ``None`` for text
+    # renderers and for text-only samples (empty media) so downstream
+    # ``multi_modal_data is not None`` is a reliable "has media" check.
+    mm = rendered.multi_modal_data
+    if mm is not None and mm.is_empty():
+        mm = None
+    mm_token_type_ids = (
+        _build_mm_token_type_ids(mm.mm_placeholders, len(rendered.token_ids))
+        if mm is not None and mm.mm_placeholders
+        else None
+    )
+    return RenderedTrainingSample(
+        token_ids=rendered.token_ids,
+        loss_mask=loss_mask,
+        multi_modal_data=mm,
+        mm_token_type_ids=mm_token_type_ids,
+    )
 
 
 def _common_prefix_len(a: list[int], b: list[int]) -> int:

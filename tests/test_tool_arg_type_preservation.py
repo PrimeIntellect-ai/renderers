@@ -26,7 +26,7 @@ import pytest
 
 
 # (HuggingFace model name, renderer name). Two JSON-shaped controls
-# (string types already preserved by the wire format) + four XML-style
+# (string types already preserved by the wire format) + five XML-style
 # parsers that rely on the schema to preserve them.
 _MODELS = [
     ("Qwen/Qwen3-8B", "auto"),  # hermes JSON  — control
@@ -35,6 +35,7 @@ _MODELS = [
     ("zai-org/GLM-5", "auto"),  # XML
     ("MiniMaxAI/MiniMax-M2.5", "auto"),  # XML
     ("poolside/Laguna-XS.2", "auto"),  # XML
+    ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),  # XML
 ]
 
 

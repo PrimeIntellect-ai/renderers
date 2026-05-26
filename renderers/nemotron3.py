@@ -430,7 +430,7 @@ class Nemotron3Renderer:
         self,
         token_ids: list[int],
         *,
-        tools: list[ToolSpec] | None = None,  # noqa: ARG002 — args land in a JSON object, schema not needed
+        tools: list[ToolSpec] | None = None,
     ) -> ParsedResponse:
         stop_ids = {self._im_end}
         if self._endoftext is not None:
@@ -443,6 +443,7 @@ class Nemotron3Renderer:
             think_end_id=self._think_end,
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
+            tools=tools,
         )
 
     def get_stop_token_ids(self) -> list[int]:

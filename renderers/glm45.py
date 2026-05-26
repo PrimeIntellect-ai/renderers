@@ -363,6 +363,21 @@ class GLM45Renderer:
                 ext_sampled.append(is_sampled)
                 ext_content.append(is_content)
 
+        # The opener-token of the first new_message may also serve as
+        # the close of the previous assistant turn (when the model
+        # failed to sample the stop token itself and the bridge has to
+        # synthesize the boundary above). Unlike :meth:`render`, the
+        # bridge emits these with ``is_sampled=False, is_content=False``
+        # — they are template scaffolding for the *next* step's prompt,
+        # not tokens the model produced *in this* step. The RL loss
+        # operates on ``previous_completion_ids`` (what the model
+        # actually sampled this round); bridge tokens belong to the
+        # subsequent prompt and must not be counted as "model output"
+        # by downstream mask consumers. This deliberate disagreement
+        # with ``render()`` reflects the SFT vs RL semantics: render's
+        # masks describe what the model *should* produce given a
+        # complete conversation; bridge's masks describe what it
+        # *actually* produced this step.
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
             content = self._visible_text(msg.get("content"))

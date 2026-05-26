@@ -180,15 +180,16 @@ class GLM45Renderer:
             # role-opening token (``<|user|>`` / ``<|observation|>``) is
             # the inference-time stop signal that closes the assistant's
             # turn (see ``get_stop_token_ids``). Mark it
-            # ``is_sampled=True`` and ``is_content=True`` so the
-            # loss-mask pipeline trains the model to emit it after
-            # ``</tool_call>`` (instead of continuing with another
-            # ``<tool_call>`` block) in both the default ``sampled``
-            # path and the body-only ``content_sft_roles`` path. The
-            # token stays attributed to this message (msg_idx=i); the
-            # byte stream is unchanged. ``system`` only appears at the
-            # start of a GLM conversation, so its opener is never the
-            # closer of an assistant turn.
+            # ``is_sampled=True`` so the loss-mask pipeline trains the
+            # model to emit it after ``</tool_call>`` (instead of
+            # continuing with another ``<tool_call>`` block). The token
+            # stays attributed to this message (msg_idx=i) and remains
+            # ``is_content=False`` — it's a role-marker / scaffold, not
+            # body bytes, so ``content_mask_for_roles({"tool"})`` and
+            # ``content_token_spans_by_role()`` correctly exclude it
+            # from "tool body" views. Byte stream is unchanged.
+            # ``system`` only appears at the start of a GLM conversation,
+            # so its opener is never the closer of an assistant turn.
             closes_assistant_turn = i > 0 and messages[i - 1]["role"] == "assistant"
 
             if role == "system":
@@ -202,7 +203,7 @@ class GLM45Renderer:
                     self._user,
                     i,
                     is_sampled=closes_assistant_turn,
-                    is_content=closes_assistant_turn,
+                    is_content=False,
                 )
                 # ``\n`` is scaffold; ``content`` is body; the optional
                 # ``/nothink`` suffix is scaffold the renderer injects
@@ -534,13 +535,12 @@ class GLM45Renderer:
         emit_text_segments,
     ) -> None:
         # Tool body bytes get ``is_content=True``; the wraps are
-        # scaffold. The ``<|observation|>`` role tag is normally
-        # scaffold too, but when the previous message is an assistant
-        # it doubles as the inference stop signal for that assistant's
-        # turn — mark it ``is_sampled=True`` and ``is_content=True`` so
-        # SFT trains the model to emit it after ``</tool_call>`` in
-        # both the default sampled path and the body-only
-        # ``content_sft_roles`` path. The token stays attributed to
+        # scaffold. The ``<|observation|>`` role tag is scaffold too
+        # (``is_content=False`` so ``content_mask_for_roles({"tool"})``
+        # excludes it). When the previous message is an assistant it
+        # doubles as the inference stop signal for that assistant's
+        # turn — mark it ``is_sampled=True`` so SFT trains the model to
+        # emit it after ``</tool_call>``. The token stays attributed to
         # this tool message; byte stream is unchanged.
         prev_role = messages[msg_idx - 1]["role"] if msg_idx > 0 else None
         closes_assistant_turn = prev_role == "assistant"
@@ -550,7 +550,7 @@ class GLM45Renderer:
                 self._observation,
                 msg_idx,
                 is_sampled=closes_assistant_turn,
-                is_content=closes_assistant_turn,
+                is_content=False,
             )
 
         emit_text_segments(

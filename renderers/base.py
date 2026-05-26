@@ -220,9 +220,7 @@ class RenderedTokens:
     message_roles: list[str] = field(default_factory=list)
     multi_modal_data: "MultiModalData | None" = None
 
-    def tokens_per_message(
-        self, n_messages: int | None = None, *, sampled_only: bool = False
-    ) -> list[int]:
+    def tokens_per_message(self, n_messages: int | None = None, *, sampled_only: bool = False) -> list[int]:
         """Count rendered tokens attributed to each caller-relative message.
 
         ``out[i]`` is the number of tokens with ``message_indices[k] == i``,
@@ -1097,10 +1095,7 @@ def _patched_load(model_name_or_path: str, **kwargs):
         with contextlib.redirect_stdout(io.StringIO()):
             fastokens.patch_transformers()
         if not _FASTOKENS_ANNOUNCED:
-            logger.info(
-                "fastokens enabled — tokenizers load through the Rust BPE "
-                "fast path (~10x encode speedup)."
-            )
+            logger.info("fastokens enabled — tokenizers load through the Rust BPE fast path (~10x encode speedup).")
             _FASTOKENS_ANNOUNCED = True
     try:
         return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
@@ -1169,8 +1164,8 @@ def load_tokenizer(
 def _populate_registry():
     if RENDERER_REGISTRY:
         return
-    from renderers.default import DefaultRenderer
     from renderers.deepseek_v3 import DeepSeekV3Renderer
+    from renderers.default import DefaultRenderer
     from renderers.glm5 import GLM5Renderer, GLM51Renderer
     from renderers.glm45 import GLM45Renderer
     from renderers.gpt_oss import GptOssRenderer
@@ -1270,10 +1265,7 @@ def create_renderer(
     if not isinstance(config, AutoRendererConfig):
         cls = RENDERER_REGISTRY.get(config.name)
         if cls is None:
-            raise ValueError(
-                f"Unknown renderer {config.name!r}. "
-                f"Available: {', '.join(sorted(RENDERER_REGISTRY))}"
-            )
+            raise ValueError(f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}")
         return cls(tokenizer, config)
 
     return _resolve_auto(tokenizer, config)
@@ -1345,7 +1337,7 @@ def build_training_sample(
     renderer: Renderer,
     messages: list[Message],
     *,
-    role_to_mask: Callable[[Message], bool],
+    role_to_mask: Callable[[Message], bool] | None = None,
     tools: list[ToolSpec] | None = None,
     content_sft_roles: "set[str] | frozenset[str] | None" = None,
 ) -> tuple[list[int], list[bool]]:
@@ -1354,15 +1346,31 @@ def build_training_sample(
     Single render() call + message_indices → per-token mask.
     Replaces build_incremental_token_mask (O(N) renders → O(1)).
 
-    When the renderer populates ``rendered.sampled_mask``, the loss mask
-    is the AND of role-based attribution and the sampled signal: only
-    tokens the model would have produced at inference are trainable.
-    This keeps SFT byte-aligned with the RL trajectory mask (where the
-    prompt / completion split achieves the same effect structurally).
+    When ``role_to_mask`` is omitted, ``loss_mask`` is the renderer's
+    ``sampled_mask`` directly: every token the model would have
+    produced at inference is trainable, regardless of which message
+    it's attributed to. This is the recommended default for renderer
+    callers — the renderer owns the per-token "is this model output"
+    signal, so role-level filtering becomes a downstream constraint
+    rather than a precondition. (Some role markers — e.g. GLM
+    ``<|user|>`` / ``<|observation|>`` after a tool-calling assistant
+    turn — *are* sampled by the model at inference and live inside the
+    next message's span; ``sampled_mask`` captures that, but a
+    naive role filter would mask them out.)
+
+    When ``role_to_mask`` is provided, ``loss_mask`` is the AND of the
+    role-based attribution and the sampled signal: only tokens the
+    model would have produced at inference AND attributed to a
+    trainable role pass through. Useful when the caller needs to
+    restrict training to a specific role (e.g. assistant-only) even on
+    a renderer whose ``sampled_mask`` already covers other roles.
+
     Renderers that don't populate ``sampled_mask`` (empty list) fall
     back to attribution-only masking — every token attributed to a
     trainable role is trained on, including template-injected
-    ``<|im_start|>role\\n`` openers.
+    ``<|im_start|>role\\n`` openers. In this fallback mode
+    ``role_to_mask`` is required; calling without it raises
+    ``ValueError``.
 
     ``content_sft_roles`` opts in additional roles for "body-only"
     supervision: for every message whose role is in this set, tokens
@@ -1393,6 +1401,13 @@ def build_training_sample(
     else:
         body_roles = frozenset()
 
+    if role_to_mask is None and not has_sampled_info:
+        raise ValueError(
+            "role_to_mask is required when the renderer does not populate "
+            "sampled_mask. Pass an explicit role filter (e.g. "
+            "lambda m: m['role'] == 'assistant') for this renderer."
+        )
+
     loss_mask: list[bool] = []
     for k, msg_idx in enumerate(rendered.message_indices):
         if msg_idx < 0:
@@ -1408,6 +1423,11 @@ def build_training_sample(
             continue
         if has_sampled_info and not rendered.sampled_mask[k]:
             loss_mask.append(False)
+        elif role_to_mask is None:
+            # sampled_mask alone gates the loss when no role filter is
+            # supplied. ``sampled_mask[k]`` is True here (handled by the
+            # branch above), so this token is trainable.
+            loss_mask.append(True)
         else:
             loss_mask.append(role_to_mask(msg))
     return rendered.token_ids, loss_mask
@@ -1659,9 +1679,7 @@ def should_preserve_past_thinking(
         return False
     # The current segment must contain a tool response for it to count
     # as an in-flight tool cycle.
-    return any(
-        messages[j].get("role") == "tool" for j in range(last_user + 1, len(messages))
-    )
+    return any(messages[j].get("role") == "tool" for j in range(last_user + 1, len(messages)))
 
 
 def build_trajectory_step(
@@ -1683,9 +1701,7 @@ def build_trajectory_step(
     the completion).
     """
     has_completion = len(completion_messages) > 0
-    prompt_ids = renderer.render_ids(
-        prompt_messages, tools=tools, add_generation_prompt=has_completion
-    )
+    prompt_ids = renderer.render_ids(prompt_messages, tools=tools, add_generation_prompt=has_completion)
     full_rendered = renderer.render(prompt_messages + completion_messages, tools=tools)
     full_ids = full_rendered.token_ids
 
@@ -1700,9 +1716,6 @@ def build_trajectory_step(
         "completion_logprobs": [0.0] * len(completion_ids),
         "routed_experts": None,
     }
-    if (
-        full_rendered.multi_modal_data is not None
-        and not full_rendered.multi_modal_data.is_empty()
-    ):
+    if full_rendered.multi_modal_data is not None and not full_rendered.multi_modal_data.is_empty():
         out["multi_modal_data"] = full_rendered.multi_modal_data
     return out

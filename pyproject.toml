@@ -23,7 +23,14 @@ dependencies = [
     # Used by GptOssRenderer to render and parse harmony tokens. Vendoring
     # OpenAI's reference implementation keeps us byte-identical with vLLM
     # (which also uses it) and saves us mirroring a 330-line Jinja template.
-    "openai-harmony>=0.0.8",
+    #
+    # Floor is ``>=0.0.4`` (not the latest 0.0.8) on purpose: every SGLang
+    # release through 0.5.12.post1 hard-pins ``openai-harmony==0.0.4``, so a
+    # higher floor makes ``renderers`` uninstallable alongside SGLang. The
+    # GptOssRenderer renders byte-identically on 0.0.4 (verified token-for-token
+    # against 0.0.8) and ``tests/test_gpt_oss_harmony_parity.py`` passes on it,
+    # so the older harmony is safe.
+    "openai-harmony>=0.0.4",
     # Crusoe's Rust BPE tokenizer; ~10x faster encode vs HF's tokenizers.
     # ``load_tokenizer`` patches it in by default for every supported model
     # except a small denylist (DeepSeek-V3 family). The patch is bracketed

@@ -1089,7 +1089,6 @@ def _patched_load(model_name_or_path: str, **kwargs):
     path is still discoverable in logs.
     """
     import fastokens
-    from transformers import AutoTokenizer
 
     global _FASTOKENS_ANNOUNCED
 
@@ -1102,11 +1101,70 @@ def _patched_load(model_name_or_path: str, **kwargs):
             )
             _FASTOKENS_ANNOUNCED = True
     try:
-        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
+        return _load_tokenizer_via_auto(model_name_or_path, **kwargs)
     finally:
         with _FASTOKENS_PATCH_LOCK:
             with contextlib.redirect_stdout(io.StringIO()):
                 fastokens.unpatch_transformers()
+
+
+def _load_fast_tokenizer_directly(
+    model_name_or_path: str, revision: str | None
+) -> Any | None:
+    """Load a self-contained fast tokenizer without building the model config.
+
+    ``AutoTokenizer.from_pretrained`` eagerly constructs the *model* config to
+    resolve the tokenizer class — even for a plain ``PreTrainedTokenizerFast``.
+    That construction can raise on modeling-only concerns the tokenizer never
+    needs (e.g. RoPE parameter validation for configs that carry nested
+    ``rope_parameters``). When the repo ships a complete ``tokenizer.json`` and
+    declares no custom tokenizer, the tokenizer is fully self-describing, so we
+    load it directly and skip the config detour.
+
+    Returns ``None`` when there's nothing safe to load this way — a custom
+    ``auto_map`` tokenizer (which must run through ``AutoTokenizer`` with
+    ``trust_remote_code``) or no fast tokenizer at all — so the caller can
+    surface its original error instead.
+    """
+    from transformers import PreTrainedTokenizerFast
+    from transformers.models.auto.tokenization_auto import get_tokenizer_config
+
+    try:
+        if "auto_map" in get_tokenizer_config(model_name_or_path, revision=revision):
+            return None
+        return PreTrainedTokenizerFast.from_pretrained(
+            model_name_or_path, revision=revision
+        )
+    except Exception:
+        return None
+
+
+def _load_tokenizer_via_auto(model_name_or_path: str, **kwargs) -> Any:
+    """``AutoTokenizer.from_pretrained`` with a config-free fallback.
+
+    renderers needs the tokenizer, not the model. If ``AutoTokenizer`` fails
+    while building the model config it loads to resolve the tokenizer class,
+    retry by loading the repo's self-contained ``tokenizer.json`` directly. The
+    original error is re-raised if the repo has no such tokenizer.
+    """
+    from transformers import AutoTokenizer
+
+    try:
+        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
+    except Exception as exc:
+        tok = _load_fast_tokenizer_directly(
+            model_name_or_path, revision=kwargs.get("revision")
+        )
+        if tok is None:
+            raise
+        logger.debug(
+            "AutoTokenizer.from_pretrained(%r) failed building the model config "
+            "(%s: %s); loaded the tokenizer directly from tokenizer.json.",
+            model_name_or_path,
+            type(exc).__name__,
+            str(exc)[:160],
+        )
+        return tok
 
 
 def load_tokenizer(
@@ -1138,9 +1196,14 @@ def load_tokenizer(
     fastokens raises during the patched load (e.g. an unknown
     pre-tokenizer type), we automatically retry with the vanilla
     backend and emit an INFO log.
-    """
-    from transformers import AutoTokenizer
 
+    ``AutoTokenizer.from_pretrained`` eagerly builds the model config to
+    resolve the tokenizer class. If that construction raises on a
+    modeling-only concern the tokenizer doesn't need (e.g. RoPE
+    validation for configs with nested ``rope_parameters``), we fall
+    back to loading the repo's self-contained ``tokenizer.json``
+    directly — see ``_load_tokenizer_via_auto``.
+    """
     kwargs: dict[str, Any] = {}
     revision = TRUSTED_REVISIONS.get(model_name_or_path)
     if revision is not None:
@@ -1149,7 +1212,7 @@ def load_tokenizer(
         kwargs = {"trust_remote_code": False}
 
     if not use_fastokens or model_name_or_path in FASTOKENS_INCOMPATIBLE:
-        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
+        return _load_tokenizer_via_auto(model_name_or_path, **kwargs)
 
     try:
         return _patched_load(model_name_or_path, **kwargs)
@@ -1162,7 +1225,7 @@ def load_tokenizer(
             type(exc).__name__,
             str(exc)[:160],
         )
-        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
+        return _load_tokenizer_via_auto(model_name_or_path, **kwargs)
 
 
 def _populate_registry():

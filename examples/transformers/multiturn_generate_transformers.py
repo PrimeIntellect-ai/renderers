@@ -26,6 +26,7 @@ import os
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from renderers.configs import Qwen35RendererConfig
 from renderers.gpt_oss import GptOssRenderer
 from renderers.qwen35 import Qwen35Renderer
 
@@ -55,7 +56,8 @@ TOOLS = [
 def make_renderer(model: str, enable_thinking: bool | None):
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=False)
     if model.startswith("Qwen/Qwen3.5-"):
-        return Qwen35Renderer(tokenizer, enable_thinking=enable_thinking), tokenizer
+        config = Qwen35RendererConfig(enable_thinking=enable_thinking)
+        return Qwen35Renderer(tokenizer, config), tokenizer
     if model == "openai/gpt-oss-20b":
         return GptOssRenderer(tokenizer), tokenizer
     raise ValueError(f"unsupported demo model: {model}")
@@ -65,8 +67,9 @@ def print_parsed(label: str, turn: str, parsed) -> None:
     print(f"\n[{label}] {turn}")
     if parsed.reasoning_content:
         print(f"reasoning: {parsed.reasoning_content[:240]}")
-    if parsed.tool_calls:
-        print(f"tool_calls: {json.dumps(parsed.tool_calls, ensure_ascii=False)}")
+    for tc in parsed.tool_calls:
+        # ``parse_response`` returns ``ParsedToolCall`` dataclasses, not dicts.
+        print(f"tool_call: {tc.name}({tc.arguments}) [{tc.status.value}]")
     if parsed.content:
         print(f"content: {parsed.content}")
 
@@ -139,21 +142,33 @@ def main() -> None:
         if parsed1.reasoning_content:
             assistant["reasoning_content"] = parsed1.reasoning_content
         if parsed1.tool_calls:
-            assistant["tool_calls"] = parsed1.tool_calls
+            # Convert the parsed dataclasses back to OpenAI-format tool_calls.
+            assistant["tool_calls"] = [
+                {
+                    "id": tc.id or f"call_{idx}",
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": tc.arguments
+                        if isinstance(tc.arguments, str)
+                        else json.dumps(tc.arguments),
+                    },
+                }
+                for idx, tc in enumerate(parsed1.tool_calls)
+            ]
         messages.append(assistant)
 
         if parsed1.tool_calls:
             new_messages = []
             for idx, tool_call in enumerate(parsed1.tool_calls):
-                fn = tool_call.get("function") or tool_call
-                tool_args = fn.get("arguments") or {}
+                tool_args = tool_call.arguments or {}
                 if isinstance(tool_args, str):
                     tool_args = json.loads(tool_args)
                 new_messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": tool_call.get("id", f"call_{idx}"),
-                        "name": fn.get("name", "multiply"),
+                        "tool_call_id": tool_call.id or f"call_{idx}",
+                        "name": tool_call.name or "multiply",
                         "content": json.dumps(
                             {"result": int(tool_args["a"]) * int(tool_args["b"])}
                         ),
@@ -165,11 +180,14 @@ def main() -> None:
             ]
 
         # Turn 2: bridge extends prompt_ids + completion1 exactly.
-        bridged_ids = renderer.bridge_to_next_turn(
+        # ``bridge_to_next_turn`` returns a ``RenderedTokens`` (or None); the
+        # extended id stream is on ``.token_ids``.
+        bridged = renderer.bridge_to_next_turn(
             prompt_ids, completion1, new_messages, tools=TOOLS
         )
-        if bridged_ids is None:
+        if bridged is None:
             raise RuntimeError("bridge_to_next_turn returned None")
+        bridged_ids = bridged.token_ids
         assert bridged_ids[: len(prompt_ids) + len(completion1)] == (
             prompt_ids + completion1
         )

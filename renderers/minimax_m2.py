@@ -61,24 +61,23 @@ class MiniMaxM2Renderer:
     def __new__(
         cls,
         tokenizer: PreTrainedTokenizer,
-        *,
-        default_system: str = _DEFAULT_SYSTEM,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
+        config: MiniMaxM2RendererConfig | None = None,
     ):
         # Native routing: only when the caller relies on the default
-        # system message; a custom default_system isn't wired through to
+        # system message; a custom model_identity isn't wired through to
         # the native classmethod yet.
+        cfg = config or MiniMaxM2RendererConfig()
+        default_identity = MiniMaxM2RendererConfig().model_identity
         if (
             native_enabled("minimax_m2") or native_enabled("minimax-m2")
-        ) and default_system == _DEFAULT_SYSTEM:
+        ) and cfg.model_identity == default_identity:
             native = load_native()
             if native is not None:
                 path = resolve_tokenizer_path(tokenizer)
                 return native.Renderer.minimax_m2(
                     path,
-                    preserve_all_thinking=preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                    preserve_all_thinking=cfg.preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=cfg.preserve_thinking_between_tool_calls,
                 )
         return super().__new__(cls)
 

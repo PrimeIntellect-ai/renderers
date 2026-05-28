@@ -60,11 +60,15 @@ class DeepSeekV3Renderer:
     def __new__(
         cls,
         tokenizer: PreTrainedTokenizer,
+        config: DeepSeekV3RendererConfig | None = None,
         *,
         enable_thinking: bool = True,
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
     ):
+        if config is not None:
+            enable_thinking = config.enable_thinking
+
         if native_enabled("deepseek_v3") or native_enabled("deepseek-v3"):
             native = load_native()
             if native is not None:

@@ -96,6 +96,7 @@ class DefaultRenderer:
     def __new__(
         cls,
         tokenizer: PreTrainedTokenizer,
+        config: DefaultRendererConfig | None = None,
         *,
         tool_parser=None,
         reasoning_parser=None,
@@ -103,6 +104,15 @@ class DefaultRenderer:
         preserve_thinking_between_tool_calls: bool = False,
         **chat_template_kwargs,
     ):
+        if config is not None:
+            tool_parser = config.tool_parser
+            reasoning_parser = config.reasoning_parser
+            preserve_all_thinking = config.preserve_all_thinking
+            preserve_thinking_between_tool_calls = (
+                config.preserve_thinking_between_tool_calls
+            )
+            chat_template_kwargs = dict(config.model_extra or {})
+
         # Native routing: only when there are no plugged parsers and no
         # exotic chat_template kwargs — the Rust path uses minijinja and
         # doesn't know about Python-side parser instances.
@@ -112,6 +122,7 @@ class DefaultRenderer:
             and reasoning_parser is None
             and not preserve_all_thinking
             and not preserve_thinking_between_tool_calls
+            and not chat_template_kwargs
         ):
             native = load_native()
             if native is not None:

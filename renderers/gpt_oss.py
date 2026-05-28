@@ -126,6 +126,7 @@ class GptOssRenderer:
     def __new__(
         cls,
         tokenizer: PreTrainedTokenizer,
+        config: GptOssRendererConfig | None = None,
         *,
         use_system_prompt: bool = True,
         reasoning_effort: str | None = "medium",
@@ -135,6 +136,17 @@ class GptOssRenderer:
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
     ):
+        if config is not None:
+            use_system_prompt = config.use_system_prompt
+            reasoning_effort = config.reasoning_effort
+            conversation_start_date = config.conversation_start_date
+            knowledge_cutoff = config.knowledge_cutoff
+            model_identity = config.model_identity
+            preserve_all_thinking = config.preserve_all_thinking
+            preserve_thinking_between_tool_calls = (
+                config.preserve_thinking_between_tool_calls
+            )
+
         if native_enabled("gpt_oss") or native_enabled("gpt-oss"):
             native = load_native()
             if native is not None:

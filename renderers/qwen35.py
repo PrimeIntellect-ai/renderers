@@ -117,12 +117,9 @@ class Qwen35Renderer:
     def __new__(
         cls,
         tokenizer: PreTrainedTokenizer,
+        config: Qwen35RendererConfig | None = None,
         *,
         processor: Any = None,
-        enable_thinking: bool | None = None,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
-        image_cache_max: int = 256,
     ):
         # Route to native only when:
         #   1. the user opted in via RENDERERS_NATIVE,
@@ -132,14 +129,16 @@ class Qwen35Renderer:
         if native_enabled("qwen35") and processor is None:
             native = load_native()
             if native is not None:
+                cfg = config or cls._config_cls()
+                enable_thinking = cfg.enable_thinking
                 if enable_thinking is None:
-                    enable_thinking = _detect_enable_thinking_default(tokenizer)
+                    enable_thinking = _default_enable_thinking(tokenizer)
                 path = resolve_tokenizer_path(tokenizer)
                 return native.Renderer.qwen35(
                     path,
                     enable_thinking=enable_thinking,
-                    preserve_all_thinking=preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                    preserve_all_thinking=cfg.preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=cfg.preserve_thinking_between_tool_calls,
                 )
         return super().__new__(cls)
 

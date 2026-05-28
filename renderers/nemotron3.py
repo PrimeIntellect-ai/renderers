@@ -85,11 +85,19 @@ class Nemotron3Renderer:
     def __new__(
         cls,
         tokenizer: PreTrainedTokenizer,
+        config: Nemotron3RendererConfig | None = None,
         *,
         enable_thinking: bool = True,
         preserve_all_thinking: bool = False,
         preserve_thinking_between_tool_calls: bool = False,
     ):
+        if config is not None:
+            enable_thinking = config.enable_thinking
+            preserve_all_thinking = config.preserve_all_thinking
+            preserve_thinking_between_tool_calls = (
+                config.preserve_thinking_between_tool_calls
+            )
+
         if native_enabled("nemotron3"):
             native = load_native()
             if native is not None:

@@ -601,12 +601,9 @@ class KimiK25Renderer:
     def __new__(
         cls,
         tokenizer,
+        config: KimiK25RendererConfig | None = None,
         *,
         processor=None,
-        enable_thinking=True,
-        preserve_all_thinking=False,
-        preserve_thinking_between_tool_calls=False,
-        image_cache_max=256,
         # Tools / messages are bound to render-time, so native routing
         # happens inside render() via a cached text-only delegate.
     ):
@@ -630,9 +627,9 @@ class KimiK25Renderer:
                 if path is not None:
                     self._native_renderer = native.Renderer.kimi_k25(
                         path,
-                        enable_thinking=enable_thinking,
-                        preserve_all_thinking=preserve_all_thinking,
-                        preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                        enable_thinking=self.config.thinking,
+                        preserve_all_thinking=self.config.preserve_all_thinking,
+                        preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
                     )
 
         # Core structural tokens — all must be single special tokens in the vocab

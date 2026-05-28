@@ -21,6 +21,7 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     attribute_text_segments,
+    extract_message_tool_names,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
 )
@@ -265,6 +266,7 @@ class GLM45Renderer:
             sampled_mask=sampled,
             is_content=content_mask,
             message_roles=[m.get("role") or "" for m in messages],
+            message_tool_names=extract_message_tool_names(messages),
         )
 
     def render_ids(
@@ -445,6 +447,7 @@ class GLM45Renderer:
             sampled_mask=[False] * total_len,
             is_content=[False] * len(previous_ids) + ext_content,
             message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
         )
 
     def _render_assistant(

@@ -23,6 +23,7 @@ from renderers.base import (
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    extract_message_tool_names,
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
@@ -305,6 +306,7 @@ class KimiK2Renderer:
             sampled_mask=sampled,
             is_content=content_mask,
             message_roles=[m.get("role") or "" for m in caller_messages],
+            message_tool_names=extract_message_tool_names(caller_messages),
         )
 
     def render_ids(
@@ -454,6 +456,7 @@ class KimiK2Renderer:
             sampled_mask=[False] * total_len,
             is_content=[False] * len(previous_ids) + ext_content,
             message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
         )
 
     def _render_assistant(

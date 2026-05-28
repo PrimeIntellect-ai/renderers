@@ -6,6 +6,7 @@ import io
 import logging
 import queue
 import threading
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import (
@@ -117,6 +118,68 @@ class Message(TypedDict, total=False):
     reasoning_content: str
 
 
+def extract_message_tool_names(messages: list[Message]) -> list[str | None]:
+    """Per-message tool function names parallel to ``message_roles``.
+
+    Returns one entry per message: the function name for ``role="tool"``
+    messages, ``None`` for every other message. Length matches the
+    input list.
+
+    For tool messages the name is taken from ``msg["name"]`` when set
+    (caller-provided), otherwise recovered by joining
+    ``msg["tool_call_id"]`` against any prior assistant's
+    ``tool_calls[i].function.name`` in the same list. Tool messages
+    whose issuing assistant lives outside the provided list (e.g. on
+    a :meth:`Renderer.bridge_to_next_turn` call where ``new_messages``
+    covers only the new turn) resolve to ``None``.
+
+    Pure metadata: this never mutates the caller's messages and has
+    no effect on the rendered token stream. It runs independently of
+    the render path so the renderer can populate the field on
+    :class:`RenderedTokens` without breaking HF byte parity for tool
+    messages that carry no ``name``. Callers who *also* want the
+    function name to appear in the rendered scaffold (e.g. GPT-OSS
+    Harmony's ``functions.{name}`` prefix) must attach ``name`` to
+    their tool messages before calling :meth:`Renderer.render`
+    themselves — renderers don't synthesize ``name`` into the input,
+    only into this metadata field.
+
+    Trainers join this list with :attr:`RenderedTokens.message_indices`
+    to recover per-token tool attribution — the canonical use case is
+    SFT on tool response bodies while RL acts only on assistant tokens
+    (tool body tokens get a constant positive advantage so the model
+    learns to anticipate tool outputs without learning to emit
+    ``<|tool_response>`` itself).
+
+    Per-message rather than per-token because the data is naturally
+    per-message — storing it per-token would duplicate the same
+    string across every body token of the same tool message.
+    """
+    lookup: dict[str, str] = {}
+    for m in messages:
+        if not isinstance(m, Mapping) or m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            if not isinstance(tc, Mapping):
+                continue
+            tc_id = tc.get("id")
+            fn = tc.get("function")
+            tc_name = fn.get("name") if isinstance(fn, Mapping) else None
+            if isinstance(tc_id, str) and isinstance(tc_name, str):
+                lookup[tc_id] = tc_name
+    out: list[str | None] = []
+    for m in messages:
+        if not isinstance(m, Mapping) or m.get("role") != "tool":
+            out.append(None)
+            continue
+        name = m.get("name")
+        if not (isinstance(name, str) and name):
+            tc_id = m.get("tool_call_id")
+            name = lookup.get(tc_id) if isinstance(tc_id, str) else None
+        out.append(name if isinstance(name, str) and name else None)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Renderer data types
 # ---------------------------------------------------------------------------
@@ -208,6 +271,32 @@ class RenderedTokens:
     renderer doesn't provide the signal. ``DefaultRenderer`` leaves it
     empty for the same reason.
 
+    ``message_tool_names`` is the per-message tool function name list,
+    parallel to ``message_roles`` (same length). For tool-role
+    messages it carries the function name — either taken from
+    ``msg["name"]`` (caller-provided) or recovered by joining
+    ``msg["tool_call_id"]`` against a prior assistant's
+    ``tool_calls[i].function.name`` in the rendered slice. Every
+    other message is ``None``, as are tool messages whose issuing
+    assistant lives outside the rendered slice (e.g. on a
+    :meth:`Renderer.bridge_to_next_turn` call where ``new_messages``
+    covers only the new turn).
+
+    This is pure metadata, computed by :func:`extract_message_tool_names`
+    independently of the render path: populating it never touches the
+    rendered token stream, so HF chat-template byte parity is
+    preserved for tool messages carrying no ``name``. Callers who
+    *also* want the function name to appear in the rendered scaffold
+    (e.g. GPT-OSS Harmony's ``functions.{name}`` prefix) must attach
+    ``name`` to their tool messages before calling
+    :meth:`Renderer.render` themselves.
+
+    Trainers join this with ``message_indices`` to build per-tool
+    selective loss masks (SFT on tool response bodies of a specific
+    tool while RL acts on assistant tokens). Empty
+    ``message_tool_names`` (``[]``) means the renderer doesn't
+    provide the signal.
+
     ``multi_modal_data`` is populated by multimodal renderers (e.g.
     ``Qwen3VLRenderer``) when image / video content parts are present;
     text-only renderers leave it as ``None``.
@@ -218,6 +307,7 @@ class RenderedTokens:
     sampled_mask: list[bool] = field(default_factory=list)
     is_content: list[bool] = field(default_factory=list)
     message_roles: list[str] = field(default_factory=list)
+    message_tool_names: list[str | None] = field(default_factory=list)
     multi_modal_data: "MultiModalData | None" = None
 
     def tokens_per_message(

@@ -43,6 +43,7 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     attribute_text_segments,
+    extract_message_tool_names,
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
@@ -604,6 +605,7 @@ class Qwen3VLRenderer:
             sampled_mask=em.sampled,
             is_content=em.is_content,
             message_roles=[m.get("role") or "" for m in messages],
+            message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=mm_data,
         )
 
@@ -839,6 +841,7 @@ class Qwen3VLRenderer:
             sampled_mask=em.sampled,
             is_content=em.is_content,
             message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
             multi_modal_data=mm_data,
         )
 

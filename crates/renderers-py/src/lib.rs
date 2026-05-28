@@ -259,10 +259,7 @@ fn numpy_u32_slice<'py>(array: &'py PyReadonlyArray1<'py, u32>) -> PyResult<&'py
         .map_err(|e| invalid(format!("expected a contiguous uint32 numpy array: {e}")))
 }
 
-fn batch_ids_to_pylist<'py>(
-    py: Python<'py>,
-    batch_ids: Vec<Vec<u32>>,
-) -> PyResult<Bound<'py, PyList>> {
+fn batch_ids_to_pylist(py: Python<'_>, batch_ids: Vec<Vec<u32>>) -> PyResult<Bound<'_, PyList>> {
     let mut rows = Vec::with_capacity(batch_ids.len());
     for ids in batch_ids {
         rows.push(PyList::new(py, ids)?);

@@ -1301,6 +1301,8 @@ def create_renderer_pool(
 def create_renderer(
     tokenizer,
     config: RendererConfig | None = None,
+    *,
+    renderer: str | None = None,
 ) -> Renderer:
     """Create a Renderer from a typed config.
 
@@ -1316,15 +1318,22 @@ def create_renderer(
             template-control kwargs (e.g. ``enable_thinking``), pass
             the specific :class:`Qwen3RendererConfig`,
             :class:`GLM5RendererConfig` etc. and set those fields.
+        renderer: Backward-compatible renderer name. Prefer ``config=`` for
+            new code; ``renderer="auto"`` is equivalent to ``config=None``.
 
     Selecting the auto-renderer for a model without a registered
     renderer falls back to :class:`DefaultRenderer` for text-only models
     and raises for VLMs (where ``apply_chat_template`` would silently
     drop images).
     """
-    from renderers.configs import AutoRendererConfig
+    from renderers.configs import AutoRendererConfig, config_from_name
 
     _populate_registry()
+
+    if renderer is not None:
+        if config is not None:
+            raise TypeError("pass either config= or renderer=, not both")
+        config = config_from_name(renderer)
 
     if config is None:
         config = AutoRendererConfig()

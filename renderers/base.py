@@ -1587,7 +1587,6 @@ def _get_offset_tokenizer(tokenizer):
         cached = _offset_tokenizers.get(name_or_path)
         if cached is not None:
             return cached
-        from transformers import AutoTokenizer
 
         kwargs: dict[str, Any] = {}
         revision = TRUSTED_REVISIONS.get(name_or_path)
@@ -1597,10 +1596,12 @@ def _get_offset_tokenizer(tokenizer):
             kwargs = {"trust_remote_code": False}
         # Explicitly vanilla — we want HF's Rust tokenizer with offset
         # tracking, not the fastokens shim. ``load_tokenizer`` would
-        # patch fastokens in by default; calling
-        # ``AutoTokenizer.from_pretrained`` directly here keeps the
-        # fastokens patch out of this code path entirely.
-        offset_tok = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+        # patch fastokens in by default; routing through
+        # ``_load_tokenizer_via_auto`` keeps the fastokens patch out
+        # of this code path while still applying the config-build
+        # fallback (RoPE-validation failures on nested
+        # ``rope_parameters``, etc.).
+        offset_tok = _load_tokenizer_via_auto(name_or_path, **kwargs)
         if not getattr(offset_tok, "is_fast", False):
             raise RuntimeError(
                 f"Vanilla tokenizer for {name_or_path!r} is not a fast "

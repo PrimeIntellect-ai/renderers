@@ -259,6 +259,17 @@ fn numpy_u32_slice<'py>(array: &'py PyReadonlyArray1<'py, u32>) -> PyResult<&'py
         .map_err(|e| invalid(format!("expected a contiguous uint32 numpy array: {e}")))
 }
 
+fn batch_ids_to_pylist<'py>(
+    py: Python<'py>,
+    batch_ids: Vec<Vec<u32>>,
+) -> PyResult<Bound<'py, PyList>> {
+    let mut rows = Vec::with_capacity(batch_ids.len());
+    for ids in batch_ids {
+        rows.push(PyList::new(py, ids)?);
+    }
+    PyList::new(py, rows)
+}
+
 #[pyclass(
     name = "RenderedTokens",
     module = "renderers_native",
@@ -607,8 +618,9 @@ impl PyRendererSession {
                 )
             })
             .map_err(render_err)?;
-        self.last_prompt_ids = Some(ids.clone());
-        PyList::new(py, ids)
+        let out = PyList::new(py, ids.iter().copied())?;
+        self.last_prompt_ids = Some(ids);
+        Ok(out)
     }
 
     #[pyo3(signature = (*, add_generation_prompt = false))]
@@ -1263,11 +1275,7 @@ impl PyRenderer {
                 }
             })
             .map_err(render_err)?;
-        let out = PyList::empty(py);
-        for ids in batch_ids {
-            out.append(PyList::new(py, ids)?)?;
-        }
-        Ok(out)
+        batch_ids_to_pylist(py, batch_ids)
     }
 
     #[pyo3(signature = (messages_batch, *, tools = None, add_generation_prompt = false))]
@@ -1307,7 +1315,8 @@ impl PyRenderer {
                             })
                             .collect::<Result<Vec<_>, _>>()?
                     };
-                    let mut ids = Vec::new();
+                    let total_len = batch_ids.iter().map(Vec::len).sum();
+                    let mut ids = Vec::with_capacity(total_len);
                     let mut offsets = Vec::with_capacity(batch_ids.len() + 1);
                     offsets.push(0);
                     for row in batch_ids {

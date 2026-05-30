@@ -12,12 +12,15 @@ achieve real parallelism.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
 import os
+import tempfile
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -32,12 +35,21 @@ from renderers.base import (
     ToolCallParseStatus,
     ToolSpec,
 )
+from renderers.mm_store import (
+    build_mm_feature_envelope,
+    mm_feature_envelope_matches,
+    mm_feature_fingerprint,
+    mm_feature_path,
+    mmfile_ref,
+    run_id_from_env,
+)
 
 _request_logger = logging.getLogger("renderers.client")
 ROUTED_EXPERTS_DATA_PREFIX = b'"routed_experts":{"data":"'
 _MM_MAX_INFLIGHT_ENV = "RENDERERS_MM_MAX_INFLIGHT"
 _DEFAULT_MM_MAX_INFLIGHT = 4
 _mm_payload_semaphores: dict[tuple[int, int], asyncio.Semaphore] = {}
+_MM_FEATURE_STORE_MODE_ENV = "RENDERERS_MM_FEATURE_STORE_MODE"
 
 
 class OverlongPromptError(Exception):
@@ -58,10 +70,7 @@ class OverlongPromptError(Exception):
     def __init__(self, *, prompt_len: int, max_prompt_len: int) -> None:
         self.prompt_len = prompt_len
         self.max_prompt_len = max_prompt_len
-        super().__init__(
-            f"Prompt length ({prompt_len}) exceeds maximum "
-            f"context length ({max_prompt_len})."
-        )
+        super().__init__(f"Prompt length ({prompt_len}) exceeds maximum context length ({max_prompt_len}).")
 
 
 # Per-process cache of resolved engine context-length caps, keyed by
@@ -138,6 +147,106 @@ def _mm_max_inflight() -> int | None:
     if value < 1:
         return None
     return value
+
+
+def _mm_feature_store_mode() -> str:
+    """Offload processed mm-feature payloads to disk and ship ``mmfile`` refs
+    (``on``, the default) or inline them as base64 in the request (``off``)."""
+    mode = os.getenv(_MM_FEATURE_STORE_MODE_ENV, "on").strip().lower()
+    if mode in {"", "0", "false", "off", "disabled", "none", "no"}:
+        return "off"
+    if mode in {"1", "true", "on", "enabled", "yes"}:
+        return "on"
+    raise ValueError(f"Invalid {_MM_FEATURE_STORE_MODE_ENV}={mode!r}; expected on or off.")
+
+
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _existing_mm_feature_valid(
+    path: Path, *, run_id: str, fingerprint: str, modality: str, mm_hash: str, placeholder_length: int
+) -> bool:
+    try:
+        import msgpack
+
+        with path.open("rb") as f:
+            packed = f.read()
+        artifact = msgpack.unpackb(packed, raw=False)
+        envelope = artifact.get("envelope") if isinstance(artifact, dict) else None
+        payload = artifact.get("payload") if isinstance(artifact, dict) else None
+        if not isinstance(envelope, dict) or not isinstance(payload, bytes):
+            return False
+        # Validate placeholder_length too: vLLM checks it on load, but the envelope
+        # match doesn't — so a stale artifact with the right hash/fingerprint but a
+        # wrong placeholder_length would fail in vLLM and never get repaired (we'd
+        # keep skipping the rewrite). Treat a mismatch as invalid → rewrite.
+        if envelope.get("placeholder_length") != int(placeholder_length):
+            return False
+        return mm_feature_envelope_matches(
+            envelope,
+            run_id=run_id,
+            fingerprint=fingerprint,
+            modality=modality,
+            mm_hash=mm_hash,
+            payload=payload,
+        )
+    except Exception:
+        return False
+
+
+def _write_mm_feature_artifact(
+    *,
+    run_id: str,
+    fingerprint: str,
+    modality: str,
+    mm_hash: str,
+    payload: bytes,
+    placeholder_length: int,
+) -> str:
+    import msgpack
+
+    path = mm_feature_path(run_id=run_id, fingerprint=fingerprint, modality=modality, mm_hash=mm_hash)
+    if path.exists() and _existing_mm_feature_valid(
+        path,
+        run_id=run_id,
+        fingerprint=fingerprint,
+        modality=modality,
+        mm_hash=mm_hash,
+        placeholder_length=placeholder_length,
+    ):
+        return mmfile_ref(run_id=run_id, fingerprint=fingerprint, modality=modality, mm_hash=mm_hash)
+
+    envelope = build_mm_feature_envelope(
+        run_id=run_id,
+        fingerprint=fingerprint,
+        modality=modality,
+        mm_hash=mm_hash,
+        payload=payload,
+        placeholder_length=placeholder_length,
+    )
+    packed = msgpack.packb({"envelope": envelope, "payload": payload}, use_bin_type=True)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(packed)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        _fsync_dir(path.parent)
+    except Exception:
+        with contextlib.suppress(FileNotFoundError):
+            tmp_path.unlink()
+        raise
+
+    return mmfile_ref(run_id=run_id, fingerprint=fingerprint, modality=modality, mm_hash=mm_hash)
 
 
 @contextlib.asynccontextmanager
@@ -278,16 +387,12 @@ async def generate(
             rendered,
         )
 
-    prompt_ids, stop_token_ids, mm_data, prompt_attr = await _maybe_offload(
-        renderer, _prepare
-    )
+    prompt_ids, stop_token_ids, mm_data, prompt_attr = await _maybe_offload(renderer, _prepare)
 
     if max_prompt_len is None:
         max_prompt_len = await _resolve_max_prompt_len(client, model)
     if max_prompt_len is not None and len(prompt_ids) > max_prompt_len:
-        raise OverlongPromptError(
-            prompt_len=len(prompt_ids), max_prompt_len=max_prompt_len
-        )
+        raise OverlongPromptError(prompt_len=len(prompt_ids), max_prompt_len=max_prompt_len)
 
     sp: dict[str, Any] = dict(sampling_params or {})
     sp["stop_token_ids"] = stop_token_ids
@@ -299,15 +404,14 @@ async def generate(
         "token_ids": prompt_ids,
         "sampling_params": sp,
     }
+
     # Multimodal: ``mm_data`` carried into the rollout is descriptor-only
     # (no ``pixel_values``) so the env worker never retains decoded image
     # tensors. Re-attach pixels for the POST via ``materialize_pixels``
     # (cache hit, else reprocess from the message base64), build the engine
     # features, then strip pixels again so the value handed back to the
     # trajectory stays descriptor-only.
-    def _features_and_descriptor_mm() -> (
-        "tuple[dict[str, Any] | None, MultiModalData | None]"
-    ):
+    def _features_and_descriptor_mm() -> "tuple[dict[str, Any] | None, MultiModalData | None]":
         if mm_data is None or mm_data.is_empty():
             return None, mm_data
         # First attempt (``force_full_pixels=False``): send ``mm_data`` as-is.
@@ -320,24 +424,15 @@ async def generate(
         # lives on multimodal renderers + the pool, not the base ``Renderer``
         # protocol; reached only when ``mm_data`` is non-empty, which implies a
         # multimodal renderer.
-        build_mm = (
-            cast(Any, renderer).materialize_pixels(mm_data, messages)
-            if force_full_pixels
-            else mm_data
-        )
+        build_mm = cast(Any, renderer).materialize_pixels(mm_data, messages) if force_full_pixels else mm_data
         return _build_mm_features(renderer, build_mm), _strip_pixels(mm_data)
 
     async with _limit_mm_payloads(mm_data):
-        features, out_mm_data = await _maybe_offload(
-            renderer, _features_and_descriptor_mm
-        )
+        features, out_mm_data = await _maybe_offload(renderer, _features_and_descriptor_mm)
     # ``prompt_attr.multi_modal_data`` aliases the original pixel-bearing
     # ``mm_data``; rebind it to the stripped copy so the attribution surfaced
     # to the trajectory is also descriptor-only.
-    if (
-        prompt_attr is not None
-        and getattr(prompt_attr, "multi_modal_data", None) is not None
-    ):
+    if prompt_attr is not None and getattr(prompt_attr, "multi_modal_data", None) is not None:
         prompt_attr = replace(prompt_attr, multi_modal_data=out_mm_data)
     if features is not None:
         body["features"] = features
@@ -369,9 +464,7 @@ async def generate(
     choice = (data.get("choices") or [{}])[0]
     completion_ids = choice.get("token_ids") or []
 
-    parsed = await _maybe_offload(
-        renderer, lambda: renderer.parse_response(completion_ids, tools=tools)
-    )
+    parsed = await _maybe_offload(renderer, lambda: renderer.parse_response(completion_ids, tools=tools))
 
     # ChatCompletionLogProbs flatten: {"content": [{"logprob": ...}, ...]}
     raw_logprobs = choice.get("logprobs") or {}
@@ -389,9 +482,7 @@ async def generate(
     # ``parsed.tool_calls`` so verifiers can inspect them, but they don't
     # trigger the tool-loop continuation.
     finish_reason = choice.get("finish_reason")
-    ok_tool_calls = [
-        tc for tc in parsed.tool_calls if tc.status == ToolCallParseStatus.OK
-    ]
+    ok_tool_calls = [tc for tc in parsed.tool_calls if tc.status == ToolCallParseStatus.OK]
     if ok_tool_calls and finish_reason == "stop":
         finish_reason = "tool_calls"
 
@@ -435,10 +526,7 @@ def _strip_pixels(mm_data: MultiModalData) -> MultiModalData:
     if not mm_data.mm_items:
         return mm_data
     new_items = {
-        modality: [
-            {k: v for k, v in item.items() if k != "pixel_values"}
-            for item in items
-        ]
+        modality: [{k: v for k, v in item.items() if k != "pixel_values"} for item in items]
         for modality, items in mm_data.mm_items.items()
     }
     return replace(mm_data, mm_items=new_items)
@@ -475,9 +563,7 @@ def _build_mm_features(
     # Type dispatch only needs the renderer class. Pools expose
     # ``renderer_cls`` as a snapshot attribute, so we don't have to check
     # out a slot just to read ``type(r)``.
-    renderer_cls = (
-        renderer.renderer_cls if isinstance(renderer, RendererPool) else type(renderer)
-    )
+    renderer_cls = renderer.renderer_cls if isinstance(renderer, RendererPool) else type(renderer)
 
     # Qwen3-VL and Qwen3.5 both ship ``pixel_values`` + ``image_grid_thw``
     # via the shared Qwen2-VL field factory. ``spatial_merge_size=2`` is
@@ -491,9 +577,7 @@ def _build_mm_features(
     )
 
 
-def _build_qwen_vl_features(
-    mm_data: MultiModalData, *, spatial_merge_size: int
-) -> dict[str, Any]:
+def _build_qwen_vl_features(mm_data: MultiModalData, *, spatial_merge_size: int) -> dict[str, Any]:
     """vLLM features payload for the Qwen-VL family (Qwen2-VL / Qwen3-VL).
 
     Stacks per-image processor outputs back into a batched ``BatchFeature``,
@@ -507,15 +591,20 @@ def _build_qwen_vl_features(
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature
-        from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
         from vllm.model_executor.models.qwen2_vl import _create_qwen2vl_field_factory
         from vllm.multimodal.inputs import MultiModalKwargsItems
+        from vllm.v1.serial_utils import MsgpackEncoder
     except ImportError as exc:
         raise RuntimeError(
             "Multimodal generate via /inference/v1/generate requires `vllm` "
             "and `torch` to encode the features payload. Install vLLM in this "
             "environment, or pre-build features upstream."
         ) from exc
+
+    mode = _mm_feature_store_mode()
+    run_id = run_id_from_env() if mode != "off" else ""
+    encoder = MsgpackEncoder(size_threshold=2**62)
+    fingerprint = mm_feature_fingerprint(family="qwen_vl", spatial_merge_size=spatial_merge_size)
 
     out: dict[str, Any] = {
         "mm_hashes": {},
@@ -532,35 +621,55 @@ def _build_qwen_vl_features(
         # mm_items ship numpy arrays (the renderer is torch-free); convert at
         # this vLLM-glue boundary where torch is already a hard dependency.
         encoded: list[Any] = [None] * len(image_items)
+        mmfile_count = 0
+        inline_count = 0
         full_indices = [i for i, it in enumerate(image_items) if it.get("pixel_values") is not None]
         if full_indices:
             full_items = [image_items[i] for i in full_indices]
-            pixel_values = torch.cat(
-                [torch.as_tensor(it["pixel_values"]) for it in full_items], dim=0
-            )
-            image_grid_thw = torch.cat(
-                [torch.as_tensor(it["image_grid_thw"]) for it in full_items], dim=0
-            )
-            hf_inputs = BatchFeature(
-                data={"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}
-            )
+            pixel_values = torch.cat([torch.as_tensor(it["pixel_values"]) for it in full_items], dim=0)
+            image_grid_thw = torch.cat([torch.as_tensor(it["image_grid_thw"]) for it in full_items], dim=0)
+            hf_inputs = BatchFeature(data={"pixel_values": pixel_values, "image_grid_thw": image_grid_thw})
             config = _create_qwen2vl_field_factory(spatial_merge_size)(hf_inputs)
             kwargs_items = MultiModalKwargsItems.from_hf_inputs(hf_inputs, config)
             for idx, item in zip(full_indices, kwargs_items["image"]):
-                encoded[idx] = encode_mm_kwargs_item(item)
+                bufs = encoder.encode(item)
+                assert len(bufs) == 1, "All tensors should be inline"
+                raw_payload = bufs[0]
+                if mode == "off":
+                    encoded[idx] = base64.b64encode(raw_payload).decode("ascii")
+                    inline_count += 1
+                    continue
+
+                mm_hash = (mm_data.mm_hashes.get("image") or [])[idx]
+                placeholder = (mm_data.mm_placeholders.get("image") or [])[idx]
+                ref = _write_mm_feature_artifact(
+                    run_id=run_id,
+                    fingerprint=fingerprint,
+                    modality="image",
+                    mm_hash=mm_hash,
+                    payload=raw_payload,
+                    placeholder_length=placeholder.length,
+                )
+                encoded[idx] = ref
+                mmfile_count += 1
+        if image_items:
+            _request_logger.debug(
+                "built qwen-vl mm features mode=%s none=%d inline=%d mmfile=%d",
+                mode,
+                len(image_items) - len(full_indices),
+                inline_count,
+                mmfile_count,
+            )
         out["kwargs_data"]["image"] = encoded
         out["mm_hashes"]["image"] = list(mm_data.mm_hashes.get("image") or [])
         out["mm_placeholders"]["image"] = [
-            {"offset": p.offset, "length": p.length}
-            for p in mm_data.mm_placeholders.get("image") or []
+            {"offset": p.offset, "length": p.length} for p in mm_data.mm_placeholders.get("image") or []
         ]
 
     # If no full payload was built across any modality, drop ``kwargs_data`` so
     # vLLM takes the hash-only (cache-hit) path. Otherwise hand it the payload
     # (with ``None`` slots for the hash-only images).
-    if not any(
-        any(item is not None for item in items) for items in out["kwargs_data"].values()
-    ):
+    if not any(any(item is not None for item in items) for items in out["kwargs_data"].values()):
         out["kwargs_data"] = None
 
     return out

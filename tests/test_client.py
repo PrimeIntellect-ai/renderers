@@ -32,16 +32,12 @@ class _FakeRenderer:
         )
 
     def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
-        return self.render(
-            messages, tools=tools, add_generation_prompt=add_generation_prompt
-        ).token_ids
+        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
 
     def get_stop_token_ids(self):
         return [99]
 
-    def parse_response(
-        self, completion_ids: list[int], *, tools=None
-    ) -> ParsedResponse:
+    def parse_response(self, completion_ids: list[int], *, tools=None) -> ParsedResponse:
         assert completion_ids == [7, 8]
         # Stores tools so tests can assert the client plumbed them through.
         self._last_parse_tools = tools
@@ -69,9 +65,7 @@ class _FakeClient:
         self.base_url = "http://fake-host:8000/v1"
 
     async def post(self, path, *, cast_to=dict, body=None, options=None):
-        self.calls.append(
-            {"path": path, "cast_to": cast_to, "body": body, "options": options}
-        )
+        self.calls.append({"path": path, "cast_to": cast_to, "body": body, "options": options})
         routed_experts = np.array([[[1]], [[2]]], dtype=np.uint8)
         payload = {
             "request_id": "gen-test",
@@ -87,9 +81,7 @@ class _FakeClient:
                     },
                     "finish_reason": "stop",
                     "routed_experts": {
-                        "data": base64.b64encode(routed_experts.tobytes()).decode(
-                            "ascii"
-                        ),
+                        "data": base64.b64encode(routed_experts.tobytes()).decode("ascii"),
                         "shape": list(routed_experts.shape),
                     },
                 }
@@ -119,9 +111,7 @@ def test_generate_builds_request_body_and_parses_response():
 
     # The client must plumb `tools` through to parse_response so XML-style
     # parsers can preserve declared-string args verbatim.
-    assert renderer._last_parse_tools == [
-        {"type": "function", "function": {"name": "echo"}}
-    ]
+    assert renderer._last_parse_tools == [{"type": "function", "function": {"name": "echo"}}]
 
     assert len(client.calls) == 1
     # /inference/v1/generate is mounted at the server root, so we post to
@@ -175,9 +165,7 @@ def test_generate_builds_request_body_and_parses_response():
 class _MalformedToolRenderer(_FakeRenderer):
     """Returns only a malformed tool-call attempt — finish_reason must stay "stop"."""
 
-    def parse_response(
-        self, completion_ids: list[int], *, tools=None
-    ) -> ParsedResponse:
+    def parse_response(self, completion_ids: list[int], *, tools=None) -> ParsedResponse:
         return ParsedResponse(
             content="",
             reasoning_content=None,
@@ -288,15 +276,16 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
     ],
     ids=["qwen3_vl", "qwen35"],
 )
-def test_generate_serializes_multimodal_features_for_qwen_vl_family(
-    model_id, renderer_class_path
-):
+def test_generate_serializes_multimodal_features_for_qwen_vl_family(model_id, renderer_class_path, monkeypatch):
     """When the renderer emits ``MultiModalData``, ``generate`` translates
     it into vLLM's ``features`` payload (mm_hashes + mm_placeholders +
     base64-encoded kwargs_data) and sticks it in the request body. Covers
-    every renderer routed through ``_build_qwen_vl_features``."""
+    every renderer routed through ``_build_qwen_vl_features``. Pins the store
+    mode off so it exercises the inline-base64 path (the on path, which emits
+    mmfile refs, is covered by ``test_qwen_vl_features_can_emit_mmfile_refs``)."""
     import importlib
 
+    monkeypatch.setenv("RENDERERS_MM_FEATURE_STORE_MODE", "off")
     pytest.importorskip("torch")
     pytest.importorskip("vllm", reason="vllm needed for features serialization")
 
@@ -369,6 +358,46 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     # Items are base64 strings (encode_mm_kwargs_item output).
     for item in features["kwargs_data"]["image"]:
         assert isinstance(item, str) and len(item) > 0
+
+
+def test_qwen_vl_features_can_emit_mmfile_refs(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm", reason="vllm needed for features serialization")
+
+    import torch as _torch
+    from renderers.base import MultiModalData, PlaceholderRange
+    from renderers.client import _build_qwen_vl_features
+
+    monkeypatch.setenv("RENDERERS_MM_FEATURE_STORE_MODE", "on")
+    monkeypatch.setenv("PRIME_RL_MM_FEATURE_ROOT", str(tmp_path))
+    monkeypatch.setenv("RUN_ID", "mmfiletest")
+
+    mm_data = MultiModalData(
+        mm_hashes={"image": ["a" * 32, "b" * 32]},
+        mm_placeholders={
+            "image": [
+                PlaceholderRange(offset=5, length=1),
+                PlaceholderRange(offset=10, length=1),
+            ]
+        },
+        mm_items={
+            "image": [
+                {
+                    "pixel_values": _torch.zeros(4, 8, dtype=_torch.float32),
+                    "image_grid_thw": _torch.tensor([[1, 2, 2]], dtype=_torch.int64),
+                },
+                {"image_grid_thw": _torch.tensor([[1, 2, 2]], dtype=_torch.int64)},
+            ]
+        },
+    )
+
+    features = _build_qwen_vl_features(mm_data, spatial_merge_size=2)
+
+    items = features["kwargs_data"]["image"]
+    assert items[0].startswith("mmfile:v1:mmfiletest:")
+    assert items[0].endswith(":image:" + "a" * 32)
+    assert items[1] is None
+    assert len(list(tmp_path.rglob("*.msgpack"))) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -502,3 +531,56 @@ def test_generate_caches_max_prompt_len_lookup_failure():
     assert len(client.calls) == 1
     assert result["prompt_ids"] == list(range(10))
     assert _max_prompt_len_cache[("http://no-models:8000/v1", "test-model")] is None
+
+
+def test_sweep_stale_artifacts_evicts_only_stale_files(tmp_path):
+    import os
+    import time
+
+    from renderers.mm_store import sweep_stale_artifacts
+
+    run_dir = tmp_path / "run_x"
+    images = run_dir / "assets" / "images"
+    features = run_dir / "assets" / "mm_features" / "v1"
+    images.mkdir(parents=True)
+    features.mkdir(parents=True)
+
+    stale_img = images / "stale.jpg"
+    fresh_img = images / "fresh.jpg"
+    stale_feat = features / "stale.msgpack"
+    fresh_feat = features / "fresh.msgpack"
+    for p in (stale_img, fresh_img, stale_feat, fresh_feat):
+        p.write_bytes(b"x")
+
+    old = time.time() - 10_000
+    os.utime(stale_img, (old, old))
+    os.utime(stale_feat, (old, old))
+
+    deleted = sweep_stale_artifacts(run_dir, ttl_seconds=3600.0)
+
+    assert deleted == 2
+    assert not stale_img.exists()
+    assert not stale_feat.exists()
+    assert fresh_img.exists()
+    assert fresh_feat.exists()
+
+
+def test_sweep_stale_artifacts_noops_on_missing_dirs(tmp_path):
+    from renderers.mm_store import sweep_stale_artifacts
+
+    assert sweep_stale_artifacts(tmp_path / "does_not_exist", ttl_seconds=1.0) == 0
+
+
+def test_mmfile_ref_emit_parse_roundtrip():
+    """The ref shape is defined once: split_mmfile_ref is the exact inverse of
+    mmfile_ref (guards against emit/parse drift across repos)."""
+    from renderers.mm_store import mmfile_ref, split_mmfile_ref
+
+    ref = mmfile_ref(run_id="run-a", fingerprint="deadbeef", modality="image", mm_hash="abc123")
+    assert ref == "mmfile:v1:run-a:deadbeef:image:abc123"
+    assert split_mmfile_ref(ref) == ("run-a", "deadbeef", "image", "abc123")
+    # Legacy 5-part form → run_id is None (caller supplies it).
+    assert split_mmfile_ref("mmfile:v1:fp:image:hash") == (None, "fp", "image", "hash")
+    for bad in ("mmfile:v2:a:b:c:d", "notmmfile:v1:a:b:c:d", "mmfile:v1:a:b"):
+        with pytest.raises(ValueError):
+            split_mmfile_ref(bad)

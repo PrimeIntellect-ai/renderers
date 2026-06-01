@@ -187,27 +187,40 @@ def mm_feature_envelope_matches(
 
 
 def sweep_stale_artifacts(run_dir: Path, ttl_seconds: float) -> int:
-    """Delete artifact files under run_dir/{assets/images, assets/mm_features} whose
-    mtime is older than ttl_seconds. Returns count deleted. Safe by construction:
-    artifacts are content-addressed and re-writable, so over-eviction just triggers
-    re-materialization, never corruption. No-op if the dirs don't exist; ignore
-    per-file errors (a file may be mid-write). Walk files only; leave dir structure."""
+    """Delete stale ``assets/mm_features`` artifacts (the expensive processed
+    ``MultiModalKwargsItem`` payloads, ~tens of MB each) whose mtime is older than
+    ttl_seconds. Returns count deleted.
+
+    Features ONLY — ``assets/images`` are never swept here. Features are a
+    regenerable cache: the trainer rebuilds pixels from the source image
+    (``materialize_pixels``) and never reads these files, and the env-worker
+    rewrites any missing feature on demand (``force_full_pixels`` repair retry +
+    write-if-missing). Source images, by contrast, are terminal browser output
+    with no regeneration path, so they are retained for the whole run as the
+    recoverable source of truth. Over-eviction of a feature is therefore safe
+    (it just forces a reprocess); over-eviction of an image is NOT, which is why
+    this sweep deliberately excludes ``IMAGE_ASSET_SUBDIR``.
+
+    ttl_seconds only needs to exceed the write->vLLM-admit window (seconds), so
+    any horizon of minutes leaves a huge safety margin against racing in-flight
+    reads. No-op if the dir doesn't exist; ignore per-file errors (a file may be
+    mid-write). Walk files only; leave dir structure."""
     import time
 
     cutoff = time.time() - ttl_seconds
     deleted = 0
-    for subdir in (IMAGE_ASSET_SUBDIR, FEATURE_ASSET_SUBDIR):
-        base = run_dir / subdir
-        if not base.is_dir():
+    base = run_dir / FEATURE_ASSET_SUBDIR
+    if not base.is_dir():
+        return 0
+    for path in base.rglob("*"):
+        if not path.is_file():
             continue
-        for path in base.rglob("*"):
-            if not path.is_file():
-                continue
-            try:
-                if path.stat().st_mtime < cutoff:
-                    path.unlink()
-                    deleted += 1
-            except OSError:
-                # File may be mid-write or already gone; over/under-eviction is safe.
-                continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                deleted += 1
+        except OSError:
+            # File may be mid-write or already gone; over-eviction is safe (the
+            # feature is regenerable), so ignore and continue.
+            continue
     return deleted

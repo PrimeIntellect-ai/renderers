@@ -533,7 +533,7 @@ def test_generate_caches_max_prompt_len_lookup_failure():
     assert _max_prompt_len_cache[("http://no-models:8000/v1", "test-model")] is None
 
 
-def test_sweep_stale_artifacts_evicts_only_stale_files(tmp_path):
+def test_sweep_stale_artifacts_evicts_only_stale_features_never_images(tmp_path):
     import os
     import time
 
@@ -558,11 +558,14 @@ def test_sweep_stale_artifacts_evicts_only_stale_files(tmp_path):
 
     deleted = sweep_stale_artifacts(run_dir, ttl_seconds=3600.0)
 
-    assert deleted == 2
-    assert not stale_img.exists()
+    # Features only: the stale feature is evicted, the fresh feature kept.
+    assert deleted == 1
     assert not stale_feat.exists()
-    assert fresh_img.exists()
     assert fresh_feat.exists()
+    # Images are NEVER swept (terminal, non-regenerable source of truth) — even a
+    # stale image is retained for the whole run.
+    assert stale_img.exists()
+    assert fresh_img.exists()
 
 
 def test_sweep_stale_artifacts_noops_on_missing_dirs(tmp_path):

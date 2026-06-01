@@ -219,6 +219,15 @@ def _write_mm_feature_artifact(
         mm_hash=mm_hash,
         placeholder_length=placeholder_length,
     ):
+        # Recurring image: the feature is already on disk and valid. Refresh its
+        # mtime so the orchestrator's last-use feature sweep treats it as hot —
+        # otherwise a frequently-reused feature keeps its first-write mtime, ages
+        # past the TTL while still being referenced, and gets swept (forcing an
+        # expensive force_full_pixels reprocess on the next reference). Suppress
+        # OSError in case a concurrent sweep just removed it — the rewrite below
+        # would handle that on a subsequent call anyway.
+        with contextlib.suppress(OSError):
+            os.utime(path, None)
         return mmfile_ref(run_id=run_id, fingerprint=fingerprint, modality=modality, mm_hash=mm_hash)
 
     envelope = build_mm_feature_envelope(

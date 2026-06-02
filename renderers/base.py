@@ -1022,6 +1022,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # GLM-5 family (GLM-4.7 reuses the GLM-5 template).
     "zai-org/GLM-5": "glm-5",
     "zai-org/GLM-5-FP8": "glm-5",
+    "zai-org/GLM-4.7": "glm-5",
     "zai-org/GLM-4.7-Flash": "glm-5",
     "zai-org/GLM-5.1": "glm-5.1",
     # GLM-4.5.

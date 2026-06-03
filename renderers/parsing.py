@@ -1299,18 +1299,24 @@ def parse_llama_3(
             parsed = json.loads(text)
         except json.JSONDecodeError:
             parsed = None
-        if isinstance(parsed, dict) and "name" in parsed:
+        if isinstance(parsed, dict) and parsed.get("name"):
             arguments = parsed.get("parameters", parsed.get("arguments", {}))
-            tool_call = {
-                "function": {
-                    "name": parsed.get("name", ""),
-                    "arguments": arguments,
-                }
-            }
             return ParsedResponse(
                 content="",
                 reasoning_content=None,
-                tool_calls=[tool_call],
+                tool_calls=[
+                    ParsedToolCall(
+                        raw=text,
+                        name=parsed["name"],
+                        arguments=arguments,
+                        token_span=(0, len(ids)),
+                        status=ToolCallParseStatus.OK,
+                    )
+                ],
             )
 
-    return ParsedResponse(content=text, reasoning_content=None, tool_calls=None)
+    # Not a tool-call shape (plain reply, or a ``{...}`` body that didn't
+    # parse / lacked a name). Llama-3 has no delimiter to anchor a
+    # "malformed attempt" against, so it falls through to content rather
+    # than producing a non-OK ParsedToolCall.
+    return ParsedResponse(content=text, reasoning_content=None)

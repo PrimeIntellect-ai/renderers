@@ -12,7 +12,12 @@ from __future__ import annotations
 import pytest
 
 from renderers import Llama3Renderer, Llama3RendererConfig, create_renderer
-from renderers.base import MODEL_RENDERER_MAP, ParsedResponse, load_tokenizer
+from renderers.base import (
+    MODEL_RENDERER_MAP,
+    ParsedResponse,
+    ToolCallParseStatus,
+    load_tokenizer,
+)
 
 # Pinned date for byte-parity tests. Matches the chat template's
 # strftime fallback so we don't have to override on the apply side.
@@ -285,7 +290,7 @@ def test_parse_response_plain_content(llama_pair):
     out = r.parse_response(ids)
     assert isinstance(out, ParsedResponse)
     assert out.content == "Hello, world!"
-    assert out.tool_calls is None
+    assert out.tool_calls == []
     assert out.reasoning_content is None
 
 
@@ -295,9 +300,11 @@ def test_parse_response_tool_call(llama_pair):
     ids = _tokens_for(tok, body) + [r._eot]
     out = r.parse_response(ids)
     assert out.content == ""
-    assert out.tool_calls == [
-        {"function": {"name": "get_weather", "arguments": {"city": "NYC"}}}
-    ]
+    assert len(out.tool_calls) == 1
+    tc = out.tool_calls[0]
+    assert tc.status == ToolCallParseStatus.OK
+    assert tc.name == "get_weather"
+    assert tc.arguments == {"city": "NYC"}
 
 
 def test_parse_response_malformed_tool_call_falls_through_to_content(llama_pair):
@@ -307,7 +314,7 @@ def test_parse_response_malformed_tool_call_falls_through_to_content(llama_pair)
     body = '{"name": "x", broken'
     ids = _tokens_for(tok, body) + [r._eot]
     out = r.parse_response(ids)
-    assert out.tool_calls is None
+    assert out.tool_calls == []
     assert "{" in out.content
 
 

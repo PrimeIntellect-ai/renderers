@@ -630,8 +630,6 @@ def _build_qwen_vl_features(mm_data: MultiModalData, *, spatial_merge_size: int)
         # mm_items ship numpy arrays (the renderer is torch-free); convert at
         # this vLLM-glue boundary where torch is already a hard dependency.
         encoded: list[Any] = [None] * len(image_items)
-        mmfile_count = 0
-        inline_count = 0
         full_indices = [i for i, it in enumerate(image_items) if it.get("pixel_values") is not None]
         if full_indices:
             full_items = [image_items[i] for i in full_indices]
@@ -646,7 +644,6 @@ def _build_qwen_vl_features(mm_data: MultiModalData, *, spatial_merge_size: int)
                 raw_payload = bufs[0]
                 if mode == "off":
                     encoded[idx] = base64.b64encode(raw_payload).decode("ascii")
-                    inline_count += 1
                     continue
 
                 mm_hash = (mm_data.mm_hashes.get("image") or [])[idx]
@@ -660,15 +657,6 @@ def _build_qwen_vl_features(mm_data: MultiModalData, *, spatial_merge_size: int)
                     placeholder_length=placeholder.length,
                 )
                 encoded[idx] = ref
-                mmfile_count += 1
-        if image_items:
-            _request_logger.debug(
-                "built qwen-vl mm features mode=%s none=%d inline=%d mmfile=%d",
-                mode,
-                len(image_items) - len(full_indices),
-                inline_count,
-                mmfile_count,
-            )
         out["kwargs_data"]["image"] = encoded
         out["mm_hashes"]["image"] = list(mm_data.mm_hashes.get("image") or [])
         out["mm_placeholders"]["image"] = [

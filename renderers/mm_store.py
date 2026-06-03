@@ -76,14 +76,9 @@ def feature_asset_dir(run_id: str) -> Path:
     """``<run_dir>/assets/mm_features``, resolved.
 
     This is the root that ``mm_feature_path`` builds under and that the
-    traversal guard checks against. Identical to ``mm_feature_run_root``.
+    traversal guard checks against.
     """
     return (run_dir(run_id) / FEATURE_ASSET_SUBDIR).resolve()
-
-
-# Alias kept for symmetry with the feature-format function names; both resolve
-# to ``<root>/run_<id>/assets/mm_features``.
-mm_feature_run_root = feature_asset_dir
 
 
 def mm_feature_fingerprint(*, family: str, spatial_merge_size: int) -> str:
@@ -110,7 +105,7 @@ def mm_feature_path(*, run_id: str, fingerprint: str, modality: str, mm_hash: st
     if not _SAFE_MM_HASH_RE.fullmatch(mm_hash):
         raise ValueError(f"Invalid multimodal feature hash: {mm_hash!r}")
 
-    root = mm_feature_run_root(run_id)
+    root = feature_asset_dir(run_id)
     path = (root / "v1" / "vllm-mmitem" / fingerprint / modality / mm_hash[:2] / f"{mm_hash}.msgpack").resolve()
     if not path.is_relative_to(root):
         raise ValueError(f"Multimodal feature path escaped root: {path}")

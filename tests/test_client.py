@@ -1,8 +1,10 @@
 import asyncio
 import base64
+import json
 
+import httpx
 import numpy as np
-
+import pytest
 from renderers.base import (
     ParsedResponse,
     ParsedToolCall,
@@ -19,7 +21,15 @@ class _FakeRenderer:
         assert messages == [{"role": "user", "content": "hi"}]
         assert tools == [{"type": "function", "function": {"name": "echo"}}]
         assert add_generation_prompt is True
-        return RenderedTokens(token_ids=[1, 2, 3])
+        # Populate the full attribution surface so the test can verify
+        # ``generate`` threads it through to the result dict unchanged.
+        return RenderedTokens(
+            token_ids=[1, 2, 3],
+            message_indices=[0, 0, -1],
+            sampled_mask=[False, False, False],
+            is_content=[False, True, False],
+            message_roles=["user"],
+        )
 
     def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
         return self.render(
@@ -62,8 +72,8 @@ class _FakeClient:
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
         )
-        routed_experts = np.array([[[1]], [[2]]], dtype=np.int32)
-        return {
+        routed_experts = np.array([[[1]], [[2]]], dtype=np.uint8)
+        payload = {
             "request_id": "gen-test",
             "choices": [
                 {
@@ -77,7 +87,7 @@ class _FakeClient:
                     },
                     "finish_reason": "stop",
                     "routed_experts": {
-                        "data": base64.b85encode(routed_experts.tobytes()).decode(
+                        "data": base64.b64encode(routed_experts.tobytes()).decode(
                             "ascii"
                         ),
                         "shape": list(routed_experts.shape),
@@ -85,6 +95,10 @@ class _FakeClient:
                 }
             ],
         }
+        return httpx.Response(
+            200,
+            content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        )
 
 
 def test_generate_builds_request_body_and_parses_response():
@@ -113,6 +127,7 @@ def test_generate_builds_request_body_and_parses_response():
     # /inference/v1/generate is mounted at the server root, so we post to
     # an absolute URL stripped of the OpenAI SDK's automatic /v1 prefix.
     assert client.calls[0]["path"] == "http://fake-host:8000/inference/v1/generate"
+    assert client.calls[0]["cast_to"] is httpx.Response
     assert client.calls[0]["body"] == {
         "model": "test-model",
         "token_ids": [1, 2, 3],
@@ -134,9 +149,22 @@ def test_generate_builds_request_body_and_parses_response():
     assert result["prompt_ids"] == [1, 2, 3]
     assert result["completion_ids"] == [7, 8]
     assert result["completion_logprobs"] == [-0.1, -0.2]
-    assert result["routed_experts"] == [[[1]], [[2]]]
+    assert result["routed_experts"]["shape"] == [2, 1, 1]
+    assert isinstance(result["routed_experts"]["data"], memoryview)
+    assert result["routed_experts"]["data"].tobytes() == base64.b64encode(b"\x01\x02")
     assert result["multi_modal_data"] is None
     assert result["request_id"] == "gen-test"
+    # Per-token attribution from the renderer surfaces on the result so
+    # downstream consumers (verifiers RendererClient → prime-rl) can
+    # build selective loss masks without a second render pass.
+    attr = result["prompt_attribution"]
+    assert attr is not None
+    assert isinstance(attr, RenderedTokens)
+    assert attr.token_ids == [1, 2, 3]
+    assert attr.is_content == [False, True, False]
+    assert attr.sampled_mask == [False, False, False]
+    assert attr.message_indices == [0, 0, -1]
+    assert attr.message_roles == ["user"]
     assert len(result["tool_calls"]) == 1
     tc = result["tool_calls"][0]
     assert tc.name == "echo"
@@ -207,6 +235,44 @@ def test_generate_uses_prebuilt_prompt_ids_without_rendering():
 
     assert client.calls[0]["body"]["token_ids"] == [11, 12, 13]
     assert result["prompt_ids"] == [11, 12, 13]
+    # Pre-built prompt without explicit attribution → ``None`` carried
+    # through. Consumers fall back to whatever attribution-free path
+    # they have (e.g. uniform completion mask).
+    assert result["prompt_attribution"] is None
+
+
+def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
+    """When the caller passes both ``prompt_ids`` and ``prompt_attribution``
+    (the multi-turn bridge path in verifiers), ``generate`` must thread
+    the attribution through to the result dict unchanged — no re-rendering,
+    no per-token reshuffling. Lets downstream consumers carry the
+    renderer's body/scaffold cut into the trajectory step without an
+    extra render pass."""
+    client = _FakeClient()
+    # Caller-supplied attribution; mirrors what
+    # ``RendererClient._get_incremental_prompt_ids`` returns from the
+    # bridge_to_next_turn output.
+    supplied = RenderedTokens(
+        token_ids=[11, 12, 13],
+        message_indices=[-1, 0, 0],
+        sampled_mask=[False, False, False],
+        is_content=[False, True, True],
+        message_roles=["tool"],
+    )
+
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=_NoRenderRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            prompt_ids=[11, 12, 13],
+            prompt_attribution=supplied,
+        )
+    )
+
+    # Exact passthrough — same object, no copy / no transform.
+    assert result["prompt_attribution"] is supplied
 
 
 # ---------------------------------------------------------------------------
@@ -214,30 +280,42 @@ def test_generate_uses_prebuilt_prompt_ids_without_rendering():
 # ---------------------------------------------------------------------------
 
 
-def test_generate_serializes_multimodal_features_for_qwen3_vl():
+@pytest.mark.parametrize(
+    "model_id,renderer_class_path",
+    [
+        ("Qwen/Qwen3-VL-4B-Instruct", "renderers.qwen3_vl:Qwen3VLRenderer"),
+        ("Qwen/Qwen3.5-2B", "renderers.qwen35:Qwen35Renderer"),
+    ],
+    ids=["qwen3_vl", "qwen35"],
+)
+def test_generate_serializes_multimodal_features_for_qwen_vl_family(
+    model_id, renderer_class_path
+):
     """When the renderer emits ``MultiModalData``, ``generate`` translates
     it into vLLM's ``features`` payload (mm_hashes + mm_placeholders +
-    base64-encoded kwargs_data) and sticks it in the request body."""
-    import pytest as _pytest
+    base64-encoded kwargs_data) and sticks it in the request body. Covers
+    every renderer routed through ``_build_qwen_vl_features``."""
+    import importlib
 
-    _pytest.importorskip("torch")
-    _pytest.importorskip("vllm", reason="vllm needed for features serialization")
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm", reason="vllm needed for features serialization")
 
     import torch as _torch
-
     from renderers.base import (
         MultiModalData,
         PlaceholderRange,
         load_tokenizer,
     )
-    from renderers.qwen3_vl import Qwen3VLRenderer
 
-    # Build a minimal real Qwen3VLRenderer so type dispatch in
+    mod_name, cls_name = renderer_class_path.split(":")
+    renderer_cls = getattr(importlib.import_module(mod_name), cls_name)
+
+    # Build a minimal real renderer so type dispatch in
     # _build_mm_features hits the qwen branch. The tokenizer is only
     # touched in __init__ to grab special-token ids; render() / etc.
     # aren't called here because we pre-supply prompt_ids + mm_data.
-    tokenizer = load_tokenizer("Qwen/Qwen3-VL-4B-Instruct")
-    renderer = Qwen3VLRenderer(tokenizer)
+    tokenizer = load_tokenizer(model_id)
+    renderer = renderer_cls(tokenizer)
 
     # Two synthetic 1×2×2 images. Field factory expects pixel_values
     # shape ``(sum_HW, embed_dim)`` and grid_thw shape ``(N, 3)``; the
@@ -291,3 +369,136 @@ def test_generate_serializes_multimodal_features_for_qwen3_vl():
     # Items are base64 strings (encode_mm_kwargs_item output).
     for item in features["kwargs_data"]["image"]:
         assert isinstance(item, str) and len(item) > 0
+
+
+# ---------------------------------------------------------------------------
+# Prompt overflow handling.
+# ---------------------------------------------------------------------------
+
+
+class _LongRenderer(_FakeRenderer):
+    """Renders a 10-token prompt regardless of input — enough to overflow a
+    small ``max_prompt_len``."""
+
+    def render(self, messages, *, tools=None, add_generation_prompt=False):
+        from renderers.base import RenderedTokens
+
+        return RenderedTokens(token_ids=list(range(10)))
+
+
+def test_generate_raises_overlong_prompt_when_explicit_cap_exceeded():
+    """Pre-flight overflow check: when an explicit ``max_prompt_len`` is set
+    and the rendered prompt is longer, ``generate`` raises
+    ``OverlongPromptError`` without dispatching the request to the engine."""
+    from renderers.client import OverlongPromptError
+
+    client = _FakeClient()
+    renderer = _LongRenderer()
+
+    with pytest.raises(OverlongPromptError) as excinfo:
+        asyncio.run(
+            generate(
+                client=client,
+                renderer=renderer,
+                messages=[{"role": "user", "content": "hi"}],
+                model="test-model",
+                max_prompt_len=4,
+            )
+        )
+
+    assert excinfo.value.prompt_len == 10
+    assert excinfo.value.max_prompt_len == 4
+    assert client.calls == [], "request must not be dispatched on pre-flight fail"
+
+
+def test_generate_allows_prompt_at_max_prompt_len():
+    """A prompt exactly equal to ``max_prompt_len`` is allowed (the check is
+    strict ``>``); only longer prompts trip the pre-flight."""
+    client = _FakeClient()
+    renderer = _LongRenderer()
+
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=renderer,
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            max_prompt_len=10,
+        )
+    )
+
+    assert len(client.calls) == 1
+    assert result["prompt_ids"] == list(range(10))
+
+
+def test_generate_auto_discovers_max_prompt_len_from_models_endpoint():
+    """When ``max_prompt_len`` is ``None`` (default), ``generate`` discovers
+    the cap via ``GET /v1/models`` and reads ``ModelCard.max_model_len``.
+    The result is cached per ``(base_url, model)`` so subsequent calls
+    don't re-query."""
+    from renderers.client import OverlongPromptError, _max_prompt_len_cache
+
+    class _ClientWithModels(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.base_url = "http://disco-host:8000/v1"
+            self.models_calls = 0
+
+        async def get(self, path, *, cast_to):
+            self.models_calls += 1
+            assert path == "/models"
+            return {
+                "object": "list",
+                "data": [
+                    {"id": "test-model", "max_model_len": 4},
+                    {"id": "other", "max_model_len": 999},
+                ],
+            }
+
+    # Clear cache so this test isn't affected by earlier ones.
+    _max_prompt_len_cache.clear()
+
+    client = _ClientWithModels()
+    renderer = _LongRenderer()
+
+    with pytest.raises(OverlongPromptError) as excinfo:
+        asyncio.run(
+            generate(
+                client=client,
+                renderer=renderer,
+                messages=[{"role": "user", "content": "hi"}],
+                model="test-model",
+            )
+        )
+
+    assert excinfo.value.max_prompt_len == 4
+    assert excinfo.value.prompt_len == 10
+    assert client.models_calls == 1, "lookup must hit /models once"
+    assert client.calls == [], "pre-flight must short-circuit the request"
+
+
+def test_generate_caches_max_prompt_len_lookup_failure():
+    """When ``GET /v1/models`` fails (e.g. mock client without ``.get``),
+    the lookup result is cached as ``None`` and the pre-flight quietly
+    disables — the request still goes through, callers fall back to
+    whatever reactive overflow handling they have."""
+    from renderers.client import _max_prompt_len_cache
+
+    # _FakeClient has no .get method → AttributeError → cached None.
+    _max_prompt_len_cache.clear()
+    client = _FakeClient()
+    client.base_url = "http://no-models:8000/v1"
+
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=_LongRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+        )
+    )
+
+    # Request was dispatched (no pre-flight rejection) and round-tripped.
+    assert len(client.calls) == 1
+    assert result["prompt_ids"] == list(range(10))
+    assert _max_prompt_len_cache[("http://no-models:8000/v1", "test-model")] is None

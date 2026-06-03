@@ -10,6 +10,7 @@ import pytest
 
 from renderers import create_renderer
 from renderers.base import load_tokenizer
+from renderers.configs import config_from_name
 
 # (HuggingFace model name, renderer name or "auto")
 #
@@ -44,7 +45,7 @@ def _load(model_name: str, renderer_name: str):
     key = f"{model_name}:{renderer_name}"
     if key not in _cache:
         tokenizer = load_tokenizer(model_name)
-        renderer = create_renderer(tokenizer, renderer=renderer_name)
+        renderer = create_renderer(tokenizer, config_from_name(renderer_name))
         _cache[key] = (tokenizer, renderer)
     return _cache[key]
 

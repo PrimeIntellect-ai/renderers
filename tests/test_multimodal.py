@@ -33,7 +33,16 @@ from renderers import (
     Qwen3VLRenderer,
     create_renderer,
 )
-from renderers.base import load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.configs import _config_class_for
+
+
+def _config_with_add_vision_id(model_name: str, add_vision_id: bool):
+    """Build the typed config for ``model_name`` (resolved via
+    ``MODEL_RENDERER_MAP``) with ``add_vision_id`` set. The qwen_vl
+    family — Qwen3.5 and Qwen3-VL — both expose this field."""
+    renderer_name = MODEL_RENDERER_MAP[model_name]
+    return _config_class_for(renderer_name)(add_vision_id=add_vision_id)
 
 
 pytest.importorskip("PIL", reason="Pillow required for multimodal tests")
@@ -111,7 +120,7 @@ def _load_processor_and_renderer(model_name: str):
             )
         else:
             processor = AutoProcessor.from_pretrained(model_name)
-        renderer = create_renderer(tokenizer, renderer="auto")
+        renderer = create_renderer(tokenizer)
         # Inject processor so the renderer doesn't try to fetch it lazily.
         if hasattr(renderer, "_processor") and renderer._processor is None:
             renderer._processor = processor
@@ -636,7 +645,7 @@ def test_modality_registry_models_route_to_renderer():
         if not _hf_snapshot_cached(model_name):
             continue
         tokenizer = load_tokenizer(model_name)
-        renderer = create_renderer(tokenizer, renderer="auto")
+        renderer = create_renderer(tokenizer)
         # We expect a hand-coded VL renderer, not the default fallback.
         assert not type(renderer).__name__.startswith("Default"), (
             f"{model_name} routed to DefaultRenderer despite being in "
@@ -682,6 +691,176 @@ def test_tool_response_image_byte_parity(mm_model_name, modality, tiny_image):
         )
 
 
+def _qwen_vl_processor_input_ids_with_kwargs(
+    processor, messages, add_gp, **template_kwargs
+):
+    """Variant of ``_qwen_vl_processor_input_ids`` that forwards
+    ``template_kwargs`` to ``apply_chat_template`` so the parity oracle
+    can exercise the same typed-config template field the renderer was
+    constructed with (e.g. ``add_vision_id=True``).
+    """
+    text = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=add_gp,
+        **template_kwargs,
+    )
+    images = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if (
+                item.get("type") in ("image", "image_url")
+                or "image" in item
+                or "image_url" in item
+            ):
+                if "image" in item and not isinstance(item["image"], dict):
+                    images.append(item["image"])
+    return processor(images=images, text=text, return_tensors="pt")["input_ids"][
+        0
+    ].tolist()
+
+
+# ``add_vision_id`` is exposed on the Qwen-VL family renderers
+# (Qwen3.5 / Qwen3.6 / Qwen3-VL) per the chat-template audit. Kimi K2.5
+# / K2.6's template has no equivalent toggle, so it's intentionally
+# absent from ``KimiK25RendererConfig`` and skipped here.
+_ADD_VISION_ID_CASES = [
+    (m, mo) for m, mo in _CASES if mo == "image" and _detect_family(m) == "qwen_vl"
+]
+
+
+@pytest.mark.parametrize(
+    "mm_model_name,modality",
+    _ADD_VISION_ID_CASES,
+    ids=[f"{m}|{mo}" for m, mo in _ADD_VISION_ID_CASES],
+)
+@pytest.mark.parametrize("add_vision_id", [True, False])
+def test_add_vision_id_parity_vs_processor(
+    mm_model_name, modality, add_vision_id, tiny_image
+):
+    """Parity for ``add_vision_id`` across image-bearing shapes.
+
+    When True, the renderer must prefix each image / video placeholder
+    with ``Picture N: `` / ``Video N: `` matching the Jinja template's
+    ``image_count`` / ``video_count`` namespaces. When False, the
+    prefix is suppressed entirely. Both branches must reproduce
+    ``processor.apply_chat_template(messages, add_vision_id=<value>)``
+    token-for-token after image expansion.
+    """
+    if not _hf_snapshot_cached(mm_model_name):
+        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+
+    kit = _modality_kit(modality, mm_model_name)
+    tokenizer, processor, _ = _load_processor_and_renderer(mm_model_name)
+    # Build a fresh renderer for the kwarg under test (the shared
+    # fixture has ``add_vision_id=False`` baked in).
+    renderer = create_renderer(
+        tokenizer,
+        _config_with_add_vision_id(mm_model_name, add_vision_id),
+    )
+    if hasattr(renderer, "_processor") and renderer._processor is None:
+        renderer._processor = processor
+
+    for case in _build_cases(kit["make_part"], tiny_image):
+        messages, add_gp = case.values
+        ours = renderer.render_ids(messages, add_generation_prompt=add_gp)
+        theirs = _qwen_vl_processor_input_ids_with_kwargs(
+            processor, messages, add_gp, add_vision_id=add_vision_id
+        )
+        assert ours == theirs, (
+            f"{mm_model_name} / add_vision_id={add_vision_id} / "
+            f"case={case.id}: renderer diverges from processor.\n"
+            f"  ours[:80]={ours[:80]}\n  theirs[:80]={theirs[:80]}\n"
+            f"  len(ours)={len(ours)} len(theirs)={len(theirs)}"
+        )
+
+
+@pytest.mark.parametrize(
+    "mm_model_name,modality",
+    _ADD_VISION_ID_CASES,
+    ids=[f"{m}|{mo}" for m, mo in _ADD_VISION_ID_CASES],
+)
+def test_bridge_refuses_when_add_vision_id_loses_prior_count(
+    mm_model_name, modality, tiny_image
+):
+    """When ``add_vision_id=True``, the bridge needs the prior turn's
+    image / video count to keep the ``Picture N:`` numbering correct.
+    The only source of that count for the bridged turn is
+    ``previous_multi_modal_data``; raw prior token ids don't carry it
+    back unambiguously (``<|vision_start|>`` is shared between image
+    and video placeholders).
+
+    If a caller omits ``previous_multi_modal_data`` on a conversation
+    that already contains images, naively continuing the bridge would
+    emit ``Picture 1:`` again for the new turn — diverging from
+    ``apply_chat_template`` and a full re-render. The bridge must
+    refuse (return None) so the caller falls back to a full re-render.
+    """
+    if not _hf_snapshot_cached(mm_model_name):
+        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+
+    kit = _modality_kit(modality, mm_model_name)
+    tokenizer, processor, _ = _load_processor_and_renderer(mm_model_name)
+    renderer = create_renderer(
+        tokenizer,
+        _config_with_add_vision_id(mm_model_name, True),
+    )
+    if hasattr(renderer, "_processor") and renderer._processor is None:
+        renderer._processor = processor
+
+    initial = [
+        {
+            "role": "user",
+            "content": [
+                kit["make_part"](tiny_image),
+                {"type": "text", "text": "Turn one."},
+            ],
+        }
+    ]
+    new_messages = [
+        {
+            "role": "user",
+            "content": [
+                kit["make_part"](tiny_image),
+                {"type": "text", "text": "Turn two."},
+            ],
+        }
+    ]
+
+    initial_rendered = renderer.render(initial, add_generation_prompt=True)
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    completion_ids = tokenizer.encode("Saw it.", add_special_tokens=False) + [im_end_id]
+
+    # No previous_multi_modal_data → bridge must refuse so the caller
+    # falls back to a full re-render (where the counter restarts from
+    # the full message list and lands on Picture 2: correctly).
+    bridged = renderer.bridge_to_next_turn(
+        previous_prompt_ids=initial_rendered.token_ids,
+        previous_completion_ids=completion_ids,
+        new_messages=new_messages,
+    )
+    assert bridged is None, (
+        f"{mm_model_name}: bridge should refuse when add_vision_id=True "
+        "and previous_multi_modal_data is omitted but prior contains images"
+    )
+
+    # With the prior mm_data threaded through, the bridge proceeds.
+    bridged_ok = renderer.bridge_to_next_turn(
+        previous_prompt_ids=initial_rendered.token_ids,
+        previous_completion_ids=completion_ids,
+        new_messages=new_messages,
+        previous_multi_modal_data=initial_rendered.multi_modal_data,
+    )
+    assert bridged_ok is not None, (
+        f"{mm_model_name}: bridge unexpectedly refused even with previous_multi_modal_data"
+    )
+
+
 def test_qwen3_vl_renderer_exposes_image_modality():
     """The flagship multimodal renderer is concretely Qwen3VLRenderer.
 
@@ -692,6 +871,43 @@ def test_qwen3_vl_renderer_exposes_image_modality():
     if not _hf_snapshot_cached(model):
         pytest.skip(f"{model}: HF snapshot not cached locally")
     tokenizer = load_tokenizer(model)
-    renderer = create_renderer(tokenizer, renderer="auto")
+    renderer = create_renderer(tokenizer)
     assert isinstance(renderer, Qwen3VLRenderer)
     assert "image" in MULTIMODAL_MODELS[model]
+
+
+def test_is_image_part_treats_type_field_as_authoritative():
+    """``Dataset.from_list`` unifies the Arrow schema across the elements
+    of a list-typed column. A content list mixing text and image parts
+    round-trips with ``image_url: None`` added to every text part (and
+    ``text: None`` added to every image part). The classifier must treat
+    the ``type`` field as authoritative when present — falling back to
+    a key-presence check on ``image_url`` would misclassify the text
+    part and the renderer would later raise on ``_load_pil_image(None)``.
+    """
+    from renderers.qwen3_vl import _is_image_part, _is_video_part
+
+    # Typed parts classify by their ``type``.
+    assert _is_image_part(
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,XXX"}}
+    )
+    assert _is_image_part({"type": "image", "image": object()})
+    assert _is_video_part(
+        {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,XXX"}}
+    )
+
+    # Schema-unified text parts — typed as text, with a None zombie key
+    # for the sibling modality — must NOT classify as image / video.
+    schema_unified_text = {"type": "text", "text": "hello", "image_url": None}
+    assert not _is_image_part(schema_unified_text)
+    assert not _is_video_part(schema_unified_text)
+    schema_unified_text_with_video = {"type": "text", "text": "hi", "video_url": None}
+    assert not _is_video_part(schema_unified_text_with_video)
+
+    # Untyped fallback only fires when ``type`` is absent, and requires
+    # a truthy value (mere key presence isn't enough).
+    assert _is_image_part({"image_url": {"url": "data:..."}})
+    assert _is_image_part({"image": object()})
+    assert not _is_image_part({"image_url": None})
+    assert not _is_image_part({"image": None})
+    assert not _is_video_part({"video_url": None})

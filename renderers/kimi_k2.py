@@ -23,34 +23,33 @@ from renderers.base import (
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    extract_message_tool_names,
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
+from renderers.configs import KimiK2RendererConfig
 from renderers.parsing import parse_kimi_k2
 
 _DEFAULT_SYSTEM = "You are Kimi, an AI assistant created by Moonshot AI."
 
 
 class KimiK2Renderer:
-    """Deterministic message → token renderer for Kimi K2 models."""
+    """Deterministic message → token renderer for Kimi K2 models.
+
+    Kimi K2's chat template doesn't read any thinking-related variable —
+    ``content`` renders verbatim with no reasoning branch. The
+    ``enable_thinking`` / ``preserve_*`` fields on the config are stored
+    for protocol uniformity with the rest of the renderer family but
+    have no effect on the byte-level output.
+    """
 
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        *,
-        enable_thinking: bool = True,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
+        config: KimiK2RendererConfig | None = None,
     ):
-        # Kimi-K2's chat template doesn't read ``reasoning_content`` for
-        # past assistant turns, so the override flags are no-ops. Stored
-        # for introspection / Protocol parity only.
         self._tokenizer = tokenizer
-        self._enable_thinking = enable_thinking
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        self.config = config or KimiK2RendererConfig()
 
         self._im_user = self._token_id("<|im_user|>")
         self._im_assistant = self._token_id("<|im_assistant|>")
@@ -118,6 +117,11 @@ class KimiK2Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
+        # Preserve the caller's list — ``message_roles`` and per-token
+        # attribution refer to this frame (not the post-normalisation
+        # list that includes auto-injected system / tool_declare).
+        caller_messages = list(messages)
+
         # Inject tools as tool_declare message + ensure system message.
         # The Jinja template emits the tools list directly (no
         # ``{"type":"function","function":...}`` wrapper) using
@@ -166,19 +170,33 @@ class KimiK2Renderer:
         token_ids: list[int] = []
         indices: list[int] = []
         sampled: list[bool] = []
+        content_mask: list[bool] = []
 
-        def emit_ids(ids: list[int], msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_ids(
+            ids: list[int], msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             token_ids.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
+            content_mask.extend([is_content] * len(ids))
 
-        def emit_special(token_id: int, msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_special(
+            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             token_ids.append(token_id)
             indices.append(msg_idx)
             sampled.append(is_sampled)
+            content_mask.append(is_content)
 
-        def emit_text(text: str, msg_idx: int, *, is_sampled: bool) -> None:
-            emit_ids(self._encode(text), msg_idx, is_sampled=is_sampled)
+        def emit_text(
+            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
+            emit_ids(
+                self._encode(text),
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=is_content,
+            )
 
         # Compute last non-tool-call assistant index to determine thinking preservation
         last_plain_assistant_idx = -1
@@ -206,31 +224,40 @@ class KimiK2Renderer:
                 content = "".join(parts)
 
             oi = orig_idx(i)
+            # Auto-injected system / tool_declare messages have ``oi == -1``.
+            # Their text isn't from the caller's input, so we treat the
+            # whole emission as scaffold (``is_content=False`` everywhere).
+            # The test contract is that ``msg_idx == -1`` runs are
+            # template-only and ``is_content=False``.
+            body_is_content = oi >= 0
 
             if role == "system":
-                emit_special(self._im_system, oi, is_sampled=False)
-                emit_text("system", oi, is_sampled=False)
-                emit_special(self._im_middle, oi, is_sampled=False)
-                emit_text(content, oi, is_sampled=False)
-                emit_special(self._im_end, oi, is_sampled=False)
+                emit_special(self._im_system, oi, is_sampled=False, is_content=False)
+                emit_text("system", oi, is_sampled=False, is_content=False)
+                emit_special(self._im_middle, oi, is_sampled=False, is_content=False)
+                emit_text(content, oi, is_sampled=False, is_content=body_is_content)
+                emit_special(self._im_end, oi, is_sampled=False, is_content=False)
                 # Jinja emits a literal newline only after the auto-injected
                 # system's <|im_end|> (see _ensure_system_message's contract).
                 if i == auto_system_idx:
-                    emit_text("\n", oi, is_sampled=False)
+                    emit_text("\n", oi, is_sampled=False, is_content=False)
 
             elif role == "tool_declare":
-                emit_special(self._im_system, oi, is_sampled=False)
-                emit_text("tool_declare", oi, is_sampled=False)
-                emit_special(self._im_middle, oi, is_sampled=False)
-                emit_text(content, oi, is_sampled=False)
-                emit_special(self._im_end, oi, is_sampled=False)
+                # The tool_declare body is the tools JSON — recoverable
+                # from the caller's ``tools`` argument, so we treat it as
+                # scaffold (consistent with Qwen3's tools-header block).
+                emit_special(self._im_system, oi, is_sampled=False, is_content=False)
+                emit_text("tool_declare", oi, is_sampled=False, is_content=False)
+                emit_special(self._im_middle, oi, is_sampled=False, is_content=False)
+                emit_text(content, oi, is_sampled=False, is_content=False)
+                emit_special(self._im_end, oi, is_sampled=False, is_content=False)
 
             elif role == "user":
-                emit_special(self._im_user, oi, is_sampled=False)
-                emit_text("user", oi, is_sampled=False)
-                emit_special(self._im_middle, oi, is_sampled=False)
-                emit_text(content, oi, is_sampled=False)
-                emit_special(self._im_end, oi, is_sampled=False)
+                emit_special(self._im_user, oi, is_sampled=False, is_content=False)
+                emit_text("user", oi, is_sampled=False, is_content=False)
+                emit_special(self._im_middle, oi, is_sampled=False, is_content=False)
+                emit_text(content, oi, is_sampled=False, is_content=body_is_content)
+                emit_special(self._im_end, oi, is_sampled=False, is_content=False)
 
             elif role == "assistant":
                 # Kimi strips reasoning from historical assistant turns and
@@ -250,27 +277,36 @@ class KimiK2Renderer:
 
             elif role == "tool":
                 self._render_tool(
-                    msg, oi, content, emit_special=emit_special, emit_text=emit_text
+                    msg,
+                    oi,
+                    content,
+                    emit_special=emit_special,
+                    emit_text=emit_text,
                 )
 
             else:
                 # Unknown role: use system-style formatting. Not a sampled
                 # assistant turn — every token is template-injected from the
                 # caller's POV, so is_sampled=False across the whole emission.
-                emit_special(self._im_system, oi, is_sampled=False)
-                emit_text(role, oi, is_sampled=False)
-                emit_special(self._im_middle, oi, is_sampled=False)
-                emit_text(content, oi, is_sampled=False)
-                emit_special(self._im_end, oi, is_sampled=False)
+                emit_special(self._im_system, oi, is_sampled=False, is_content=False)
+                emit_text(role, oi, is_sampled=False, is_content=False)
+                emit_special(self._im_middle, oi, is_sampled=False, is_content=False)
+                emit_text(content, oi, is_sampled=False, is_content=body_is_content)
+                emit_special(self._im_end, oi, is_sampled=False, is_content=False)
 
         # Generation prompt
         if add_generation_prompt:
-            emit_special(self._im_assistant, -1, is_sampled=False)
-            emit_text("assistant", -1, is_sampled=False)
-            emit_special(self._im_middle, -1, is_sampled=False)
+            emit_special(self._im_assistant, -1, is_sampled=False, is_content=False)
+            emit_text("assistant", -1, is_sampled=False, is_content=False)
+            emit_special(self._im_middle, -1, is_sampled=False, is_content=False)
 
         return RenderedTokens(
-            token_ids=token_ids, message_indices=indices, sampled_mask=sampled
+            token_ids=token_ids,
+            message_indices=indices,
+            sampled_mask=sampled,
+            is_content=content_mask,
+            message_roles=[m.get("role") or "" for m in caller_messages],
+            message_tool_names=extract_message_tool_names(caller_messages),
         )
 
     def render_ids(
@@ -331,21 +367,42 @@ class KimiK2Renderer:
             return None
 
         ext: list[int] = []
+        ext_indices: list[int] = []
+        ext_sampled: list[bool] = []
+        ext_content: list[bool] = []
 
-        # Bridge output is consumed as the next turn's prompt — the caller
-        # blanket-masks it via ``prompt_mask=[False]*N``, so we don't track
-        # sampled_mask here. Local helpers accept the kwarg for signature
-        # compatibility with ``_render_tool`` and ignore it; the returned
-        # ``RenderedTokens`` leaves ``sampled_mask`` empty.
+        # Bridge populates ``message_indices`` (relative to ``new_messages``)
+        # and ``sampled_mask`` (uniformly ``False`` — every token the
+        # bridge emits is template scaffolding for the next prompt, not
+        # something the model sampled). ``is_content`` follows the same
+        # rules as in :meth:`render` so consumers can walk the trajectory
+        # and read each step's own body mask. Downstream consumers can
+        # run :meth:`RenderedTokens.tokens_per_message` on the bridge
+        # output to get per-new-message token counts without re-rendering.
         def emit_special(
-            token_id: int, _msg_idx: int = -1, *, is_sampled: bool = False
+            token_id: int,
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
             ext.append(token_id)
+            ext_indices.append(msg_idx)
+            ext_sampled.append(is_sampled)
+            ext_content.append(is_content)
 
         def emit_text(
-            text: str, _msg_idx: int = -1, *, is_sampled: bool = False
+            text: str,
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
-            ext.extend(self._encode(text))
+            ids = self._encode(text)
+            ext.extend(ids)
+            ext_indices.extend([msg_idx] * len(ids))
+            ext_sampled.extend([is_sampled] * len(ids))
+            ext_content.extend([is_content] * len(ids))
 
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
@@ -365,30 +422,42 @@ class KimiK2Renderer:
                 content = "".join(parts)
 
             if role == "user":
-                emit_special(self._im_user, i, is_sampled=False)
-                emit_text("user", i, is_sampled=False)
-                emit_special(self._im_middle, i, is_sampled=False)
-                emit_text(content, i, is_sampled=False)
-                emit_special(self._im_end, i, is_sampled=False)
+                emit_special(self._im_user, i)
+                emit_text("user", i)
+                emit_special(self._im_middle, i)
+                emit_text(content, i, is_content=True)
+                emit_special(self._im_end, i)
             elif role == "system":
-                emit_special(self._im_system, i, is_sampled=False)
-                emit_text("system", i, is_sampled=False)
-                emit_special(self._im_middle, i, is_sampled=False)
-                emit_text(content, i, is_sampled=False)
-                emit_special(self._im_end, i, is_sampled=False)
+                emit_special(self._im_system, i)
+                emit_text("system", i)
+                emit_special(self._im_middle, i)
+                emit_text(content, i, is_content=True)
+                emit_special(self._im_end, i)
             elif role == "tool":
                 self._render_tool(
-                    msg, i, content, emit_special=emit_special, emit_text=emit_text
+                    msg,
+                    i,
+                    content,
+                    emit_special=emit_special,
+                    emit_text=emit_text,
                 )
             else:
                 return None
 
         # Generation prompt.
-        emit_special(self._im_assistant, -1, is_sampled=False)
-        emit_text("assistant", -1, is_sampled=False)
-        emit_special(self._im_middle, -1, is_sampled=False)
+        emit_special(self._im_assistant, -1)
+        emit_text("assistant", -1)
+        emit_special(self._im_middle, -1)
 
-        return RenderedTokens(token_ids=previous_ids + ext)
+        total_len = len(previous_ids) + len(ext)
+        return RenderedTokens(
+            token_ids=previous_ids + ext,
+            message_indices=[-1] * len(previous_ids) + ext_indices,
+            sampled_mask=[False] * total_len,
+            is_content=[False] * len(previous_ids) + ext_content,
+            message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
+        )
 
     def _render_assistant(
         self,
@@ -404,23 +473,32 @@ class KimiK2Renderer:
         # scaffolding — at inference the chat template emits these as the
         # generation prompt and the model never samples them. Marking the
         # role tag as ``is_sampled=False`` keeps the SFT loss mask aligned
-        # with what the model would actually have produced.
-        emit_special(self._im_assistant, msg_idx, is_sampled=False)
-        emit_text("assistant", msg_idx, is_sampled=False)
-        emit_special(self._im_middle, msg_idx, is_sampled=False)
+        # with what the model would actually have produced. ``is_content``
+        # is also False here — the role tag isn't part of any message's
+        # body, on any role.
+        emit_special(self._im_assistant, msg_idx, is_sampled=False, is_content=False)
+        emit_text("assistant", msg_idx, is_sampled=False, is_content=False)
+        emit_special(self._im_middle, msg_idx, is_sampled=False, is_content=False)
 
         # Kimi K2's Jinja template has no reasoning-content support: the
         # assistant turn renders its ``content`` verbatim, including any
         # inline ``<think>...</think>`` tags. The separate
         # ``reasoning_content`` field is dropped (the template never reads
         # it). ``is_last_turn`` is unused here for the same reason.
+        # On assistant tokens, ``is_content == sampled_mask`` by construction
+        # — every sampled token is body, every scaffold token isn't.
         _ = is_last_turn
-        emit_text(content, msg_idx, is_sampled=True)
+        emit_text(content, msg_idx, is_sampled=True, is_content=True)
 
-        # Tool calls
+        # Tool calls — model-sampled markup carrying caller / model body.
         tool_calls = msg.get("tool_calls") or []
         if tool_calls:
-            emit_special(self._tool_calls_section_begin, msg_idx, is_sampled=True)
+            emit_special(
+                self._tool_calls_section_begin,
+                msg_idx,
+                is_sampled=True,
+                is_content=True,
+            )
             for tc in tool_calls:
                 func = tc.get("function") or tc
                 arguments = func.get("arguments", {})
@@ -434,16 +512,37 @@ class KimiK2Renderer:
                 # caller to provide an id in ``functions.{name}:{idx}`` form
                 # (that's where the Kimi parser recovers the function name).
                 tc_id = tc.get("id") or ""
-                emit_special(self._tool_call_begin, msg_idx, is_sampled=True)
-                emit_text(tc_id, msg_idx, is_sampled=True)
-                emit_special(self._tool_call_argument_begin, msg_idx, is_sampled=True)
-                emit_text(args_str, msg_idx, is_sampled=True)
-                emit_special(self._tool_call_end, msg_idx, is_sampled=True)
-            emit_special(self._tool_calls_section_end, msg_idx, is_sampled=True)
+                emit_special(
+                    self._tool_call_begin,
+                    msg_idx,
+                    is_sampled=True,
+                    is_content=True,
+                )
+                emit_text(tc_id, msg_idx, is_sampled=True, is_content=True)
+                emit_special(
+                    self._tool_call_argument_begin,
+                    msg_idx,
+                    is_sampled=True,
+                    is_content=True,
+                )
+                emit_text(args_str, msg_idx, is_sampled=True, is_content=True)
+                emit_special(
+                    self._tool_call_end,
+                    msg_idx,
+                    is_sampled=True,
+                    is_content=True,
+                )
+            emit_special(
+                self._tool_calls_section_end,
+                msg_idx,
+                is_sampled=True,
+                is_content=True,
+            )
 
         # ``<|im_end|>`` is the model's stop signal — it samples this to
-        # end its turn, so it is part of the sampled stream.
-        emit_special(self._im_end, msg_idx, is_sampled=True)
+        # end its turn, so it is part of the sampled stream (and the
+        # assistant's body).
+        emit_special(self._im_end, msg_idx, is_sampled=True, is_content=True)
 
     def _render_tool(
         self,
@@ -456,13 +555,28 @@ class KimiK2Renderer:
     ) -> None:
         # Tool messages are conversation history injected by the runtime
         # between assistant turns — the model never samples any of these
-        # tokens, so every emission is is_sampled=False.
+        # tokens, so every emission is is_sampled=False. The ``content``
+        # field's body bytes get ``is_content=True``; everything else —
+        # the ``<|im_system|>name<|im_middle|>`` wrap, the ``## Return of
+        # …\n`` header (template-synthesised, not part of the body) —
+        # is scaffold so the SFT mask for tool body never trains the
+        # model to emit them.
+        #
+        # We keep the original kimi_k2 emit boundaries — the header and
+        # the content are encoded separately, which preserves the
+        # template's byte-identity since the original code also emitted
+        # them as separate ``encode`` calls.
         name = msg.get("name") or "tool"
         tool_call_id = msg.get("tool_call_id") or ""
 
-        emit_special(self._im_system, msg_idx, is_sampled=False)
-        emit_text(name, msg_idx, is_sampled=False)
-        emit_special(self._im_middle, msg_idx, is_sampled=False)
-        emit_text(f"## Return of {tool_call_id}\n", msg_idx, is_sampled=False)
-        emit_text(content, msg_idx, is_sampled=False)
-        emit_special(self._im_end, msg_idx, is_sampled=False)
+        emit_special(self._im_system, msg_idx, is_sampled=False, is_content=False)
+        emit_text(name, msg_idx, is_sampled=False, is_content=False)
+        emit_special(self._im_middle, msg_idx, is_sampled=False, is_content=False)
+        emit_text(
+            f"## Return of {tool_call_id}\n",
+            msg_idx,
+            is_sampled=False,
+            is_content=False,
+        )
+        emit_text(content, msg_idx, is_sampled=False, is_content=True)
+        emit_special(self._im_end, msg_idx, is_sampled=False, is_content=False)

@@ -21,15 +21,14 @@ from renderers.base import (
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    attribute_text_segments,
+    extract_message_tool_names,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
     trim_to_turn_close,
 )
+from renderers.configs import MiniMaxM2RendererConfig
 from renderers.parsing import parse_minimax
-
-_DEFAULT_SYSTEM = (
-    "You are a helpful assistant. Your name is MiniMax-M2.5 and is built by MiniMax."
-)
 
 _TOOLS_HEADER = (
     "\n\n# Tools\n"
@@ -58,17 +57,10 @@ class MiniMaxM2Renderer:
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        *,
-        default_system: str = _DEFAULT_SYSTEM,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
+        config: MiniMaxM2RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
-        self._default_system = default_system
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
-        )
+        self.config = config or MiniMaxM2RendererConfig()
 
         self._bos = self._token_id("]~!b[")
         self._role = self._token_id("]~b]")
@@ -119,17 +111,69 @@ class MiniMaxM2Renderer:
         tokens: list[int] = []
         indices: list[int] = []
         sampled: list[bool] = []
+        content_mask: list[bool] = []
 
-        def emit_special(token_id: int, msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_special(
+            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
             sampled.append(is_sampled)
+            content_mask.append(is_content)
 
-        def emit_text(text: str, msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_text(
+            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             ids = self._encode(text)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
+            content_mask.extend([is_content] * len(ids))
+
+        def emit_text_segments(
+            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
+        ) -> None:
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments
+            ):
+                tokens.append(tok_id)
+                indices.append(msg_idx)
+                sampled.append(is_sampled)
+                content_mask.append(is_content)
+
+        def emit_token_overlap_body(
+            full_text: str,
+            body_start: int,
+            body_end: int,
+            msg_idx: int,
+            *,
+            is_sampled: bool,
+        ) -> None:
+            """Tokenize ``full_text`` and mark tokens that overlap the body
+            char span as ``is_content=True``.
+
+            Differs from :func:`attribute_text_segments` only in the
+            boundary-token rule: a token straddling scaffold→body gets
+            ``True`` if any of its bytes are body bytes (overlap rule),
+            rather than being attributed to whichever segment its first
+            char belongs to. The body's first byte is preserved even when
+            BPE merges it with the wrap's trailing byte (``>The`` →
+            single token).
+            """
+            from renderers.base import _get_offset_tokenizer
+
+            offset_tok = _get_offset_tokenizer(self._tokenizer)
+            encoding = offset_tok(
+                full_text, add_special_tokens=False, return_offsets_mapping=True
+            )
+            for tok_id, (start, end) in zip(
+                encoding["input_ids"], encoding["offset_mapping"]
+            ):
+                overlaps = start < body_end and end > body_start
+                tokens.append(tok_id)
+                indices.append(msg_idx)
+                sampled.append(is_sampled)
+                content_mask.append(overlaps)
 
         # ── Extract system message ──────────────────────────────────
         first_is_system = messages[0].get("role") == "system"
@@ -137,27 +181,38 @@ class MiniMaxM2Renderer:
         conversation: list[Message] = messages[1:] if first_is_system else messages
 
         # ── System block (always present) ───────────────────────────
-        emit_special(self._bos, sys_idx, is_sampled=False)
-        emit_special(self._role, sys_idx, is_sampled=False)
+        emit_special(self._bos, sys_idx, is_sampled=False, is_content=False)
+        emit_special(self._role, sys_idx, is_sampled=False, is_content=False)
 
         sys_content = (
             self._visible_text(messages[0].get("content")) if first_is_system else ""
         )
-        system_text = "system\n" + (sys_content or self._default_system)
+        # Body = caller's system content (if any). Default system message
+        # is template-injected scaffold; tools header / per-tool JSON /
+        # footer / instructions are scaffold too (the tools dict is
+        # recoverable from the ``tools`` arg).
+        sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+        if sys_content:
+            sys_segments.append((sys_content, True))
+        else:
+            sys_segments.append((self.config.model_identity, False))
 
         if tools:
-            system_text += _TOOLS_HEADER
+            sys_segments.append((_TOOLS_HEADER, False))
             for tool in tools:
                 func = tool.get("function", tool)
-                system_text += (
-                    "<tool>" + json.dumps(func, ensure_ascii=False) + "</tool>\n"
+                sys_segments.append(
+                    (
+                        "<tool>" + json.dumps(func, ensure_ascii=False) + "</tool>\n",
+                        False,
+                    )
                 )
-            system_text += _TOOLS_FOOTER_PREFIX
-            system_text += _TOOLS_INSTRUCTIONS
+            sys_segments.append((_TOOLS_FOOTER_PREFIX, False))
+            sys_segments.append((_TOOLS_INSTRUCTIONS, False))
 
-        emit_text(system_text, sys_idx, is_sampled=False)
-        emit_special(self._eos, sys_idx, is_sampled=False)
-        emit_text("\n", sys_idx, is_sampled=False)
+        emit_text_segments(sys_segments, sys_idx, is_sampled=False)
+        emit_special(self._eos, sys_idx, is_sampled=False, is_content=False)
+        emit_text("\n", sys_idx, is_sampled=False, is_content=False)
 
         # ── Compute last_user_index (relative to conversation) ──────
         last_ui = -1
@@ -172,21 +227,21 @@ class MiniMaxM2Renderer:
             orig_idx = ci + (1 if first_is_system else 0)
 
             if role == "user":
-                emit_special(self._role, orig_idx, is_sampled=False)
-                emit_text(
-                    "user\n" + self._visible_text(msg.get("content")),
-                    orig_idx,
-                    is_sampled=False,
-                )
-                emit_special(self._eos, orig_idx, is_sampled=False)
-                emit_text("\n", orig_idx, is_sampled=False)
+                emit_special(self._role, orig_idx, is_sampled=False, is_content=False)
+                user_content = self._visible_text(msg.get("content"))
+                user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                if user_content:
+                    user_segments.append((user_content, True))
+                emit_text_segments(user_segments, orig_idx, is_sampled=False)
+                emit_special(self._eos, orig_idx, is_sampled=False, is_content=False)
+                emit_text("\n", orig_idx, is_sampled=False, is_content=False)
 
             elif role == "assistant":
                 preserve_thinking = should_preserve_past_thinking(
                     messages,
                     orig_idx,
-                    preserve_all_thinking=self._preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self._preserve_thinking_between_tool_calls,
+                    preserve_all_thinking=self.config.preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
                 )
                 self._render_assistant(
                     msg,
@@ -196,6 +251,7 @@ class MiniMaxM2Renderer:
                     preserve_thinking=preserve_thinking,
                     emit_special=emit_special,
                     emit_text=emit_text,
+                    emit_text_segments=emit_text_segments,
                 )
 
             elif role == "tool":
@@ -206,17 +262,24 @@ class MiniMaxM2Renderer:
                     msg,
                     emit_special=emit_special,
                     emit_text=emit_text,
+                    emit_text_segments=emit_text_segments,
+                    emit_token_overlap_body=emit_token_overlap_body,
                 )
 
         # ── Generation prompt ───────────────────────────────────────
         if add_generation_prompt:
-            emit_special(self._role, -1, is_sampled=False)
-            emit_text("ai\n", -1, is_sampled=False)
-            emit_special(self._think, -1, is_sampled=False)
-            emit_text("\n", -1, is_sampled=False)
+            emit_special(self._role, -1, is_sampled=False, is_content=False)
+            emit_text("ai\n", -1, is_sampled=False, is_content=False)
+            emit_special(self._think, -1, is_sampled=False, is_content=False)
+            emit_text("\n", -1, is_sampled=False, is_content=False)
 
         return RenderedTokens(
-            token_ids=tokens, message_indices=indices, sampled_mask=sampled
+            token_ids=tokens,
+            message_indices=indices,
+            sampled_mask=sampled,
+            is_content=content_mask,
+            message_roles=[m.get("role") or "" for m in messages],
+            message_tool_names=extract_message_tool_names(messages),
         )
 
     def render_ids(
@@ -277,22 +340,77 @@ class MiniMaxM2Renderer:
             return None
 
         ext: list[int] = []
+        ext_indices: list[int] = []
+        ext_sampled: list[bool] = []
+        ext_content: list[bool] = []
 
-        # Bridge output is consumed as the next turn's prompt — the
-        # caller blanket-masks it via ``prompt_mask=[False]*N``, so we
-        # don't track sampled_mask here. Local helpers accept the kwarg
-        # for signature compatibility with ``_render_tool`` and ignore
-        # it; the returned ``RenderedTokens`` leaves ``sampled_mask``
-        # empty.
+        # Bridge populates ``message_indices`` (relative to ``new_messages``)
+        # and ``sampled_mask`` (uniformly ``False`` — every token the
+        # bridge emits is template scaffolding for the next prompt, not
+        # something the model sampled). ``is_content`` follows the same
+        # rules as in :meth:`render` so consumers can walk the trajectory
+        # and read each step's own body mask.
         def emit_special(
-            token_id: int, _msg_idx: int = -1, *, is_sampled: bool = False
+            token_id: int,
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
             ext.append(token_id)
+            ext_indices.append(msg_idx)
+            ext_sampled.append(is_sampled)
+            ext_content.append(is_content)
 
         def emit_text(
-            text: str, _msg_idx: int = -1, *, is_sampled: bool = False
+            text: str,
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
         ) -> None:
-            ext.extend(self._encode(text))
+            ids = self._encode(text)
+            ext.extend(ids)
+            ext_indices.extend([msg_idx] * len(ids))
+            ext_sampled.extend([is_sampled] * len(ids))
+            ext_content.extend([is_content] * len(ids))
+
+        def emit_text_segments(
+            segments: list[tuple[str, bool]],
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+        ) -> None:
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments
+            ):
+                ext.append(tok_id)
+                ext_indices.append(msg_idx)
+                ext_sampled.append(is_sampled)
+                ext_content.append(is_content)
+
+        def emit_token_overlap_body(
+            full_text: str,
+            body_start: int,
+            body_end: int,
+            msg_idx: int,
+            *,
+            is_sampled: bool,
+        ) -> None:
+            from renderers.base import _get_offset_tokenizer
+
+            offset_tok = _get_offset_tokenizer(self._tokenizer)
+            encoding = offset_tok(
+                full_text, add_special_tokens=False, return_offsets_mapping=True
+            )
+            for tok_id, (start, end) in zip(
+                encoding["input_ids"], encoding["offset_mapping"]
+            ):
+                overlaps = start < body_end and end > body_start
+                ext.append(tok_id)
+                ext_indices.append(msg_idx)
+                ext_sampled.append(is_sampled)
+                ext_content.append(overlaps)
 
         # Trailing ``\n`` after the ``[e~[`` turn close — see ``render()``.
         emit_text("\n", -1)
@@ -302,12 +420,18 @@ class MiniMaxM2Renderer:
             content = self._visible_text(msg.get("content"))
             if role == "user":
                 emit_special(self._role, i)
-                emit_text("user\n" + content, i)
+                user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                if content:
+                    user_segments.append((content, True))
+                emit_text_segments(user_segments, i)
                 emit_special(self._eos, i)
                 emit_text("\n", i)
             elif role == "system":
                 emit_special(self._role, i)
-                emit_text("system\n" + content, i)
+                sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+                if content:
+                    sys_segments.append((content, True))
+                emit_text_segments(sys_segments, i)
                 emit_special(self._eos, i)
                 emit_text("\n", i)
             elif role == "tool":
@@ -318,6 +442,8 @@ class MiniMaxM2Renderer:
                     msg,
                     emit_special=emit_special,
                     emit_text=emit_text,
+                    emit_text_segments=emit_text_segments,
+                    emit_token_overlap_body=emit_token_overlap_body,
                 )
             else:
                 return None
@@ -328,7 +454,15 @@ class MiniMaxM2Renderer:
         emit_special(self._think, -1)
         emit_text("\n", -1)
 
-        return RenderedTokens(token_ids=previous_ids + ext)
+        total_len = len(previous_ids) + len(ext)
+        return RenderedTokens(
+            token_ids=previous_ids + ext,
+            message_indices=[-1] * len(previous_ids) + ext_indices,
+            sampled_mask=[False] * total_len,
+            is_content=[False] * len(previous_ids) + ext_content,
+            message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
+        )
 
     def _render_assistant(
         self,
@@ -340,6 +474,7 @@ class MiniMaxM2Renderer:
         preserve_thinking: bool = False,
         emit_special,
         emit_text,
+        emit_text_segments,
     ):
         content = self._visible_text(msg.get("content"))
 
@@ -358,12 +493,14 @@ class MiniMaxM2Renderer:
         # the chat template emits these as the generation prompt and the
         # model never samples them. Marking the role marker and tag as
         # ``is_sampled=False`` keeps the SFT loss mask aligned with what
-        # the model would actually have produced.
-        emit_special(self._role, orig_idx, is_sampled=False)
+        # the model would actually have produced. ``is_content`` is also
+        # False here — the role tag isn't part of any message's body.
+        emit_special(self._role, orig_idx, is_sampled=False, is_content=False)
 
         # Build the model-sampled portion (think block + content + tool
-        # calls). Text segments stay contiguous within each is_sampled
-        # span to preserve BPE merges.
+        # calls). For assistant messages the invariant
+        # ``is_content == sampled_mask`` holds — every sampled token is
+        # body, every scaffold token isn't.
         tool_calls = msg.get("tool_calls") or []
         emit_thinking = reasoning_content and (
             conv_idx > last_user_index or preserve_thinking
@@ -374,10 +511,15 @@ class MiniMaxM2Renderer:
             # immediately after ``ai\n``, which forces a tokenizer
             # boundary — splitting ``ai\n`` (not_sampled) from the
             # ``<think>``-led body (sampled) is BPE-safe.
-            emit_text("ai\n", orig_idx, is_sampled=False)
-            emit_special(self._think, orig_idx, is_sampled=True)
-            emit_text("\n" + reasoning_content + "\n", orig_idx, is_sampled=True)
-            emit_special(self._think_end, orig_idx, is_sampled=True)
+            emit_text("ai\n", orig_idx, is_sampled=False, is_content=False)
+            emit_special(self._think, orig_idx, is_sampled=True, is_content=True)
+            emit_text(
+                "\n" + reasoning_content + "\n",
+                orig_idx,
+                is_sampled=True,
+                is_content=True,
+            )
+            emit_special(self._think_end, orig_idx, is_sampled=True, is_content=True)
             # \n\n + content must be contiguous for BPE
             body = "\n\n" + content if content else "\n\n"
         else:
@@ -390,17 +532,19 @@ class MiniMaxM2Renderer:
             # choice for SFT (don't train on a token whose first byte
             # is template scaffolding).
             if tool_calls and not body:
-                emit_text("ai\n\n", orig_idx, is_sampled=False)
+                emit_text("ai\n\n", orig_idx, is_sampled=False, is_content=False)
             else:
-                emit_text("ai\n", orig_idx, is_sampled=False)
+                emit_text("ai\n", orig_idx, is_sampled=False, is_content=False)
 
         if tool_calls:
             # \n before <minimax:tool_call> must be contiguous with preceding text.
             # The empty-body / non-thinking case folded the leading \n
             # into the role-tag emission above; skip it here.
             if emit_thinking or body:
-                emit_text(body + "\n", orig_idx, is_sampled=True)
-            emit_special(self._tool_call_tok, orig_idx, is_sampled=True)
+                emit_text(body + "\n", orig_idx, is_sampled=True, is_content=True)
+            emit_special(
+                self._tool_call_tok, orig_idx, is_sampled=True, is_content=True
+            )
 
             invoke_block = "\n"
             for tc in tool_calls:
@@ -432,16 +576,18 @@ class MiniMaxM2Renderer:
                         )
                 invoke_block += "</invoke>\n"
 
-            emit_text(invoke_block, orig_idx, is_sampled=True)
-            emit_special(self._tool_call_end_tok, orig_idx, is_sampled=True)
+            emit_text(invoke_block, orig_idx, is_sampled=True, is_content=True)
+            emit_special(
+                self._tool_call_end_tok, orig_idx, is_sampled=True, is_content=True
+            )
         elif body:
-            emit_text(body, orig_idx, is_sampled=True)
+            emit_text(body, orig_idx, is_sampled=True, is_content=True)
 
         # ``[e~[`` is the model's stop signal — it samples this to end
         # its turn, so it is part of the sampled stream. The trailing
         # ``\n`` is template-appended between turns and never sampled.
-        emit_special(self._eos, orig_idx, is_sampled=True)
-        emit_text("\n", orig_idx, is_sampled=False)
+        emit_special(self._eos, orig_idx, is_sampled=True, is_content=True)
+        emit_text("\n", orig_idx, is_sampled=False, is_content=False)
 
     def _render_tool(
         self,
@@ -452,10 +598,15 @@ class MiniMaxM2Renderer:
         *,
         emit_special,
         emit_text,
+        emit_text_segments,
+        emit_token_overlap_body=None,
     ) -> None:
         # Tool messages are conversation history injected by the runtime
         # between assistant turns — the model never samples any of these
-        # tokens, so every emission is is_sampled=False.
+        # tokens, so every emission is is_sampled=False. The ``content``
+        # body bytes get ``is_content=True``; the surrounding ``<response>``
+        # wrap, role tag and separators are scaffold so an SFT mask over
+        # tool body never trains the model to emit those.
         prev_is_tool = conv_idx > 0 and conversation[conv_idx - 1]["role"] == "tool"
         next_is_tool = (
             conv_idx + 1 < len(conversation)
@@ -463,8 +614,8 @@ class MiniMaxM2Renderer:
         )
 
         if not prev_is_tool:
-            emit_special(self._role, orig_idx, is_sampled=False)
-            emit_text("tool", orig_idx, is_sampled=False)
+            emit_special(self._role, orig_idx, is_sampled=False, is_content=False)
+            emit_text("tool", orig_idx, is_sampled=False, is_content=False)
 
         content = self._visible_text(msg.get("content"))
         # Leading ``\n`` before ``<response>`` only on the first of a
@@ -473,12 +624,39 @@ class MiniMaxM2Renderer:
         # through a single emit_text call instead of splitting the merge.
         prefix = "" if prev_is_tool else "\n"
         suffix = "\n" if next_is_tool else ""
-        emit_text(
-            prefix + "<response>" + content + "</response>" + suffix,
-            orig_idx,
-            is_sampled=False,
-        )
+
+        # ``<response>`` is plain text with no separator between the
+        # closing ``>`` and ``content``'s first byte, so BPE can merge
+        # them into a single token (e.g., ``>The``). The shared
+        # ``attribute_text_segments`` helper picks the segment of a
+        # boundary-spanning token by its *first* char (here scaffold),
+        # which would drop the body's leading letter out of the body
+        # run. We instead use an "intersects body" rule: any token whose
+        # ``[start, end)`` char range overlaps the body span gets
+        # ``is_content=True``. A few scaffold bytes (the leading ``>``
+        # or trailing ``<``) bleed into the body run, but body bytes are
+        # recoverable as a substring of the decoded body span.
+        body_text = prefix + "<response>" + content + "</response>" + suffix
+        body_start = len(prefix) + len("<response>")
+        body_end = body_start + len(content)
+        if content and emit_token_overlap_body is not None:
+            emit_token_overlap_body(
+                body_text, body_start, body_end, orig_idx, is_sampled=False
+            )
+        else:
+            # Empty body or no overlap-aware emitter available — fall back
+            # to the standard segments path.
+            tool_segments: list[tuple[str, bool]] = []
+            if prefix:
+                tool_segments.append((prefix, False))
+            tool_segments.append(("<response>", False))
+            if content:
+                tool_segments.append((content, True))
+            tool_segments.append(("</response>", False))
+            if suffix:
+                tool_segments.append((suffix, False))
+            emit_text_segments(tool_segments, orig_idx, is_sampled=False)
 
         if not next_is_tool:
-            emit_special(self._eos, orig_idx, is_sampled=False)
-            emit_text("\n", orig_idx, is_sampled=False)
+            emit_special(self._eos, orig_idx, is_sampled=False, is_content=False)
+            emit_text("\n", orig_idx, is_sampled=False, is_content=False)

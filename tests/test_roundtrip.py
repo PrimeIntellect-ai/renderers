@@ -51,11 +51,11 @@ _ROUNDTRIP_MODELS = [
 
 @lru_cache(maxsize=None)
 def _load_renderer(model_name: str, renderer_name: str):
-    from renderers import create_renderer
+    from renderers import config_from_name, create_renderer
     from renderers.base import load_tokenizer
 
     tok = load_tokenizer(model_name)
-    return tok, create_renderer(tok, renderer=renderer_name)
+    return tok, create_renderer(tok, config_from_name(renderer_name))
 
 
 def pytest_generate_tests(metafunc):
@@ -316,7 +316,7 @@ def test_default_renderer_fallback_parser_preserves_boundary_whitespace(
     """
     from renderers.default import DefaultRenderer
 
-    renderer = DefaultRenderer(rt_tokenizer, tool_parser=None, reasoning_parser=None)
+    renderer = DefaultRenderer(rt_tokenizer)
 
     # Encode `<think>reason</think>\nvisible` as text and run through
     # parse_response. We don't need the template to emit `<think>` here

@@ -9,8 +9,12 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-05-18T21:42:54.18041997Z"
 exclude-newer-span = "P7D"
+
+[options.exclude-newer-package]
+prime-pydantic-config = false
+fastokens = false
 
 [[package]]
 name = "annotated-doc"
@@ -265,6 +269,35 @@ wheels = [
 ]
 
 [[package]]
+name = "fastokens"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/14/8e/7e88ec1d48db5a6e8d8d44318ce285e38c04b81508bdc2a60e17045a116f/fastokens-0.2.0.tar.gz", hash = "sha256:ef0e175de5c8cb1b616b3210d75dce1fab78e35fc02f77f03f7847d4678be686", size = 675822, upload-time = "2026-05-17T10:32:55.642Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/14/3d640cbe3c866ee6c113ea4ca37c16c5aa44be6412918928bbd3f3b739ef/fastokens-0.2.0-cp313-cp313t-macosx_10_12_x86_64.whl", hash = "sha256:e7db86c2785a502e3cd993c7d3a91c46e2751f94d1f446caa9600e9cf3dafbd1", size = 3078350, upload-time = "2026-05-17T10:32:41.313Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/bf/33ca3798842fb8bdacf03a97c874454d50fe328d44e0d3c3ba7a633fd3ab/fastokens-0.2.0-cp313-cp313t-macosx_11_0_arm64.whl", hash = "sha256:fa8dcbc6ad3f7a7e9f5bf1ef3cfc9f0c04f0c8779be9e38864815dc567b27de4", size = 2983397, upload-time = "2026-05-17T10:32:38.823Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/0a/1bfd13fb855bce3ce50faa644d6e0e19343035706c2628e17da1247bbf50/fastokens-0.2.0-cp313-cp313t-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:09b399600ae5beaa34e45afd05c6835b8569861955dfdc3e05afba25fe414e5a", size = 3309835, upload-time = "2026-05-17T10:32:33.427Z" },
+    { url = "https://files.pythonhosted.org/packages/32/ce/33292977a81011ffc59cee1c20b6f8d0dbd9cb39209c327dc74dc542178d/fastokens-0.2.0-cp313-cp313t-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:f363b1e89fe4ed979224c326b25b33b28e1172134f3e7959238276170f12328e", size = 3615173, upload-time = "2026-05-17T10:32:30.898Z" },
+    { url = "https://files.pythonhosted.org/packages/07/1c/1bef8b4831bf9220ae182fcee3e250273b7f537c81aec96041f6eb4bc990/fastokens-0.2.0-cp313-cp313t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:5d79358faa11658d8908fbdfab321b6ae6a0ff52ae3cdce7a0fda5c30629a276", size = 3295485, upload-time = "2026-05-17T10:32:36.109Z" },
+    { url = "https://files.pythonhosted.org/packages/92/11/49afb739800b6a82af04fa1e991b68669c789ebeaa3bcbc96c2544c8ff9c/fastokens-0.2.0-cp313-cp313t-musllinux_1_2_aarch64.whl", hash = "sha256:cf6ae284b70d65989548a8143e1f463f31126f5650ad45ce6af05b83e4afb3e7", size = 3329524, upload-time = "2026-05-17T10:32:44.607Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/d2/f9b1c01535a0ce994d30e86cf49616023246134d2a406b74c5dd49df7825/fastokens-0.2.0-cp313-cp313t-musllinux_1_2_armv7l.whl", hash = "sha256:40fa091ff12aa8ac00fa8e2133c7256b96209827b88de5120eb1361600d7f68f", size = 3149194, upload-time = "2026-05-17T10:32:47.596Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/0b/95b2e5d25efc684988918658c90445e0e5f1dc4fee7dae5edd586b4feaba/fastokens-0.2.0-cp313-cp313t-musllinux_1_2_i686.whl", hash = "sha256:f643f4739b20c86ed21e2c46e7fe203e6a621e21124074f138819423882e3aba", size = 3401011, upload-time = "2026-05-17T10:32:50.13Z" },
+    { url = "https://files.pythonhosted.org/packages/9b/31/80b74196524d7a9576fa96685a39ee1f333ffd12eb29dbeb5e65c6e3dcb2/fastokens-0.2.0-cp313-cp313t-musllinux_1_2_x86_64.whl", hash = "sha256:3cd4effdc6610cbee0be717032652a1997976f1a2f21949435d925c7982cf6f3", size = 3593240, upload-time = "2026-05-17T10:32:52.661Z" },
+    { url = "https://files.pythonhosted.org/packages/59/96/12814aa955b7277adb07a8b36176181f247f3b9cf973d05b34294df6a72c/fastokens-0.2.0-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:d29eb1d608977d63fc4679d6ce2b360fdb8b0ea8d66a0eaf804f7ac31ba52a3a", size = 3089011, upload-time = "2026-05-17T10:32:43.16Z" },
+    { url = "https://files.pythonhosted.org/packages/c0/05/553b59c6a8542ad7d443306fc1fd7bb012e4aae459ccf9ab422ea4c681b7/fastokens-0.2.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:f8ec7a20322aafe245201727c7a507b87333c51dc580940b9ee5456dbfe3963c", size = 2992964, upload-time = "2026-05-17T10:32:39.992Z" },
+    { url = "https://files.pythonhosted.org/packages/13/66/a53c2309003510de7c189ba8a9d2ea5a1833e9b447d9f69b95449c3dfe34/fastokens-0.2.0-cp39-abi3-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:dc4c0a25726620b1cc4cfb7e9dc1a53b17bbe3f2f9adbaa57b8375b5f36ac5d4", size = 3316289, upload-time = "2026-05-17T10:32:34.557Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/54/e0e4318ee1ad0b5196df72cf93615bba0b81f7869d659a44ccc475969151/fastokens-0.2.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:160253f8d30747cf66e7ed895c513e16f7b173dd9e644fa641e2eecbd43a616a", size = 3303534, upload-time = "2026-05-17T10:32:37.462Z" },
+    { url = "https://files.pythonhosted.org/packages/64/44/bfff90e4b1a43c17edf7305dafbd56dc992bbe832cc08da78f1f50104c2d/fastokens-0.2.0-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:b61b9fe5b41e0bb36ad86e7551dc53293c9833909ef07b1cdbaa2055b06c3b3e", size = 3254096, upload-time = "2026-05-17T10:32:28.489Z" },
+    { url = "https://files.pythonhosted.org/packages/df/89/bec1a0368100c5f1134ab1ce588d71f88697fadbbad5f26bb130eda00fe8/fastokens-0.2.0-cp39-abi3-manylinux_2_28_armv7l.whl", hash = "sha256:8f138fc64e355589be43068e6996ac0bfcfd872cd75fb5793d11d06cb9c0ac9b", size = 3000177, upload-time = "2026-05-17T10:32:29.745Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/fd/cbe8a033e2ef565ce5aef4e02316054b04adad96ee9805cba74a50a84ed9/fastokens-0.2.0-cp39-abi3-manylinux_2_28_ppc64le.whl", hash = "sha256:c1a6cd93d16e880d81deb12519cc2eb20149d7423321cf00a34ce25ea9c9ef15", size = 3626561, upload-time = "2026-05-17T10:32:32.087Z" },
+    { url = "https://files.pythonhosted.org/packages/05/bf/1cad7f0e8d03f5f5b2b417cda8859e4d968d2eebdca0cd336b23d7dbbdbb/fastokens-0.2.0-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:01b9bdba818d7b2c67d57d9917faf7a1dad32ece0734440130de94ad768b819f", size = 3336689, upload-time = "2026-05-17T10:32:46.21Z" },
+    { url = "https://files.pythonhosted.org/packages/05/56/0030c6e67c60ee88b74336d1bb03eb556b2afa60445268921ad02d9cb3b3/fastokens-0.2.0-cp39-abi3-musllinux_1_2_armv7l.whl", hash = "sha256:9aec70b85a06bf2ac95dd76e07e404040dbcfb06eb165f29bc61ef2ab68dc87a", size = 3154666, upload-time = "2026-05-17T10:32:48.835Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/5b/02cc5d501ccc2fbd4b068a7aa34a35347bdb3a4189b96af647ef0407af87/fastokens-0.2.0-cp39-abi3-musllinux_1_2_i686.whl", hash = "sha256:8c41f5278ac53853249c1170d653ee0afaa0906c9bc32c8d25c9443b6d667298", size = 3406657, upload-time = "2026-05-17T10:32:51.392Z" },
+    { url = "https://files.pythonhosted.org/packages/97/d7/f5fb2564e16b1f5733e05c41b090f95a3fe767f6b888ba7d864193bc5447/fastokens-0.2.0-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:d068bc50082ad67d5d542847075f1f7b8d10f703274e56e241312f18b4d9e772", size = 3598064, upload-time = "2026-05-17T10:32:54.109Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/39/2098de2aa01c3e2ef62b066926d70015f88845e3ac1a976ba1cc3a363c05/fastokens-0.2.0-cp39-abi3-win_amd64.whl", hash = "sha256:5729c44ce1d60cb03e506731dcb17d8c2d69c267098c3ff35ca8be37d618714d", size = 2767905, upload-time = "2026-05-17T10:32:56.759Z" },
+]
+
+[[package]]
 name = "filelock"
 version = "3.29.0"
 source = { registry = "https://pypi.org/simple" }
@@ -374,11 +407,11 @@ wheels = [
 
 [[package]]
 name = "idna"
-version = "3.13"
+version = "3.15"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ce/cc/762dfb036166873f0059f3b7de4565e1b5bc3d6f28a414c13da27e442f99/idna-3.13.tar.gz", hash = "sha256:585ea8fe5d69b9181ec1afba340451fba6ba764af97026f92a91d4eef164a242", size = 194210, upload-time = "2026-04-22T16:42:42.314Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/77/7b3966d0b9d1d31a36ddf1746926a11dface89a83409bf1483f0237aa758/idna-3.15.tar.gz", hash = "sha256:ca962446ea538f7092a95e057da437618e886f4d349216d2b1e294abfdb65fdc", size = 199245, upload-time = "2026-05-12T22:45:57.011Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5d/13/ad7d7ca3808a898b4612b6fe93cde56b53f3034dcde235acb1f0e1df24c6/idna-3.13-py3-none-any.whl", hash = "sha256:892ea0cde124a99ce773decba204c5552b69c3c67ffd5f232eb7696135bc8bb3", size = 68629, upload-time = "2026-04-22T16:42:40.909Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/23/408243171aa9aaba178d3e2559159c24c1171a641aa83b67bdd3394ead8e/idna-3.15-py3-none-any.whl", hash = "sha256:048adeaf8c2d788c40fee287673ccaa74c24ffd8dcf09ffa555a2fbb59f10ac8", size = 72340, upload-time = "2026-05-12T22:45:55.733Z" },
 ]
 
 [[package]]
@@ -1042,6 +1075,18 @@ wheels = [
 ]
 
 [[package]]
+name = "prime-pydantic-config"
+version = "0.3.0.dev83"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b3/4e/bcdb244336d3abae60c7767626aaf635ef724bdc3f2cb46e317d11b23d91/prime_pydantic_config-0.3.0.dev83.tar.gz", hash = "sha256:7446e6439ba6de2f2c332acb292ba5b53da7c1a4ad60e4a25b78393b17859fdd", size = 73322, upload-time = "2026-05-24T02:58:49.485Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/6b/372380c6f5cc3a6f0b6690acb453e9aa9d848e8c1ec421e883c1c3c7a293/prime_pydantic_config-0.3.0.dev83-py3-none-any.whl", hash = "sha256:91a8d883181aff069a4a07f56b636c399c32f1814d8177b9e167a8398643e313", size = 26259, upload-time = "2026-05-24T02:58:48.432Z" },
+]
+
+[[package]]
 name = "pydantic"
 version = "2.13.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1335,11 +1380,13 @@ wheels = [
 name = "renderers"
 source = { editable = "." }
 dependencies = [
+    { name = "fastokens" },
     { name = "jinja2" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "openai" },
     { name = "openai-harmony" },
+    { name = "prime-pydantic-config" },
     { name = "tiktoken" },
     { name = "transformers" },
 ]
@@ -1358,10 +1405,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastokens", specifier = ">=0.2.0" },
     { name = "jinja2" },
     { name = "numpy" },
     { name = "openai", specifier = ">=1.108.1" },
     { name = "openai-harmony", specifier = ">=0.0.8" },
+    { name = "prime-pydantic-config", specifier = ">=0.3.0.dev83" },
     { name = "tiktoken" },
     { name = "transformers", specifier = ">=4.50.0" },
 ]

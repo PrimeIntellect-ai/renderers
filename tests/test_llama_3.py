@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from renderers import Llama3Renderer, create_renderer
+from renderers import Llama3Renderer, Llama3RendererConfig, create_renderer
 from renderers.base import MODEL_RENDERER_MAP, ParsedResponse, load_tokenizer
 
 # Pinned date for byte-parity tests. Matches the chat template's
@@ -30,7 +30,7 @@ _MODEL_PAIRS = [
 def llama_pair(request):
     canonical, mirror = request.param
     tok = load_tokenizer(mirror)
-    renderer = Llama3Renderer(tok, date_string=_PINNED_DATE)
+    renderer = Llama3Renderer(tok, Llama3RendererConfig(date_string=_PINNED_DATE))
     return canonical, mirror, tok, renderer
 
 
@@ -46,10 +46,10 @@ def test_canonical_meta_llama_paths_route_to_llama_3():
         )
 
 
-def test_create_renderer_via_explicit_name(llama_pair):
-    """The 'llama-3' string resolves to Llama3Renderer in the registry."""
+def test_create_renderer_via_explicit_config(llama_pair):
+    """``Llama3RendererConfig`` resolves to Llama3Renderer in the registry."""
     _, _, tok, _ = llama_pair
-    r = create_renderer(tok, renderer="llama-3")
+    r = create_renderer(tok, Llama3RendererConfig())
     assert isinstance(r, Llama3Renderer)
 
 
@@ -63,19 +63,21 @@ def test_default_date_matches_chat_template_strftime_fallback(llama_pair):
     deterministic without an explicit override."""
     _, _, tok, _ = llama_pair
     r = Llama3Renderer(tok)
-    assert r._date_string == _PINNED_DATE
+    assert r.config.date_string == _PINNED_DATE
 
 
 def test_preserve_all_thinking_rejected(llama_pair):
     _, _, tok, _ = llama_pair
     with pytest.raises(NotImplementedError, match="reasoning_content"):
-        Llama3Renderer(tok, preserve_all_thinking=True)
+        Llama3Renderer(tok, Llama3RendererConfig(preserve_all_thinking=True))
 
 
 def test_preserve_thinking_between_tool_calls_rejected(llama_pair):
     _, _, tok, _ = llama_pair
     with pytest.raises(NotImplementedError, match="reasoning_content"):
-        Llama3Renderer(tok, preserve_thinking_between_tool_calls=True)
+        Llama3Renderer(
+            tok, Llama3RendererConfig(preserve_thinking_between_tool_calls=True)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +149,7 @@ def test_parity_trims_whitespace(llama_pair):
 def test_parity_custom_date(llama_pair):
     """``date_string`` constructor override changes both sides identically."""
     _, _, tok, _ = llama_pair
-    r = Llama3Renderer(tok, date_string="01 Jan 2026")
+    r = Llama3Renderer(tok, Llama3RendererConfig(date_string="01 Jan 2026"))
     msgs = [{"role": "user", "content": "Hi."}]
     expected = list(
         tok.apply_chat_template(
@@ -183,7 +185,10 @@ def test_parity_tools_in_system_mode(llama_pair):
     """When constructed with ``tools_in_user_message=False``, the renderer
     matches ``apply_chat_template(... tools_in_user_message=False)``."""
     _, _, tok, _ = llama_pair
-    r = Llama3Renderer(tok, date_string=_PINNED_DATE, tools_in_user_message=False)
+    r = Llama3Renderer(
+        tok,
+        Llama3RendererConfig(date_string=_PINNED_DATE, tools_in_user_message=False),
+    )
     tools = [
         {
             "type": "function",

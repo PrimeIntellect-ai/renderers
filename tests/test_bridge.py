@@ -41,9 +41,10 @@ _BRIDGE_MODELS = [
 def _load(model_name: str, renderer_name: str):
     from renderers import create_renderer
     from renderers.base import load_tokenizer
+    from renderers.configs import config_from_name
 
     tok = load_tokenizer(model_name)
-    return tok, create_renderer(tok, renderer=renderer_name)
+    return tok, create_renderer(tok, config_from_name(renderer_name))
 
 
 def pytest_generate_tests(metafunc):

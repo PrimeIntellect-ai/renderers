@@ -20,9 +20,9 @@ Notable differences from the Qwen / GLM family renderers:
 * Tools default to "first-user-message" mode (matching the chat
   template's default ``tools_in_user_message=True``): tool descriptions
   + JSON signatures are injected into the first user message rather
-  than the system block. Pass ``tools_in_user_message=False`` at
-  construction to flip to system-block mode.
-* ``date_string`` is a constructor kwarg pinned at ``"26 Jul 2024"`` by
+  than the system block. Set ``Llama3RendererConfig.tools_in_user_message
+  = False`` to flip to system-block mode.
+* ``Llama3RendererConfig.date_string`` is pinned at ``"26 Jul 2024"`` by
   default to match the chat template's ``strftime`` fallback (and keep
   output deterministic). Override per instance for production runs that
   want today's date.
@@ -51,13 +51,12 @@ from renderers.base import (
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
+from renderers.configs import Llama3RendererConfig
 from renderers.parsing import parse_llama_3
 
 # ---------------------------------------------------------------------------
 # Constants — must match the Jinja chat template's literal strings exactly.
 # ---------------------------------------------------------------------------
-
-_DEFAULT_DATE_STRING = "26 Jul 2024"
 
 _CUTTING_KNOWLEDGE_DATE = "December 2023"
 
@@ -91,21 +90,17 @@ class Llama3Renderer:
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        *,
-        date_string: str = _DEFAULT_DATE_STRING,
-        tools_in_user_message: bool = True,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
+        config: Llama3RendererConfig | None = None,
     ):
-        if preserve_all_thinking or preserve_thinking_between_tool_calls:
+        config = config or Llama3RendererConfig()
+        if config.preserve_all_thinking or config.preserve_thinking_between_tool_calls:
             raise NotImplementedError(
                 "Llama-3 doesn't ship a reasoning_content channel — the chat "
                 "template has no <think> block to preserve or drop. "
                 "preserve_*_thinking flags are not applicable."
             )
         self._tokenizer = tokenizer
-        self._date_string = date_string
-        self._tools_in_user_message = tools_in_user_message
+        self.config = config
 
         self._bos = self._token_id("<|begin_of_text|>")
         self._start_header = self._token_id("<|start_header_id|>")
@@ -215,8 +210,8 @@ class Llama3Renderer:
         if tools is not None:
             body += "Environment: ipython\n"
         body += f"Cutting Knowledge Date: {_CUTTING_KNOWLEDGE_DATE}\n"
-        body += f"Today Date: {self._date_string}\n\n"
-        if tools is not None and not self._tools_in_user_message:
+        body += f"Today Date: {self.config.date_string}\n\n"
+        if tools is not None and not self.config.tools_in_user_message:
             body += _TOOLS_IN_SYSTEM_INTRO
             for t in tools:
                 body += json.dumps(t, indent=4, ensure_ascii=False) + "\n\n"
@@ -231,7 +226,7 @@ class Llama3Renderer:
         i = 0
         # 2a. tools_in_user_message mode pulls the first user message
         #     into a special block with the tools description prepended.
-        if tools is not None and self._tools_in_user_message:
+        if tools is not None and self.config.tools_in_user_message:
             if i >= len(body_messages):
                 raise ValueError(
                     "Cannot place tools in the first user message — no user "

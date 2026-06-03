@@ -12,8 +12,16 @@ on:
       - "renderers-v*"
 
 jobs:
-  publish:
+  # Build (no OIDC) → publish (OIDC only). The build job runs uv build with
+  # contents: read only so a poisoned build-time dep cannot mint the OIDC
+  # token. The publish job has id-token: write and the pypi-prod environment
+  # but no source checkout — it only downloads the prebuilt artifact and runs
+  # the SHA-pinned pypa publish action.
+  build:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/renderers-v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout tagged release (dispatch)
         if: github.event_name == 'workflow_dispatch'
@@ -28,8 +36,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve release tag
-        id: release
+      - name: Validate release tag
         env:
           EVENT_NAME: ${{ github.event_name }}
           PUSHED_REF: ${{ github.ref_name }}
@@ -53,14 +60,31 @@ jobs:
               ;;
           esac
 
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
       - uses: astral-sh/setup-uv@v7
 
       - name: Build renderers
         run: uv build
 
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi-prod
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
       - name: Publish to PyPI
-        env:
-          PYPI_RENDERERS_TOKEN: ${{ secrets.PYPI_RENDERERS_TOKEN }}
-        run: uv publish --token "$PYPI_RENDERERS_TOKEN" dist/*
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0

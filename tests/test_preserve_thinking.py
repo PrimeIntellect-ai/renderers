@@ -1,9 +1,10 @@
 """Smoke coverage for the ``preserve_*_thinking`` override flags.
 
-Flags are constructor-only (``create_renderer(..., preserve_all_thinking=True)``)
-and stored as instance attributes — there is no call-site ``render`` /
-``render_ids`` override. Each test that wants a non-default flag builds
-a fresh renderer for that configuration via ``_make`` below.
+Flags live on the typed renderer config (e.g.
+``Qwen3RendererConfig(preserve_all_thinking=True)``) and are stored on
+the renderer as ``self.config.preserve_*``. Each test that wants a
+non-default flag builds a fresh renderer for that configuration via
+``_make`` below.
 
 Two invariants per renderer:
 
@@ -22,15 +23,22 @@ default==override equality instead of strict growth.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from renderers import create_renderer
-from renderers.base import should_preserve_past_thinking
+from renderers.base import MODEL_RENDERER_MAP, should_preserve_past_thinking
+from renderers.configs import _config_class_for
 
 
 def _make(tokenizer, renderer_name, **flags):
     """Build a fresh renderer with the given preserve_*_thinking flags
     bound at construction. Reuses the cached tokenizer fixture."""
-    return create_renderer(tokenizer, renderer=renderer_name, **flags)
+    if renderer_name == "auto":
+        renderer_name = MODEL_RENDERER_MAP.get(
+            getattr(tokenizer, "name_or_path", ""), "default"
+        )
+    config = _config_class_for(renderer_name)(**flags)
+    return create_renderer(tokenizer, config)
 
 
 # Renderers whose template doesn't drop past-asst thinking or has no
@@ -379,17 +387,19 @@ def test_default_renderer_raises_on_flags():
     """``DefaultRenderer`` falls back to apply_chat_template with no
     selective re-emit pathway, so constructing one with either flag set
     must raise — fail fast, before any render is attempted."""
+    from renderers import DefaultRendererConfig
     from renderers.base import load_tokenizer
 
     tok = load_tokenizer("Qwen/Qwen2.5-0.5B-Instruct")
     # No flags → constructs cleanly.
-    create_renderer(tok, renderer="default")
+    create_renderer(tok, DefaultRendererConfig())
     # Either flag set → raises at construction.
     with pytest.raises(NotImplementedError):
-        create_renderer(tok, renderer="default", preserve_all_thinking=True)
+        create_renderer(tok, DefaultRendererConfig(preserve_all_thinking=True))
     with pytest.raises(NotImplementedError):
         create_renderer(
-            tok, renderer="default", preserve_thinking_between_tool_calls=True
+            tok,
+            DefaultRendererConfig(preserve_thinking_between_tool_calls=True),
         )
 
 
@@ -399,31 +409,27 @@ def test_default_renderer_raises_on_flags():
 
 
 def test_create_renderer_records_flag_state(model_name, renderer_name, tokenizer):
-    """Each renderer exposes the bound flag state via ``_preserve_*``
-    attributes — useful for downstream code (pool cache keys, logging,
-    test assertions) that needs to confirm what was constructed."""
+    """Each renderer exposes the bound flag state via ``self.config`` —
+    useful for downstream code (pool cache keys, logging, test
+    assertions) that needs to confirm what was constructed."""
     from renderers.default import DefaultRenderer
 
-    bare = create_renderer(tokenizer, renderer=renderer_name)
-    assert bare._preserve_all_thinking is False
-    assert bare._preserve_thinking_between_tool_calls is False
+    bare = _make(tokenizer, renderer_name)
+    assert bare.config.preserve_all_thinking is False
+    assert bare.config.preserve_thinking_between_tool_calls is False
 
     if not isinstance(bare, DefaultRenderer):
         # DefaultRenderer raises at construction with either flag set —
         # covered by ``test_default_renderer_raises_on_flags``.
-        all_on = create_renderer(
-            tokenizer, renderer=renderer_name, preserve_all_thinking=True
-        )
-        assert all_on._preserve_all_thinking is True
-        assert all_on._preserve_thinking_between_tool_calls is False
+        all_on = _make(tokenizer, renderer_name, preserve_all_thinking=True)
+        assert all_on.config.preserve_all_thinking is True
+        assert all_on.config.preserve_thinking_between_tool_calls is False
 
-        btc_on = create_renderer(
-            tokenizer,
-            renderer=renderer_name,
-            preserve_thinking_between_tool_calls=True,
+        btc_on = _make(
+            tokenizer, renderer_name, preserve_thinking_between_tool_calls=True
         )
-        assert btc_on._preserve_all_thinking is False
-        assert btc_on._preserve_thinking_between_tool_calls is True
+        assert btc_on.config.preserve_all_thinking is False
+        assert btc_on.config.preserve_thinking_between_tool_calls is True
 
 
 # ---------------------------------------------------------------------------
@@ -431,30 +437,31 @@ def test_create_renderer_records_flag_state(model_name, renderer_name, tokenizer
 # ---------------------------------------------------------------------------
 
 
-def test_glm5_constructor_rejects_clear_thinking():
-    """``clear_thinking`` was a chat-template-kwarg pass-through. It is
-    superseded by the renderer-agnostic ``preserve_all_thinking`` override
-    and must no longer be accepted by the constructor — its default-True
-    semantics are now baked into the render gate."""
+def test_glm5_config_accepts_clear_thinking():
+    """``clear_thinking`` is a chat-template field on GLM-5's typed
+    config. The GLM-5 / GLM-5.1 Jinja templates gate historical
+    reasoning on ``clear_thinking is defined and not clear_thinking``,
+    so passing ``clear_thinking=False`` here must reach the renderer's
+    historical-reasoning gate. Parity vs ``apply_chat_template`` is
+    asserted in ``test_renderer_config_parity``."""
+    from renderers import GLM5RendererConfig
     from renderers.base import load_tokenizer
     from renderers.glm5 import GLM5Renderer
 
     tok = load_tokenizer("zai-org/GLM-5")
-    with pytest.raises(TypeError):
-        GLM5Renderer(tok, clear_thinking=True)  # type: ignore[call-arg]
-    with pytest.raises(TypeError):
-        GLM5Renderer(tok, clear_thinking=False)  # type: ignore[call-arg]
+    # Both values must be accepted without raising.
+    GLM5Renderer(tok, GLM5RendererConfig(clear_thinking=True))
+    GLM5Renderer(tok, GLM5RendererConfig(clear_thinking=False))
 
 
-def test_qwen36_constructor_rejects_preserve_thinking():
+def test_qwen36_config_rejects_unknown_field():
     """``preserve_thinking`` on Qwen3.6 was a chat-template-kwarg
-    pass-through. It is superseded by the renderer-agnostic
-    ``preserve_all_thinking`` override and must no longer be accepted by
-    the constructor — its default-False semantics are now inherited from
-    Qwen3.5's render gate."""
-    from renderers.base import load_tokenizer
-    from renderers.qwen36 import Qwen36Renderer
+    pass-through in an earlier revision. It is superseded by the
+    renderer-agnostic ``preserve_all_thinking`` override and must not
+    appear on the typed config — its default-False semantics are now
+    inherited from Qwen3.5's render gate. ``extra="forbid"`` on the
+    pydantic model enforces this at construction."""
+    from renderers import Qwen36RendererConfig
 
-    tok = load_tokenizer("Qwen/Qwen3.6-35B-A3B")
-    with pytest.raises(TypeError):
-        Qwen36Renderer(tok, preserve_thinking=True)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError, match="preserve_thinking"):
+        Qwen36RendererConfig(preserve_thinking=True)  # type: ignore[call-arg]

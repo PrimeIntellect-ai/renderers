@@ -99,7 +99,7 @@ def test_kimi_k2_unknown_role_message_indices():
     from renderers.base import load_tokenizer
 
     tok = load_tokenizer("moonshotai/Kimi-K2-Instruct")
-    renderer = create_renderer(tok, renderer="auto")
+    renderer = create_renderer(tok)
 
     msgs = [
         {"role": "user", "content": "hi"},

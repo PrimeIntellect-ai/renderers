@@ -114,11 +114,12 @@ def test_think_reasoning_parser_no_block():
 
 def test_default_renderer_uses_parsers():
     """DefaultRenderer + parsers should extract tool calls and reasoning."""
-    from renderers import create_renderer
+    from renderers import DefaultRendererConfig, create_renderer
 
     tok = load_tokenizer("Qwen/Qwen3-0.6B")
     renderer = create_renderer(
-        tok, renderer="default", tool_parser="qwen3", reasoning_parser="think"
+        tok,
+        DefaultRendererConfig(tool_parser="qwen3", reasoning_parser="think"),
     )
     assert renderer.supports_tools is True
 
@@ -134,10 +135,10 @@ def test_default_renderer_uses_parsers():
 
 def test_default_renderer_without_parsers_is_backward_compatible():
     """Without parsers, DefaultRenderer still does basic <think> extraction."""
-    from renderers import create_renderer
+    from renderers import DefaultRendererConfig, create_renderer
 
     tok = load_tokenizer("Qwen/Qwen3-0.6B")
-    renderer = create_renderer(tok, renderer="default")
+    renderer = create_renderer(tok, DefaultRendererConfig())
     assert renderer.supports_tools is False
 
     ids = tok.encode("<think>r</think>a", add_special_tokens=False)

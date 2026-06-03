@@ -1,0 +1,104 @@
+name: Publish Dev
+
+# Tag every commit on main as ``renderers-v<next>.dev<N>`` and publish the
+# wheel to PyPI as a pre-release. ``<next>`` is the latest release tag with
+# its patch bumped; ``<N>`` is the number of commits since that release so
+# each main commit maps to a unique PEP 440 dev version.
+#
+# Building from the freshly-created tag means hatch-vcs resolves the version
+# cleanly (no ``+gHASH`` local segment), which PyPI requires.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: publish-dev-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.compute.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next dev tag
+        id: compute
+        run: |
+          set -euo pipefail
+          LATEST_RELEASE=$(git tag --list 'renderers-v*' --sort=-v:refname \
+            | grep -Ev '(dev|rc|a[0-9]|b[0-9])' \
+            | head -1)
+          if [ -z "$LATEST_RELEASE" ]; then
+            echo "No release tag matching 'renderers-v<MAJOR.MINOR.PATCH>' found" >&2
+            exit 1
+          fi
+          BASE=${LATEST_RELEASE#renderers-v}
+          MAJOR=$(echo "$BASE" | cut -d. -f1)
+          MINOR=$(echo "$BASE" | cut -d. -f2)
+          PATCH=$(echo "$BASE" | cut -d. -f3)
+          NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          N=$(git rev-list --count "${LATEST_RELEASE}..HEAD")
+          TAG="renderers-v${NEXT}.dev${N}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Computed tag: ${TAG} (base=${LATEST_RELEASE}, commits=${N})"
+
+      - name: Create and push tag
+        env:
+          TAG: ${{ steps.compute.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists on origin — nothing to do" >&2
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" -m "Automated dev release ${TAG}"
+          git push origin "$TAG"
+
+  build:
+    needs: tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ needs.tag.outputs.tag }}
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Build renderers
+        run: uv build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-dev
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi-prod
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-dev
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0

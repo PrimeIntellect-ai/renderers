@@ -18,10 +18,10 @@ from renderers.base import (
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    extract_message_tool_names,
 )
+from renderers.configs import DefaultRendererConfig
 from renderers.parsers import (
-    ReasoningParser,
-    ToolParser,
     get_reasoning_parser,
     get_tool_parser,
 )
@@ -82,36 +82,30 @@ def _decode_tool_call_arguments(messages: list) -> list:
 class DefaultRenderer:
     """Fallback renderer using tokenizer.apply_chat_template().
 
-    Works with any model. Pass ``tool_parser`` and/or ``reasoning_parser``
-    (by name, resolved against the registries in ``renderers.parsers``) to
-    enable structured output extraction.
+    Works with any model. The config can carry ``tool_parser`` and/or
+    ``reasoning_parser`` (resolved against ``renderers.parsers``) to
+    enable structured output extraction, plus arbitrary additional Jinja
+    template kwargs captured as ``model_extra`` (``extra="allow"`` on
+    :class:`renderers.DefaultRendererConfig`).
     """
 
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        *,
-        tool_parser: str | ToolParser | None = None,
-        reasoning_parser: str | ReasoningParser | None = None,
-        preserve_all_thinking: bool = False,
-        preserve_thinking_between_tool_calls: bool = False,
-        **chat_template_kwargs,
+        config: DefaultRendererConfig | None = None,
     ):
-        if preserve_all_thinking or preserve_thinking_between_tool_calls:
+        cfg = config or DefaultRendererConfig()
+        if cfg.preserve_all_thinking or cfg.preserve_thinking_between_tool_calls:
             raise NotImplementedError(
                 "DefaultRenderer falls back to apply_chat_template and can't "
                 "selectively re-emit dropped reasoning_content. Configure a "
                 "model-specific renderer if you need preserve_*_thinking."
             )
         self._tokenizer = tokenizer
-        self._chat_template_kwargs = chat_template_kwargs
-        self._tool_parser = _resolve_parser(tool_parser, tokenizer, get_tool_parser)
+        self.config = cfg
+        self._tool_parser = _resolve_parser(cfg.tool_parser, tokenizer, get_tool_parser)
         self._reasoning_parser = _resolve_parser(
-            reasoning_parser, tokenizer, get_reasoning_parser
-        )
-        self._preserve_all_thinking = preserve_all_thinking
-        self._preserve_thinking_between_tool_calls = (
-            preserve_thinking_between_tool_calls
+            cfg.reasoning_parser, tokenizer, get_reasoning_parser
         )
 
     @property
@@ -143,10 +137,16 @@ class DefaultRenderer:
             token_ids = full_ids
             message_indices.extend([-1] * len(gen_tokens))
 
-        return RenderedTokens(token_ids=token_ids, message_indices=message_indices)
+        message_roles = [m.get("role") or "" for m in messages]
+        return RenderedTokens(
+            token_ids=token_ids,
+            message_indices=message_indices,
+            message_roles=message_roles,
+            message_tool_names=extract_message_tool_names(messages),
+        )
 
     def _apply(self, messages, *, tools=None, add_generation_prompt=False) -> list[int]:
-        kwargs = dict(self._chat_template_kwargs)
+        kwargs = dict(self.config.model_extra or {})
         kwargs["add_generation_prompt"] = add_generation_prompt
         kwargs["tokenize"] = True
         if tools is not None:

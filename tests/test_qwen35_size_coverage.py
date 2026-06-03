@@ -5,9 +5,8 @@ Seven Qwen3.5 sizes route to ``Qwen35Renderer``. The 4B / 9B / 35B-A3B /
 ``enable_thinking=true``); the smaller 0.8B / 2B sizes ship the polarity-
 flipped variant (default ``enable_thinking=false`` → empty
 ``<think>\\n\\n</think>\\n\\n`` at the gen-prompt boundary). The renderer
-detects polarity from the tokenizer's chat_template at construction, so
-both variants render byte-identical to their own
-``apply_chat_template``.
+hard-codes this polarity per model (``_ENABLE_THINKING_DEFAULTS``), so
+both variants render byte-identical to their own ``apply_chat_template``.
 
 These tests lock in (a) the exact set of Qwen3.5 sizes in the map and
 (b) byte parity for every one of them across representative
@@ -19,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from renderers import Qwen35Renderer, create_renderer
+from renderers import Qwen35Renderer, Qwen35RendererConfig, create_renderer
 from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
 
 
@@ -57,7 +56,7 @@ def test_no_other_qwen35_sizes_silently_added():
 
 
 # ---------------------------------------------------------------------------
-# Polarity auto-detection: 0.8B / 2B flip ``enable_thinking`` default.
+# Polarity defaults: 0.8B / 2B flip ``enable_thinking`` default.
 # ---------------------------------------------------------------------------
 
 
@@ -73,17 +72,41 @@ def test_no_other_qwen35_sizes_silently_added():
         ("Qwen/Qwen3.5-397B-A17B", True),
     ],
 )
-def test_qwen35_enable_thinking_polarity_autodetected(qwen35_model, expected_default):
-    """The renderer's ``_enable_thinking`` resolves to the chat template's
-    own default when no explicit flag is passed — so big / small sizes
-    each match their own template at the gen-prompt boundary."""
+def test_qwen35_enable_thinking_polarity_default(qwen35_model, expected_default):
+    """With no explicit flag, the renderer resolves ``enable_thinking`` from
+    the hard-coded per-model default — so big / small sizes each match their
+    own template at the gen-prompt boundary."""
     tok = load_tokenizer(qwen35_model)
-    renderer = create_renderer(tok, renderer="qwen3.5")
+    renderer = create_renderer(tok, Qwen35RendererConfig())
     assert isinstance(renderer, Qwen35Renderer)
-    assert renderer._enable_thinking is expected_default, (
+    assert renderer.config.enable_thinking is expected_default, (
         f"{qwen35_model}: expected enable_thinking default {expected_default}, "
-        f"got {renderer._enable_thinking}"
+        f"got {renderer.config.enable_thinking}"
     )
+
+
+def test_construction_does_not_call_apply_chat_template():
+    """The ``enable_thinking`` default is hard-coded per model, so building a
+    ``Qwen35Renderer`` must not probe ``apply_chat_template`` — a
+    bring-your-own tokenizer with no chat-template support still works."""
+
+    class _Stub:
+        name_or_path = "Qwen/Qwen3.5-0.8B"
+        unk_token_id = -1
+
+        def convert_tokens_to_ids(self, token):
+            # Any stable non-unk id per token; the renderer only needs the
+            # special tokens to resolve to distinct, in-vocab ids.
+            return abs(hash(token)) % 1_000_000 + 1
+
+        def apply_chat_template(self, *args, **kwargs):
+            raise AssertionError(
+                "apply_chat_template must not be called at construction"
+            )
+
+    renderer = Qwen35Renderer(_Stub())
+    # 0.8B is a small size → thinking defaults off, from the hard-coded table.
+    assert renderer.config.enable_thinking is False
 
 
 # ---------------------------------------------------------------------------
@@ -146,9 +169,9 @@ def test_qwen35_size_parity_with_apply_chat_template(
     """Each in-map Qwen3.5 size renders byte-identical to its own
     ``apply_chat_template`` output. Locks in the property that lets us
     share ``Qwen35Renderer`` across all seven sizes — the polarity
-    flip on 0.8B / 2B is absorbed by the constructor's auto-detect."""
+    flip on 0.8B / 2B is absorbed by the per-model default."""
     tok = load_tokenizer(qwen35_model)
-    renderer = create_renderer(tok, renderer="qwen3.5")
+    renderer = create_renderer(tok, Qwen35RendererConfig())
     assert isinstance(renderer, Qwen35Renderer)
 
     ours = renderer.render_ids(messages, add_generation_prompt=add_gen_prompt)

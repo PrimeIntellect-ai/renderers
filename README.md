@@ -17,7 +17,7 @@ from transformers import AutoTokenizer
 from renderers import create_renderer
 
 tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
-r = create_renderer(tok, renderer="auto")           # → Qwen3Renderer
+r = create_renderer(tok)                            # → Qwen3Renderer (auto-resolved)
 
 prompt_ids = r.render_ids(
     [{"role": "user", "content": "hi"}],
@@ -71,17 +71,17 @@ Each hand-coded bridge:
 ### Picking a renderer
 
 ```python
-r = create_renderer(tok, renderer="auto")
+r = create_renderer(tok)                # AutoRendererConfig is the implicit default
 ```
 
-Auto-detect matches `tokenizer.name_or_path` against `MODEL_RENDERER_MAP` by **exact match**. Prefix matching is intentionally off — same architecture can ship different chat templates (base vs instruct, fine-tune renames). Fine-tunes must pass `renderer=<name>` explicitly; unknown names fall back to `DefaultRenderer`.
+Auto-detect matches `tokenizer.name_or_path` against `MODEL_RENDERER_MAP` by **exact match**. Prefix matching is intentionally off — same architecture can ship different chat templates (base vs instruct, fine-tune renames). Fine-tunes must pass an explicit typed config (e.g. `Qwen3RendererConfig()`); unknown names fall back to `DefaultRenderer`.
 
 ### Pools
 
 ```python
 from renderers import create_renderer_pool
 
-pool = create_renderer_pool("Qwen/Qwen3-8B", renderer="auto", size=16)
+pool = create_renderer_pool("Qwen/Qwen3-8B", size=16)
 with pool.checkout() as r:
     ids = r.render_ids(messages)
 ```
@@ -108,25 +108,50 @@ Empirical delta on Qwen3.5-35B-A3B + mini-swe-agent-plus, step 0:
 
 Each break fragments a rollout into multiple training samples — every fragment re-encodes its prefix, inflating compute roughly linearly with the number of breaks.
 
-## Compaction overrides
+## Typed renderer configs
 
-`create_renderer` and `create_renderer_pool` accept two constructor-only flags:
+Each renderer accepts a typed pydantic config that pins its template-control kwargs at construction. `create_renderer` and `create_renderer_pool` take one positional `config` argument:
 
 ```python
-preserve_all_thinking: bool = False
-preserve_thinking_between_tool_calls: bool = False
+from renderers import (
+    create_renderer,
+    AutoRendererConfig,
+    Qwen3RendererConfig,
+    GLM5RendererConfig,
+    DefaultRendererConfig,
+)
+
+# Auto-resolve renderer from the tokenizer's model name. Carries the
+# shared preserve_* flags; template kwargs require an explicit choice.
+renderer = create_renderer(tokenizer)
+renderer = create_renderer(tokenizer, AutoRendererConfig(preserve_all_thinking=True))
+
+# Explicit choice — the typed config exposes exactly the fields that
+# renderer's chat template honours.
+renderer = create_renderer(tokenizer, Qwen3RendererConfig(enable_thinking=False))
+renderer = create_renderer(tokenizer, GLM5RendererConfig(clear_thinking=False))
+
+# Default renderer (apply_chat_template fallback) — extra fields are
+# captured via pydantic ``extra="allow"`` and forwarded to the Jinja
+# template; tool / reasoning parsers are typed.
+renderer = create_renderer(
+    tokenizer,
+    DefaultRendererConfig(tool_parser="qwen3", reasoning_parser="think"),
+)
 ```
 
-Defaults preserve byte-identity with the model's chat template. Flipping a flag at construction restores `reasoning_content` the template would otherwise drop:
+Discriminated union: every per-renderer config is a variant of `RendererConfig`, dispatched on the `name` field. Bogus combinations (e.g. `add_vision_id` under `name="qwen3"`) error at construction with a `pydantic.ValidationError`. Downstream pydantic configs (prime-rl orchestrator, verifiers `ClientConfig`) hold a single field typed as `RendererConfig` and inherit the same strict-per-variant validation.
 
-- `preserve_all_thinking=True` — every past assistant's reasoning is kept.
-- `preserve_thinking_between_tool_calls=True` — reasoning is kept on assistants in the in-flight tool cycle (no-op for current renderers; reserved for future templates that drop it).
+Two shared behaviour flags live on every variant via `_BaseRendererConfig`:
 
-The canonical use case is **compaction**. Injecting a `user` turn like *"summarize the work so far"* puts every prior assistant in a "past cycle", so template-default rules drop their `reasoning_content` before the summarizer sees it. Build the renderer with `preserve_all_thinking=True` to keep reasoning visible end-to-end on those flows. Both flags only ever *add* tokens vs the template default.
+- `preserve_all_thinking=True` — every past assistant's `reasoning_content` is kept, even when the chat template would drop it.
+- `preserve_thinking_between_tool_calls=True` — reasoning is kept on assistants in the in-flight tool cycle (post-last-user A-T-…-A block when it contains a tool response). A new user turn closes the block and drops its thinking.
+
+These OR-compose with template-level toggles (e.g. GLM-5 `clear_thinking`, Nemotron-3 `truncate_history_thinking`): either flag saying "keep" wins. preserve_* can only ever *extend* retention — never override a template kwarg into a "drop" decision. The canonical use case is **compaction**: injecting a `user` turn like *"summarize the work so far"* puts every prior assistant in a past cycle, and `preserve_all_thinking=True` keeps reasoning visible end-to-end.
 
 ## `DefaultRenderer`
 
-Fallback for unsupported models. Wraps `apply_chat_template` and accepts `tool_parser` / `reasoning_parser` kwargs (vLLM convention). `bridge_to_next_turn` returns `None` because the template's close is unknown, so multi-turn rollouts fall back to full re-render. Implementing a hand-coded renderer is a few hundred lines of Python (`render_ids` + `parse_response` + `bridge_to_next_turn`) and is the only path that closes the failure modes above by construction.
+Fallback for unsupported models. Wraps `apply_chat_template` and accepts `tool_parser` / `reasoning_parser` (vLLM convention) plus arbitrary Jinja kwargs via `DefaultRendererConfig`'s `extra="allow"`. `bridge_to_next_turn` returns `None` because the template's close is unknown, so multi-turn rollouts fall back to full re-render. Implementing a hand-coded renderer is a few hundred lines of Python (`render_ids` + `parse_response` + `bridge_to_next_turn`) and is the only path that closes the failure modes above by construction.
 
 ## Roadmap
 

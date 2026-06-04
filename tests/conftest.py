@@ -33,6 +33,8 @@ RENDERER_MODELS = [
     ("moonshotai/Kimi-K2.6", "auto"),
     ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
     ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16", "auto"),
+    # Ultra resolves the Ultra template variant via name (auto → ultra=True).
+    ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
     # Llama-3 loads via the unrestricted unsloth mirror (byte-identical
     # chat template) so CI needs no Meta-gated HF token. Pinned to the

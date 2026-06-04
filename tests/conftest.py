@@ -34,6 +34,11 @@ RENDERER_MODELS = [
     ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
     ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
+    # Llama-3 loads via the unrestricted unsloth mirror (byte-identical
+    # chat template) so CI needs no Meta-gated HF token. Pinned to the
+    # explicit "llama-3" config because the mirror name isn't in
+    # MODEL_RENDERER_MAP (so "auto" would fall back to DefaultRenderer).
+    ("unsloth/Llama-3.2-1B-Instruct", "llama-3"),
     ("openai/gpt-oss-20b", "gpt-oss"),
     ("Qwen/Qwen2.5-0.5B-Instruct", "default"),
 ]
@@ -102,4 +107,31 @@ def _skip_gpt_oss_for_hf_parity_tests(request):
         pytest.skip(
             f"{model_name}: renderer matches openai-harmony / vLLM, not HF "
             "apply_chat_template — see test_gpt_oss_harmony_parity.py"
+        )
+
+
+# Llama-3's chat template fills the "Today Date:" line via ``strftime_now``,
+# so ``apply_chat_template`` with no explicit ``date_string`` bakes in the
+# real wall-clock date — non-deterministic and not byte-stable against a
+# renderer pinned to "26 Jul 2024". Generic HF-parity tests can't pass a
+# kwarg, so they're skipped here; deterministic byte-parity (with the date
+# passed on both sides) is covered in test_llama_3.py.
+_LLAMA_HF_PARITY_TEST_FILES = {
+    "test_render_ids.py",
+    "test_build_helpers.py",
+}
+
+
+@pytest.fixture(autouse=True)
+def _skip_llama_for_hf_parity_tests(request):
+    callspec = getattr(request.node, "callspec", None)
+    model_name = callspec.params.get("model_name") if callspec else None
+    if model_name != "unsloth/Llama-3.2-1B-Instruct":
+        return
+    test_file = os.path.basename(str(request.node.fspath))
+    if test_file in _LLAMA_HF_PARITY_TEST_FILES:
+        pytest.skip(
+            f"{model_name}: template uses strftime_now for the date line, so "
+            "generic apply_chat_template parity is non-deterministic — "
+            "deterministic byte-parity is covered in test_llama_3.py"
         )

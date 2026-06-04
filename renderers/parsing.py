@@ -1290,9 +1290,26 @@ def parse_llama_3(
     + parses-as-dict-with-name-key check; anything else is treated as
     content. Llama-3 doesn't have a built-in reasoning channel, so
     ``reasoning_content`` is always ``None``.
+
+    Unlike the delimiter-based formats (Qwen/GLM), the tool call has no
+    special token to anchor on, so a leading assistant role-header
+    (``<|start_header_id|>assistant<|end_header_id|>\\n\\n``) would defeat
+    the starts-with-``{`` check. Callers that slice a completion without
+    dropping the generation prompt include that scaffold; we skip past the
+    final ``<|end_header_id|>`` so the body is what we parse. The sampled
+    stream in production carries no header, making this a no-op there.
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
-    text = _decode(tokenizer, ids).strip()
+
+    # Skip a leading assistant role-header scaffold if present.
+    body_start = 0
+    end_header_id = tokenizer.convert_tokens_to_ids("<|end_header_id|>")
+    if isinstance(end_header_id, int):
+        eh_positions = _find_all(ids, end_header_id)
+        if eh_positions:
+            body_start = eh_positions[-1] + 1
+    body_ids = ids[body_start:]
+    text = _decode(tokenizer, body_ids).strip()
 
     if text.startswith("{") and text.endswith("}"):
         try:
@@ -1309,7 +1326,7 @@ def parse_llama_3(
                         raw=text,
                         name=parsed["name"],
                         arguments=arguments,
-                        token_span=(0, len(ids)),
+                        token_span=(body_start, len(ids)),
                         status=ToolCallParseStatus.OK,
                     )
                 ],

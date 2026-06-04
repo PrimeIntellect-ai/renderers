@@ -71,18 +71,25 @@ def test_default_date_matches_chat_template_strftime_fallback(llama_pair):
     assert r.config.date_string == _PINNED_DATE
 
 
-def test_preserve_all_thinking_rejected(llama_pair):
+def test_preserve_thinking_flags_are_noops(llama_pair):
+    """Llama-3 has no reasoning channel, so the ``preserve_*_thinking``
+    flags are accepted but never change the token stream — the same
+    never-preserves contract as Kimi-K2 / Qwen3-VL. (Cross-renderer
+    coverage lives in tests/test_preserve_thinking.py.)"""
     _, _, tok, _ = llama_pair
-    with pytest.raises(NotImplementedError, match="reasoning_content"):
-        Llama3Renderer(tok, Llama3RendererConfig(preserve_all_thinking=True))
-
-
-def test_preserve_thinking_between_tool_calls_rejected(llama_pair):
-    _, _, tok, _ = llama_pair
-    with pytest.raises(NotImplementedError, match="reasoning_content"):
-        Llama3Renderer(
-            tok, Llama3RendererConfig(preserve_thinking_between_tool_calls=True)
-        )
+    msgs = [
+        {"role": "user", "content": "Hi."},
+        {
+            "role": "assistant",
+            "reasoning_content": "internal musings",
+            "content": "Hello!",
+        },
+    ]
+    base = Llama3Renderer(tok).render_ids(msgs)
+    for flag in ("preserve_all_thinking", "preserve_thinking_between_tool_calls"):
+        r = Llama3Renderer(tok, Llama3RendererConfig(**{flag: True}))
+        assert r.config.__getattribute__(flag) is True
+        assert r.render_ids(msgs) == base, f"{flag} must be a no-op for Llama-3"
 
 
 # ---------------------------------------------------------------------------
@@ -352,8 +359,8 @@ def test_bridge_extends_prev_verbatim_on_clean_stop(llama_pair):
     bridged = r.bridge_to_next_turn(prev_prompt, prev_completion, new_messages)
     assert bridged is not None
     prev = prev_prompt + prev_completion
-    assert bridged[: len(prev)] == prev
-    assert len(bridged) > len(prev)
+    assert bridged.token_ids[: len(prev)] == prev
+    assert len(bridged.token_ids) > len(prev)
 
 
 def test_bridge_matches_fresh_render_on_clean_stop(llama_pair):
@@ -371,7 +378,7 @@ def test_bridge_matches_fresh_render_on_clean_stop(llama_pair):
     prev_prompt, prev_completion = _simulate_prior_turn(r)
     bridged = r.bridge_to_next_turn(prev_prompt, prev_completion, new_messages)
     fresh = r.render_ids(prior + asst + new_messages, add_generation_prompt=True)
-    assert bridged == fresh
+    assert bridged.token_ids == fresh
 
 
 def test_bridge_rejects_assistant_in_extension(llama_pair):
@@ -396,5 +403,5 @@ def test_bridge_synthesises_close_on_truncation(llama_pair):
     )
     assert bridged is not None
     base = prev_prompt + trunc
-    assert bridged[: len(base)] == base
-    assert len(bridged) > len(base)
+    assert bridged.token_ids[: len(base)] == base
+    assert len(bridged.token_ids) > len(base)

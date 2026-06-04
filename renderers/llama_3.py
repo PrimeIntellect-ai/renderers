@@ -48,6 +48,8 @@ from renderers.base import (
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    attribute_text_segments,
+    extract_message_tool_names,
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
@@ -92,15 +94,14 @@ class Llama3Renderer:
         tokenizer: PreTrainedTokenizer,
         config: Llama3RendererConfig | None = None,
     ):
-        config = config or Llama3RendererConfig()
-        if config.preserve_all_thinking or config.preserve_thinking_between_tool_calls:
-            raise NotImplementedError(
-                "Llama-3 doesn't ship a reasoning_content channel — the chat "
-                "template has no <think> block to preserve or drop. "
-                "preserve_*_thinking flags are not applicable."
-            )
+        # ``preserve_*_thinking`` are accepted but no-ops: Llama-3 ships no
+        # reasoning_content channel, so there's never any past-assistant
+        # thinking to retain or drop. The flags are stored on ``self.config``
+        # for cross-renderer uniformity but never change the token stream —
+        # the same contract as Kimi-K2 / Qwen3-VL (see the never-preserves
+        # renderers in tests/test_preserve_thinking.py).
         self._tokenizer = tokenizer
-        self.config = config
+        self.config = config or Llama3RendererConfig()
 
         self._bos = self._token_id("<|begin_of_text|>")
         self._start_header = self._token_id("<|start_header_id|>")
@@ -179,20 +180,43 @@ class Llama3Renderer:
 
         tokens: list[int] = []
         indices: list[int] = []
+        sampled: list[bool] = []
+        content_mask: list[bool] = []
 
-        def emit_ids(ids: list[int], msg_idx: int) -> None:
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-
-        def emit_special(token_id: int, msg_idx: int) -> None:
+        def emit_special(
+            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
+            sampled.append(is_sampled)
+            content_mask.append(is_content)
 
-        def emit_text(text: str, msg_idx: int) -> None:
-            emit_ids(self._encode(text), msg_idx)
+        def emit_text(
+            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
+            ids = self._encode(text)
+            tokens.extend(ids)
+            indices.extend([msg_idx] * len(ids))
+            sampled.extend([is_sampled] * len(ids))
+            content_mask.extend([is_content] * len(ids))
+
+        def emit_text_segments(
+            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
+        ) -> None:
+            """Tokenize concatenated wrap + body as one BPE pass; per-token
+            ``is_content`` follows each token's source segment. Lets the
+            scaffold/body split stay attributed without splitting the
+            encode call (which could shift BPE merges at the boundary)."""
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments
+            ):
+                tokens.append(tok_id)
+                indices.append(msg_idx)
+                sampled.append(is_sampled)
+                content_mask.append(is_content)
 
         # ── 0. BOS ──────────────────────────────────────────────────
-        emit_special(self._bos, -1)
+        emit_special(self._bos, -1, is_sampled=False, is_content=False)
 
         # ── 1. System block (always emitted) ────────────────────────
         first_is_system = messages[0].get("role") == "system"
@@ -203,21 +227,27 @@ class Llama3Renderer:
             else ""
         )
 
-        emit_special(self._start_header, sys_idx)
-        emit_text("system", sys_idx)
-        emit_special(self._end_header, sys_idx)
-        body = "\n\n"
+        emit_special(self._start_header, sys_idx, is_sampled=False, is_content=False)
+        emit_text("system", sys_idx, is_sampled=False, is_content=False)
+        emit_special(self._end_header, sys_idx, is_sampled=False, is_content=False)
+        # The Cutting Knowledge / Today Date preamble (and any tools-in-system
+        # block) is template scaffold; only the caller's system content is
+        # body. Route both through one BPE pass so the wrap/body boundary
+        # can't shift merges.
+        preamble = "\n\n"
         if tools is not None:
-            body += "Environment: ipython\n"
-        body += f"Cutting Knowledge Date: {_CUTTING_KNOWLEDGE_DATE}\n"
-        body += f"Today Date: {self.config.date_string}\n\n"
+            preamble += "Environment: ipython\n"
+        preamble += f"Cutting Knowledge Date: {_CUTTING_KNOWLEDGE_DATE}\n"
+        preamble += f"Today Date: {self.config.date_string}\n\n"
         if tools is not None and not self.config.tools_in_user_message:
-            body += _TOOLS_IN_SYSTEM_INTRO
+            preamble += _TOOLS_IN_SYSTEM_INTRO
             for t in tools:
-                body += json.dumps(t, indent=4, ensure_ascii=False) + "\n\n"
-        body += sys_text
-        emit_text(body, sys_idx)
-        emit_special(self._eot, sys_idx)
+                preamble += json.dumps(t, indent=4, ensure_ascii=False) + "\n\n"
+        sys_segments: list[tuple[str, bool]] = [(preamble, False)]
+        if sys_text:
+            sys_segments.append((sys_text, True))
+        emit_text_segments(sys_segments, sys_idx, is_sampled=False)
+        emit_special(self._eot, sys_idx, is_sampled=False, is_content=False)
 
         # ── 2. Body messages ────────────────────────────────────────
         body_messages = messages[1:] if first_is_system else messages
@@ -239,15 +269,20 @@ class Llama3Renderer:
                     f"message to be 'user'; got {first_user.get('role')!r}."
                 )
             user_idx = i + offset
-            emit_special(self._start_header, user_idx)
-            emit_text("user", user_idx)
-            emit_special(self._end_header, user_idx)
-            user_body = "\n\n" + _TOOLS_IN_USER_INTRO
+            emit_special(
+                self._start_header, user_idx, is_sampled=False, is_content=False
+            )
+            emit_text("user", user_idx, is_sampled=False, is_content=False)
+            emit_special(self._end_header, user_idx, is_sampled=False, is_content=False)
+            user_preamble = "\n\n" + _TOOLS_IN_USER_INTRO
             for t in tools:
-                user_body += json.dumps(t, indent=4, ensure_ascii=False) + "\n\n"
-            user_body += self._content_str(first_user.get("content")).strip()
-            emit_text(user_body, user_idx)
-            emit_special(self._eot, user_idx)
+                user_preamble += json.dumps(t, indent=4, ensure_ascii=False) + "\n\n"
+            user_content = self._content_str(first_user.get("content")).strip()
+            user_segments: list[tuple[str, bool]] = [(user_preamble, False)]
+            if user_content:
+                user_segments.append((user_content, True))
+            emit_text_segments(user_segments, user_idx, is_sampled=False)
+            emit_special(self._eot, user_idx, is_sampled=False, is_content=False)
             i += 1
 
         # 2b. Remaining messages — plain user/assistant/tool/assistant-with-tool-calls.
@@ -258,14 +293,22 @@ class Llama3Renderer:
             tool_calls = msg.get("tool_calls")
 
             if role in ("tool", "ipython"):
-                emit_special(self._start_header, msg_idx)
-                emit_text("ipython", msg_idx)
-                emit_special(self._end_header, msg_idx)
-                emit_text(
-                    "\n\n" + self._tool_response_str(msg.get("content")),
-                    msg_idx,
+                # Tool responses are conversation history the model never
+                # samples; the response body is caller content, the wrap is
+                # scaffold.
+                emit_special(
+                    self._start_header, msg_idx, is_sampled=False, is_content=False
                 )
-                emit_special(self._eot, msg_idx)
+                emit_text("ipython", msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._end_header, msg_idx, is_sampled=False, is_content=False
+                )
+                tool_body = self._tool_response_str(msg.get("content"))
+                tool_segments: list[tuple[str, bool]] = [("\n\n", False)]
+                if tool_body:
+                    tool_segments.append((tool_body, True))
+                emit_text_segments(tool_segments, msg_idx, is_sampled=False)
+                emit_special(self._eot, msg_idx, is_sampled=False, is_content=False)
             elif tool_calls:
                 if len(tool_calls) != 1:
                     raise ValueError(
@@ -280,30 +323,70 @@ class Llama3Renderer:
                     args_str = arguments
                 else:
                     args_str = json.dumps(arguments, ensure_ascii=False)
-                emit_special(self._start_header, msg_idx)
-                emit_text("assistant", msg_idx)
-                emit_special(self._end_header, msg_idx)
-                emit_text(
-                    '\n\n{"name": "' + name + '", "parameters": ' + args_str + "}",
-                    msg_idx,
+                emit_special(
+                    self._start_header, msg_idx, is_sampled=False, is_content=False
                 )
-                emit_special(self._eot, msg_idx)
-            else:
+                emit_text("assistant", msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._end_header, msg_idx, is_sampled=False, is_content=False
+                )
+                # The ``\n\n`` after the header is gen-prompt scaffold the
+                # model never samples; the JSON tool-call body and the
+                # closing ``<|eot_id|>`` are the model's sampled emission.
+                emit_text("\n\n", msg_idx, is_sampled=False, is_content=False)
+                emit_text(
+                    '{"name": "' + name + '", "parameters": ' + args_str + "}",
+                    msg_idx,
+                    is_sampled=True,
+                    is_content=True,
+                )
+                emit_special(self._eot, msg_idx, is_sampled=True, is_content=True)
+            elif role == "assistant":
                 content = self._content_str(msg.get("content")).strip()
-                emit_special(self._start_header, msg_idx)
-                emit_text(role or "", msg_idx)
-                emit_special(self._end_header, msg_idx)
-                emit_text("\n\n" + content, msg_idx)
-                emit_special(self._eot, msg_idx)
+                emit_special(
+                    self._start_header, msg_idx, is_sampled=False, is_content=False
+                )
+                emit_text("assistant", msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._end_header, msg_idx, is_sampled=False, is_content=False
+                )
+                # ``\n\n`` separator is scaffold (it's the generation prompt);
+                # the body and the closing ``<|eot_id|>`` are model-sampled.
+                emit_text("\n\n", msg_idx, is_sampled=False, is_content=False)
+                if content:
+                    emit_text(content, msg_idx, is_sampled=True, is_content=True)
+                emit_special(self._eot, msg_idx, is_sampled=True, is_content=True)
+            else:
+                # user / non-leading system: caller content, never sampled.
+                content = self._content_str(msg.get("content")).strip()
+                emit_special(
+                    self._start_header, msg_idx, is_sampled=False, is_content=False
+                )
+                emit_text(role or "", msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._end_header, msg_idx, is_sampled=False, is_content=False
+                )
+                segments: list[tuple[str, bool]] = [("\n\n", False)]
+                if content:
+                    segments.append((content, True))
+                emit_text_segments(segments, msg_idx, is_sampled=False)
+                emit_special(self._eot, msg_idx, is_sampled=False, is_content=False)
 
         # ── 3. Generation prompt ────────────────────────────────────
         if add_generation_prompt:
-            emit_special(self._start_header, -1)
-            emit_text("assistant", -1)
-            emit_special(self._end_header, -1)
-            emit_text("\n\n", -1)
+            emit_special(self._start_header, -1, is_sampled=False, is_content=False)
+            emit_text("assistant", -1, is_sampled=False, is_content=False)
+            emit_special(self._end_header, -1, is_sampled=False, is_content=False)
+            emit_text("\n\n", -1, is_sampled=False, is_content=False)
 
-        return RenderedTokens(token_ids=tokens, message_indices=indices)
+        return RenderedTokens(
+            token_ids=tokens,
+            message_indices=indices,
+            sampled_mask=sampled,
+            is_content=content_mask,
+            message_roles=[m.get("role") or "" for m in messages],
+            message_tool_names=extract_message_tool_names(messages),
+        )
 
     def render_ids(
         self,
@@ -318,7 +401,12 @@ class Llama3Renderer:
             add_generation_prompt=add_generation_prompt,
         ).token_ids
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,
+    ) -> ParsedResponse:
         return parse_llama_3(
             self._tokenizer,
             token_ids,
@@ -339,7 +427,7 @@ class Llama3Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
-    ) -> list[int] | None:
+    ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids
             or not new_messages
@@ -357,32 +445,56 @@ class Llama3Renderer:
             return None
 
         ext: list[int] = []
+        ext_indices: list[int] = []
+        ext_content: list[bool] = []
 
-        def emit_special(token_id: int, _msg_idx: int = -1) -> None:
+        # Every token the bridge emits is template scaffolding for the next
+        # prompt — none of it is model-sampled — so ``sampled_mask`` is
+        # uniformly ``False`` (applied over the whole sequence at return).
+        # ``is_content`` follows the same rules as :meth:`render` so a
+        # consumer can walk the trajectory and read each step's body mask.
+        def emit_special(token_id: int, msg_idx: int = -1) -> None:
             ext.append(token_id)
+            ext_indices.append(msg_idx)
+            ext_content.append(False)
 
-        def emit_text(text: str, _msg_idx: int = -1) -> None:
-            ext.extend(self._encode(text))
+        def emit_text(text: str, msg_idx: int = -1) -> None:
+            ids = self._encode(text)
+            ext.extend(ids)
+            ext_indices.extend([msg_idx] * len(ids))
+            ext_content.extend([False] * len(ids))
+
+        def emit_text_segments(
+            segments: list[tuple[str, bool]], msg_idx: int = -1
+        ) -> None:
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments
+            ):
+                ext.append(tok_id)
+                ext_indices.append(msg_idx)
+                ext_content.append(is_content)
 
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
-            if role == "system":
+            if role in ("system", "user"):
+                content = self._content_str(msg.get("content")).strip()
                 emit_special(self._start_header, i)
-                emit_text("system", i)
+                emit_text(role, i)
                 emit_special(self._end_header, i)
-                emit_text("\n\n" + self._content_str(msg.get("content")).strip(), i)
-                emit_special(self._eot, i)
-            elif role == "user":
-                emit_special(self._start_header, i)
-                emit_text("user", i)
-                emit_special(self._end_header, i)
-                emit_text("\n\n" + self._content_str(msg.get("content")).strip(), i)
+                segs: list[tuple[str, bool]] = [("\n\n", False)]
+                if content:
+                    segs.append((content, True))
+                emit_text_segments(segs, i)
                 emit_special(self._eot, i)
             elif role in ("tool", "ipython"):
+                tool_body = self._tool_response_str(msg.get("content"))
                 emit_special(self._start_header, i)
                 emit_text("ipython", i)
                 emit_special(self._end_header, i)
-                emit_text("\n\n" + self._tool_response_str(msg.get("content")), i)
+                tool_segs: list[tuple[str, bool]] = [("\n\n", False)]
+                if tool_body:
+                    tool_segs.append((tool_body, True))
+                emit_text_segments(tool_segs, i)
                 emit_special(self._eot, i)
             else:
                 return None
@@ -393,4 +505,12 @@ class Llama3Renderer:
         emit_special(self._end_header, -1)
         emit_text("\n\n", -1)
 
-        return previous_ids + ext
+        total_len = len(previous_ids) + len(ext)
+        return RenderedTokens(
+            token_ids=previous_ids + ext,
+            message_indices=[-1] * len(previous_ids) + ext_indices,
+            sampled_mask=[False] * total_len,
+            is_content=[False] * len(previous_ids) + ext_content,
+            message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
+        )

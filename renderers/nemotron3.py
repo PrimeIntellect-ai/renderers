@@ -75,6 +75,35 @@ def _render_extra_keys(obj: dict[str, Any], handled_keys: set[str]) -> list[str]
     return lines
 
 
+# Per-model ``ultra`` default, applied when the renderer config leaves it
+# ``None``. The Nemotron-3 family ships two chat-template variants: Nano /
+# Super share one; Ultra differs in the reasoning-block glue (no ``\n`` around
+# ``</think>``) and the thinking-truncation boundary (drop thinking on every
+# assistant turn before the last user message). BF16 and FP8 share the same
+# tokenizer and template. Hard-coded keyed by
+# ``tokenizer.name_or_path`` rather than probed from the live template — the
+# same convention as Qwen3.5's ``_ENABLE_THINKING_DEFAULTS`` (avoids pulling
+# ``apply_chat_template`` onto the construction hot path and keeps
+# bring-your-own-tokenizer use working).
+_ULTRA_DEFAULTS: dict[str, bool] = {
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": False,
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": False,
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": True,
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": True,
+}
+
+
+def _default_ultra(tokenizer) -> bool:
+    """Hard-coded ``ultra`` default for ``tokenizer``'s model.
+
+    Falls back to ``False`` (the Nano / Super template, and the majority of
+    the family) for unknown / fine-tuned checkpoints whose ``name_or_path``
+    isn't in ``_ULTRA_DEFAULTS`` — pass an explicit ``ultra=True`` for an
+    Ultra fine-tune or a locally-pathed Ultra checkpoint.
+    """
+    return _ULTRA_DEFAULTS.get(getattr(tokenizer, "name_or_path", ""), False)
+
+
 class Nemotron3Renderer:
     """Deterministic message → token renderer for Nemotron 3 models."""
 
@@ -84,7 +113,14 @@ class Nemotron3Renderer:
         config: Nemotron3RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
-        self.config = config or Nemotron3RendererConfig()
+        cfg = config or Nemotron3RendererConfig()
+        # ``ultra=None`` defers to the model's known default (see
+        # ``_ULTRA_DEFAULTS``). Materialise here so downstream reads see a
+        # concrete bool; rebind the frozen config with the resolved value so
+        # introspection sees the same.
+        if cfg.ultra is None:
+            cfg = cfg.model_copy(update={"ultra": _default_ultra(tokenizer)})
+        self.config = cfg
 
         # Look up special token IDs from the tokenizer (not hardcoded).
         # <|endoftext|> is optional: Nemotron-3 Nano / Super tokenizers ship
@@ -335,6 +371,17 @@ class Nemotron3Renderer:
                 last_plain_assistant_idx = j
                 break
 
+        # Ultra truncates thinking on every assistant turn *before the last
+        # user message* (template rule ``loop.index0 < last_user_idx``),
+        # whereas Nano/Super preserve only the last plain assistant. Compute
+        # the last-user index over the normalized ``messages`` list (a leading
+        # system never holds a user, so the relative comparison is unaffected).
+        last_user_idx_norm = -1
+        for j in range(len(messages) - 1, -1, -1):
+            if messages[j].get("role") == "user":
+                last_user_idx_norm = j
+                break
+
         # ── 2. Iterate messages ─────────────────────────────────────
         for i, msg in enumerate(messages):
             role = msg["role"]
@@ -360,7 +407,10 @@ class Nemotron3Renderer:
                 emit_text("\n", msg_orig_idx, is_sampled=False, is_content=False)
 
             elif role == "assistant":
-                is_last_turn = i >= last_plain_assistant_idx
+                if self.config.ultra:
+                    is_last_turn = i >= last_user_idx_norm
+                else:
+                    is_last_turn = i >= last_plain_assistant_idx
                 preserve_thinking = msg_orig_idx >= 0 and should_preserve_past_thinking(
                     original_messages,
                     msg_orig_idx,
@@ -617,6 +667,7 @@ class Nemotron3Renderer:
             content = after_think_end.lstrip("\n")
 
         reasoning_content = reasoning_content.strip()
+        ultra = self.config.ultra
 
         # ``<|im_start|>assistant\n`` is template-injected scaffolding —
         # at inference the chat template emits these as the generation
@@ -645,28 +696,36 @@ class Nemotron3Renderer:
             or not self.config.truncate_history_thinking
         ):
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
+            # Ultra: <think>\n{reasoning}</think>{content} (no \n around </think>).
+            # Nano/Super: <think>\n{reasoning}\n</think>\n{content}.
             emit_text(
-                "\n" + reasoning_content + "\n",
+                ("\n" + reasoning_content)
+                if ultra
+                else ("\n" + reasoning_content + "\n"),
                 msg_idx,
                 is_sampled=True,
                 is_content=True,
             )
             emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
-            # Single \n separator (not \n\n like Qwen3.5)
+            # Single \n separator (not \n\n like Qwen3.5); Ultra glues directly.
             emit_text(
-                "\n" + content + content_suffix,
+                (content + content_suffix)
+                if ultra
+                else ("\n" + content + content_suffix),
                 msg_idx,
                 is_sampled=True,
                 is_content=True,
             )
         elif reasoning_content:
-            # Historical assistant whose reasoning got stripped — template
-            # keeps a single \n between the collapsed <think></think> and
-            # the content as a marker that reasoning existed.
+            # Historical assistant whose reasoning got stripped. Nano/Super keep
+            # a single \n between the collapsed <think></think> and the content
+            # as a marker that reasoning existed; Ultra glues content directly.
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
             emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
             emit_text(
-                "\n" + content + content_suffix,
+                (content + content_suffix)
+                if ultra
+                else ("\n" + content + content_suffix),
                 msg_idx,
                 is_sampled=True,
                 is_content=True,

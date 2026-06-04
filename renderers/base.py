@@ -1037,9 +1037,14 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "moonshotai/Kimi-K2-Instruct": "kimi-k2",
     "moonshotai/Kimi-K2.5": "kimi-k2.5",
     "moonshotai/Kimi-K2.6": "kimi-k2.5",
-    # Nemotron 3.
+    # Nemotron 3. Nano / Super share one chat-template variant; the Ultra
+    # checkpoints use the Ultra variant — the renderer auto-selects it from
+    # the model name (see ``nemotron3._ULTRA_DEFAULTS``). BF16 and FP8 share the
+    # same tokenizer and template.
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nemotron-3",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nemotron-3",
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nemotron-3",
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nemotron-3",
     # Poolside Laguna.
     "poolside/Laguna-XS.2": "laguna-xs.2",
     # GPT-OSS.

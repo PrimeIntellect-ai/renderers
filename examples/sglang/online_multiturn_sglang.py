@@ -142,6 +142,9 @@ async def run_one(
     print(f"\n=== {label} ===")
 
     renderer = make_renderer(model, enable_thinking)
+    renderer_tools = (
+        renderer.prepare_tools(TOOLS) if hasattr(renderer, "prepare_tools") else TOOLS
+    )
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": "You are a concise tool-using assistant."},
@@ -152,7 +155,18 @@ async def run_one(
     ]
 
     # Turn 1: render locally, send token IDs. SGLang never sees messages.
-    prompt_ids = renderer.render_ids(messages, tools=TOOLS, add_generation_prompt=True)
+    session = (
+        renderer.new_session(messages, tools=renderer_tools)
+        if hasattr(renderer, "new_session")
+        else None
+    )
+    prompt_ids = (
+        session.render_ids(add_generation_prompt=True)
+        if session is not None
+        else renderer.render_ids(
+            messages, tools=renderer_tools, add_generation_prompt=True
+        )
+    )
     output1 = await generate_sglang(
         client=client,
         base_url=base_url,
@@ -208,8 +222,12 @@ async def run_one(
     # Turn 2: bridge extends prompt_ids + completion1 exactly.
     # ``bridge_to_next_turn`` returns a ``RenderedTokens`` (or None); the
     # extended id stream is on ``.token_ids``.
-    bridged = renderer.bridge_to_next_turn(
-        prompt_ids, completion1, new_messages, tools=TOOLS
+    bridged = (
+        session.bridge_to_next_turn(completion1, new_messages)
+        if session is not None
+        else renderer.bridge_to_next_turn(
+            prompt_ids, completion1, new_messages, tools=renderer_tools
+        )
     )
     if bridged is None:
         raise RuntimeError("bridge_to_next_turn returned None")

@@ -1,0 +1,29 @@
+[package]
+name = "renderers-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "CLI runner for renderers-core — golden-test fixtures and ad-hoc rendering."
+publish = false
+
+[[bin]]
+name = "renderers-cli"
+path = "src/main.rs"
+
+[dependencies]
+renderers-core = { path = "../renderers-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "qwen3"
+harness = false
+
+[lints]
+workspace = true

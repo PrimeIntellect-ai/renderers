@@ -15,6 +15,11 @@ from typing import Any
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
+from renderers._native_router import (
+    load_native,
+    native_enabled,
+    resolve_tokenizer_path,
+)
 from renderers.base import (
     Message,
     ParsedResponse,
@@ -51,6 +56,34 @@ _TOOLS_FOOTER = (
 
 class GLM45Renderer:
     """Deterministic message → token renderer for GLM-4.5 Air models."""
+
+    def __new__(
+        cls,
+        tokenizer: PreTrainedTokenizer,
+        config: GLM45RendererConfig | None = None,
+        *,
+        enable_thinking: bool = True,
+        preserve_all_thinking: bool = False,
+        preserve_thinking_between_tool_calls: bool = False,
+    ):
+        if config is not None:
+            enable_thinking = config.enable_thinking
+            preserve_all_thinking = config.preserve_all_thinking
+            preserve_thinking_between_tool_calls = (
+                config.preserve_thinking_between_tool_calls
+            )
+
+        if native_enabled("glm45"):
+            native = load_native()
+            if native is not None:
+                path = resolve_tokenizer_path(tokenizer)
+                return native.Renderer.glm45(
+                    path,
+                    enable_thinking=enable_thinking,
+                    preserve_all_thinking=preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                )
+        return super().__new__(cls)
 
     def __init__(
         self,

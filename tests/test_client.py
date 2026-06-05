@@ -299,6 +299,18 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
 
     pytest.importorskip("torch")
     pytest.importorskip("vllm", reason="vllm needed for features serialization")
+    pytest.importorskip(
+        "vllm.entrypoints.serve.disagg.mm_serde",
+        reason="vLLM multimodal serializer is not available",
+    )
+    pytest.importorskip(
+        "vllm.model_executor.models.qwen2_vl",
+        reason="vLLM Qwen-VL field factory is not available",
+    )
+    pytest.importorskip(
+        "vllm.multimodal.inputs",
+        reason="vLLM multimodal input wrappers are not available",
+    )
 
     import torch as _torch
     from renderers.base import (

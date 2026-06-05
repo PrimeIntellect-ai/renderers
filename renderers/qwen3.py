@@ -5,6 +5,14 @@ Key differences from Qwen3.5:
 - Tool calls use JSON format: {"name": "...", "arguments": ...}
 - Thinking blocks only inserted when loop.last OR reasoning_content present
 - Generation prompt does NOT add <think> by default
+
+# Native (Rust) routing
+
+When ``RENDERERS_NATIVE`` selects ``qwen3`` (see
+``renderers._native_router``) and the native extension is available,
+``Qwen3Renderer(...)`` returns an instance of the Rust implementation
+instead of this Python class. The returned object satisfies the same
+duck-typed Renderer protocol, so callers don't need to special-case it.
 """
 
 from __future__ import annotations
@@ -13,6 +21,11 @@ import json
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
+from renderers._native_router import (
+    load_native,
+    native_enabled,
+    resolve_tokenizer_path,
+)
 from renderers.base import (
     Message,
     ParsedResponse,
@@ -47,11 +60,46 @@ _TOOLS_FOOTER = (
 class Qwen3Renderer:
     """Deterministic message → token renderer for Qwen3 models."""
 
+    def __new__(
+        cls,
+        tokenizer: PreTrainedTokenizer,
+        config: Qwen3RendererConfig | None = None,
+        *,
+        enable_thinking: bool = True,
+        preserve_all_thinking: bool = False,
+        preserve_thinking_between_tool_calls: bool = False,
+    ):
+        if config is not None:
+            enable_thinking = config.enable_thinking
+            preserve_all_thinking = config.preserve_all_thinking
+            preserve_thinking_between_tool_calls = (
+                config.preserve_thinking_between_tool_calls
+            )
+
+        # Native routing: when ``RENDERERS_NATIVE`` opts qwen3 into the
+        # Rust path and the extension is installed, return the native
+        # instance directly. Otherwise fall through to the pure-Python
+        # constructor below.
+        if native_enabled("qwen3"):
+            native = load_native()
+            if native is not None:
+                path = resolve_tokenizer_path(tokenizer)
+                return native.Renderer.qwen3(
+                    path,
+                    enable_thinking=enable_thinking,
+                    preserve_all_thinking=preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                )
+        return super().__new__(cls)
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
         config: Qwen3RendererConfig | None = None,
     ):
+        # If __new__ returned a native instance, Python won't call this
+        # __init__ (different type). For the pure-Python instance, do
+        # the normal setup.
         self._tokenizer = tokenizer
         self.config = config or Qwen3RendererConfig()
 

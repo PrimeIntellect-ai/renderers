@@ -16,6 +16,11 @@ from typing import Any
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
+from renderers._native_router import (
+    load_native,
+    native_enabled,
+    resolve_tokenizer_path,
+)
 from renderers.base import (
     Message,
     ParsedResponse,
@@ -55,6 +60,39 @@ class GLM5Renderer:
     # instead of just emitting ``</think>`` as a separator. Subclassed in
     # GLM51Renderer; GLM-5 proper keeps this off.
     empty_think_on_last_assistant: bool = False
+
+    # Native-routing family key. Overridden in GLM51Renderer.
+    _NATIVE_KEY = "glm5"
+    _NATIVE_METHOD = "glm5"
+
+    def __new__(
+        cls,
+        tokenizer: PreTrainedTokenizer,
+        config: GLM5RendererConfig | GLM51RendererConfig | None = None,
+        *,
+        enable_thinking: bool = True,
+        preserve_all_thinking: bool = False,
+        preserve_thinking_between_tool_calls: bool = False,
+    ):
+        if config is not None:
+            enable_thinking = config.enable_thinking
+            preserve_all_thinking = config.preserve_all_thinking
+            preserve_thinking_between_tool_calls = (
+                config.preserve_thinking_between_tool_calls
+            )
+
+        if native_enabled(cls._NATIVE_KEY):
+            native = load_native()
+            if native is not None:
+                path = resolve_tokenizer_path(tokenizer)
+                builder = getattr(native.Renderer, cls._NATIVE_METHOD)
+                return builder(
+                    path,
+                    enable_thinking=enable_thinking,
+                    preserve_all_thinking=preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=preserve_thinking_between_tool_calls,
+                )
+        return super().__new__(cls)
 
     # GLM-5.1 uses the same template surface and binds the same kwargs.
     # Subclassed in ``GLM51Renderer`` so the registry can dispatch on the
@@ -649,6 +687,8 @@ class GLM51Renderer(GLM5Renderer):
 
     empty_think_on_last_assistant = True
     _config_cls = GLM51RendererConfig
+    _NATIVE_KEY = "glm51"
+    _NATIVE_METHOD = "glm51"
 
     @staticmethod
     def _format_tool_spec(tool: ToolSpec) -> str:

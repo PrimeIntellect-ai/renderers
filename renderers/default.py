@@ -13,6 +13,11 @@ from typing import Any
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
+from renderers._native_router import (
+    load_native,
+    native_enabled,
+    resolve_tokenizer_path,
+)
 from renderers.base import (
     Message,
     ParsedResponse,
@@ -88,6 +93,59 @@ class DefaultRenderer:
     template kwargs captured as ``model_extra`` (``extra="allow"`` on
     :class:`renderers.DefaultRendererConfig`).
     """
+
+    def __new__(
+        cls,
+        tokenizer: PreTrainedTokenizer,
+        config: DefaultRendererConfig | None = None,
+        *,
+        tool_parser=None,
+        reasoning_parser=None,
+        preserve_all_thinking: bool = False,
+        preserve_thinking_between_tool_calls: bool = False,
+        **chat_template_kwargs,
+    ):
+        if config is not None:
+            tool_parser = config.tool_parser
+            reasoning_parser = config.reasoning_parser
+            preserve_all_thinking = config.preserve_all_thinking
+            preserve_thinking_between_tool_calls = (
+                config.preserve_thinking_between_tool_calls
+            )
+            chat_template_kwargs = dict(config.model_extra or {})
+
+        # Native routing: only when there are no plugged parsers and no
+        # exotic chat_template kwargs — the Rust path uses minijinja and
+        # doesn't know about Python-side parser instances.
+        if (
+            native_enabled("default")
+            and tool_parser is None
+            and reasoning_parser is None
+            and not preserve_all_thinking
+            and not preserve_thinking_between_tool_calls
+            and not chat_template_kwargs
+        ):
+            native = load_native()
+            if native is not None:
+                ct = getattr(tokenizer, "chat_template", None)
+                if isinstance(ct, str) and ct:
+                    path = resolve_tokenizer_path(tokenizer)
+                    stop = (
+                        [tokenizer.eos_token_id]
+                        if getattr(tokenizer, "eos_token_id", None) is not None
+                        else None
+                    )
+                    extras = {
+                        "bos_token": getattr(tokenizer, "bos_token", None) or "",
+                        "eos_token": getattr(tokenizer, "eos_token", None) or "",
+                    }
+                    return native.Renderer.default_renderer(
+                        path,
+                        ct,
+                        stop_token_ids=stop,
+                        extra_context=extras,
+                    )
+        return super().__new__(cls)
 
     def __init__(
         self,

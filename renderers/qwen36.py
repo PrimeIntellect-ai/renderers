@@ -23,14 +23,47 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from renderers._native_router import (
+    load_native,
+    native_enabled,
+    resolve_tokenizer_path,
+)
 from renderers.configs import Qwen36RendererConfig
-from renderers.qwen35 import Qwen35Renderer
+from renderers.qwen35 import Qwen35Renderer, _default_enable_thinking
 
 
 class Qwen36Renderer(Qwen35Renderer):
     """Deterministic message → token renderer for Qwen3.6 models."""
 
     _config_cls = Qwen36RendererConfig
+
+    def __new__(
+        cls,
+        tokenizer,
+        config: Qwen36RendererConfig | None = None,
+        *,
+        processor=None,
+    ):
+        # Route to native only for Qwen3.6 specifically — never fall
+        # through to the parent's qwen35 router (the renderer flag is
+        # different).
+        if native_enabled("qwen36") and processor is None:
+            native = load_native()
+            if native is not None:
+                cfg = config or Qwen36RendererConfig()
+                enable_thinking = cfg.enable_thinking
+                if enable_thinking is None:
+                    enable_thinking = _default_enable_thinking(tokenizer)
+                path = resolve_tokenizer_path(tokenizer)
+                return native.Renderer.qwen36(
+                    path,
+                    enable_thinking=enable_thinking,
+                    preserve_all_thinking=cfg.preserve_all_thinking,
+                    preserve_thinking_between_tool_calls=cfg.preserve_thinking_between_tool_calls,
+                )
+        # Skip Qwen35Renderer.__new__ (would also try to route, with the
+        # wrong flag). Go straight to object.
+        return object.__new__(cls)
 
     @staticmethod
     def _render_arg_value(arg_value: Any) -> str:

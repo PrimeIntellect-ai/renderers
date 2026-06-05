@@ -34,3 +34,6 @@ coverage.xml
 
 # agent harness state
 .claude/
+
+# rust
+target/

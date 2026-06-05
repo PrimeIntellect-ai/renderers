@@ -111,6 +111,11 @@ def main() -> None:
             stop_token_ids=renderer.get_stop_token_ids(),
             skip_special_tokens=False,
         )
+        renderer_tools = (
+            renderer.prepare_tools(TOOLS)
+            if hasattr(renderer, "prepare_tools")
+            else TOOLS
+        )
 
         messages = [
             {"role": "system", "content": "You are a concise tool-using assistant."},
@@ -122,8 +127,17 @@ def main() -> None:
 
         # Turn 1: render locally and pass token IDs to vLLM. vLLM never sees
         # messages and never applies a chat template.
-        prompt_ids = renderer.render_ids(
-            messages, tools=TOOLS, add_generation_prompt=True
+        session = (
+            renderer.new_session(messages, tools=renderer_tools)
+            if hasattr(renderer, "new_session")
+            else None
+        )
+        prompt_ids = (
+            session.render_ids(add_generation_prompt=True)
+            if session is not None
+            else renderer.render_ids(
+                messages, tools=renderer_tools, add_generation_prompt=True
+            )
         )
         output1 = llm.generate(
             [{"prompt_token_ids": prompt_ids}],
@@ -178,8 +192,12 @@ def main() -> None:
         # Turn 2: bridge extends prompt_ids + completion1 exactly.
         # ``bridge_to_next_turn`` returns a ``RenderedTokens`` (or None); the
         # extended id stream is on ``.token_ids``.
-        bridged = renderer.bridge_to_next_turn(
-            prompt_ids, completion1, new_messages, tools=TOOLS
+        bridged = (
+            session.bridge_to_next_turn(completion1, new_messages)
+            if session is not None
+            else renderer.bridge_to_next_turn(
+                prompt_ids, completion1, new_messages, tools=renderer_tools
+            )
         )
         if bridged is None:
             raise RuntimeError("bridge_to_next_turn returned None")

@@ -36,6 +36,7 @@ from renderers.base import (
     RenderedTokens,
     ToolCallParseStatus,
     ToolSpec,
+    extract_message_tool_names,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
     trim_to_turn_close,
@@ -947,6 +948,7 @@ class KimiK25Renderer:
             sampled_mask=sampled,
             is_content=content_mask,
             message_roles=[m.get("role") or "" for m in messages],
+            message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=mm_data,
         )
 
@@ -1189,6 +1191,7 @@ class KimiK25Renderer:
             merged_items.setdefault(modality, []).extend(vals)
 
         bridge_roles = [m.get("role") or "" for m in new_messages]
+        bridge_tool_names = extract_message_tool_names(new_messages)
         if not (merged_hashes or merged_placeholders or merged_items):
             return RenderedTokens(
                 token_ids=tokens,
@@ -1196,6 +1199,7 @@ class KimiK25Renderer:
                 sampled_mask=sampled,
                 is_content=content_mask,
                 message_roles=bridge_roles,
+                message_tool_names=bridge_tool_names,
             )
 
         mm_data = MultiModalData(
@@ -1209,6 +1213,7 @@ class KimiK25Renderer:
             sampled_mask=sampled,
             is_content=content_mask,
             message_roles=bridge_roles,
+            message_tool_names=bridge_tool_names,
             multi_modal_data=mm_data,
         )
 

@@ -27,6 +27,7 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     attribute_text_segments,
+    extract_message_tool_names,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
     trim_to_turn_close,
@@ -67,39 +68,44 @@ _TOOLS_INSTRUCTIONS = (
 )
 
 
-def _detect_enable_thinking_default(tokenizer: PreTrainedTokenizer) -> bool:
-    """Probe the tokenizer's chat template to learn its ``enable_thinking``
-    default polarity at the generation-prompt boundary.
+# Per-model ``enable_thinking`` default, applied when the renderer config
+# leaves it ``None``. The Qwen3.5 family ships two chat-template variants
+# that differ only in the polarity of the gated thinking branch:
+#
+#   * Big sizes (4B / 9B / 35B-A3B / 122B-A10B / 397B-A17B) default
+#     ``enable_thinking=true`` — an open ``<think>\n`` at the gen prompt.
+#   * Small sizes (0.8B / 2B) flip it — default ``false``, emitting the
+#     empty ``<think>\n\n</think>\n\n`` block.
+#
+# These are hard-coded (keyed by ``tokenizer.name_or_path``) rather than
+# probed from the live ``chat_template``: probing meant calling
+# ``apply_chat_template`` at construction, which pulls ``transformers`` onto
+# the hot path and breaks bring-your-own-tokenizer use. The values are the
+# ground truth pinned by ``tests/test_qwen35_size_coverage.py`` — both the
+# polarity assertions and byte-parity against each size's own
+# ``apply_chat_template``.
+_ENABLE_THINKING_DEFAULTS: dict[str, bool] = {
+    "Qwen/Qwen3.5-0.8B": False,
+    "Qwen/Qwen3.5-2B": False,
+    "Qwen/Qwen3.5-4B": True,
+    "Qwen/Qwen3.5-9B": True,
+    "Qwen/Qwen3.5-35B-A3B": True,
+    "Qwen/Qwen3.5-122B-A10B": True,
+    "Qwen/Qwen3.5-397B-A17B": True,
+    # Qwen3.6 extends the Qwen3.5 template; same big-size polarity.
+    "Qwen/Qwen3.6-35B-A3B": True,
+}
 
-    The Qwen3.5 family ships two template variants that differ only in the
-    polarity of the gated branch:
 
-    * Big sizes (4B / 9B / 35B-A3B / 122B-A10B / 397B-A17B) emit an open
-      ``<think>\\n`` by default and the empty ``<think>\\n\\n</think>\\n\\n``
-      block when ``enable_thinking`` is explicitly false.
-    * Small sizes (0.8B / 2B) flip the polarity — they emit the empty
-      block by default and the open ``<think>\\n`` only when
-      ``enable_thinking`` is explicitly true.
+def _default_enable_thinking(tokenizer) -> bool:
+    """Hard-coded ``enable_thinking`` default for ``tokenizer``'s model.
 
-    A one-shot ``apply_chat_template`` call with no flag and a minimal
-    user message reveals which variant is in use: the empty-block tail
-    ends with ``</think>``, the open-think tail does not. Failing the
-    probe (no chat_template, exotic config) falls back to the big-model
-    default of True, which matches every entry in
-    ``MODEL_RENDERER_MAP`` that routes to ``qwen3.5`` without explicit
-    polarity awareness.
+    Falls back to ``True`` (the big-model default, and the majority of the
+    family) for unknown / fine-tuned checkpoints whose ``name_or_path`` isn't
+    in ``_ENABLE_THINKING_DEFAULTS``; pass an explicit ``enable_thinking=`` to
+    a small-size fine-tune that needs ``False``.
     """
-    try:
-        out = tokenizer.apply_chat_template(
-            [{"role": "user", "content": "x"}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-    except Exception:
-        return True
-    if not isinstance(out, str):
-        return True
-    return not out.rstrip().endswith("</think>")
+    return _ENABLE_THINKING_DEFAULTS.get(getattr(tokenizer, "name_or_path", ""), True)
 
 
 class Qwen35Renderer:
@@ -117,13 +123,13 @@ class Qwen35Renderer:
         self._tokenizer = tokenizer
         self._processor = processor
         cfg = config or type(self)._config_cls()
-        # ``enable_thinking=None`` defers to the tokenizer's chat-template
-        # default (Instruct → off, Thinking → on). Materialise here so
-        # downstream reads see a concrete bool; rebind the config with
-        # the resolved value so introspection sees the same.
+        # ``enable_thinking=None`` defers to the model's known default (see
+        # ``_ENABLE_THINKING_DEFAULTS``). Materialise here so downstream reads
+        # see a concrete bool; rebind the config with the resolved value so
+        # introspection sees the same.
         if cfg.enable_thinking is None:
             cfg = cfg.model_copy(
-                update={"enable_thinking": _detect_enable_thinking_default(tokenizer)}
+                update={"enable_thinking": _default_enable_thinking(tokenizer)}
             )
         self.config = cfg
 
@@ -569,6 +575,7 @@ class Qwen35Renderer:
             sampled_mask=sampled,
             is_content=content_mask,
             message_roles=[m.get("role") or "" for m in messages],
+            message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=mm_data,
         )
 
@@ -849,6 +856,7 @@ class Qwen35Renderer:
             merged_items.setdefault(modality, []).extend(vals)
 
         bridge_roles = [m.get("role") or "" for m in new_messages]
+        bridge_tool_names = extract_message_tool_names(new_messages)
         if not (merged_hashes or merged_placeholders or merged_items):
             return RenderedTokens(
                 token_ids=tokens,
@@ -856,6 +864,7 @@ class Qwen35Renderer:
                 sampled_mask=sampled,
                 is_content=content_mask,
                 message_roles=bridge_roles,
+                message_tool_names=bridge_tool_names,
             )
 
         mm_data = MultiModalData(
@@ -869,6 +878,7 @@ class Qwen35Renderer:
             sampled_mask=sampled,
             is_content=content_mask,
             message_roles=bridge_roles,
+            message_tool_names=bridge_tool_names,
             multi_modal_data=mm_data,
         )
 

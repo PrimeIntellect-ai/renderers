@@ -55,6 +55,9 @@ _RENDERER_MODELS = [
     ("moonshotai/Kimi-K2.6", "auto"),
     ("deepseek-ai/DeepSeek-V3", "auto"),
     ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
+    # Ultra: auto-resolves to the Ultra template variant (ultra=True) via the
+    # model name; parity asserted against the Ultra apply_chat_template.
+    ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
 ]

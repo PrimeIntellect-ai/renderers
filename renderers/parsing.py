@@ -65,30 +65,36 @@ def _coerce_arg_value(
     """Coerce a raw ``<arg_value>`` body to its declared type.
 
     Returns ``(value, used_json_fallback)``. The boolean is ``True`` only
-    when ``json.loads`` was attempted and raised, so the caller knows
-    whether to flag ``INVALID_JSON``. Returning a string verbatim
-    because the schema declared ``type: "string"`` is NOT a fallback.
+    when ``json.loads`` was attempted, raised, AND the schema doesn't
+    permit a string. Returning a string verbatim because the schema
+    permits strings is NOT a fallback.
 
     Rule (matches vLLM / SGLang reference parsers):
 
     - If the param's declared ``type`` is ``"string"`` (or single-element
       ``["string"]``), return ``text`` verbatim — never ``json.loads``.
-    - Anything else (no schema, non-string scalar, object, array, or
-      union types that include non-string): try ``json.loads`` and fall
-      back to raw ``text`` on parse failure.
+    - Otherwise try ``json.loads``. If that fails, return raw ``text``.
+      The ``used_json_fallback`` flag is ``True`` only when the schema
+      does NOT permit a string — i.e. the fallback is truly suspect.
 
-    Union types that include ``"string"`` alongside other types still
-    attempt ``json.loads`` first so an explicit integer / bool can
-    parse; the string branch only wins as the fallback.
+    Union types (``anyOf``/``oneOf``) that include ``"string"`` alongside
+    other types still attempt ``json.loads`` first so an explicit
+    integer / bool can parse; the string branch wins as fallback, and
+    landing there is expected — not a malformed-JSON signal.
     """
+    string_is_allowed = False
     if param_schema is not None:
         declared = param_schema.get("type")
         if declared == "string" or declared == ["string"]:
             return text, False
+        for branch in param_schema.get("anyOf") or param_schema.get("oneOf") or []:
+            if isinstance(branch, dict) and branch.get("type") == "string":
+                string_is_allowed = True
+                break
     try:
         return json.loads(text), False
     except (json.JSONDecodeError, ValueError):
-        return text, True
+        return text, not string_is_allowed
 
 
 def _find(ids: list[int], target: int, start: int = 0) -> int:

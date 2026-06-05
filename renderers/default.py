@@ -18,6 +18,7 @@ from renderers.base import (
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    extract_message_tool_names,
 )
 from renderers.configs import DefaultRendererConfig
 from renderers.parsers import (
@@ -141,6 +142,7 @@ class DefaultRenderer:
             token_ids=token_ids,
             message_indices=message_indices,
             message_roles=message_roles,
+            message_tool_names=extract_message_tool_names(messages),
         )
 
     def _apply(self, messages, *, tools=None, add_generation_prompt=False) -> list[int]:

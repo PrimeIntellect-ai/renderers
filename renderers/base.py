@@ -6,6 +6,7 @@ import io
 import logging
 import queue
 import threading
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import (
@@ -117,6 +118,68 @@ class Message(TypedDict, total=False):
     reasoning_content: str
 
 
+def extract_message_tool_names(messages: list[Message]) -> list[str | None]:
+    """Per-message tool function names parallel to ``message_roles``.
+
+    Returns one entry per message: the function name for ``role="tool"``
+    messages, ``None`` for every other message. Length matches the
+    input list.
+
+    For tool messages the name is taken from ``msg["name"]`` when set
+    (caller-provided), otherwise recovered by joining
+    ``msg["tool_call_id"]`` against any prior assistant's
+    ``tool_calls[i].function.name`` in the same list. Tool messages
+    whose issuing assistant lives outside the provided list (e.g. on
+    a :meth:`Renderer.bridge_to_next_turn` call where ``new_messages``
+    covers only the new turn) resolve to ``None``.
+
+    Pure metadata: this never mutates the caller's messages and has
+    no effect on the rendered token stream. It runs independently of
+    the render path so the renderer can populate the field on
+    :class:`RenderedTokens` without breaking HF byte parity for tool
+    messages that carry no ``name``. Callers who *also* want the
+    function name to appear in the rendered scaffold (e.g. GPT-OSS
+    Harmony's ``functions.{name}`` prefix) must attach ``name`` to
+    their tool messages before calling :meth:`Renderer.render`
+    themselves — renderers don't synthesize ``name`` into the input,
+    only into this metadata field.
+
+    Trainers join this list with :attr:`RenderedTokens.message_indices`
+    to recover per-token tool attribution — the canonical use case is
+    SFT on tool response bodies while RL acts only on assistant tokens
+    (tool body tokens get a constant positive advantage so the model
+    learns to anticipate tool outputs without learning to emit
+    ``<|tool_response>`` itself).
+
+    Per-message rather than per-token because the data is naturally
+    per-message — storing it per-token would duplicate the same
+    string across every body token of the same tool message.
+    """
+    lookup: dict[str, str] = {}
+    for m in messages:
+        if not isinstance(m, Mapping) or m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            if not isinstance(tc, Mapping):
+                continue
+            tc_id = tc.get("id")
+            fn = tc.get("function")
+            tc_name = fn.get("name") if isinstance(fn, Mapping) else None
+            if isinstance(tc_id, str) and isinstance(tc_name, str):
+                lookup[tc_id] = tc_name
+    out: list[str | None] = []
+    for m in messages:
+        if not isinstance(m, Mapping) or m.get("role") != "tool":
+            out.append(None)
+            continue
+        name = m.get("name")
+        if not (isinstance(name, str) and name):
+            tc_id = m.get("tool_call_id")
+            name = lookup.get(tc_id) if isinstance(tc_id, str) else None
+        out.append(name if isinstance(name, str) and name else None)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Renderer data types
 # ---------------------------------------------------------------------------
@@ -208,6 +271,32 @@ class RenderedTokens:
     renderer doesn't provide the signal. ``DefaultRenderer`` leaves it
     empty for the same reason.
 
+    ``message_tool_names`` is the per-message tool function name list,
+    parallel to ``message_roles`` (same length). For tool-role
+    messages it carries the function name — either taken from
+    ``msg["name"]`` (caller-provided) or recovered by joining
+    ``msg["tool_call_id"]`` against a prior assistant's
+    ``tool_calls[i].function.name`` in the rendered slice. Every
+    other message is ``None``, as are tool messages whose issuing
+    assistant lives outside the rendered slice (e.g. on a
+    :meth:`Renderer.bridge_to_next_turn` call where ``new_messages``
+    covers only the new turn).
+
+    This is pure metadata, computed by :func:`extract_message_tool_names`
+    independently of the render path: populating it never touches the
+    rendered token stream, so HF chat-template byte parity is
+    preserved for tool messages carrying no ``name``. Callers who
+    *also* want the function name to appear in the rendered scaffold
+    (e.g. GPT-OSS Harmony's ``functions.{name}`` prefix) must attach
+    ``name`` to their tool messages before calling
+    :meth:`Renderer.render` themselves.
+
+    Trainers join this with ``message_indices`` to build per-tool
+    selective loss masks (SFT on tool response bodies of a specific
+    tool while RL acts on assistant tokens). Empty
+    ``message_tool_names`` (``[]``) means the renderer doesn't
+    provide the signal.
+
     ``multi_modal_data`` is populated by multimodal renderers (e.g.
     ``Qwen3VLRenderer``) when image / video content parts are present;
     text-only renderers leave it as ``None``.
@@ -218,6 +307,7 @@ class RenderedTokens:
     sampled_mask: list[bool] = field(default_factory=list)
     is_content: list[bool] = field(default_factory=list)
     message_roles: list[str] = field(default_factory=list)
+    message_tool_names: list[str | None] = field(default_factory=list)
     multi_modal_data: "MultiModalData | None" = None
 
     def tokens_per_message(
@@ -915,8 +1005,8 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # ``enable_thinking=true`` (open ``<think>\n`` at the gen prompt);
     # the smaller 0.8B / 2B variants flip the polarity (default
     # ``enable_thinking=false``, empty ``<think>\n\n</think>\n\n``).
-    # ``Qwen35Renderer`` auto-detects polarity from the tokenizer's
-    # chat_template at construction, so all seven sizes are
+    # ``Qwen35Renderer`` hard-codes this polarity per model
+    # (``_ENABLE_THINKING_DEFAULTS``), so all seven sizes are
     # token-for-token parity-tested against their own
     # ``apply_chat_template`` — including with
     # ``add_generation_prompt=True``.
@@ -951,9 +1041,14 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "moonshotai/Kimi-K2-Instruct": "kimi-k2",
     "moonshotai/Kimi-K2.5": "kimi-k2.5",
     "moonshotai/Kimi-K2.6": "kimi-k2.5",
-    # Nemotron 3.
+    # Nemotron 3. Nano / Super share one chat-template variant; the Ultra
+    # checkpoints use the Ultra variant — the renderer auto-selects it from
+    # the model name (see ``nemotron3._ULTRA_DEFAULTS``). BF16 and FP8 share the
+    # same tokenizer and template.
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nemotron-3",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nemotron-3",
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nemotron-3",
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nemotron-3",
     # Poolside Laguna.
     "poolside/Laguna-XS.2": "laguna-xs.2",
     # GPT-OSS.
@@ -1093,7 +1188,6 @@ def _patched_load(model_name_or_path: str, **kwargs):
     path is still discoverable in logs.
     """
     import fastokens
-    from transformers import AutoTokenizer
 
     global _FASTOKENS_ANNOUNCED
 
@@ -1102,16 +1196,74 @@ def _patched_load(model_name_or_path: str, **kwargs):
             fastokens.patch_transformers()
         if not _FASTOKENS_ANNOUNCED:
             logger.info(
-                "fastokens enabled — tokenizers load through the Rust BPE "
-                "fast path (~10x encode speedup)."
+                "fastokens enabled — tokenizers load through the Rust BPE fast path (~10x encode speedup)."
             )
             _FASTOKENS_ANNOUNCED = True
     try:
-        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
+        return _load_tokenizer_via_auto(model_name_or_path, **kwargs)
     finally:
         with _FASTOKENS_PATCH_LOCK:
             with contextlib.redirect_stdout(io.StringIO()):
                 fastokens.unpatch_transformers()
+
+
+def _load_fast_tokenizer_directly(
+    model_name_or_path: str, revision: str | None
+) -> Any | None:
+    """Load a self-contained fast tokenizer without building the model config.
+
+    ``AutoTokenizer.from_pretrained`` eagerly constructs the *model* config to
+    resolve the tokenizer class — even for a plain ``PreTrainedTokenizerFast``.
+    That construction can raise on modeling-only concerns the tokenizer never
+    needs (e.g. RoPE parameter validation for configs that carry nested
+    ``rope_parameters``). When the repo ships a complete ``tokenizer.json`` and
+    declares no custom tokenizer, the tokenizer is fully self-describing, so we
+    load it directly and skip the config detour.
+
+    Returns ``None`` when there's nothing safe to load this way — a custom
+    ``auto_map`` tokenizer (which must run through ``AutoTokenizer`` with
+    ``trust_remote_code``) or no fast tokenizer at all — so the caller can
+    surface its original error instead.
+    """
+    from transformers import PreTrainedTokenizerFast
+    from transformers.models.auto.tokenization_auto import get_tokenizer_config
+
+    try:
+        if "auto_map" in get_tokenizer_config(model_name_or_path, revision=revision):
+            return None
+        return PreTrainedTokenizerFast.from_pretrained(
+            model_name_or_path, revision=revision
+        )
+    except Exception:
+        return None
+
+
+def _load_tokenizer_via_auto(model_name_or_path: str, **kwargs) -> Any:
+    """``AutoTokenizer.from_pretrained`` with a config-free fallback.
+
+    renderers needs the tokenizer, not the model. If ``AutoTokenizer`` fails
+    while building the model config it loads to resolve the tokenizer class,
+    retry by loading the repo's self-contained ``tokenizer.json`` directly. The
+    original error is re-raised if the repo has no such tokenizer.
+    """
+    from transformers import AutoTokenizer
+
+    try:
+        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
+    except Exception as exc:
+        tok = _load_fast_tokenizer_directly(
+            model_name_or_path, revision=kwargs.get("revision")
+        )
+        if tok is None:
+            raise
+        logger.debug(
+            "AutoTokenizer.from_pretrained(%r) failed building the model config "
+            "(%s: %s); loaded the tokenizer directly from tokenizer.json.",
+            model_name_or_path,
+            type(exc).__name__,
+            str(exc)[:160],
+        )
+        return tok
 
 
 def load_tokenizer(
@@ -1143,9 +1295,14 @@ def load_tokenizer(
     fastokens raises during the patched load (e.g. an unknown
     pre-tokenizer type), we automatically retry with the vanilla
     backend and emit an INFO log.
-    """
-    from transformers import AutoTokenizer
 
+    ``AutoTokenizer.from_pretrained`` eagerly builds the model config to
+    resolve the tokenizer class. If that construction raises on a
+    modeling-only concern the tokenizer doesn't need (e.g. RoPE
+    validation for configs with nested ``rope_parameters``), we fall
+    back to loading the repo's self-contained ``tokenizer.json``
+    directly — see ``_load_tokenizer_via_auto``.
+    """
     kwargs: dict[str, Any] = {}
     revision = TRUSTED_REVISIONS.get(model_name_or_path)
     if revision is not None:
@@ -1154,7 +1311,7 @@ def load_tokenizer(
         kwargs = {"trust_remote_code": False}
 
     if not use_fastokens or model_name_or_path in FASTOKENS_INCOMPATIBLE:
-        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
+        return _load_tokenizer_via_auto(model_name_or_path, **kwargs)
 
     try:
         return _patched_load(model_name_or_path, **kwargs)
@@ -1167,14 +1324,14 @@ def load_tokenizer(
             type(exc).__name__,
             str(exc)[:160],
         )
-        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
+        return _load_tokenizer_via_auto(model_name_or_path, **kwargs)
 
 
 def _populate_registry():
     if RENDERER_REGISTRY:
         return
-    from renderers.default import DefaultRenderer
     from renderers.deepseek_v3 import DeepSeekV3Renderer
+    from renderers.default import DefaultRenderer
     from renderers.glm5 import GLM5Renderer, GLM51Renderer
     from renderers.glm45 import GLM45Renderer
     from renderers.gpt_oss import GptOssRenderer
@@ -1275,8 +1432,7 @@ def create_renderer(
         cls = RENDERER_REGISTRY.get(config.name)
         if cls is None:
             raise ValueError(
-                f"Unknown renderer {config.name!r}. "
-                f"Available: {', '.join(sorted(RENDERER_REGISTRY))}"
+                f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
             )
         return cls(tokenizer, config)
 
@@ -1349,7 +1505,7 @@ def build_training_sample(
     renderer: Renderer,
     messages: list[Message],
     *,
-    role_to_mask: Callable[[Message], bool],
+    role_to_mask: Callable[[Message], bool] | None = None,
     tools: list[ToolSpec] | None = None,
     content_sft_roles: "set[str] | frozenset[str] | None" = None,
 ) -> tuple[list[int], list[bool]]:
@@ -1358,15 +1514,31 @@ def build_training_sample(
     Single render() call + message_indices → per-token mask.
     Replaces build_incremental_token_mask (O(N) renders → O(1)).
 
-    When the renderer populates ``rendered.sampled_mask``, the loss mask
-    is the AND of role-based attribution and the sampled signal: only
-    tokens the model would have produced at inference are trainable.
-    This keeps SFT byte-aligned with the RL trajectory mask (where the
-    prompt / completion split achieves the same effect structurally).
+    When ``role_to_mask`` is omitted, ``loss_mask`` is the renderer's
+    ``sampled_mask`` directly: every token the model would have
+    produced at inference is trainable, regardless of which message
+    it's attributed to. This is the recommended default for renderer
+    callers — the renderer owns the per-token "is this model output"
+    signal, so role-level filtering becomes a downstream constraint
+    rather than a precondition. (Some role markers — e.g. GLM
+    ``<|user|>`` / ``<|observation|>`` after a tool-calling assistant
+    turn — *are* sampled by the model at inference and live inside the
+    next message's span; ``sampled_mask`` captures that, but a
+    naive role filter would mask them out.)
+
+    When ``role_to_mask`` is provided, ``loss_mask`` is the AND of the
+    role-based attribution and the sampled signal: only tokens the
+    model would have produced at inference AND attributed to a
+    trainable role pass through. Useful when the caller needs to
+    restrict training to a specific role (e.g. assistant-only) even on
+    a renderer whose ``sampled_mask`` already covers other roles.
+
     Renderers that don't populate ``sampled_mask`` (empty list) fall
     back to attribution-only masking — every token attributed to a
     trainable role is trained on, including template-injected
-    ``<|im_start|>role\\n`` openers.
+    ``<|im_start|>role\\n`` openers. In this fallback mode
+    ``role_to_mask`` is required; calling without it raises
+    ``ValueError``.
 
     ``content_sft_roles`` opts in additional roles for "body-only"
     supervision: for every message whose role is in this set, tokens
@@ -1397,6 +1569,13 @@ def build_training_sample(
     else:
         body_roles = frozenset()
 
+    if role_to_mask is None and not has_sampled_info:
+        raise ValueError(
+            "role_to_mask is required when the renderer does not populate "
+            "sampled_mask. Pass an explicit role filter (e.g. "
+            "lambda m: m['role'] == 'assistant') for this renderer."
+        )
+
     loss_mask: list[bool] = []
     for k, msg_idx in enumerate(rendered.message_indices):
         if msg_idx < 0:
@@ -1412,6 +1591,11 @@ def build_training_sample(
             continue
         if has_sampled_info and not rendered.sampled_mask[k]:
             loss_mask.append(False)
+        elif role_to_mask is None:
+            # sampled_mask alone gates the loss when no role filter is
+            # supplied. ``sampled_mask[k]`` is True here (handled by the
+            # branch above), so this token is trainable.
+            loss_mask.append(True)
         else:
             loss_mask.append(role_to_mask(msg))
     return rendered.token_ids, loss_mask
@@ -1502,7 +1686,6 @@ def _get_offset_tokenizer(tokenizer):
         cached = _offset_tokenizers.get(name_or_path)
         if cached is not None:
             return cached
-        from transformers import AutoTokenizer
 
         kwargs: dict[str, Any] = {}
         revision = TRUSTED_REVISIONS.get(name_or_path)
@@ -1512,10 +1695,12 @@ def _get_offset_tokenizer(tokenizer):
             kwargs = {"trust_remote_code": False}
         # Explicitly vanilla — we want HF's Rust tokenizer with offset
         # tracking, not the fastokens shim. ``load_tokenizer`` would
-        # patch fastokens in by default; calling
-        # ``AutoTokenizer.from_pretrained`` directly here keeps the
-        # fastokens patch out of this code path entirely.
-        offset_tok = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+        # patch fastokens in by default; routing through
+        # ``_load_tokenizer_via_auto`` keeps the fastokens patch out
+        # of this code path while still applying the config-build
+        # fallback (RoPE-validation failures on nested
+        # ``rope_parameters``, etc.).
+        offset_tok = _load_tokenizer_via_auto(name_or_path, **kwargs)
         if not getattr(offset_tok, "is_fast", False):
             raise RuntimeError(
                 f"Vanilla tokenizer for {name_or_path!r} is not a fast "

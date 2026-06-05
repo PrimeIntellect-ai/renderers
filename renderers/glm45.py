@@ -21,6 +21,7 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     attribute_text_segments,
+    extract_message_tool_names,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
 )
@@ -184,6 +185,22 @@ class GLM45Renderer:
             role = msg["role"]
             content = self._visible_text(msg.get("content"))
 
+            # When the previous message is an assistant, this message's
+            # role-opening token (``<|user|>`` / ``<|observation|>``) is
+            # the inference-time stop signal that closes the assistant's
+            # turn (see ``get_stop_token_ids``). Mark it
+            # ``is_sampled=True`` so the loss-mask pipeline trains the
+            # model to emit it after ``</tool_call>`` (instead of
+            # continuing with another ``<tool_call>`` block). The token
+            # stays attributed to this message (msg_idx=i) and remains
+            # ``is_content=False`` — it's a role-marker / scaffold, not
+            # body bytes, so ``content_mask_for_roles({"tool"})`` and
+            # ``content_token_spans_by_role()`` correctly exclude it
+            # from "tool body" views. Byte stream is unchanged.
+            # ``system`` only appears at the start of a GLM conversation,
+            # so its opener is never the closer of an assistant turn.
+            closes_assistant_turn = i > 0 and messages[i - 1]["role"] == "assistant"
+
             if role == "system":
                 emit_special(self._system, i, is_sampled=False, is_content=False)
                 # ``\n`` is the scaffold separator after the role tag;
@@ -193,7 +210,12 @@ class GLM45Renderer:
                 )
 
             elif role == "user":
-                emit_special(self._user, i, is_sampled=False, is_content=False)
+                emit_special(
+                    self._user,
+                    i,
+                    is_sampled=closes_assistant_turn,
+                    is_content=False,
+                )
                 # ``\n`` is scaffold; ``content`` is body; the optional
                 # ``/nothink`` suffix is scaffold the renderer injects
                 # when ``enable_thinking=False``.
@@ -244,6 +266,7 @@ class GLM45Renderer:
             sampled_mask=sampled,
             is_content=content_mask,
             message_roles=[m.get("role") or "" for m in messages],
+            message_tool_names=extract_message_tool_names(messages),
         )
 
     def render_ids(
@@ -362,6 +385,21 @@ class GLM45Renderer:
                 ext_sampled.append(is_sampled)
                 ext_content.append(is_content)
 
+        # The opener-token of the first new_message may also serve as
+        # the close of the previous assistant turn (when the model
+        # failed to sample the stop token itself and the bridge has to
+        # synthesize the boundary above). Unlike :meth:`render`, the
+        # bridge emits these with ``is_sampled=False, is_content=False``
+        # — they are template scaffolding for the *next* step's prompt,
+        # not tokens the model produced *in this* step. The RL loss
+        # operates on ``previous_completion_ids`` (what the model
+        # actually sampled this round); bridge tokens belong to the
+        # subsequent prompt and must not be counted as "model output"
+        # by downstream mask consumers. This deliberate disagreement
+        # with ``render()`` reflects the SFT vs RL semantics: render's
+        # masks describe what the model *should* produce given a
+        # complete conversation; bridge's masks describe what it
+        # *actually* produced this step.
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
             content = self._visible_text(msg.get("content"))
@@ -409,6 +447,7 @@ class GLM45Renderer:
             sampled_mask=[False] * total_len,
             is_content=[False] * len(previous_ids) + ext_content,
             message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
         )
 
     def _render_assistant(
@@ -531,21 +570,24 @@ class GLM45Renderer:
         emit_text,
         emit_text_segments,
     ) -> None:
-        # Tool messages are conversation history injected by the runtime
-        # between assistant turns — the model never samples any of these
-        # tokens, so every emission is is_sampled=False. The body bytes
-        # get ``is_content=True``; the ``\n<tool_response>\n`` /
-        # ``\n</tool_response>`` wraps and the ``<|observation|>`` role
-        # tag are scaffold so the SFT mask for tool body never trains
-        # the model to emit them. Single BPE pass over the joined text
-        # preserves boundary merges (the tool body's leading/trailing
-        # chars can merge with the wrap's ``\n``s if the tokenizer would
-        # do so; we route through ``emit_text_segments`` so the
-        # attribution is offset-driven and tokenizer-agnostic).
-        prev_is_tool = msg_idx > 0 and messages[msg_idx - 1]["role"] == "tool"
+        # Tool body bytes get ``is_content=True``; the wraps are
+        # scaffold. The ``<|observation|>`` role tag is scaffold too
+        # (``is_content=False`` so ``content_mask_for_roles({"tool"})``
+        # excludes it). When the previous message is an assistant it
+        # doubles as the inference stop signal for that assistant's
+        # turn — mark it ``is_sampled=True`` so SFT trains the model to
+        # emit it after ``</tool_call>``. The token stays attributed to
+        # this tool message; byte stream is unchanged.
+        prev_role = messages[msg_idx - 1]["role"] if msg_idx > 0 else None
+        closes_assistant_turn = prev_role == "assistant"
 
-        if not prev_is_tool:
-            emit_special(self._observation, msg_idx, is_sampled=False, is_content=False)
+        if prev_role != "tool":
+            emit_special(
+                self._observation,
+                msg_idx,
+                is_sampled=closes_assistant_turn,
+                is_content=False,
+            )
 
         emit_text_segments(
             [

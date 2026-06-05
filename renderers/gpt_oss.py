@@ -56,6 +56,7 @@ from renderers.base import (
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    extract_message_tool_names,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
     trim_to_turn_close,
@@ -465,6 +466,7 @@ class GptOssRenderer:
             sampled_mask=sampled,
             is_content=content_mask,
             message_roles=[m.get("role") or "" for m in messages],
+            message_tool_names=extract_message_tool_names(messages),
         )
 
     def render_ids(
@@ -594,6 +596,7 @@ class GptOssRenderer:
             sampled_mask=[False] * total_len,
             is_content=[False] * len(previous_ids) + ext_content,
             message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
         )
 
     # ── message conversion ───────────────────────────────────────────────────

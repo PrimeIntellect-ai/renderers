@@ -262,11 +262,6 @@ async def generate(
     sp.setdefault("skip_special_tokens", False)
 
     if transport == "dynamo_chat":
-        # Dynamo branch: POST /v1/chat/completions with nvext.token_data.
-        # Dynamo has no /inference/v1/generate route; the equivalent TITO
-        # surface lives on chat-completions via the ``nvext`` envelope
-        # (PR #8119: response token IDs come back under
-        # ``nvext.engine_data.completion_token_ids``).
         if mm_data is not None and not mm_data.is_empty():
             raise NotImplementedError(
                 "Multimodal renderers are not yet supported on the "
@@ -285,7 +280,6 @@ async def generate(
             messages=messages,
         )
     elif transport == "vllm_generate":
-        # vLLM-native branch: POST /inference/v1/generate (unchanged from upstream).
         features = (
             _build_mm_features(renderer, mm_data)
             if mm_data and not mm_data.is_empty()
@@ -327,9 +321,7 @@ async def generate(
 
     choice = (data.get("choices") or [{}])[0]
     is_dynamo = transport == "dynamo_chat"
-    # vLLM writes choices[0].token_ids; Dynamo returns engine fields under nvext
-    # (PR #8119). Only consult nvext on the dynamo path so the vLLM path stays
-    # byte-identical to upstream.
+    # Only consult nvext on the dynamo path, so the vLLM path is unchanged.
     nvext_resp = (data.get("nvext") or {}) if is_dynamo else {}
     engine_data = nvext_resp.get("engine_data") or {}
 
@@ -343,7 +335,7 @@ async def generate(
                 break
     completion_ids = list(completion_ids or [])
     if is_dynamo and not ids_present:
-        # Field absent (not merely an empty completion) — usually a missing
+        # Field absent (vs. an empty completion) — usually a missing
         # nvext.extra_fields=["engine_data"] opt-in.
         raise RuntimeError(
             "dynamo_chat response carried no completion token IDs "
@@ -355,26 +347,22 @@ async def generate(
     )
 
     # ChatCompletionLogProbs flatten: {"content": [{"logprob": ...}, ...]}.
-    # engine_data.completion_logprobs is a dynamo-only fallback.
     raw_logprobs = choice.get("logprobs") or {}
     content_lp = raw_logprobs.get("content") if isinstance(raw_logprobs, dict) else None
     completion_logprobs = [float(c.get("logprob") or 0.0) for c in content_lp or []]
     if not completion_logprobs and is_dynamo:
+        # Dynamo-only fallback when chat logprobs are absent.
         engine_lp = engine_data.get("completion_logprobs") or []
         if engine_lp:
             completion_logprobs = [float(x) for x in engine_lp]
 
-    # vLLM routed_experts sidecar ({shape, data}) passed through unchanged. Not
-    # surfaced on dynamo_chat: its nvext shape differs from the downstream
-    # RoutedExpertsPayload contract (base64 + ``start``).
+    # Not surfaced on dynamo_chat: its nvext shape differs from the
+    # downstream RoutedExpertsPayload contract (base64 + ``start``).
     routed_experts = choice.get("routed_experts")
 
-    # /inference/v1/generate returns finish_reason in {"stop","length",...} —
-    # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
-    # when we extracted tool calls client-side, so OpenAI-compatible agent
-    # loops continue past the tool turn instead of treating the response as
-    # final. Dynamo's chat-completions surface CAN return "tool_calls"
-    # directly, so this promotion is a no-op there.
+    # /inference/v1/generate never returns "tool_calls", so promote
+    # stop→tool_calls when we parsed tool calls client-side (keeps agent
+    # loops going). No-op on dynamo_chat, which can return it directly.
     finish_reason = choice.get("finish_reason")
     ok_tool_calls = [
         tc for tc in parsed.tool_calls if tc.status == ToolCallParseStatus.OK
@@ -424,30 +412,14 @@ async def _post_dynamo_chat(
     """POST ``prompt_ids`` to Dynamo's ``/v1/chat/completions`` route.
 
     Mirrors ``verifiers.clients.openai_chat_completions_token_client._post_dynamo_chat``
-    in shape, so the wire payload is identical whether the rollout goes
-    through the token client or the renderer client. Anything that lands
-    on Dynamo's chat-completions surface, lands here.
-
-    Wire shape:
-
-      - ``nvext.token_data``: pre-tokenized prompt; Dynamo's preprocessor
-        skips tokenization when present.
-      - ``nvext.extra_fields = ["engine_data"]``: opt-in to Dynamo's engine
-        metadata channel (completion token IDs + logprobs). routed_experts is
-        intentionally NOT requested — Dynamo's nvext shape differs from the
-        downstream RoutedExpertsPayload contract, so it is dropped on this path.
-      - ``messages``: placeholder (single user message). Dynamo ignores
-        when ``token_data`` is present, but the OpenAI schema requires
-        a non-empty messages array, so we send a 1-token stub.
-      - ``stop_token_ids`` / ``cache_salt`` / ``logprobs`` / backend sampling
-        hints ride as passthrough fields accepted by Dynamo's
-        ``PASSTHROUGH_EXTRA_FIELDS`` allowlist.
+    so the wire payload is identical via either client. ``nvext.token_data``
+    carries the pre-tokenized prompt (Dynamo skips tokenization when present)
+    and ``extra_fields=["engine_data"]`` opts into the completion-IDs/logprobs
+    channel. ``messages`` is a placeholder stub the OpenAI schema requires but
+    Dynamo ignores. routed_experts is not requested (incompatible nvext shape).
     """
-    # Standard OpenAI fields that map 1:1 onto Dynamo's chat-completions
-    # request schema (validate.rs accepts them natively).
     body: dict[str, Any] = {
         "model": model,
-        # Single placeholder user message; ignored when token_data is set.
         "messages": [{"role": "user", "content": ""}],
         "stream": False,
         "nvext": {
@@ -455,15 +427,14 @@ async def _post_dynamo_chat(
             "extra_fields": ["engine_data"],
         },
     }
-    # tools are NOT sent on the wire: the renderer already bakes them into
-    # token_data, and renderer ToolSpec isn't the OpenAI tool shape (would 400).
+    # tools are baked into token_data already; the renderer ToolSpec isn't the
+    # OpenAI tool shape, so forwarding it would 400.
     if cache_salt is not None:
         body["nvext"]["cache_salt"] = cache_salt
     if priority is not None:
         body["nvext"]["agent_hints"] = {"priority": priority}
 
-    # Surface standard sampling params at top level (Dynamo's schema
-    # recognizes them natively, so they flow into SamplingOptions cleanly).
+    # Sampling params Dynamo's schema recognizes natively at top level.
     promotable = (
         "max_tokens",
         "temperature",
@@ -484,17 +455,15 @@ async def _post_dynamo_chat(
         if key == "max_tokens":
             body["max_completion_tokens"] = value
         elif key == "logprobs":
-            # Standard OpenAI shape: logprobs=true + top_logprobs=N. The
-            # vLLM TITO surface accepts ``logprobs=N`` (int); Dynamo's
-            # chat-completions schema requires the bool+top_logprobs split.
+            # vLLM takes logprobs=N (int); Dynamo's chat schema wants the
+            # OpenAI bool + top_logprobs split.
             body["logprobs"] = True
             if isinstance(value, int) and value > 1:
                 body["top_logprobs"] = value
         else:
             body[key] = value
 
-    # Pass-through hints that Dynamo's PASSTHROUGH_EXTRA_FIELDS allowlist
-    # accepts (stop_token_ids, token constraints, backend sampling toggles).
+    # Pass-through hints on Dynamo's PASSTHROUGH_EXTRA_FIELDS allowlist.
     for key in (
         "stop_token_ids",
         "bad_words_token_ids",

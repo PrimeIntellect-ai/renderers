@@ -36,6 +36,12 @@ RENDERER_MODELS = [
     # Ultra resolves the Ultra template variant via name (auto → ultra=True).
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
+    # NOTE: DeepSeek-V3/R1 are intentionally NOT in this shared barrage.
+    # They carry pre-existing renderer↔template divergences unrelated to
+    # the V3/R1 split (e.g. the template renders tool_calls only when
+    # content is None, and is_content masks for non-assistant bodies),
+    # which would fail here. The split is validated in test_deepseek_r1.py;
+    # the pre-existing gaps are tracked separately.
     # Llama-3 loads via the unrestricted unsloth mirror (byte-identical
     # chat template) so CI needs no Meta-gated HF token. Pinned to the
     # explicit "llama-3" config because the mirror name isn't in

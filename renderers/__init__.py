@@ -44,6 +44,7 @@ from renderers.configs import (
     BaseRendererConfig,
     config_from_name,
     DefaultRendererConfig,
+    DeepSeekR1RendererConfig,
     DeepSeekV3RendererConfig,
     GLM45RendererConfig,
     GLM51RendererConfig,
@@ -74,6 +75,7 @@ from renderers.configs import (
 # imports — ``renderers.base._populate_registry`` lazy-imports the
 # concrete classes itself when a renderer is instantiated.
 _LAZY_RENDERERS: dict[str, str] = {
+    "DeepSeekR1Renderer": "renderers.deepseek_r1",
     "DeepSeekV3Renderer": "renderers.deepseek_v3",
     "DefaultRenderer": "renderers.default",
     "GLM45Renderer": "renderers.glm45",
@@ -113,6 +115,8 @@ __all__ = [
     "BaseRendererConfig",
     "Content",
     "ContentPart",
+    "DeepSeekR1Renderer",
+    "DeepSeekR1RendererConfig",
     "DeepSeekV3Renderer",
     "DeepSeekV3RendererConfig",
     "DefaultRenderer",

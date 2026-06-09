@@ -54,6 +54,7 @@ _RENDERER_MODELS = [
     ("moonshotai/Kimi-K2.5", "auto"),
     ("moonshotai/Kimi-K2.6", "auto"),
     ("deepseek-ai/DeepSeek-V3", "auto"),
+    ("deepseek-ai/DeepSeek-R1", "auto"),
     ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
     # Ultra: auto-resolves to the Ultra template variant (ultra=True) via the
     # model name; parity asserted against the Ultra apply_chat_template.

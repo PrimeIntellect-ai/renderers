@@ -400,24 +400,30 @@ class Nemotron3RendererConfig(BaseRendererConfig):
 
 
 class DeepSeekV3RendererConfig(BaseRendererConfig):
-    """DeepSeek V3 renderer config.
+    """DeepSeek-V3 renderer config (non-reasoning).
 
-    ``enable_thinking`` is renderer-internal here — DeepSeek-V3's chat
-    template does not reference any thinking variable, so passing it to
-    ``apply_chat_template`` upstream is a no-op. The renderer uses it
-    to control the ``<think>`` prefill at the generation prompt (R1
-    distill convention).
+    DeepSeek-V3 has no thinking concept: the generation prompt is a bare
+    ``<｜Assistant｜>`` and assistant content is emitted verbatim. For the
+    reasoning variant use :class:`DeepSeekR1RendererConfig`.
     """
 
     name: Literal["deepseek-v3"] = "deepseek-v3"
 
-    enable_thinking: bool = True
-    """Renderer convention for the R1-distill family: when ``True``,
-    prefill ``<think>`` at the generation prompt. The DeepSeek-V3 Jinja
-    template ignores this kwarg upstream; it's not a chat-template
-    kwarg in the strict sense."""
 
-    _internal_fields = frozenset({"enable_thinking"})
+class DeepSeekR1RendererConfig(BaseRendererConfig):
+    """DeepSeek-R1 renderer config (reasoning).
+
+    R1 always reasons — its chat template unconditionally prefills
+    ``<think>\\n`` at the generation prompt and strips ``</think>`` from
+    historical assistant turns. There is therefore no ``enable_thinking``
+    knob (thinking is not optional), and ``preserve_*`` flags are no-ops
+    (history reasoning is always dropped); both stored for protocol
+    uniformity. Applies to full ``deepseek-ai/DeepSeek-R1`` / ``-R1-0528``
+    — NOT the R1-Distill-Qwen/Llama models, which use those base
+    tokenizers and route to the Qwen3 / Llama-3 renderers.
+    """
+
+    name: Literal["deepseek-r1"] = "deepseek-r1"
 
 
 RendererConfig = Annotated[
@@ -439,6 +445,7 @@ RendererConfig = Annotated[
         MiniMaxM2RendererConfig,
         Nemotron3RendererConfig,
         DeepSeekV3RendererConfig,
+        DeepSeekR1RendererConfig,
     ],
     Field(discriminator="name"),
 ]
@@ -474,6 +481,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "minimax-m2": MiniMaxM2RendererConfig,
     "nemotron-3": Nemotron3RendererConfig,
     "deepseek-v3": DeepSeekV3RendererConfig,
+    "deepseek-r1": DeepSeekR1RendererConfig,
 }
 
 
@@ -505,6 +513,7 @@ __all__ = [
     "AutoRendererConfig",
     "BaseRendererConfig",
     "DefaultRendererConfig",
+    "DeepSeekR1RendererConfig",
     "DeepSeekV3RendererConfig",
     "GLM45RendererConfig",
     "GLM51RendererConfig",

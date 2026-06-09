@@ -1030,9 +1030,13 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # MiniMax.
     "MiniMaxAI/MiniMax-M2": "minimax-m2",
     "MiniMaxAI/MiniMax-M2.5": "minimax-m2",
-    # DeepSeek V3.
+    # DeepSeek V3 (non-reasoning).
     "deepseek-ai/DeepSeek-V3": "deepseek-v3",
     "deepseek-ai/DeepSeek-V3-Base": "deepseek-v3",
+    # DeepSeek R1 (reasoning). Distill models use the Qwen/Llama
+    # tokenizers and route to those renderers, not here.
+    "deepseek-ai/DeepSeek-R1": "deepseek-r1",
+    "deepseek-ai/DeepSeek-R1-0528": "deepseek-r1",
     # Kimi K2 (K2.5 and K2.6 share the K2.5 template, distinct from K2).
     "moonshotai/Kimi-K2-Instruct": "kimi-k2",
     "moonshotai/Kimi-K2.5": "kimi-k2.5",
@@ -1161,6 +1165,8 @@ FASTOKENS_INCOMPATIBLE: frozenset[str] = frozenset(
         # doesn't yet implement.
         "deepseek-ai/DeepSeek-V3",
         "deepseek-ai/DeepSeek-V3-Base",
+        "deepseek-ai/DeepSeek-R1",
+        "deepseek-ai/DeepSeek-R1-0528",
     }
 )
 
@@ -1334,6 +1340,7 @@ def load_tokenizer(
 def _populate_registry():
     if RENDERER_REGISTRY:
         return
+    from renderers.deepseek_r1 import DeepSeekR1Renderer
     from renderers.deepseek_v3 import DeepSeekV3Renderer
     from renderers.default import DefaultRenderer
     from renderers.glm5 import GLM5Renderer, GLM51Renderer
@@ -1362,6 +1369,7 @@ def _populate_registry():
             "glm-4.5": GLM45Renderer,
             "minimax-m2": MiniMaxM2Renderer,
             "deepseek-v3": DeepSeekV3Renderer,
+            "deepseek-r1": DeepSeekR1Renderer,
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
             "laguna-xs.2": LagunaXS2Renderer,

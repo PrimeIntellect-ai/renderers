@@ -278,8 +278,32 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
     assert result["prompt_attribution"] is supplied
 
 
+class _DynamoFakeClient(_FakeClient):
+    """Dynamo-shaped response: engine fields + routed_experts under nvext (not
+    choices[0]), so the test proves routed_experts is dropped on dynamo_chat."""
+
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        self.calls.append(
+            {"path": path, "cast_to": cast_to, "body": body, "options": options}
+        )
+        return {
+            "id": "gen-dyn",
+            "choices": [
+                {
+                    "index": 0,
+                    "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+                    "finish_reason": "stop",
+                }
+            ],
+            "nvext": {
+                "engine_data": {"completion_token_ids": [7, 8]},
+                "routed_experts": {"data": "AQI=", "shape": [2, 1, 1]},
+            },
+        }
+
+
 def test_dynamo_transport_forwards_priority_and_detokenize():
-    client = _FakeClient()
+    client = _DynamoFakeClient()
 
     result = asyncio.run(
         generate(
@@ -324,11 +348,8 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
         "detokenize": False,
     }
     assert result["completion_ids"] == [7, 8]
-    # routed_experts passes through unchanged (no client-side decode).
-    assert result["routed_experts"] == {
-        "data": base64.b64encode(b"\x01\x02").decode("ascii"),
-        "shape": [2, 1, 1],
-    }
+    # routed_experts is dropped on dynamo_chat (nvext shape != downstream contract).
+    assert result["routed_experts"] is None
 
 
 class _NoCompletionIdsClient(_FakeClient):

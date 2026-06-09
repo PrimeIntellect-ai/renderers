@@ -431,8 +431,10 @@ async def _post_dynamo_chat(
 
       - ``nvext.token_data``: pre-tokenized prompt; Dynamo's preprocessor
         skips tokenization when present.
-      - ``nvext.extra_fields = ["engine_data", "routed_experts"]``: opt-in
-        to Dynamo's engine metadata and router replay channels.
+      - ``nvext.extra_fields = ["engine_data"]``: opt-in to Dynamo's engine
+        metadata channel (completion token IDs + logprobs). routed_experts is
+        intentionally NOT requested — Dynamo's nvext shape differs from the
+        downstream RoutedExpertsPayload contract, so it is dropped on this path.
       - ``messages``: placeholder (single user message). Dynamo ignores
         when ``token_data`` is present, but the OpenAI schema requires
         a non-empty messages array, so we send a 1-token stub.

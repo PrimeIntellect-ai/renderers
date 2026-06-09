@@ -1033,8 +1033,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # DeepSeek V3 (non-reasoning).
     "deepseek-ai/DeepSeek-V3": "deepseek-v3",
     "deepseek-ai/DeepSeek-V3-Base": "deepseek-v3",
-    # DeepSeek R1 (reasoning). Distill models use the Qwen/Llama
-    # tokenizers and route to those renderers, not here.
+    # DeepSeek R1 (reasoning).
     "deepseek-ai/DeepSeek-R1": "deepseek-r1",
     "deepseek-ai/DeepSeek-R1-0528": "deepseek-r1",
     # Kimi K2 (K2.5 and K2.6 share the K2.5 template, distinct from K2).

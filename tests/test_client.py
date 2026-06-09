@@ -309,7 +309,7 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
         "stream": False,
         "nvext": {
             "token_data": [1, 2, 3],
-            "extra_fields": ["engine_data", "routed_experts"],
+            "extra_fields": ["engine_data"],
             "cache_salt": "ckpt-42",
             "agent_hints": {"priority": 17},
         },
@@ -355,6 +355,44 @@ def test_dynamo_transport_raises_without_completion_ids():
                 max_prompt_len=10_000,
             )
         )
+
+
+class _EmptyCompletionClient(_FakeClient):
+    """Dynamo response with a present-but-empty completion_token_ids list."""
+
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        self.calls.append(
+            {"path": path, "cast_to": cast_to, "body": body, "options": options}
+        )
+        return {
+            "request_id": "x",
+            "choices": [{"index": 0, "finish_reason": "stop", "logprobs": {"content": []}}],
+            "nvext": {"engine_data": {"completion_token_ids": []}},
+        }
+
+
+class _EmptyParseRenderer(_FakeRenderer):
+    def parse_response(self, completion_ids, *, tools=None) -> ParsedResponse:
+        assert completion_ids == []
+        return ParsedResponse(content="", reasoning_content=None, tool_calls=[])
+
+
+def test_dynamo_transport_allows_present_but_empty_completion():
+    """A present-but-empty completion_token_ids is a valid zero-token completion
+    and must NOT raise (only an absent field raises)."""
+    result = asyncio.run(
+        generate(
+            client=_EmptyCompletionClient(),
+            renderer=_EmptyParseRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={"max_tokens": 7},
+            transport="dynamo_chat",
+            max_prompt_len=10_000,
+        )
+    )
+    assert result["completion_ids"] == []
 
 
 class _BoomClient(_FakeClient):

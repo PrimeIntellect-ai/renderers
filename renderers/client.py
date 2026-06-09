@@ -325,23 +325,25 @@ async def generate(
         raise ValueError(f"Unknown renderer transport: {transport!r}")
 
     choice = (data.get("choices") or [{}])[0]
-    # Dynamo emits engine token IDs under ``nvext.engine_data.completion_token_ids``
-    # (PR #8119 channel) rather than ``choice.token_ids``. Try both — vLLM's
-    # /inference/v1/generate writes the top-level shape; Dynamo's
-    # /v1/chat/completions writes the nested one. The first present wins.
+    is_dynamo = transport == "dynamo_chat"
+    # vLLM writes choices[0].token_ids; Dynamo returns engine fields under nvext
+    # (PR #8119). Only consult nvext on the dynamo path so the vLLM path stays
+    # byte-identical to upstream.
+    nvext_resp = (data.get("nvext") or {}) if is_dynamo else {}
+    engine_data = nvext_resp.get("engine_data") or {}
+
     completion_ids = choice.get("token_ids")
-    if not completion_ids:
-        nvext_resp = data.get("nvext") or {}
-        engine_data = nvext_resp.get("engine_data") or {}
-        completion_ids = (
-            engine_data.get("completion_token_ids")
-            or nvext_resp.get("completion_token_ids")
-            or []
-        )
+    ids_present = completion_ids is not None
+    if not ids_present and is_dynamo:
+        for src in (engine_data, nvext_resp):
+            if src.get("completion_token_ids") is not None:
+                completion_ids = src["completion_token_ids"]
+                ids_present = True
+                break
     completion_ids = list(completion_ids or [])
-    if transport == "dynamo_chat" and not completion_ids:
-        # Fail loudly rather than parse an empty completion (usually a missing
-        # nvext.extra_fields=["engine_data"] opt-in).
+    if is_dynamo and not ids_present:
+        # Field absent (not merely an empty completion) — usually a missing
+        # nvext.extra_fields=["engine_data"] opt-in.
         raise RuntimeError(
             "dynamo_chat response carried no completion token IDs "
             "(expected nvext.engine_data.completion_token_ids)."
@@ -352,24 +354,19 @@ async def generate(
     )
 
     # ChatCompletionLogProbs flatten: {"content": [{"logprob": ...}, ...]}.
-    # Same shape on both transports (Dynamo aliases the standard OpenAI
-    # logprobs field). engine_data.completion_logprobs is a fallback when
-    # the OpenAI-style logprobs array is absent.
+    # engine_data.completion_logprobs is a dynamo-only fallback.
     raw_logprobs = choice.get("logprobs") or {}
     content_lp = raw_logprobs.get("content") if isinstance(raw_logprobs, dict) else None
     completion_logprobs = [float(c.get("logprob") or 0.0) for c in content_lp or []]
-    if not completion_logprobs:
-        nvext_resp = data.get("nvext") or {}
-        engine_data = nvext_resp.get("engine_data") or {}
+    if not completion_logprobs and is_dynamo:
         engine_lp = engine_data.get("completion_logprobs") or []
         if engine_lp:
             completion_logprobs = [float(x) for x in engine_lp]
 
-    # Pass the routed_experts sidecar through unchanged (binary {shape, data}
-    # for vLLM; same dict under nvext for Dynamo). Decoding is the consumer's job.
-    routed_experts = choice.get("routed_experts") or (data.get("nvext") or {}).get(
-        "routed_experts"
-    )
+    # vLLM routed_experts sidecar ({shape, data}) passed through unchanged. Not
+    # surfaced on dynamo_chat: its nvext shape differs from the downstream
+    # RoutedExpertsPayload contract (base64 + ``start``).
+    routed_experts = choice.get("routed_experts")
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
@@ -385,7 +382,9 @@ async def generate(
         finish_reason = "tool_calls"
 
     return {
-        "request_id": data.get("request_id") or data.get("id") or "",
+        "request_id": data.get("request_id")
+        or (data.get("id") if is_dynamo else None)
+        or "",
         "prompt_ids": list(prompt_ids),
         "completion_ids": list(completion_ids),
         "completion_logprobs": completion_logprobs,
@@ -450,7 +449,7 @@ async def _post_dynamo_chat(
         "stream": False,
         "nvext": {
             "token_data": list(prompt_ids),
-            "extra_fields": ["engine_data", "routed_experts"],
+            "extra_fields": ["engine_data"],
         },
     }
     # tools are NOT sent on the wire: the renderer already bakes them into

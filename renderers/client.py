@@ -119,6 +119,7 @@ async def _resolve_max_prompt_len(client: AsyncOpenAI, model: str) -> int | None
         _max_prompt_len_cache[key] = value
         return value
 
+
 # Public type alias; matches verifiers.types.RendererTransport string set.
 RendererTransport = Literal["vllm_generate", "dynamo_chat"]
 

@@ -387,7 +387,9 @@ class _EmptyCompletionClient(_FakeClient):
         )
         return {
             "request_id": "x",
-            "choices": [{"index": 0, "finish_reason": "stop", "logprobs": {"content": []}}],
+            "choices": [
+                {"index": 0, "finish_reason": "stop", "logprobs": {"content": []}}
+            ],
             "nvext": {"engine_data": {"completion_token_ids": []}},
         }
 

@@ -35,29 +35,49 @@ def _v3():
 # content is None (a pre-existing renderer↔template gap, tracked separately),
 # which is orthogonal to the V3/R1 reasoning split this module covers.
 _PARITY_SHAPES = [
-    ("single_turn", [
-        {"role": "user", "content": "What is 2+2?"},
-        {"role": "assistant", "content": "4"},
-    ], {}),
-    ("multi_turn", [
-        {"role": "user", "content": "A"},
-        {"role": "assistant", "content": "B"},
-        {"role": "user", "content": "C"},
-        {"role": "assistant", "content": "D"},
-    ], {}),
-    ("reasoning_content_field", [
-        {"role": "user", "content": "x"},
-        {"role": "assistant", "reasoning_content": "r", "content": "4"},
-    ], {}),
-    ("gen_prompt", [
-        {"role": "system", "content": "You are helpful."},
-        {"role": "user", "content": "Hi"},
-    ], {"add_generation_prompt": True}),
-    ("inline_think_history", [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": "<think>reasoning</think>answer"},
-        {"role": "user", "content": "q2"},
-    ], {}),
+    (
+        "single_turn",
+        [
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "4"},
+        ],
+        {},
+    ),
+    (
+        "multi_turn",
+        [
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "C"},
+            {"role": "assistant", "content": "D"},
+        ],
+        {},
+    ),
+    (
+        "reasoning_content_field",
+        [
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "reasoning_content": "r", "content": "4"},
+        ],
+        {},
+    ),
+    (
+        "gen_prompt",
+        [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hi"},
+        ],
+        {"add_generation_prompt": True},
+    ),
+    (
+        "inline_think_history",
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "<think>reasoning</think>answer"},
+            {"role": "user", "content": "q2"},
+        ],
+        {},
+    ),
 ]
 
 

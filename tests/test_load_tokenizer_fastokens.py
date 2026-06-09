@@ -46,6 +46,8 @@ def test_fastokens_incompatible_is_explicit_set():
         {
             "deepseek-ai/DeepSeek-V3",
             "deepseek-ai/DeepSeek-V3-Base",
+            "deepseek-ai/DeepSeek-R1",
+            "deepseek-ai/DeepSeek-R1-0528",
         }
     )
 

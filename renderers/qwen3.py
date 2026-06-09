@@ -62,6 +62,7 @@ class Qwen3Renderer:
         self._tool_call_end = self._token_id("</tool_call>")
         self._tool_response = self._token_id("<tool_response>")
         self._tool_response_end = self._token_id("</tool_response>")
+        self._think_end = self._token_id("</think>")
 
     def _token_id(self, token: str) -> int:
         tid = self._tokenizer.convert_tokens_to_ids(token)
@@ -276,6 +277,7 @@ class Qwen3Renderer:
             stop_ids={self._im_end, self._endoftext},
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
+            reasoning_end_id=self._think_end,
         )
 
     def get_stop_token_ids(self) -> list[int]:

@@ -42,7 +42,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
-from renderers.parsing import parse_kimi_k2_section
+from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
 from renderers.qwen3_vl import (
     _image_hash,
     _is_image_part,
@@ -452,6 +452,13 @@ def _parse_kimi_k2_response(
             ids = ids[:i]
             break
 
+    # Reasoning first: a tool-call section the model drafts *inside* its
+    # <think> trace must not be parsed as a real call (regression #78 — cf.
+    # parse_qwen3). K2.5 renders </think> as text, so locate the boundary by
+    # decoding; the section scan then starts past it. content_ids still begins
+    # at 0, so the </think> text-split below recovers reasoning unchanged.
+    reasoning_end = _reasoning_end_token_index(tokenizer, ids)
+
     # Token-ID path — produces spans. Only run if every relevant special
     # token resolved at init (i.e. is in the tokenizer's vocab).
     tool_calls: list[ParsedToolCall] = []
@@ -471,6 +478,7 @@ def _parse_kimi_k2_response(
             tool_call_begin_id=tool_call_begin_id,
             tool_call_argument_begin_id=tool_call_argument_begin_id,
             tool_call_end_id=tool_call_end_id,
+            scan_start=reasoning_end,
         )
         text = (
             tokenizer.decode(content_ids, skip_special_tokens=False)
@@ -481,9 +489,13 @@ def _parse_kimi_k2_response(
         text = tokenizer.decode(ids, skip_special_tokens=False) if ids else ""
 
     # Fallback path: model emitted literal-text section delimiters (singular
-    # variant) rather than special tokens. Spans unavailable here.
+    # variant) rather than special tokens. Spans unavailable here. Start the
+    # search past the first </think> so a literal section drafted inside the
+    # reasoning trace isn't matched as a real call (regression #78).
     if not tool_calls:
-        tc_match = _TOOL_CALLS_SECTION_RE.search(text)
+        think_close = text.find("</think>")
+        search_from = think_close + len("</think>") if think_close != -1 else 0
+        tc_match = _TOOL_CALLS_SECTION_RE.search(text, search_from)
         if tc_match:
             text = text[: tc_match.start()]
             tool_section = (

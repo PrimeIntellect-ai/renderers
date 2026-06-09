@@ -325,6 +325,7 @@ class Qwen3VLRenderer:
         self._tool_call_end = self._token_id("</tool_call>")
         self._tool_response = self._token_id("<tool_response>")
         self._tool_response_end = self._token_id("</tool_response>")
+        self._think_end = self._token_id("</think>")
         self._vision_start = self._token_id("<|vision_start|>")
         self._vision_end = self._token_id("<|vision_end|>")
         self._image_pad = self._token_id("<|image_pad|>")
@@ -634,6 +635,7 @@ class Qwen3VLRenderer:
             stop_ids={self._im_end, self._endoftext},
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
+            reasoning_end_id=self._think_end,
         )
 
     def get_stop_token_ids(self) -> list[int]:

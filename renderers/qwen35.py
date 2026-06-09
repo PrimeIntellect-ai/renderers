@@ -40,6 +40,8 @@ from renderers.qwen3_vl import (
     _is_video_part,
     _load_pil_image,
     materialize_image_pixels,
+    materialize_image_raw_refs,
+    qwen_image_item_for_render,
 )
 
 # ---------------------------------------------------------------------------
@@ -209,6 +211,12 @@ class Qwen35Renderer:
         :func:`materialize_image_pixels`."""
         return materialize_image_pixels(self, mm_data, messages)
 
+    def materialize_raw_refs(
+        self, mm_data: MultiModalData, messages: list[Message]
+    ) -> MultiModalData:
+        """Attach raw-image refs to descriptor-only mm_data without pixels."""
+        return materialize_image_raw_refs(self, mm_data, messages)
+
     @staticmethod
     def _content_has_media(content: Any) -> bool:
         """True when ``content`` is a structured list containing image / video parts."""
@@ -373,7 +381,7 @@ class Qwen35Renderer:
             # image data, so they ARE body content (is_content=True);
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # specials are template scaffold.
-            _, out, n, h = self._process_image(part)
+            n, h, mm_item = qwen_image_item_for_render(self, part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(
@@ -395,12 +403,7 @@ class Qwen35Renderer:
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
             )
-            mm_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            mm_items.setdefault("image", []).append(mm_item)
 
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             """Emit a user message whose content list contains image parts.
@@ -724,7 +727,7 @@ class Qwen35Renderer:
                 content_mask.append(is_content)
 
         def emit_image(part: dict[str, Any], msg_idx: int = -1) -> None:
-            _, out, n, h = self._process_image(part)
+            n, h, mm_item = qwen_image_item_for_render(self, part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(f"Picture {vision_counts['image']}: ", msg_idx)
@@ -737,12 +740,7 @@ class Qwen35Renderer:
             new_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
             )
-            new_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            new_items.setdefault("image", []).append(mm_item)
 
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             emit_special(self._im_start, msg_idx)

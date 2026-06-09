@@ -10,6 +10,10 @@ ship a cheap reference, and re-load it on the consumer:
    ``<run_dir>/assets/mm_features/v1/vllm-mmitem/<fingerprint>/<modality>/<hash[:2]>/<hash>.msgpack``
    and shipped as ``mmfile:v1:<run_id>:<fingerprint>:<modality>:<mm_hash>``
    tuple refs.
+3. **Raw-image inference refs** — raw images already written under
+   ``<run_dir>/assets/images`` and shipped as compact
+   ``mmraw:v1:<run_id>:<fingerprint>:<modality>:<mm_hash>:<raw_image_id>:<grid>``
+   refs. vLLM loads the raw image and runs its own processor.
 
 This module is the single source of truth for the on-disk layout, the
 fingerprint, the ref strings, and the msgpack envelope. It lives in
@@ -33,13 +37,20 @@ RUN_OUTPUT_ROOT = Path("/data/outputs")
 MM_FEATURE_ROOT_ENV = "PRIME_RL_MM_FEATURE_ROOT"
 
 MMFILE_PREFIX = "mmfile:v1"
+MMRAW_PREFIX = "mmraw:v1"
+MM_PAYLOAD_MODE_ENV = "RENDERERS_MM_FEATURE_STORE_MODE"
+MM_RAW_PAYLOAD_KEY = "_prime_rl_mm_payload"
+MM_RAW_PAYLOAD_VALUE = "raw"
 
 _SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SAFE_FINGERPRINT_RE = re.compile(r"^[a-f0-9]{16,64}$")
 _SAFE_MM_HASH_RE = re.compile(r"^[a-f0-9]{16,128}$")
+_SAFE_RAW_IMAGE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SAFE_GRID_THW_RE = re.compile(r"^[0-9]+x[0-9]+x[0-9]+$")
 
 _MM_FEATURE_SCHEMA_VERSION = 1
 _MM_FEATURE_KIND = "vllm.MultiModalKwargsItem"
+_MM_RAW_SCHEMA_VERSION = 1
 
 # Run-dir-relative asset subdirs, for callers that already hold a run dir.
 IMAGE_ASSET_SUBDIR = Path("assets/images")
@@ -81,6 +92,32 @@ def feature_asset_dir(run_id: str) -> Path:
     return (run_dir(run_id) / FEATURE_ASSET_SUBDIR).resolve()
 
 
+def mm_payload_mode() -> str:
+    """Return the inference multimodal payload mode.
+
+    Explicit env wins:
+
+    - ``raw``: send only cache-only ``None`` slots or raw-image ``mmraw`` refs.
+    - ``on`` / ``processed``: legacy processed ``mmfile`` feature artifacts.
+    - ``off`` / ``inline``: legacy inline base64 processed payloads.
+
+    With no explicit env, hosted runs (``RUN_ID`` present) default to ``raw`` so
+    env workers avoid the image processor. Local/dev processes without
+    ``RUN_ID`` keep the old processed-artifact behavior.
+    """
+    raw = os.getenv(MM_PAYLOAD_MODE_ENV)
+    if raw is None:
+        return "raw" if os.getenv("RUN_ID", "").strip() else "processed"
+    mode = raw.strip().lower()
+    if mode in {"raw", "raw-ref", "raw_refs", "mmraw"}:
+        return "raw"
+    if mode in {"", "1", "true", "on", "enabled", "yes", "processed", "mmfile"}:
+        return "processed"
+    if mode in {"0", "false", "off", "disabled", "none", "no", "inline"}:
+        return "inline"
+    raise ValueError(f"Invalid {MM_PAYLOAD_MODE_ENV}={mode!r}; expected raw, on/processed, or off/inline.")
+
+
 def mm_feature_fingerprint(*, family: str, spatial_merge_size: int) -> str:
     import importlib.metadata
 
@@ -92,6 +129,37 @@ def mm_feature_fingerprint(*, family: str, spatial_merge_size: int) -> str:
         "vllm": importlib.metadata.version("vllm"),
         "transformers": importlib.metadata.version("transformers"),
         "torch": importlib.metadata.version("torch"),
+    }
+    raw = json.dumps(parts, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:32]
+
+
+def mm_processor_fingerprint(
+    *,
+    family: str,
+    patch_size: int,
+    merge_size: int,
+    temporal_patch_size: int,
+    min_pixels: int,
+    max_pixels: int,
+) -> str:
+    import importlib.metadata
+
+    try:
+        transformers_version = importlib.metadata.version("transformers")
+    except importlib.metadata.PackageNotFoundError:
+        transformers_version = "missing"
+
+    parts = {
+        "schema_version": _MM_RAW_SCHEMA_VERSION,
+        "kind": "raw-image-processor-layout",
+        "family": family,
+        "patch_size": int(patch_size),
+        "merge_size": int(merge_size),
+        "temporal_patch_size": int(temporal_patch_size),
+        "min_pixels": int(min_pixels),
+        "max_pixels": int(max_pixels),
+        "transformers": transformers_version,
     }
     raw = json.dumps(parts, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:32]
@@ -130,6 +198,64 @@ def split_mmfile_ref(ref: str) -> "tuple[str | None, str, str, str]":
     if len(parts) == 6:
         return parts[2], parts[3], parts[4], parts[5]
     return None, parts[2], parts[3], parts[4]
+
+
+def _grid_to_ref(grid_thw: object) -> str:
+    data = grid_thw.tolist() if hasattr(grid_thw, "tolist") else grid_thw
+    if isinstance(data, list) and data and isinstance(data[0], list):
+        data = data[0]
+    if not isinstance(data, (list, tuple)) or len(data) != 3:
+        raise ValueError(f"Invalid image grid_thw for raw ref: {grid_thw!r}")
+    return "x".join(str(int(v)) for v in data)
+
+
+def _grid_from_ref(value: str) -> list[int]:
+    if not _SAFE_GRID_THW_RE.fullmatch(value):
+        raise ValueError(f"Invalid image grid_thw ref segment: {value!r}")
+    return [int(v) for v in value.split("x")]
+
+
+def raw_image_path(*, run_id: str, raw_image_id: str) -> Path:
+    if not _SAFE_RAW_IMAGE_ID_RE.fullmatch(raw_image_id):
+        raise ValueError(f"Invalid raw image id: {raw_image_id!r}")
+    root = image_asset_dir(run_id)
+    path = (root / raw_image_id).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError(f"Raw image path escaped root: {path}")
+    return path
+
+
+def mmraw_ref(
+    *,
+    run_id: str,
+    fingerprint: str,
+    modality: str,
+    mm_hash: str,
+    raw_image_id: str,
+    grid_thw: object,
+) -> str:
+    if not _SAFE_RUN_ID_RE.fullmatch(run_id):
+        raise ValueError(f"Invalid raw multimodal run id: {run_id!r}")
+    if not _SAFE_FINGERPRINT_RE.fullmatch(fingerprint):
+        raise ValueError(f"Invalid raw multimodal fingerprint: {fingerprint!r}")
+    if modality != "image":
+        raise ValueError(f"Unsupported raw multimodal modality: {modality!r}")
+    if not _SAFE_MM_HASH_RE.fullmatch(mm_hash):
+        raise ValueError(f"Invalid raw multimodal hash: {mm_hash!r}")
+    raw_image_path(run_id=run_id, raw_image_id=raw_image_id)
+    return f"{MMRAW_PREFIX}:{run_id}:{fingerprint}:{modality}:{mm_hash}:{raw_image_id}:{_grid_to_ref(grid_thw)}"
+
+
+def split_mmraw_ref(ref: str) -> tuple[str, str, str, str, str, list[int]]:
+    """Parse a run-scoped raw-image ref into
+    ``(run_id, fingerprint, modality, mm_hash, raw_image_id, grid_thw)``.
+    Field-level safe-regex checks live in the reader, but the grid segment is
+    parsed here so emit/parse cannot drift.
+    """
+    parts = ref.split(":")
+    if parts[:2] != ["mmraw", "v1"] or len(parts) != 8:
+        raise ValueError(f"Invalid mmraw ref shape: {ref!r}")
+    return parts[2], parts[3], parts[4], parts[5], parts[6], _grid_from_ref(parts[7])
 
 
 def build_mm_feature_envelope(

@@ -36,11 +36,15 @@ from renderers.base import (
     ToolSpec,
 )
 from renderers.mm_store import (
+    MM_RAW_PAYLOAD_KEY,
+    MM_RAW_PAYLOAD_VALUE,
     build_mm_feature_envelope,
     mm_feature_envelope_matches,
     mm_feature_fingerprint,
     mm_feature_path,
+    mm_payload_mode,
     mmfile_ref,
+    mmraw_ref,
     run_id_from_env,
 )
 
@@ -49,7 +53,6 @@ ROUTED_EXPERTS_DATA_PREFIX = b'"routed_experts":{"data":"'
 _MM_MAX_INFLIGHT_ENV = "RENDERERS_MM_MAX_INFLIGHT"
 _DEFAULT_MM_MAX_INFLIGHT = 4
 _mm_payload_semaphores: dict[tuple[int, int], asyncio.Semaphore] = {}
-_MM_FEATURE_STORE_MODE_ENV = "RENDERERS_MM_FEATURE_STORE_MODE"
 
 
 class OverlongPromptError(Exception):
@@ -147,17 +150,6 @@ def _mm_max_inflight() -> int | None:
     if value < 1:
         return None
     return value
-
-
-def _mm_feature_store_mode() -> str:
-    """Offload processed mm-feature payloads to disk and ship ``mmfile`` refs
-    (``on``, the default) or inline them as base64 in the request (``off``)."""
-    mode = os.getenv(_MM_FEATURE_STORE_MODE_ENV, "on").strip().lower()
-    if mode in {"", "0", "false", "off", "disabled", "none", "no"}:
-        return "off"
-    if mode in {"1", "true", "on", "enabled", "yes"}:
-        return "on"
-    raise ValueError(f"Invalid {_MM_FEATURE_STORE_MODE_ENV}={mode!r}; expected on or off.")
 
 
 def _fsync_dir(path: Path) -> None:
@@ -261,6 +253,9 @@ def _write_mm_feature_artifact(
 @contextlib.asynccontextmanager
 async def _limit_mm_payloads(mm_data: MultiModalData | None) -> AsyncIterator[None]:
     if mm_data is None or mm_data.is_empty():
+        yield
+        return
+    if mm_payload_mode() == "raw":
         yield
         return
 
@@ -433,7 +428,13 @@ async def generate(
         # lives on multimodal renderers + the pool, not the base ``Renderer``
         # protocol; reached only when ``mm_data`` is non-empty, which implies a
         # multimodal renderer.
-        build_mm = cast(Any, renderer).materialize_pixels(mm_data, messages) if force_full_pixels else mm_data
+        if force_full_pixels:
+            if mm_payload_mode() == "raw":
+                build_mm = cast(Any, renderer).materialize_raw_refs(mm_data, messages)
+            else:
+                build_mm = cast(Any, renderer).materialize_pixels(mm_data, messages)
+        else:
+            build_mm = mm_data
         return _build_mm_features(renderer, build_mm), _strip_pixels(mm_data)
 
     async with _limit_mm_payloads(mm_data):
@@ -524,18 +525,26 @@ async def generate(
 
 
 def _strip_pixels(mm_data: MultiModalData) -> MultiModalData:
-    """Return ``mm_data`` with ``pixel_values`` dropped from every item.
+    """Return ``mm_data`` with request-scoped multimodal payloads dropped.
 
     Keeps the descriptor (``image_grid_thw`` etc.), ``mm_hashes`` and
     ``mm_placeholders`` — everything needed for token alignment and for
-    re-deriving pixels later (POST via ``materialize_pixels``; training via
-    the orchestrator). The decoded pixel tensors are never retained on the
-    trajectory, which is what keeps env-worker memory flat across a rollout.
+    re-deriving pixels later (POST repair via raw refs / ``materialize_pixels``;
+    training via the orchestrator). Decoded pixels and one-request raw-ref
+    markers are never retained on the trajectory, so later bridge turns use the
+    cache-only ``None`` slot instead of reprocessing every image.
     """
     if not mm_data.mm_items:
         return mm_data
+    drop_keys = {
+        "pixel_values",
+        "raw_uri",
+        "raw_image_id",
+        "mm_processor_fingerprint",
+        MM_RAW_PAYLOAD_KEY,
+    }
     new_items = {
-        modality: [{k: v for k, v in item.items() if k != "pixel_values"} for item in items]
+        modality: [{k: v for k, v in item.items() if k not in drop_keys} for item in items]
         for modality, items in mm_data.mm_items.items()
     }
     return replace(mm_data, mm_items=new_items)
@@ -597,6 +606,55 @@ def _build_qwen_vl_features(mm_data: MultiModalData, *, spatial_merge_size: int)
     Returns ``None`` semantics live one level up — this helper assumes the
     caller already verified ``mm_data`` is non-empty.
     """
+    mode = mm_payload_mode()
+    out: dict[str, Any] = {
+        "mm_hashes": {},
+        "mm_placeholders": {},
+        "kwargs_data": {},
+    }
+
+    image_items = mm_data.mm_items.get("image") or []
+    if image_items:
+        mm_hashes = list(mm_data.mm_hashes.get("image") or [])
+        placeholders = list(mm_data.mm_placeholders.get("image") or [])
+        if len(mm_hashes) != len(image_items) or len(placeholders) != len(image_items):
+            raise ValueError(
+                "Qwen-VL mm sidecar length mismatch: "
+                f"items={len(image_items)} hashes={len(mm_hashes)} placeholders={len(placeholders)}"
+            )
+
+        if mode == "raw":
+            run_id = run_id_from_env()
+            encoded: list[Any] = [None] * len(image_items)
+            for idx, item in enumerate(image_items):
+                if item.get(MM_RAW_PAYLOAD_KEY) != MM_RAW_PAYLOAD_VALUE:
+                    continue
+                raw_image_id = item.get("raw_image_id")
+                grid_thw = item.get("image_grid_thw")
+                fingerprint = item.get("mm_processor_fingerprint")
+                if not isinstance(raw_image_id, str) or not raw_image_id:
+                    raise ValueError("raw multimodal image item is missing raw_image_id")
+                if grid_thw is None:
+                    raise ValueError("raw multimodal image item is missing image_grid_thw")
+                if not isinstance(fingerprint, str) or not fingerprint:
+                    raise ValueError("raw multimodal image item is missing mm_processor_fingerprint")
+                encoded[idx] = mmraw_ref(
+                    run_id=run_id,
+                    fingerprint=fingerprint,
+                    modality="image",
+                    mm_hash=mm_hashes[idx],
+                    raw_image_id=raw_image_id,
+                    grid_thw=grid_thw,
+                )
+            out["kwargs_data"]["image"] = encoded
+            out["mm_hashes"]["image"] = mm_hashes
+            out["mm_placeholders"]["image"] = [
+                {"offset": p.offset, "length": p.length} for p in placeholders
+            ]
+            if not any(item is not None for item in encoded):
+                out["kwargs_data"] = None
+            return out
+
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature
@@ -610,18 +668,9 @@ def _build_qwen_vl_features(mm_data: MultiModalData, *, spatial_merge_size: int)
             "environment, or pre-build features upstream."
         ) from exc
 
-    mode = _mm_feature_store_mode()
-    run_id = run_id_from_env() if mode != "off" else ""
+    run_id = run_id_from_env() if mode == "processed" else ""
     encoder = MsgpackEncoder(size_threshold=2**62)
     fingerprint = mm_feature_fingerprint(family="qwen_vl", spatial_merge_size=spatial_merge_size)
-
-    out: dict[str, Any] = {
-        "mm_hashes": {},
-        "mm_placeholders": {},
-        "kwargs_data": {},
-    }
-
-    image_items = mm_data.mm_items.get("image") or []
     if image_items:
         # An item carrying ``pixel_values`` is sent as a full payload; an item
         # without (descriptor-only) is sent hash-only, on the assumption that
@@ -642,7 +691,7 @@ def _build_qwen_vl_features(mm_data: MultiModalData, *, spatial_merge_size: int)
                 bufs = encoder.encode(item)
                 assert len(bufs) == 1, "All tensors should be inline"
                 raw_payload = bufs[0]
-                if mode == "off":
+                if mode == "inline":
                     encoded[idx] = base64.b64encode(raw_payload).decode("ascii")
                     continue
 

@@ -400,6 +400,193 @@ def test_qwen_vl_features_can_emit_mmfile_refs(tmp_path, monkeypatch):
     assert len(list(tmp_path.rglob("*.msgpack"))) == 1
 
 
+def test_qwen_vl_features_can_emit_mmraw_refs_without_processed_payloads(tmp_path, monkeypatch):
+    from renderers.base import MultiModalData, PlaceholderRange
+    from renderers.client import _build_qwen_vl_features
+    from renderers.mm_store import (
+        MM_RAW_PAYLOAD_KEY,
+        MM_RAW_PAYLOAD_VALUE,
+        mm_processor_fingerprint,
+        raw_image_path,
+        split_mmraw_ref,
+    )
+
+    monkeypatch.setenv("RENDERERS_MM_FEATURE_STORE_MODE", "raw")
+    monkeypatch.setenv("PRIME_RL_MM_FEATURE_ROOT", str(tmp_path))
+    monkeypatch.setenv("RUN_ID", "rawtest")
+    raw_image_path(run_id="rawtest", raw_image_id="image.png").parent.mkdir(parents=True)
+    raw_image_path(run_id="rawtest", raw_image_id="image.png").write_bytes(b"not-read-by-serializer")
+    fingerprint = mm_processor_fingerprint(
+        family="qwen_vl",
+        patch_size=16,
+        merge_size=2,
+        temporal_patch_size=2,
+        min_pixels=65536,
+        max_pixels=16777216,
+    )
+    mm_hash = "a" * 32
+    mm_data = MultiModalData(
+        mm_hashes={"image": [mm_hash, "b" * 32]},
+        mm_placeholders={
+            "image": [
+                PlaceholderRange(offset=5, length=1),
+                PlaceholderRange(offset=10, length=1),
+            ]
+        },
+        mm_items={
+            "image": [
+                {
+                    "image_grid_thw": [[1, 2, 2]],
+                    "raw_image_id": "image.png",
+                    "mm_processor_fingerprint": fingerprint,
+                    MM_RAW_PAYLOAD_KEY: MM_RAW_PAYLOAD_VALUE,
+                },
+                {"image_grid_thw": [[1, 2, 2]]},
+            ]
+        },
+    )
+
+    features = _build_qwen_vl_features(mm_data, spatial_merge_size=2)
+
+    items = features["kwargs_data"]["image"]
+    assert items[1] is None
+    assert split_mmraw_ref(items[0]) == (
+        "rawtest",
+        fingerprint,
+        "image",
+        mm_hash,
+        "image.png",
+        [1, 2, 2],
+    )
+    assert list(tmp_path.rglob("*.msgpack")) == []
+
+
+def test_strip_pixels_removes_one_request_raw_markers():
+    from renderers.base import MultiModalData
+    from renderers.client import _strip_pixels
+    from renderers.mm_store import MM_RAW_PAYLOAD_KEY, MM_RAW_PAYLOAD_VALUE
+
+    mm_data = MultiModalData(
+        mm_items={
+            "image": [
+                {
+                    "image_grid_thw": [[1, 2, 2]],
+                    "raw_uri": "file:///tmp/image.png",
+                    "raw_image_id": "image.png",
+                    "mm_processor_fingerprint": "a" * 32,
+                    MM_RAW_PAYLOAD_KEY: MM_RAW_PAYLOAD_VALUE,
+                }
+            ]
+        }
+    )
+
+    stripped = _strip_pixels(mm_data)
+
+    assert stripped.mm_items == {"image": [{"image_grid_thw": [[1, 2, 2]]}]}
+
+
+def test_qwen3_vl_raw_mode_render_does_not_process_pixels(tmp_path, monkeypatch):
+    import json
+
+    from PIL import Image
+    from renderers.mm_store import MM_RAW_PAYLOAD_KEY, MM_RAW_PAYLOAD_VALUE
+    from renderers.qwen3_vl import Qwen3VLRenderer
+
+    class _Tokenizer:
+        unk_token_id = -1
+        _specials = {
+            "<|im_start|>": 1,
+            "<|im_end|>": 2,
+            "<|endoftext|>": 3,
+            "<tool_call>": 4,
+            "</tool_call>": 5,
+            "<tool_response>": 6,
+            "</tool_response>": 7,
+            "<|vision_start|>": 8,
+            "<|vision_end|>": 9,
+            "<|image_pad|>": 10,
+            "<|video_pad|>": 11,
+        }
+
+        def __init__(self, name_or_path):
+            self.name_or_path = name_or_path
+
+        def convert_tokens_to_ids(self, token):
+            return self._specials.get(token, self.unk_token_id)
+
+        def encode(self, text, add_special_tokens=False):
+            return [100 + ord(ch) % 50 for ch in text]
+
+    monkeypatch.setenv("RENDERERS_MM_FEATURE_STORE_MODE", "raw")
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "preprocessor_config.json").write_text(
+        json.dumps(
+            {
+                "patch_size": 16,
+                "temporal_patch_size": 2,
+                "merge_size": 2,
+                "size": {"shortest_edge": 65536, "longest_edge": 16777216},
+            }
+        )
+    )
+    path = tmp_path / "image.png"
+    Image.new("RGB", (32, 32), color=(255, 0, 0)).save(path)
+    renderer = Qwen3VLRenderer(_Tokenizer(str(model_dir)), processor=object())
+
+    rendered = renderer.render(
+        [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": f"file://{path}"}}]}],
+        add_generation_prompt=True,
+    )
+
+    item = rendered.multi_modal_data.mm_items["image"][0]
+    assert "pixel_values" not in item
+    assert item[MM_RAW_PAYLOAD_KEY] == MM_RAW_PAYLOAD_VALUE
+    assert item["raw_image_id"] == "image.png"
+    assert item["image_grid_thw"] == [[1, 16, 16]]
+    assert rendered.multi_modal_data.mm_placeholders["image"][0].length == 64
+
+
+def test_qwen3_vl_raw_layout_matches_real_processor(tmp_path, monkeypatch):
+    from huggingface_hub import try_to_load_from_cache
+    from PIL import Image
+
+    model_id = "Qwen/Qwen3-VL-4B-Instruct"
+    if not isinstance(try_to_load_from_cache(model_id, "preprocessor_config.json"), str):
+        pytest.skip(f"{model_id} preprocessor_config.json is not cached locally")
+
+    transformers = pytest.importorskip("transformers")
+    from renderers.base import load_tokenizer
+    from renderers.qwen3_vl import Qwen3VLRenderer, describe_qwen_image_layout
+
+    monkeypatch.setenv("RENDERERS_MM_FEATURE_STORE_MODE", "raw")
+    processor = transformers.AutoProcessor.from_pretrained(model_id, local_files_only=True)
+    tokenizer = load_tokenizer(model_id)
+    renderer = Qwen3VLRenderer(tokenizer)
+
+    sizes = [
+        (32, 32),
+        (512, 512),
+        (333, 777),
+        (1200, 300),
+        (4096, 2048),
+        (65, 97),
+    ]
+    for width, height in sizes:
+        path = tmp_path / f"image_{width}x{height}.png"
+        Image.new("RGB", (width, height), color=(width % 255, height % 255, 7)).save(path)
+        part = {"type": "image_url", "image_url": {"url": f"file://{path}"}}
+        desc = describe_qwen_image_layout(renderer, part)
+        with Image.open(path) as image:
+            expected = processor.image_processor(images=[image.convert("RGB")], return_tensors="np")["image_grid_thw"][
+                0
+            ].tolist()
+        assert desc.image_grid_thw == [expected]
+        assert desc.num_image_tokens == int(expected[0] * expected[1] * expected[2]) // (
+            processor.image_processor.merge_size**2
+        )
+
+
 # ---------------------------------------------------------------------------
 # Prompt overflow handling.
 # ---------------------------------------------------------------------------
@@ -587,3 +774,24 @@ def test_mmfile_ref_emit_parse_roundtrip():
     for bad in ("mmfile:v2:a:b:c:d", "notmmfile:v1:a:b:c:d", "mmfile:v1:a:b"):
         with pytest.raises(ValueError):
             split_mmfile_ref(bad)
+
+
+def test_mmraw_ref_emit_parse_roundtrip(tmp_path, monkeypatch):
+    from renderers.mm_store import mmraw_ref, raw_image_path, split_mmraw_ref
+
+    monkeypatch.setenv("PRIME_RL_MM_FEATURE_ROOT", str(tmp_path))
+    raw_image_path(run_id="run-a", raw_image_id="abc.png").parent.mkdir(parents=True)
+    ref = mmraw_ref(
+        run_id="run-a",
+        fingerprint="deadbeefdeadbeef",
+        modality="image",
+        mm_hash="a" * 32,
+        raw_image_id="abc.png",
+        grid_thw=[[1, 2, 2]],
+    )
+
+    assert ref == "mmraw:v1:run-a:deadbeefdeadbeef:image:" + "a" * 32 + ":abc.png:1x2x2"
+    assert split_mmraw_ref(ref) == ("run-a", "deadbeefdeadbeef", "image", "a" * 32, "abc.png", [1, 2, 2])
+    for bad in ("mmraw:v2:a:b:c:d:e:f", "notmmraw:v1:a:b:c:d:e:f", "mmraw:v1:a:b:c"):
+        with pytest.raises(ValueError):
+            split_mmraw_ref(bad)

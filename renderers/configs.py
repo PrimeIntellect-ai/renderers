@@ -153,7 +153,31 @@ class Qwen35RendererConfig(BaseRendererConfig):
     caching so processed pixel buffers stay request-scoped. Renderer-internal —
     not a Jinja chat-template kwarg."""
 
-    _internal_fields = frozenset({"image_cache_max"})
+    image_patch_size: int | None = None
+    """Optional Qwen image patch size override for raw-ref layout."""
+
+    image_temporal_patch_size: int | None = None
+    """Optional Qwen temporal patch size override for raw-ref layout."""
+
+    image_merge_size: int | None = None
+    """Optional Qwen spatial merge size override for raw-ref layout."""
+
+    image_min_pixels: int | None = None
+    """Optional Qwen minimum resized image area override for raw-ref layout."""
+
+    image_max_pixels: int | None = None
+    """Optional Qwen maximum resized image area override for raw-ref layout."""
+
+    _internal_fields = frozenset(
+        {
+            "image_cache_max",
+            "image_patch_size",
+            "image_temporal_patch_size",
+            "image_merge_size",
+            "image_min_pixels",
+            "image_max_pixels",
+        }
+    )
 
 
 class Qwen36RendererConfig(BaseRendererConfig):
@@ -170,7 +194,31 @@ class Qwen36RendererConfig(BaseRendererConfig):
     image_cache_max: int = 0
     """See :class:`Qwen35RendererConfig.image_cache_max`."""
 
-    _internal_fields = frozenset({"image_cache_max"})
+    image_patch_size: int | None = None
+    """See :class:`Qwen35RendererConfig.image_patch_size`."""
+
+    image_temporal_patch_size: int | None = None
+    """See :class:`Qwen35RendererConfig.image_temporal_patch_size`."""
+
+    image_merge_size: int | None = None
+    """See :class:`Qwen35RendererConfig.image_merge_size`."""
+
+    image_min_pixels: int | None = None
+    """See :class:`Qwen35RendererConfig.image_min_pixels`."""
+
+    image_max_pixels: int | None = None
+    """See :class:`Qwen35RendererConfig.image_max_pixels`."""
+
+    _internal_fields = frozenset(
+        {
+            "image_cache_max",
+            "image_patch_size",
+            "image_temporal_patch_size",
+            "image_merge_size",
+            "image_min_pixels",
+            "image_max_pixels",
+        }
+    )
 
 
 class Qwen3VLRendererConfig(BaseRendererConfig):
@@ -184,7 +232,31 @@ class Qwen3VLRendererConfig(BaseRendererConfig):
     image_cache_max: int = 0
     """See :class:`Qwen35RendererConfig.image_cache_max`."""
 
-    _internal_fields = frozenset({"image_cache_max"})
+    image_patch_size: int | None = None
+    """See :class:`Qwen35RendererConfig.image_patch_size`."""
+
+    image_temporal_patch_size: int | None = None
+    """See :class:`Qwen35RendererConfig.image_temporal_patch_size`."""
+
+    image_merge_size: int | None = None
+    """See :class:`Qwen35RendererConfig.image_merge_size`."""
+
+    image_min_pixels: int | None = None
+    """See :class:`Qwen35RendererConfig.image_min_pixels`."""
+
+    image_max_pixels: int | None = None
+    """See :class:`Qwen35RendererConfig.image_max_pixels`."""
+
+    _internal_fields = frozenset(
+        {
+            "image_cache_max",
+            "image_patch_size",
+            "image_temporal_patch_size",
+            "image_merge_size",
+            "image_min_pixels",
+            "image_max_pixels",
+        }
+    )
 
 
 class GLM5RendererConfig(BaseRendererConfig):

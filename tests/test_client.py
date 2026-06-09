@@ -95,10 +95,13 @@ class _FakeClient:
                 }
             ],
         }
-        return httpx.Response(
-            200,
-            content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        )
+        # vLLM path requests cast_to=httpx.Response; Dynamo path uses cast_to=dict.
+        if cast_to is httpx.Response:
+            return httpx.Response(
+                200,
+                content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            )
+        return payload
 
 
 def test_generate_builds_request_body_and_parses_response():
@@ -294,7 +297,7 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
             },
             cache_salt="ckpt-42",
             priority=17,
-            transport="dynamo_chat_nvext",
+            transport="dynamo_chat",
         )
     )
 
@@ -310,7 +313,7 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
             "cache_salt": "ckpt-42",
             "agent_hints": {"priority": 17},
         },
-        "tools": [{"type": "function", "function": {"name": "echo"}}],
+        # tools are NOT forwarded on the wire (baked into token_data instead).
         "temperature": 0.3,
         "max_completion_tokens": 7,
         "logprobs": True,
@@ -321,7 +324,60 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
         "detokenize": False,
     }
     assert result["completion_ids"] == [7, 8]
-    assert result["routed_experts"] == [[[1]], [[2]]]
+    # routed_experts passes through unchanged (no client-side decode).
+    assert result["routed_experts"] == {
+        "data": base64.b64encode(b"\x01\x02").decode("ascii"),
+        "shape": [2, 1, 1],
+    }
+
+
+class _NoCompletionIdsClient(_FakeClient):
+    """Dynamo response that carries no completion token IDs."""
+
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        self.calls.append(
+            {"path": path, "cast_to": cast_to, "body": body, "options": options}
+        )
+        return {"request_id": "x", "choices": [{"index": 0, "finish_reason": "stop"}]}
+
+
+def test_dynamo_transport_raises_without_completion_ids():
+    with pytest.raises(RuntimeError, match="completion token IDs"):
+        asyncio.run(
+            generate(
+                client=_NoCompletionIdsClient(),
+                renderer=_FakeRenderer(),
+                messages=[{"role": "user", "content": "hi"}],
+                model="test-model",
+                tools=[{"type": "function", "function": {"name": "echo"}}],
+                sampling_params={"max_tokens": 7},
+                transport="dynamo_chat",
+                max_prompt_len=10_000,
+            )
+        )
+
+
+class _BoomClient(_FakeClient):
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        raise ValueError("boom")
+
+
+@pytest.mark.parametrize("transport", ["vllm_generate", "dynamo_chat"])
+def test_generate_propagates_post_errors_raw(transport):
+    # POST errors must propagate unchanged (no NameError from a stale handler).
+    with pytest.raises(ValueError, match="boom"):
+        asyncio.run(
+            generate(
+                client=_BoomClient(),
+                renderer=_FakeRenderer(),
+                messages=[{"role": "user", "content": "hi"}],
+                model="test-model",
+                tools=[{"type": "function", "function": {"name": "echo"}}],
+                sampling_params={"max_tokens": 7},
+                transport=transport,
+                max_prompt_len=10_000,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

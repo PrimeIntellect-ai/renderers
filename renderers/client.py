@@ -2,12 +2,12 @@
 
 Two transports, selected per-call via ``transport=`` parameter:
 
-    "prime_vllm_generate" (default)
+    "vllm_generate" (default)
         messages → Renderer.render_ids() → token IDs → POST /inference/v1/generate
         → completion tokens → Renderer.parse_response() → structured message
         vLLM's TITO surface (server.py mounts the route in prime-rl).
 
-    "dynamo_chat_nvext"
+    "dynamo_chat"
         messages → Renderer.render_ids() → token IDs → POST /v1/chat/completions
         with ``nvext.token_data`` + ``nvext.extra_fields=["engine_data"]``
         → completion tokens via ``nvext.engine_data.completion_token_ids``
@@ -120,7 +120,7 @@ async def _resolve_max_prompt_len(client: AsyncOpenAI, model: str) -> int | None
         return value
 
 # Public type alias; matches verifiers.types.RendererTransport string set.
-RendererTransport = Literal["prime_vllm_generate", "dynamo_chat_nvext"]
+RendererTransport = Literal["vllm_generate", "dynamo_chat"]
 
 
 async def _maybe_offload(renderer: Renderer | RendererPool, fn):
@@ -168,7 +168,7 @@ async def generate(
     prompt_attribution: RenderedTokens | None = None,
     tools: list[ToolSpec] | None = None,
     sampling_params: dict[str, Any] | None = None,
-    transport: RendererTransport = "prime_vllm_generate",
+    transport: RendererTransport = "vllm_generate",
     cache_salt: str | None = None,
     priority: int | None = None,
     extra_headers: dict[str, str] | None = None,
@@ -260,25 +260,19 @@ async def generate(
     sp["logprobs"] = 1
     sp.setdefault("skip_special_tokens", False)
 
-    features = (
-        _build_mm_features(renderer, mm_data)
-        if mm_data and not mm_data.is_empty()
-        else None
-    )
-
-    if transport == "dynamo_chat_nvext":
+    if transport == "dynamo_chat":
         # Dynamo branch: POST /v1/chat/completions with nvext.token_data.
         # Dynamo has no /inference/v1/generate route; the equivalent TITO
         # surface lives on chat-completions via the ``nvext`` envelope
         # (PR #8119: response token IDs come back under
         # ``nvext.engine_data.completion_token_ids``).
-        if features is not None:
+        if mm_data is not None and not mm_data.is_empty():
             raise NotImplementedError(
                 "Multimodal renderers are not yet supported on the "
-                "dynamo_chat_nvext transport. Use prime_vllm_generate or "
+                "dynamo_chat transport. Use vllm_generate or "
                 "stay on the token-client TITO path for VLMs."
             )
-        data = await _post_dynamo_chat_nvext(
+        data = await _post_dynamo_chat(
             client=client,
             model=model,
             prompt_ids=prompt_ids,
@@ -289,8 +283,13 @@ async def generate(
             extra_headers=extra_headers,
             messages=messages,
         )
-    else:
-        # vLLM-native branch: POST /inference/v1/generate (vLLM 0.20 TITO).
+    elif transport == "vllm_generate":
+        # vLLM-native branch: POST /inference/v1/generate (unchanged from upstream).
+        features = (
+            _build_mm_features(renderer, mm_data)
+            if mm_data and not mm_data.is_empty()
+            else None
+        )
         body: dict[str, Any] = {
             "model": model,
             "token_ids": prompt_ids,
@@ -315,21 +314,15 @@ async def generate(
             sp.get("max_tokens"),
         )
         post_kwargs: dict[str, Any] = {
-            "cast_to": cast(Any, dict[str, Any]),
+            "cast_to": httpx.Response,
             "body": body,
         }
         if extra_headers:
             post_kwargs["options"] = cast(Any, {"headers": extra_headers})
-        try:
-            data = await client.post(endpoint, **post_kwargs)
-        except BadRequestError as exc:
-            _log_overlong_prompt_diagnostic(
-                prompt_ids=prompt_ids,
-                messages=messages,
-                max_tokens=sp.get("max_tokens"),
-                exc=exc,
-            )
-            raise
+        raw_response = await client.post(endpoint, **post_kwargs)
+        data = parse_generate_response(raw_response.content)
+    else:
+        raise ValueError(f"Unknown renderer transport: {transport!r}")
 
     choice = (data.get("choices") or [{}])[0]
     # Dynamo emits engine token IDs under ``nvext.engine_data.completion_token_ids``
@@ -346,6 +339,13 @@ async def generate(
             or []
         )
     completion_ids = list(completion_ids or [])
+    if transport == "dynamo_chat" and not completion_ids:
+        # Fail loudly rather than parse an empty completion (usually a missing
+        # nvext.extra_fields=["engine_data"] opt-in).
+        raise RuntimeError(
+            "dynamo_chat response carried no completion token IDs "
+            "(expected nvext.engine_data.completion_token_ids)."
+        )
 
     parsed = await _maybe_offload(
         renderer, lambda: renderer.parse_response(completion_ids, tools=tools)
@@ -365,16 +365,11 @@ async def generate(
         if engine_lp:
             completion_logprobs = [float(x) for x in engine_lp]
 
-    routed_experts = None
-    raw_re = choice.get("routed_experts") or (data.get("nvext") or {}).get(
+    # Pass the routed_experts sidecar through unchanged (binary {shape, data}
+    # for vLLM; same dict under nvext for Dynamo). Decoding is the consumer's job.
+    routed_experts = choice.get("routed_experts") or (data.get("nvext") or {}).get(
         "routed_experts"
     )
-    if isinstance(raw_re, dict) and "data" in raw_re and "shape" in raw_re:
-        routed_experts = (
-            np.frombuffer(base64.b85decode(raw_re["data"]), dtype=np.int32)
-            .reshape(raw_re["shape"])
-            .tolist()
-        )
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
@@ -414,7 +409,7 @@ async def generate(
     }
 
 
-async def _post_dynamo_chat_nvext(
+async def _post_dynamo_chat(
     *,
     client: AsyncOpenAI,
     model: str,
@@ -428,7 +423,7 @@ async def _post_dynamo_chat_nvext(
 ) -> dict[str, Any]:
     """POST ``prompt_ids`` to Dynamo's ``/v1/chat/completions`` route.
 
-    Mirrors ``verifiers.clients.openai_chat_completions_token_client._post_dynamo_chat_nvext``
+    Mirrors ``verifiers.clients.openai_chat_completions_token_client._post_dynamo_chat``
     in shape, so the wire payload is identical whether the rollout goes
     through the token client or the renderer client. Anything that lands
     on Dynamo's chat-completions surface, lands here.
@@ -458,8 +453,8 @@ async def _post_dynamo_chat_nvext(
             "extra_fields": ["engine_data", "routed_experts"],
         },
     }
-    if tools:
-        body["tools"] = tools
+    # tools are NOT sent on the wire: the renderer already bakes them into
+    # token_data, and renderer ToolSpec isn't the OpenAI tool shape (would 400).
     if cache_salt is not None:
         body["nvext"]["cache_salt"] = cache_salt
     if priority is not None:
@@ -513,16 +508,8 @@ async def _post_dynamo_chat_nvext(
     }
     if extra_headers:
         post_kwargs["options"] = cast(Any, {"headers": extra_headers})
-    try:
-        return await client.post("/chat/completions", **post_kwargs)
-    except BadRequestError as exc:
-        _log_overlong_prompt_diagnostic(
-            prompt_ids=prompt_ids,
-            messages=messages,
-            max_tokens=sp.get("max_tokens"),
-            exc=exc,
-        )
-        raise
+    # Engine 4xx propagate raw (matches the vLLM path).
+    return await client.post("/chat/completions", **post_kwargs)
 
 
 def _build_mm_features(

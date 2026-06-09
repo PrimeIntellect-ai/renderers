@@ -250,7 +250,7 @@ def test_deepseek_v3_in_think_section_is_not_a_real_call():
     def section(name: str) -> str:
         return (
             "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>"
-            f"{name}\n```json\n{{\"code\": \"print(1)\"}}\n```"
+            f'{name}\n```json\n{{"code": "print(1)"}}\n```'
             "<｜tool▁call▁end｜><｜tool▁calls▁end｜>"
         )
 

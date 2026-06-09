@@ -192,9 +192,7 @@ def parse_qwen3(
     # ``reasoning_end_id`` is the ``</think>`` token id; when it's absent
     # (``None``) or the model never closed its reasoning, the scan falls back
     # to the whole stream (prior behavior).
-    reasoning_end = (
-        _find(ids, reasoning_end_id) if reasoning_end_id is not None else -1
-    )
+    reasoning_end = _find(ids, reasoning_end_id) if reasoning_end_id is not None else -1
     scan_start = reasoning_end + 1 if reasoning_end != -1 else 0
 
     tc_start = _find(ids, tool_call_id, scan_start)

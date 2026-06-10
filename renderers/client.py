@@ -25,6 +25,7 @@ achieve real parallelism.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -300,13 +301,12 @@ class _DynamoChatTransport(_Transport):
         # Engine 4xx propagate raw (matches the vLLM path).
         resp = await client.post("/chat/completions", **post_kwargs)
         # Dynamo's NvExt request schema carries no field for
-        # routed_experts_prompt_start, so the worker cannot trim the prompt
-        # rows: it returns full-sequence routing with start=0. Stamp the
-        # intended trim offset (the prompt we sent) onto the payload here so the
-        # consumer aligns the completion. NOTE: this assumes the worker did NOT
-        # trim; if a forwarded prompt-start field is later added to NvExt (so the
-        # worker trims and reports the offset itself), drop this stamping.
-        _stamp_dynamo_routed_experts_start(resp, prompt_ids, sp)
+        # routed_experts_prompt_start, so the worker can't trim the prompt rows:
+        # it returns full-sequence routing with start=0. Trim the leading prompt
+        # rows here and set start, so the payload matches the consumer contract
+        # (row 0 == position start). NOTE: if a forwarded prompt-start field is
+        # later added to NvExt (worker trims + reports start), drop this.
+        _trim_dynamo_routed_experts(resp, prompt_ids, sp)
         return resp
 
     @staticmethod
@@ -473,16 +473,25 @@ def _normalize_routed_experts(payload: Any) -> dict[str, Any] | None:
     }
 
 
-def _stamp_dynamo_routed_experts_start(
+_ROUTED_EXPERTS_ITEMSIZE = {"uint8": 1, "uint16": 2, "int16": 2, "int32": 4}
+
+
+def _trim_dynamo_routed_experts(
     resp: Any, prompt_ids: list[int], sp: dict[str, Any]
 ) -> None:
-    """Set ``routed_experts.start`` on a dynamo_chat response in place.
+    """Trim a dynamo_chat routed_experts payload to begin at ``start``, in place.
 
-    The worker returns full-sequence routing with ``start=0`` (it can't trim —
-    NvExt carries no ``routed_experts_prompt_start``). Stamp the intended trim
-    offset so the consumer aligns the completion: the caller's
-    ``routed_experts_prompt_start`` if set, else ``len(prompt_ids) - 1`` (where
-    the completion's routing begins). No-op when routed_experts is absent.
+    The Dynamo worker returns FULL-sequence routing with ``start=0`` because
+    NvExt carries no field to forward ``routed_experts_prompt_start`` for
+    worker-side trimming. The consumer contract is that row 0 of the payload is
+    the row at ``start`` (the vllm_generate path has vLLM trim internally), so
+    we drop the leading prompt rows here and set ``start`` to the offset:
+    the caller's ``routed_experts_prompt_start`` if set, else ``prefix_len - 1``
+    (the boundary row that produces the first completion token). No-op when
+    routed_experts is absent/empty or the offset is 0.
+
+    Worker-side trimming (avoiding full-prompt routing on the wire) is a future
+    optimization gated on a forwarded NvExt prompt-start field.
     """
     if not isinstance(resp, Mapping):
         return
@@ -495,10 +504,26 @@ def _stamp_dynamo_routed_experts_start(
         routed = engine.get("routed_experts") if isinstance(engine, Mapping) else None
     if not isinstance(routed, dict):
         return
-    start = sp.get("routed_experts_prompt_start")
-    if start is None:
-        start = max(0, len(prompt_ids) - 1)
-    routed["start"] = int(start)
+    data = routed.get("data")
+    shape = routed.get("shape")
+    if not isinstance(data, str) or not (
+        isinstance(shape, (list, tuple)) and len(shape) == 3
+    ):
+        return
+
+    offset = sp.get("routed_experts_prompt_start")
+    if offset is None:
+        offset = len(prompt_ids) - 1
+    offset = max(0, min(int(offset), int(shape[0])))
+    if offset == 0:
+        return
+
+    itemsize = _ROUTED_EXPERTS_ITEMSIZE.get(routed.get("dtype", "uint8"), 1)
+    row_size = int(shape[1]) * int(shape[2]) * itemsize
+    trimmed = base64.b64decode(data)[offset * row_size :]
+    routed["data"] = base64.b64encode(trimmed).decode("ascii")
+    routed["shape"] = [int(shape[0]) - offset, int(shape[1]), int(shape[2])]
+    routed["start"] = offset
 
 
 async def _maybe_offload(renderer: Renderer | RendererPool, fn):

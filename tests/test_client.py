@@ -539,6 +539,31 @@ def test_trim_dynamo_routed_experts():
     assert resp4 == {"nvext": {"engine_data": {}}}
 
 
+def test_dynamo_parse_present_empty_engine_logprobs_does_not_fall_back_to_chat():
+    """A present-but-empty engine_data.completion_logprobs is authoritative
+    (logprobs off): parse must NOT fall through to the divergent chat echo."""
+    data = {
+        "choices": [
+            {
+                # chat-echo logprobs (would mismatch the engine ids)
+                "logprobs": {"content": [{"logprob": -9.9}, {"logprob": -8.8}]},
+                "finish_reason": "stop",
+            }
+        ],
+        "nvext": {
+            "engine_data": {
+                "completion_token_ids": [7, 8],
+                "completion_logprobs": [],
+            }
+        },
+    }
+    from renderers.client import _TRANSPORTS
+
+    wire = _TRANSPORTS["dynamo_chat"].parse(data)
+    assert wire.completion_ids == [7, 8]
+    assert wire.completion_logprobs == []  # engine present-empty wins over chat echo
+
+
 def test_dynamo_transport_merges_caller_nvext():
     """F2: caller-supplied nvext is merged — extra_fields union with engine_data,
     agent_hints merged with priority, unrelated caller keys preserved."""

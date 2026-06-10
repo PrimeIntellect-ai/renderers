@@ -410,9 +410,13 @@ class _DynamoChatTransport(_Transport):
         # positionally aligned with the ids. The choices[0] chat logprobs are a
         # detokenize/retokenize echo that can diverge from the sampled ids, which
         # would misalign while still passing the length check below. Fall back to
-        # the chat logprobs only when the engine channel carries none.
-        logprobs = [float(x) for x in engine.get("completion_logprobs") or []]
-        if not logprobs:
+        # the chat logprobs only when the engine channel is absent — a present
+        # but empty engine list is authoritative (logprobs off) and must NOT
+        # fall through to the chat echo (distinguish presence from truthiness).
+        engine_logprobs = engine.get("completion_logprobs")
+        if engine_logprobs is not None:
+            logprobs = [float(x) for x in engine_logprobs]
+        else:
             logprobs = _flatten_chat_logprobs(choice)
         # Logprobs are indexed positionally against completion_ids downstream;
         # a length mismatch would silently misalign tokens and logprobs.

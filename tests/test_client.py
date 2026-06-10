@@ -509,6 +509,30 @@ def test_dynamo_transport_merges_caller_nvext():
     assert nvext["annotations"] == ["trace"]
 
 
+def test_dynamo_transport_routes_sampling_params_cache_salt_and_priority_to_nvext():
+    """cache_salt/priority supplied inside sampling_params (not the dedicated
+    kwargs) must still land in nvext, never as top-level chat fields."""
+    client = _DynamoFakeClient()
+    asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={"max_tokens": 7, "cache_salt": "ckpt-9", "priority": 5},
+            transport="dynamo_chat",
+            max_prompt_len=10_000,
+        )
+    )
+    body = client.calls[0]["body"]
+    assert body["nvext"]["cache_salt"] == "ckpt-9"
+    assert body["nvext"]["agent_hints"] == {"priority": 5}
+    # neither leaks to a top-level chat field
+    assert "cache_salt" not in body
+    assert "priority" not in body
+
+
 class _BothTokenIdsClient(_FakeClient):
     """Dynamo response carrying engine_data.completion_token_ids AND a divergent
     choices[0].token_ids — the canonical engine channel must win (F3)."""

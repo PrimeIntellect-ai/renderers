@@ -306,10 +306,19 @@ class _DynamoChatTransport(_Transport):
         cache_salt: str | None,
         priority: int | None,
     ) -> dict[str, Any]:
+        # cache_salt / priority may arrive as dedicated kwargs or inside
+        # sampling_params (the kwargs win). On Dynamo both belong in nvext, so
+        # they're routed there and never forwarded as top-level chat fields —
+        # keeping a shared sampling_params dict consistent with vllm_generate.
+        if cache_salt is None:
+            cache_salt = sp.get("cache_salt")
+        if priority is None:
+            priority = sp.get("priority")
+
         # Merge caller-supplied nvext rather than overwriting it, then layer on
         # the required fields: token_data (authoritative renderer tokens) and a
         # cumulative extra_fields union with "engine_data". The cache_salt /
-        # priority kwargs win over any caller nvext values.
+        # priority values win over any caller nvext values.
         nvext: dict[str, Any] = dict(sp.get("nvext") or {})
         nvext["token_data"] = list(prompt_ids)
         extra_fields = list(nvext.get("extra_fields") or [])
@@ -341,8 +350,8 @@ class _DynamoChatTransport(_Transport):
         for key, value in sp.items():
             if value is None or key in _DYNAMO_DROP_KEYS or key in body:
                 continue
-            if key in ("nvext", "max_tokens"):
-                continue  # handled above
+            if key in ("nvext", "max_tokens", "cache_salt"):
+                continue  # handled above (cache_salt -> nvext; priority denylisted)
             if key == "logprobs":
                 # vLLM takes logprobs=N (int); Dynamo's chat schema wants the
                 # OpenAI bool + top_logprobs split.

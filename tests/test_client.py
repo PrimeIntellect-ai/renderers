@@ -587,6 +587,41 @@ def test_qwen3_vl_raw_layout_matches_real_processor(tmp_path, monkeypatch):
         )
 
 
+def test_qwen3_vl_preprocessor_config_hub_download_fallback(tmp_path, monkeypatch):
+    """Hub-style ids that miss the local HF cache fall back to
+    ``hf_hub_download``; download failure (offline) keeps the explicit-config
+    error."""
+    import huggingface_hub
+
+    from renderers.qwen3_vl import _load_preprocessor_config_json
+
+    config = {
+        "patch_size": 16,
+        "temporal_patch_size": 2,
+        "merge_size": 2,
+        "size": {"shortest_edge": 65536, "longest_edge": 16777216},
+    }
+    downloaded = tmp_path / "preprocessor_config.json"
+    downloaded.write_text(json.dumps(config))
+
+    def fake_download(repo_id, filename):
+        assert filename == "preprocessor_config.json"
+        return str(downloaded)
+
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **k: None)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    _load_preprocessor_config_json.cache_clear()
+    assert _load_preprocessor_config_json("org/uncached-model") == config
+
+    def offline_download(repo_id, filename):
+        raise OSError("offline")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", offline_download)
+    _load_preprocessor_config_json.cache_clear()
+    with pytest.raises(RuntimeError, match="could not find preprocessor_config.json"):
+        _load_preprocessor_config_json("org/uncached-model-offline")
+
+
 # ---------------------------------------------------------------------------
 # Prompt overflow handling.
 # ---------------------------------------------------------------------------

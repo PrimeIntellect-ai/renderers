@@ -324,9 +324,12 @@ class _DynamoChatTransport(_Transport):
         nvext: dict[str, Any] = dict(sp.get("nvext") or {})
         nvext["token_data"] = list(prompt_ids)
         extra_fields = list(nvext.get("extra_fields") or [])
-        for field in ("engine_data", "routed_experts"):
-            if field not in extra_fields:
-                extra_fields.append(field)
+        # Only request "engine_data": the worker nests routed_experts inside it
+        # (engine_data.routed_experts), so also requesting the dedicated
+        # "routed_experts" field would duplicate the (large) base64 blob on the
+        # wire — once under engine_data and once promoted at the top level.
+        if "engine_data" not in extra_fields:
+            extra_fields.append("engine_data")
         nvext["extra_fields"] = extra_fields
         # ``routed_experts_prompt_start`` is the multi-turn replay offset. Dynamo
         # exposes no top-level field for it, so thread it through
@@ -418,14 +421,15 @@ class _DynamoChatTransport(_Transport):
                 f"completion token count ({len(completion_ids)})."
             )
 
-        # routed_experts: prefer the dedicated nvext.routed_experts field
-        # (extra_fields=["routed_experts"]); fall back to the engine_data
-        # passthrough (extra_fields=["engine_data"]) since the worker also nests
-        # it there. The Dynamo vLLM worker already emits the prime-rl contract
-        # shape {data(base64), shape, start, dtype}, so pass it through unchanged.
+        # routed_experts: read the dedicated nvext.routed_experts field if a
+        # caller opted into it, else the engine_data passthrough where the
+        # worker nests it (engine_data.routed_experts). Normalize to the
+        # {data, shape, start, dtype} contract so a malformed/legacy payload
+        # fails here with context instead of deep in trajectory processing.
         routed_experts = nvext.get("routed_experts")
         if routed_experts is None:
             routed_experts = engine.get("routed_experts")
+        routed_experts = _normalize_routed_experts(routed_experts)
 
         return _WireResult(
             completion_ids=completion_ids,
@@ -440,6 +444,37 @@ _TRANSPORTS: dict[str, _Transport] = {
     "vllm_generate": _VllmGenerateTransport(),
     "dynamo_chat": _DynamoChatTransport(),
 }
+
+
+def _normalize_routed_experts(payload: Any) -> dict[str, Any] | None:
+    """Validate/normalize a dynamo_chat routed_experts payload to the
+    ``{data, shape, start, dtype}`` contract.
+
+    Defaults ``start=0`` and ``dtype="uint8"`` for back-compat with payloads
+    serialized before those fields existed; raises a clear ``RuntimeError`` for
+    a non-contract payload (string/map, wrong rank) so the failure surfaces here
+    with context instead of as a ``TypeError``/``KeyError`` in trajectory
+    processing.
+    """
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping) or "data" not in payload or "shape" not in payload:
+        raise RuntimeError(
+            "dynamo_chat routed_experts must be a mapping with 'data' and "
+            f"'shape'; got {type(payload).__name__}"
+        )
+    shape = payload["shape"]
+    if not (isinstance(shape, (list, tuple)) and len(shape) == 3):
+        raise RuntimeError(
+            "dynamo_chat routed_experts 'shape' must be 3-D [seq, layers, topk]; "
+            f"got {shape!r}"
+        )
+    return {
+        "data": payload["data"],
+        "shape": [int(d) for d in shape],
+        "start": int(payload.get("start", 0)),
+        "dtype": payload.get("dtype", "uint8"),
+    }
 
 
 async def _maybe_offload(renderer: Renderer | RendererPool, fn):

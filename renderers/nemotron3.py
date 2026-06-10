@@ -76,12 +76,11 @@ def _render_extra_keys(obj: dict[str, Any], handled_keys: set[str]) -> list[str]
 
 
 # The Nemotron-3 family ships two chat-template variants. Nano / Super share
-# one (config ``name="nemotron-3"``); Ultra differs in the reasoning-block glue
-# — no ``\n`` around ``</think>`` — and gets its own discriminator
-# (``name="nemotron-3-ultra"``). Which variant a checkpoint uses is carried by
-# ``MODEL_RENDERER_MAP`` (and hence the resolved config's ``name``), so the
-# renderer reads it off ``config.name`` rather than probing the live template.
-_ULTRA_CONFIG_NAME = "nemotron-3-ultra"
+# one (renderer ``Nemotron3Renderer`` / config ``name="nemotron-3"``); Ultra
+# differs in the reasoning-block glue — no ``\n`` around ``</think>`` — and is
+# the ``Nemotron3UltraRenderer`` subclass (``name="nemotron-3-ultra"``). Which
+# variant a checkpoint uses is carried by ``MODEL_RENDERER_MAP``, so the right
+# renderer class is constructed and the variant is encoded by the class itself.
 
 
 def _is_super(tokenizer) -> bool:
@@ -97,7 +96,18 @@ def _is_super(tokenizer) -> bool:
 
 
 class Nemotron3Renderer:
-    """Deterministic message → token renderer for Nemotron 3 models."""
+    """Deterministic message → token renderer for Nemotron-3 Nano / Super.
+
+    The Ultra variant (distinct ``</think>`` glue) is the
+    :class:`Nemotron3UltraRenderer` subclass below; both are registered under
+    their own discriminator and differ only by the class-level hooks here.
+    """
+
+    # Variant hooks (overridden by ``Nemotron3UltraRenderer``): the default
+    # config to build when none is passed, and whether to use Ultra's
+    # reasoning-block glue.
+    _config_cls: type = Nemotron3RendererConfig
+    _ultra: bool = False
 
     def __init__(
         self,
@@ -105,12 +115,8 @@ class Nemotron3Renderer:
         config: Nemotron3RendererConfig | Nemotron3UltraRendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
-        cfg = config or Nemotron3RendererConfig()
+        cfg = config or type(self)._config_cls()
         self.config = cfg
-        # The Ultra variant is selected by the config discriminator
-        # (``name="nemotron-3-ultra"``), not a flag — one renderer class serves
-        # both, switching glue off ``self._ultra``.
-        self._ultra = cfg.name == _ULTRA_CONFIG_NAME
 
         # Resolve the per-variant reasoning-effort hint appended to the last
         # user message. Ultra honours ``medium_effort``; Super honours
@@ -825,3 +831,17 @@ class Nemotron3Renderer:
         if not next_is_tool:
             emit_special(self._im_end, oi, is_sampled=False, is_content=False)
             emit_text("\n", oi, is_sampled=False, is_content=False)
+
+
+class Nemotron3UltraRenderer(Nemotron3Renderer):
+    """Renderer for Nemotron-3 **Ultra**.
+
+    Identical to :class:`Nemotron3Renderer` except the reasoning block is glued
+    as ``<think>\\n{reasoning}</think>{content}`` (no ``\\n`` around
+    ``</think>``) and truncated historical turns collapse to
+    ``<think></think>{content}`` (no ``\\n``) — the difference is carried by the
+    ``_ultra`` class hook. Honours the Ultra-only ``medium_effort`` kwarg.
+    """
+
+    _config_cls = Nemotron3UltraRendererConfig
+    _ultra = True

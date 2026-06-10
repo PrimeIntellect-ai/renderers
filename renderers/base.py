@@ -1351,7 +1351,7 @@ def _populate_registry():
     from renderers.laguna_xs2 import LagunaXS2Renderer
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
-    from renderers.nemotron3 import Nemotron3Renderer
+    from renderers.nemotron3 import Nemotron3Renderer, Nemotron3UltraRenderer
     from renderers.qwen3 import Qwen3Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
     from renderers.qwen35 import Qwen35Renderer
@@ -1375,7 +1375,7 @@ def _populate_registry():
             "laguna-xs.2": LagunaXS2Renderer,
             "llama-3": Llama3Renderer,
             "nemotron-3": Nemotron3Renderer,
-            "nemotron-3-ultra": Nemotron3Renderer,
+            "nemotron-3-ultra": Nemotron3UltraRenderer,
             "gpt-oss": GptOssRenderer,
         }
     )

@@ -298,7 +298,16 @@ class _DynamoChatTransport(_Transport):
         if extra_headers:
             post_kwargs["options"] = cast(Any, {"headers": extra_headers})
         # Engine 4xx propagate raw (matches the vLLM path).
-        return await client.post("/chat/completions", **post_kwargs)
+        resp = await client.post("/chat/completions", **post_kwargs)
+        # Dynamo's NvExt request schema carries no field for
+        # routed_experts_prompt_start, so the worker cannot trim the prompt
+        # rows: it returns full-sequence routing with start=0. Stamp the
+        # intended trim offset (the prompt we sent) onto the payload here so the
+        # consumer aligns the completion. NOTE: this assumes the worker did NOT
+        # trim; if a forwarded prompt-start field is later added to NvExt (so the
+        # worker trims and reports the offset itself), drop this stamping.
+        _stamp_dynamo_routed_experts_start(resp, prompt_ids, sp)
+        return resp
 
     @staticmethod
     def _build_body(
@@ -331,19 +340,6 @@ class _DynamoChatTransport(_Transport):
         if "engine_data" not in extra_fields:
             extra_fields.append("engine_data")
         nvext["extra_fields"] = extra_fields
-        # ``routed_experts_prompt_start`` is the multi-turn replay offset. Dynamo
-        # exposes no top-level field for it, so thread it through
-        # ``nvext.extra_args.sampling_options`` where the worker's
-        # ``build_sampling_params`` applies it to vLLM ``SamplingParams`` — vLLM
-        # then trims the leading prompt rows and the worker echoes the value back
-        # as ``routed_experts.start`` for completion alignment.
-        prompt_start = sp.get("routed_experts_prompt_start")
-        if prompt_start is not None:
-            extra_args = dict(nvext.get("extra_args") or {})
-            sampling_options = dict(extra_args.get("sampling_options") or {})
-            sampling_options["routed_experts_prompt_start"] = prompt_start
-            extra_args["sampling_options"] = sampling_options
-            nvext["extra_args"] = extra_args
         if cache_salt is not None:
             nvext["cache_salt"] = cache_salt
         if priority is not None:
@@ -475,6 +471,34 @@ def _normalize_routed_experts(payload: Any) -> dict[str, Any] | None:
         "start": int(payload.get("start", 0)),
         "dtype": payload.get("dtype", "uint8"),
     }
+
+
+def _stamp_dynamo_routed_experts_start(
+    resp: Any, prompt_ids: list[int], sp: dict[str, Any]
+) -> None:
+    """Set ``routed_experts.start`` on a dynamo_chat response in place.
+
+    The worker returns full-sequence routing with ``start=0`` (it can't trim —
+    NvExt carries no ``routed_experts_prompt_start``). Stamp the intended trim
+    offset so the consumer aligns the completion: the caller's
+    ``routed_experts_prompt_start`` if set, else ``len(prompt_ids) - 1`` (where
+    the completion's routing begins). No-op when routed_experts is absent.
+    """
+    if not isinstance(resp, Mapping):
+        return
+    nvext = resp.get("nvext")
+    if not isinstance(nvext, Mapping):
+        return
+    routed = nvext.get("routed_experts")
+    if not isinstance(routed, dict):
+        engine = nvext.get("engine_data")
+        routed = engine.get("routed_experts") if isinstance(engine, Mapping) else None
+    if not isinstance(routed, dict):
+        return
+    start = sp.get("routed_experts_prompt_start")
+    if start is None:
+        start = max(0, len(prompt_ids) - 1)
+    routed["start"] = int(start)
 
 
 async def _maybe_offload(renderer: Renderer | RendererPool, fn):

@@ -471,8 +471,8 @@ def test_dynamo_transport_forwards_extra_sampling_fields_and_drops_denylist():
                 "guided_json": {"type": "object"},
                 # denylisted — must NOT hit the wire
                 "return_token_ids": True,
-                # renderer-internal: forwarded via nvext.extra_args (below),
-                # never as a top-level chat field
+                # renderer-internal: never a wire field (stamped onto the
+                # response's routed_experts.start instead)
                 "routed_experts_prompt_start": 3,
             },
             transport="dynamo_chat",
@@ -485,14 +485,33 @@ def test_dynamo_transport_forwards_extra_sampling_fields_and_drops_denylist():
     assert body["stop"] == ["</s>"]
     assert body["guided_json"] == {"type": "object"}
     assert "return_token_ids" not in body
-    # routed_experts_prompt_start is not a top-level field; it rides
-    # nvext.extra_args.sampling_options so the worker applies it to vLLM
-    # SamplingParams (trims the prompt rows) and echoes it back as start.
+    # routed_experts_prompt_start is renderer-internal: Dynamo has no nvext
+    # field to forward it to the worker, so the renderer stamps it as
+    # routed_experts.start on the response instead. It must never hit the wire.
     assert "routed_experts_prompt_start" not in body
-    assert (
-        body["nvext"]["extra_args"]["sampling_options"]["routed_experts_prompt_start"]
-        == 3
-    )
+    assert "extra_args" not in body.get("nvext", {})
+
+
+def test_stamp_dynamo_routed_experts_start():
+    """The dynamo transport stamps routed_experts.start (the worker returns
+    full routing with start=0): caller's routed_experts_prompt_start wins,
+    else prompt_len-1; absent routed_experts is a no-op."""
+    from renderers.client import _stamp_dynamo_routed_experts_start
+
+    # caller-provided prompt_start wins (engine_data channel)
+    resp = {"nvext": {"engine_data": {"routed_experts": {"data": "x", "shape": [5, 1, 1], "start": 0}}}}
+    _stamp_dynamo_routed_experts_start(resp, [1, 2, 3, 4], {"routed_experts_prompt_start": 3})
+    assert resp["nvext"]["engine_data"]["routed_experts"]["start"] == 3
+
+    # fallback to prompt_len - 1 (top-level routed_experts channel)
+    resp2 = {"nvext": {"routed_experts": {"data": "x", "shape": [5, 1, 1], "start": 0}}}
+    _stamp_dynamo_routed_experts_start(resp2, [1, 2, 3, 4], {})
+    assert resp2["nvext"]["routed_experts"]["start"] == 3
+
+    # no routed_experts -> no-op
+    resp3 = {"nvext": {"engine_data": {}}}
+    _stamp_dynamo_routed_experts_start(resp3, [1, 2], {})
+    assert resp3 == {"nvext": {"engine_data": {}}}
 
 
 def test_dynamo_transport_merges_caller_nvext():

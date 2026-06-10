@@ -33,7 +33,8 @@ RENDERER_MODELS = [
     ("moonshotai/Kimi-K2.6", "auto"),
     ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
     ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16", "auto"),
-    # Ultra resolves the Ultra template variant via name (auto → ultra=True).
+    # Ultra resolves to the `nemotron-3-ultra` config variant via the model
+    # name (auto → MODEL_RENDERER_MAP → nemotron-3-ultra).
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
     # DeepSeek-V3/R1 are intentionally NOT in this shared barrage: their

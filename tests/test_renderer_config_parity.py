@@ -55,9 +55,13 @@ _RENDERER_MODELS = [
     ("moonshotai/Kimi-K2.6", "auto"),
     ("deepseek-ai/DeepSeek-V3", "auto"),
     ("deepseek-ai/DeepSeek-R1", "auto"),
+    # Nano + Super share the ``nemotron-3`` config (incl. ``low_effort``, which
+    # fires only on Super); both are exercised so the kwarg is checked where it
+    # no-ops (Nano) AND where it appends (Super).
     ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
-    # Ultra: auto-resolves to the Ultra template variant (ultra=True) via the
-    # model name; parity asserted against the Ultra apply_chat_template.
+    ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16", "auto"),
+    # Ultra: auto-resolves to the ``nemotron-3-ultra`` config via the model
+    # name; parity asserted against the Ultra apply_chat_template (``medium_effort``).
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
@@ -85,6 +89,12 @@ _KWARG_VALUES: dict[str, list[Any]] = {
     # ``truncate_history_thinking=False`` keeps reasoning on historical
     # assistants instead of collapsing to ``<think></think>``.
     "truncate_history_thinking": [True, False],
+    # Nemotron-3 reasoning-effort hints appended to the last user message.
+    # ``low_effort`` is a Super (``nemotron-3``) kwarg; ``medium_effort`` an
+    # Ultra (``nemotron-3-ultra``) kwarg. On the variant that doesn't define
+    # the kwarg the template — and the renderer — no-op it.
+    "low_effort": [True, False],
+    "medium_effort": [True, False],
     # MiniMax-M2 — fallback persona string when no system message is
     # supplied. Two arbitrary values to verify the renderer threads the
     # exact bytes through (whitespace included).

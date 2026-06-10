@@ -1040,14 +1040,15 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "moonshotai/Kimi-K2-Instruct": "kimi-k2",
     "moonshotai/Kimi-K2.5": "kimi-k2.5",
     "moonshotai/Kimi-K2.6": "kimi-k2.5",
-    # Nemotron 3. Nano / Super share one chat-template variant; the Ultra
-    # checkpoints use the Ultra variant — the renderer auto-selects it from
-    # the model name (see ``nemotron3._ULTRA_DEFAULTS``). BF16 and FP8 share the
+    # Nemotron 3. Nano / Super share one chat-template variant (``nemotron-3``);
+    # the Ultra checkpoints use the Ultra variant (``nemotron-3-ultra``, distinct
+    # ``</think>`` glue). Both route to the same Nemotron3Renderer, which selects
+    # the variant from the resolved config's ``name``. BF16 and FP8 share the
     # same tokenizer and template.
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nemotron-3",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nemotron-3",
-    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nemotron-3",
-    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nemotron-3",
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nemotron-3-ultra",
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nemotron-3-ultra",
     # Llama 3.2 (Instruct). Tested against the gated meta-llama repos and
     # the unrestricted unsloth/... mirror, which ships a byte-identical
     # chat template. ``Llama3Renderer`` defaults ``date_string`` to
@@ -1374,6 +1375,7 @@ def _populate_registry():
             "laguna-xs.2": LagunaXS2Renderer,
             "llama-3": Llama3Renderer,
             "nemotron-3": Nemotron3Renderer,
+            "nemotron-3-ultra": Nemotron3Renderer,
             "gpt-oss": GptOssRenderer,
         }
     )

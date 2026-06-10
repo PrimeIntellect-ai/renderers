@@ -280,16 +280,15 @@ def _load_preprocessor_config_json(model_name_or_path: str) -> dict[str, Any]:
         except Exception:
             pass
         if not candidates:
-            # Cache miss for a hub-style id: fall back to downloading the file
-            # (a few hundred bytes; lands in the HF cache so this is one-time
-            # per process pool). Hosted env workers render models they never
-            # loaded locally, so the cache-only lookup above rarely hits there.
-            # Offline/no-network environments fall through to the error below,
-            # which names the explicit image_* config escape hatch.
+            # Cache miss for a hub-style id (hosted workers render models they
+            # never loaded locally): download the tiny file into the HF cache.
+            # Offline, this falls through to the error below.
             try:
                 from huggingface_hub import hf_hub_download
 
-                downloaded = hf_hub_download(model_name_or_path, "preprocessor_config.json")
+                downloaded = hf_hub_download(
+                    model_name_or_path, "preprocessor_config.json"
+                )
                 candidates.append(Path(downloaded))
             except Exception:
                 pass

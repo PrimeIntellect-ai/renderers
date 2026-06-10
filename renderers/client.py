@@ -261,11 +261,13 @@ class _DynamoChatTransport(_Transport):
 
     Dynamo has no /inference/v1/generate route. ``nvext.token_data`` carries
     the pre-tokenized prompt (Dynamo skips tokenization when present) and
-    ``extra_fields=["engine_data"]`` opts into the completion-IDs/logprobs
-    channel (PR #8119). Mirrors
+    ``extra_fields=["engine_data", "routed_experts"]`` opts into the
+    completion-IDs/logprobs channel (PR #8119) and the MoE routed_experts
+    channel. Mirrors
     ``verifiers.clients.openai_chat_completions_token_client._post_dynamo_chat``
-    so the wire payload is identical via either client. routed_experts is not
-    requested (its nvext shape differs from the downstream contract).
+    so the wire payload is identical via either client. routed_experts is read
+    from ``nvext.routed_experts`` (or ``nvext.engine_data.routed_experts``) and
+    surfaced as the prime-rl ``{data, shape, start, dtype}`` contract.
     """
 
     async def post(
@@ -322,9 +324,23 @@ class _DynamoChatTransport(_Transport):
         nvext: dict[str, Any] = dict(sp.get("nvext") or {})
         nvext["token_data"] = list(prompt_ids)
         extra_fields = list(nvext.get("extra_fields") or [])
-        if "engine_data" not in extra_fields:
-            extra_fields.append("engine_data")
+        for field in ("engine_data", "routed_experts"):
+            if field not in extra_fields:
+                extra_fields.append(field)
         nvext["extra_fields"] = extra_fields
+        # ``routed_experts_prompt_start`` is the multi-turn replay offset. Dynamo
+        # exposes no top-level field for it, so thread it through
+        # ``nvext.extra_args.sampling_options`` where the worker's
+        # ``build_sampling_params`` applies it to vLLM ``SamplingParams`` — vLLM
+        # then trims the leading prompt rows and the worker echoes the value back
+        # as ``routed_experts.start`` for completion alignment.
+        prompt_start = sp.get("routed_experts_prompt_start")
+        if prompt_start is not None:
+            extra_args = dict(nvext.get("extra_args") or {})
+            sampling_options = dict(extra_args.get("sampling_options") or {})
+            sampling_options["routed_experts_prompt_start"] = prompt_start
+            extra_args["sampling_options"] = sampling_options
+            nvext["extra_args"] = extra_args
         if cache_salt is not None:
             nvext["cache_salt"] = cache_salt
         if priority is not None:
@@ -402,10 +418,19 @@ class _DynamoChatTransport(_Transport):
                 f"completion token count ({len(completion_ids)})."
             )
 
+        # routed_experts: prefer the dedicated nvext.routed_experts field
+        # (extra_fields=["routed_experts"]); fall back to the engine_data
+        # passthrough (extra_fields=["engine_data"]) since the worker also nests
+        # it there. The Dynamo vLLM worker already emits the prime-rl contract
+        # shape {data(base64), shape, start, dtype}, so pass it through unchanged.
+        routed_experts = nvext.get("routed_experts")
+        if routed_experts is None:
+            routed_experts = engine.get("routed_experts")
+
         return _WireResult(
             completion_ids=completion_ids,
             completion_logprobs=logprobs,
-            routed_experts=None,
+            routed_experts=routed_experts,
             request_id=data.get("request_id") or data.get("id") or "",
             finish_reason=choice.get("finish_reason"),
         )

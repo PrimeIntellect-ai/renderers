@@ -280,7 +280,7 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
 
 class _DynamoFakeClient(_FakeClient):
     """Dynamo-shaped response: engine fields + routed_experts under nvext (not
-    choices[0]), so the test proves routed_experts is dropped on dynamo_chat."""
+    choices[0]); used to prove routed_experts now surfaces on dynamo_chat."""
 
     async def post(self, path, *, cast_to=dict, body=None, options=None):
         self.calls.append(
@@ -297,7 +297,12 @@ class _DynamoFakeClient(_FakeClient):
             ],
             "nvext": {
                 "engine_data": {"completion_token_ids": [7, 8]},
-                "routed_experts": {"data": "AQI=", "shape": [2, 1, 1]},
+                "routed_experts": {
+                    "data": "AQI=",
+                    "shape": [2, 1, 1],
+                    "start": 0,
+                    "dtype": "uint8",
+                },
             },
         }
 
@@ -333,7 +338,7 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
         "stream": False,
         "nvext": {
             "token_data": [1, 2, 3],
-            "extra_fields": ["engine_data"],
+            "extra_fields": ["engine_data", "routed_experts"],
             "cache_salt": "ckpt-42",
             "agent_hints": {"priority": 17},
         },
@@ -348,8 +353,14 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
         "detokenize": False,
     }
     assert result["completion_ids"] == [7, 8]
-    # routed_experts is dropped on dynamo_chat (nvext shape != downstream contract).
-    assert result["routed_experts"] is None
+    # routed_experts now surfaces on dynamo_chat via nvext.routed_experts,
+    # passed through as the prime-rl {data, shape, start, dtype} contract.
+    assert result["routed_experts"] == {
+        "data": "AQI=",
+        "shape": [2, 1, 1],
+        "start": 0,
+        "dtype": "uint8",
+    }
 
 
 class _NoCompletionIdsClient(_FakeClient):
@@ -458,8 +469,10 @@ def test_dynamo_transport_forwards_extra_sampling_fields_and_drops_denylist():
                 "frequency_penalty": 0.25,
                 "stop": ["</s>"],
                 "guided_json": {"type": "object"},
-                # denylisted / renderer-internal — must NOT hit the wire
+                # denylisted — must NOT hit the wire
                 "return_token_ids": True,
+                # renderer-internal: forwarded via nvext.extra_args (below),
+                # never as a top-level chat field
                 "routed_experts_prompt_start": 3,
             },
             transport="dynamo_chat",
@@ -472,7 +485,14 @@ def test_dynamo_transport_forwards_extra_sampling_fields_and_drops_denylist():
     assert body["stop"] == ["</s>"]
     assert body["guided_json"] == {"type": "object"}
     assert "return_token_ids" not in body
+    # routed_experts_prompt_start is not a top-level field; it rides
+    # nvext.extra_args.sampling_options so the worker applies it to vLLM
+    # SamplingParams (trims the prompt rows) and echoes it back as start.
     assert "routed_experts_prompt_start" not in body
+    assert (
+        body["nvext"]["extra_args"]["sampling_options"]["routed_experts_prompt_start"]
+        == 3
+    )
 
 
 def test_dynamo_transport_merges_caller_nvext():
@@ -501,8 +521,8 @@ def test_dynamo_transport_merges_caller_nvext():
     )
     nvext = client.calls[0]["body"]["nvext"]
     assert nvext["token_data"] == [1, 2, 3]
-    # extra_fields union preserves caller "timing" + our "engine_data"
-    assert nvext["extra_fields"] == ["timing", "engine_data"]
+    # extra_fields union preserves caller "timing" + our "engine_data"/"routed_experts"
+    assert nvext["extra_fields"] == ["timing", "engine_data", "routed_experts"]
     # agent_hints merged: caller osl kept, priority overlaid
     assert nvext["agent_hints"] == {"osl": 4, "priority": 9}
     # unrelated caller nvext keys survive

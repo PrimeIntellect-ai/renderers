@@ -441,6 +441,149 @@ def test_generate_propagates_post_errors_raw(transport):
         )
 
 
+def test_dynamo_transport_forwards_extra_sampling_fields_and_drops_denylist():
+    """F1: sampling fields outside the old allowlist (presence_penalty, stop,
+    guided_json) must reach the wire; vLLM-only/internal keys are dropped."""
+    client = _DynamoFakeClient()
+    asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={
+                "max_tokens": 7,
+                "presence_penalty": 0.5,
+                "frequency_penalty": 0.25,
+                "stop": ["</s>"],
+                "guided_json": {"type": "object"},
+                # denylisted / renderer-internal — must NOT hit the wire
+                "return_token_ids": True,
+                "routed_experts_prompt_start": 3,
+            },
+            transport="dynamo_chat",
+            max_prompt_len=10_000,
+        )
+    )
+    body = client.calls[0]["body"]
+    assert body["presence_penalty"] == 0.5
+    assert body["frequency_penalty"] == 0.25
+    assert body["stop"] == ["</s>"]
+    assert body["guided_json"] == {"type": "object"}
+    assert "return_token_ids" not in body
+    assert "routed_experts_prompt_start" not in body
+
+
+def test_dynamo_transport_merges_caller_nvext():
+    """F2: caller-supplied nvext is merged — extra_fields union with engine_data,
+    agent_hints merged with priority, unrelated caller keys preserved."""
+    client = _DynamoFakeClient()
+    asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={
+                "max_tokens": 7,
+                "nvext": {
+                    "extra_fields": ["timing"],
+                    "agent_hints": {"osl": 4},
+                    "annotations": ["trace"],
+                },
+            },
+            priority=9,
+            transport="dynamo_chat",
+            max_prompt_len=10_000,
+        )
+    )
+    nvext = client.calls[0]["body"]["nvext"]
+    assert nvext["token_data"] == [1, 2, 3]
+    # extra_fields union preserves caller "timing" + our "engine_data"
+    assert nvext["extra_fields"] == ["timing", "engine_data"]
+    # agent_hints merged: caller osl kept, priority overlaid
+    assert nvext["agent_hints"] == {"osl": 4, "priority": 9}
+    # unrelated caller nvext keys survive
+    assert nvext["annotations"] == ["trace"]
+
+
+class _BothTokenIdsClient(_FakeClient):
+    """Dynamo response carrying engine_data.completion_token_ids AND a divergent
+    choices[0].token_ids — the canonical engine channel must win (F3)."""
+
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        self.calls.append(
+            {"path": path, "cast_to": cast_to, "body": body, "options": options}
+        )
+        return {
+            "id": "gen-dyn",
+            "choices": [
+                {
+                    "index": 0,
+                    "token_ids": [99, 99],  # divergent echo — must be ignored
+                    "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+                    "finish_reason": "stop",
+                }
+            ],
+            "nvext": {"engine_data": {"completion_token_ids": [7, 8]}},
+        }
+
+
+def test_dynamo_transport_prefers_engine_data_over_choices_token_ids():
+    client = _BothTokenIdsClient()
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={"max_tokens": 7},
+            transport="dynamo_chat",
+            max_prompt_len=10_000,
+        )
+    )
+    assert result["completion_ids"] == [7, 8]
+
+
+class _MisalignedLogprobsClient(_FakeClient):
+    """Dynamo response whose logprobs length disagrees with completion_ids (F4)."""
+
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        self.calls.append(
+            {"path": path, "cast_to": cast_to, "body": body, "options": options}
+        )
+        return {
+            "id": "gen-dyn",
+            "choices": [
+                {
+                    "index": 0,
+                    "logprobs": {"content": [{"logprob": -0.1}]},  # only 1 logprob
+                    "finish_reason": "stop",
+                }
+            ],
+            "nvext": {"engine_data": {"completion_token_ids": [7, 8]}},  # 2 tokens
+        }
+
+
+def test_dynamo_transport_raises_on_logprob_length_mismatch():
+    with pytest.raises(RuntimeError, match="logprobs length"):
+        asyncio.run(
+            generate(
+                client=_MisalignedLogprobsClient(),
+                renderer=_FakeRenderer(),
+                messages=[{"role": "user", "content": "hi"}],
+                model="test-model",
+                tools=[{"type": "function", "function": {"name": "echo"}}],
+                sampling_params={"max_tokens": 7},
+                transport="dynamo_chat",
+                max_prompt_len=10_000,
+            )
+        )
+
+
 # ---------------------------------------------------------------------------
 # Multimodal features payload.
 # ---------------------------------------------------------------------------

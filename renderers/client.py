@@ -125,26 +125,18 @@ async def _resolve_max_prompt_len(client: AsyncOpenAI, model: str) -> int | None
 # Public type alias; matches verifiers.types.RendererTransport string set.
 RendererTransport = Literal["vllm_generate", "dynamo_chat"]
 
-# Sampling params Dynamo's chat schema recognizes natively at top level.
-_DYNAMO_PROMOTABLE_KEYS = (
-    "max_tokens",
-    "temperature",
-    "top_p",
-    "top_k",
-    "min_p",
-    "seed",
-    "n",
-    "repetition_penalty",
-    "min_tokens",
-    "logprobs",
-    "skip_special_tokens",
-)
-# Pass-through hints on Dynamo's PASSTHROUGH_EXTRA_FIELDS allowlist.
-_DYNAMO_PASSTHROUGH_KEYS = (
-    "stop_token_ids",
-    "bad_words_token_ids",
-    "allowed_token_ids",
-    "detokenize",
+# Keys never forwarded to Dynamo at the top level: vLLM/prime-only fields its
+# strict validator rejects (mirrors the token client's drop set), the
+# renderer-internal ``routed_experts_prompt_start`` parse hint (never a wire
+# field), and ``priority`` (routed into nvext.agent_hints instead). ``max_tokens``
+# and ``nvext`` are handled explicitly and skipped separately.
+_DYNAMO_DROP_KEYS = frozenset(
+    {
+        "return_token_ids",
+        "spaces_between_special_tokens",
+        "priority",
+        "routed_experts_prompt_start",
+    }
 )
 
 # Absolute /inference/v1/generate URLs, cached per client base_url.
@@ -289,6 +281,7 @@ class _DynamoChatTransport(_Transport):
         priority: int | None,
         extra_headers: dict[str, str] | None,
     ) -> dict[str, Any]:
+        # TODO: Implement multimodal support for dynamo_chat transport.
         if mm_data is not None and not mm_data.is_empty():
             raise NotImplementedError(
                 "Multimodal renderers are not yet supported on the dynamo_chat "
@@ -313,31 +306,44 @@ class _DynamoChatTransport(_Transport):
         cache_salt: str | None,
         priority: int | None,
     ) -> dict[str, Any]:
-        # messages is a placeholder stub the OpenAI schema requires but Dynamo
-        # ignores. tools are baked into token_data; forwarding the renderer
-        # ToolSpec (not the OpenAI tool shape) would 400.
-        nvext: dict[str, Any] = {
-            "token_data": list(prompt_ids),
-            "extra_fields": ["engine_data"],
-        }
+        # Merge caller-supplied nvext rather than overwriting it, then layer on
+        # the required fields: token_data (authoritative renderer tokens) and a
+        # cumulative extra_fields union with "engine_data". The cache_salt /
+        # priority kwargs win over any caller nvext values.
+        nvext: dict[str, Any] = dict(sp.get("nvext") or {})
+        nvext["token_data"] = list(prompt_ids)
+        extra_fields = list(nvext.get("extra_fields") or [])
+        if "engine_data" not in extra_fields:
+            extra_fields.append("engine_data")
+        nvext["extra_fields"] = extra_fields
         if cache_salt is not None:
             nvext["cache_salt"] = cache_salt
         if priority is not None:
-            nvext["agent_hints"] = {"priority": priority}
+            agent_hints = dict(nvext.get("agent_hints") or {})
+            agent_hints["priority"] = priority
+            nvext["agent_hints"] = agent_hints
+
+        # messages is a placeholder stub the OpenAI schema requires but Dynamo
+        # ignores. tools are baked into token_data; forwarding the renderer
+        # ToolSpec (not the OpenAI tool shape) would 400.
         body: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": ""}],
             "stream": False,
             "nvext": nvext,
         }
+        if sp.get("max_tokens") is not None:
+            body["max_completion_tokens"] = sp["max_tokens"]
 
-        for key in _DYNAMO_PROMOTABLE_KEYS:
-            value = sp.get(key)
-            if value is None:
+        # Forward every other non-None sampling field (denylist, not allowlist)
+        # so caller-requested params (presence_penalty, stop, guided_*, ...) are
+        # not silently dropped. Mirrors the token client's body construction.
+        for key, value in sp.items():
+            if value is None or key in _DYNAMO_DROP_KEYS or key in body:
                 continue
-            if key == "max_tokens":
-                body["max_completion_tokens"] = value
-            elif key == "logprobs":
+            if key in ("nvext", "max_tokens"):
+                continue  # handled above
+            if key == "logprobs":
                 # vLLM takes logprobs=N (int); Dynamo's chat schema wants the
                 # OpenAI bool + top_logprobs split.
                 body["logprobs"] = True
@@ -345,10 +351,6 @@ class _DynamoChatTransport(_Transport):
                     body["top_logprobs"] = value
             else:
                 body[key] = value
-
-        for key in _DYNAMO_PASSTHROUGH_KEYS:
-            if sp.get(key) is not None:
-                body[key] = sp[key]
         return body
 
     def parse(self, data: dict[str, Any]) -> _WireResult:
@@ -356,14 +358,20 @@ class _DynamoChatTransport(_Transport):
         nvext = data.get("nvext") or {}
         engine = nvext.get("engine_data") or {}
 
-        completion_ids = choice.get("token_ids")
-        present = completion_ids is not None
-        if not present:
-            for src in (engine, nvext):
-                if src.get("completion_token_ids") is not None:
-                    completion_ids = src["completion_token_ids"]
-                    present = True
-                    break
+        # Canonical Dynamo channel first (PR #8119: nvext.engine_data, then
+        # top-level nvext), then the OpenAI-extended choices[0].token_ids. The
+        # engine channel is authoritative — choices[0].token_ids may be a
+        # detokenize-then-retokenize echo that differs from what was sampled.
+        completion_ids = None
+        present = False
+        for src in (engine, nvext):
+            if src.get("completion_token_ids") is not None:
+                completion_ids = src["completion_token_ids"]
+                present = True
+                break
+        if not present and choice.get("token_ids") is not None:
+            completion_ids = choice["token_ids"]
+            present = True
         if not present:
             # Field absent (vs. an empty completion) — usually a missing
             # nvext.extra_fields=["engine_data"] opt-in.
@@ -371,14 +379,22 @@ class _DynamoChatTransport(_Transport):
                 "dynamo_chat response carried no completion token IDs "
                 "(expected nvext.engine_data.completion_token_ids)."
             )
+        completion_ids = list(completion_ids or [])
 
         logprobs = _flatten_chat_logprobs(choice)
         if not logprobs:
             # Dynamo-only fallback when chat logprobs are absent.
             logprobs = [float(x) for x in engine.get("completion_logprobs") or []]
+        # Logprobs are indexed positionally against completion_ids downstream;
+        # a length mismatch would silently misalign tokens and logprobs.
+        if logprobs and len(logprobs) != len(completion_ids):
+            raise RuntimeError(
+                f"dynamo_chat logprobs length ({len(logprobs)}) does not match "
+                f"completion token count ({len(completion_ids)})."
+            )
 
         return _WireResult(
-            completion_ids=list(completion_ids or []),
+            completion_ids=completion_ids,
             completion_logprobs=logprobs,
             routed_experts=None,
             request_id=data.get("request_id") or data.get("id") or "",

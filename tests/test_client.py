@@ -355,13 +355,13 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
     }
     assert result["completion_ids"] == [7, 8]
     # routed_experts surfaces on dynamo_chat as the {data, shape, start, dtype}
-    # contract. The renderer trims the leading prompt rows (offset = prompt_len
-    # - 1 = 2 here, no routed_experts_prompt_start set): 4 rows -> last 2, with
-    # start=2 so row 0 is the boundary the consumer expects.
+    # contract. No routed_experts_prompt_start is set here (first-turn case), so
+    # the renderer does NOT trim — full-sequence routing passes through with
+    # start=0.
     assert result["routed_experts"] == {
-        "data": "AwQ=",
-        "shape": [2, 1, 1],
-        "start": 2,
+        "data": "AQIDBA==",
+        "shape": [4, 1, 1],
+        "start": 0,
         "dtype": "uint8",
     }
 
@@ -496,42 +496,46 @@ def test_dynamo_transport_forwards_extra_sampling_fields_and_drops_denylist():
 
 
 def test_trim_dynamo_routed_experts():
-    """The dynamo transport trims leading prompt rows (worker returns full
-    routing, start=0) and sets start: caller's routed_experts_prompt_start
-    wins, else prompt_len-1; offset 0 / absent routed_experts is a no-op."""
+    """The dynamo transport trims leading prompt rows ONLY when the caller
+    supplies routed_experts_prompt_start (worker returns full routing, start=0).
+    Absent start (first turn), offset 0, or absent routed_experts are no-ops."""
     from renderers.client import _trim_dynamo_routed_experts
 
     def _payload(channel):
-        return {"nvext": {channel: {"routed_experts": {
+        re = {
             "data": base64.b64encode(bytes([0, 1, 2, 3, 4])).decode(),
             "shape": [5, 1, 1], "start": 0, "dtype": "uint8",
-        }}}} if channel == "engine_data" else {"nvext": {"routed_experts": {
-            "data": base64.b64encode(bytes([0, 1, 2, 3, 4])).decode(),
-            "shape": [5, 1, 1], "start": 0, "dtype": "uint8",
-        }}}
+        }
+        return {"nvext": {channel: {"routed_experts": re}} if channel == "engine_data"
+                else {"routed_experts": re}}
 
-    # caller-provided prompt_start=3 -> drop 3 rows, start=3 (engine_data channel)
+    # explicit prompt_start=3 -> drop 3 rows, start=3 (engine_data channel)
     resp = _payload("engine_data")
-    _trim_dynamo_routed_experts(resp, [1, 2, 3, 4], {"routed_experts_prompt_start": 3})
+    _trim_dynamo_routed_experts(resp, {"routed_experts_prompt_start": 3})
     re = resp["nvext"]["engine_data"]["routed_experts"]
     assert re["shape"] == [2, 1, 1] and re["start"] == 3
     assert base64.b64decode(re["data"]) == bytes([3, 4])
 
-    # fallback prompt_len-1 = 3 (top-level routed_experts channel)
+    # explicit prompt_start=3 (top-level routed_experts channel)
     resp2 = _payload("routed_experts")
-    _trim_dynamo_routed_experts(resp2, [1, 2, 3, 4], {})
+    _trim_dynamo_routed_experts(resp2, {"routed_experts_prompt_start": 3})
     re2 = resp2["nvext"]["routed_experts"]
     assert re2["shape"] == [2, 1, 1] and re2["start"] == 3
-    assert base64.b64decode(re2["data"]) == bytes([3, 4])
+
+    # absent start (first turn) -> NO trim, full-sequence with start=0
+    resp3 = _payload("engine_data")
+    _trim_dynamo_routed_experts(resp3, {})
+    re3 = resp3["nvext"]["engine_data"]["routed_experts"]
+    assert re3["shape"] == [5, 1, 1] and re3["start"] == 0
 
     # offset 0 -> no-op
-    resp3 = _payload("engine_data")
-    _trim_dynamo_routed_experts(resp3, [1], {"routed_experts_prompt_start": 0})
-    assert resp3["nvext"]["engine_data"]["routed_experts"]["shape"] == [5, 1, 1]
+    resp0 = _payload("engine_data")
+    _trim_dynamo_routed_experts(resp0, {"routed_experts_prompt_start": 0})
+    assert resp0["nvext"]["engine_data"]["routed_experts"]["shape"] == [5, 1, 1]
 
     # absent routed_experts -> no-op
     resp4 = {"nvext": {"engine_data": {}}}
-    _trim_dynamo_routed_experts(resp4, [1, 2], {})
+    _trim_dynamo_routed_experts(resp4, {"routed_experts_prompt_start": 3})
     assert resp4 == {"nvext": {"engine_data": {}}}
 
 

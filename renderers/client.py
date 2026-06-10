@@ -306,7 +306,7 @@ class _DynamoChatTransport(_Transport):
         # rows here and set start, so the payload matches the consumer contract
         # (row 0 == position start). NOTE: if a forwarded prompt-start field is
         # later added to NvExt (worker trims + reports start), drop this.
-        _trim_dynamo_routed_experts(resp, prompt_ids, sp)
+        _trim_dynamo_routed_experts(resp, sp)
         return resp
 
     @staticmethod
@@ -476,19 +476,18 @@ def _normalize_routed_experts(payload: Any) -> dict[str, Any] | None:
 _ROUTED_EXPERTS_ITEMSIZE = {"uint8": 1, "uint16": 2, "int16": 2, "int32": 4}
 
 
-def _trim_dynamo_routed_experts(
-    resp: Any, prompt_ids: list[int], sp: dict[str, Any]
-) -> None:
+def _trim_dynamo_routed_experts(resp: Any, sp: dict[str, Any]) -> None:
     """Trim a dynamo_chat routed_experts payload to begin at ``start``, in place.
 
     The Dynamo worker returns FULL-sequence routing with ``start=0`` because
     NvExt carries no field to forward ``routed_experts_prompt_start`` for
     worker-side trimming. The consumer contract is that row 0 of the payload is
     the row at ``start`` (the vllm_generate path has vLLM trim internally), so
-    we drop the leading prompt rows here and set ``start`` to the offset:
-    the caller's ``routed_experts_prompt_start`` if set, else ``prefix_len - 1``
-    (the boundary row that produces the first completion token). No-op when
-    routed_experts is absent/empty or the offset is 0.
+    when the caller explicitly supplies ``routed_experts_prompt_start`` we drop
+    that many leading rows and set ``start`` to it. No-op when routed_experts is
+    absent/empty, the offset is 0, or no offset is supplied — a first-turn
+    request with no caller start keeps full-sequence routing with ``start=0``
+    rather than claiming a prefix the consumer has no state for.
 
     Worker-side trimming (avoiding full-prompt routing on the wire) is a future
     optimization gated on a forwarded NvExt prompt-start field.
@@ -513,7 +512,7 @@ def _trim_dynamo_routed_experts(
 
     offset = sp.get("routed_experts_prompt_start")
     if offset is None:
-        offset = len(prompt_ids) - 1
+        return
     offset = max(0, min(int(offset), int(shape[0])))
     if offset == 0:
         return

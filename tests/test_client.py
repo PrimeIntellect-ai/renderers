@@ -474,8 +474,9 @@ def test_dynamo_transport_forwards_extra_sampling_fields_and_drops_denylist():
                 "guided_json": {"type": "object"},
                 # denylisted — must NOT hit the wire
                 "return_token_ids": True,
-                # renderer-internal: never a wire field (stamped onto the
-                # response's routed_experts.start instead)
+                # not a top-level field (Dynamo rejects unknown ones); routed
+                # into nvext.routed_experts_prompt_start so the worker trims
+                # routing engine-side
                 "routed_experts_prompt_start": 3,
             },
             transport="dynamo_chat",
@@ -488,17 +489,19 @@ def test_dynamo_transport_forwards_extra_sampling_fields_and_drops_denylist():
     assert body["stop"] == ["</s>"]
     assert body["guided_json"] == {"type": "object"}
     assert "return_token_ids" not in body
-    # routed_experts_prompt_start is renderer-internal: Dynamo has no nvext
-    # field to forward it to the worker, so the renderer stamps it as
-    # routed_experts.start on the response instead. It must never hit the wire.
+    # routed_experts_prompt_start is dropped from the top level (Dynamo rejects
+    # unknown top-level fields) but routed into nvext so the worker applies it to
+    # SamplingParams and trims routing engine-side.
     assert "routed_experts_prompt_start" not in body
+    assert body["nvext"]["routed_experts_prompt_start"] == 3
     assert "extra_args" not in body.get("nvext", {})
 
 
 def test_trim_dynamo_routed_experts():
-    """The dynamo transport trims leading prompt rows ONLY when the caller
-    supplies routed_experts_prompt_start (worker returns full routing, start=0).
-    Absent start (first turn), offset 0, or absent routed_experts are no-ops."""
+    """Client-side trim is a back-compat fallback: it trims ONLY when the worker
+    returned full routing (start=0) AND the caller supplied a positive
+    routed_experts_prompt_start. No-op when the worker already trimmed (start>0),
+    no offset is supplied (first turn), offset is 0, or routed_experts is absent."""
     from renderers.client import _trim_dynamo_routed_experts
 
     def _payload(channel):
@@ -521,6 +524,16 @@ def test_trim_dynamo_routed_experts():
     _trim_dynamo_routed_experts(resp2, {"routed_experts_prompt_start": 3})
     re2 = resp2["nvext"]["routed_experts"]
     assert re2["shape"] == [2, 1, 1] and re2["start"] == 3
+
+    # worker already trimmed engine-side (start>0) -> no-op (don't double-trim)
+    resp_wt = {"nvext": {"engine_data": {"routed_experts": {
+        "data": base64.b64encode(bytes([3, 4])).decode(),
+        "shape": [2, 1, 1], "start": 3, "dtype": "uint8",
+    }}}}
+    _trim_dynamo_routed_experts(resp_wt, {"routed_experts_prompt_start": 3})
+    rewt = resp_wt["nvext"]["engine_data"]["routed_experts"]
+    assert rewt["shape"] == [2, 1, 1] and rewt["start"] == 3
+    assert base64.b64decode(rewt["data"]) == bytes([3, 4])
 
     # absent start (first turn) -> NO trim, full-sequence with start=0
     resp3 = _payload("engine_data")

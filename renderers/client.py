@@ -127,10 +127,11 @@ async def _resolve_max_prompt_len(client: AsyncOpenAI, model: str) -> int | None
 RendererTransport = Literal["vllm_generate", "dynamo_chat"]
 
 # Keys never forwarded to Dynamo at the top level: vLLM/prime-only fields its
-# strict validator rejects (mirrors the token client's drop set), the
-# renderer-internal ``routed_experts_prompt_start`` parse hint (never a wire
-# field), and ``priority`` (routed into nvext.agent_hints instead). ``max_tokens``
-# and ``nvext`` are handled explicitly and skipped separately.
+# strict validator rejects (mirrors the token client's drop set). ``priority``
+# is routed into nvext.agent_hints and ``routed_experts_prompt_start`` into
+# nvext.routed_experts_prompt_start instead (the worker applies the latter to
+# SamplingParams so vLLM trims routing engine-side). ``max_tokens`` and ``nvext``
+# are handled explicitly and skipped separately.
 _DYNAMO_DROP_KEYS = frozenset(
     {
         "return_token_ids",
@@ -346,6 +347,13 @@ class _DynamoChatTransport(_Transport):
             agent_hints = dict(nvext.get("agent_hints") or {})
             agent_hints["priority"] = priority
             nvext["agent_hints"] = agent_hints
+        # routed_experts_prompt_start rides nvext (Dynamo rejects unknown
+        # top-level chat fields). The worker applies it to SamplingParams so vLLM
+        # trims the leading prompt rows engine-side and stamps the payload's
+        # `start` — the client-side trim then no-ops (see _trim_dynamo_routed_experts).
+        reps = sp.get("routed_experts_prompt_start")
+        if reps is not None:
+            nvext["routed_experts_prompt_start"] = reps
 
         # messages is a placeholder stub the OpenAI schema requires but Dynamo
         # ignores. tools are baked into token_data; forwarding the renderer
@@ -486,20 +494,18 @@ _ROUTED_EXPERTS_ITEMSIZE = {"uint8": 1, "uint16": 2, "int16": 2, "int32": 4}
 
 
 def _trim_dynamo_routed_experts(resp: Any, sp: dict[str, Any]) -> None:
-    """Trim a dynamo_chat routed_experts payload to begin at ``start``, in place.
+    """Client-side trim of a dynamo_chat routed_experts payload, in place.
 
-    The Dynamo worker returns FULL-sequence routing with ``start=0`` because
-    NvExt carries no field to forward ``routed_experts_prompt_start`` for
-    worker-side trimming. The consumer contract is that row 0 of the payload is
-    the row at ``start`` (the vllm_generate path has vLLM trim internally), so
-    when the caller explicitly supplies ``routed_experts_prompt_start`` we drop
-    that many leading rows and set ``start`` to it. No-op when routed_experts is
-    absent/empty, the offset is 0, or no offset is supplied — a first-turn
-    request with no caller start keeps full-sequence routing with ``start=0``
-    rather than claiming a prefix the consumer has no state for.
-
-    Worker-side trimming (avoiding full-prompt routing on the wire) is a future
-    optimization gated on a forwarded NvExt prompt-start field.
+    This is a **back-compat fallback**. The renderer now forwards
+    ``routed_experts_prompt_start`` via ``nvext`` (see ``_build_body``), so a
+    current Dynamo worker trims the leading prompt rows engine-side (vLLM) and
+    stamps the payload's ``start`` > 0 — in which case this is a no-op. We only
+    trim here when the worker returned FULL-sequence routing with ``start == 0``
+    (an older worker that ignored the nvext field) and the caller supplied a
+    positive ``routed_experts_prompt_start``: drop that many leading rows and set
+    ``start``. No-op when routed_experts is absent/empty, the worker already
+    trimmed (``start`` > 0), or no positive offset is supplied (first-turn
+    requests keep full-sequence routing with ``start=0``).
     """
     if not isinstance(resp, Mapping):
         return
@@ -521,6 +527,9 @@ def _trim_dynamo_routed_experts(resp: Any, sp: dict[str, Any]) -> None:
 
     offset = sp.get("routed_experts_prompt_start")
     if offset is None:
+        return
+    # Worker already trimmed engine-side (stamped start > 0) — don't double-trim.
+    if int(routed.get("start") or 0) != 0:
         return
     offset = max(0, min(int(offset), int(shape[0])))
     if offset == 0:

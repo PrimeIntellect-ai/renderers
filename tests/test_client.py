@@ -353,12 +353,13 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
         "detokenize": False,
     }
     assert result["completion_ids"] == [7, 8]
-    # routed_experts now surfaces on dynamo_chat via nvext.routed_experts,
-    # passed through as the prime-rl {data, shape, start, dtype} contract.
+    # routed_experts surfaces on dynamo_chat as the {data, shape, start, dtype}
+    # contract. start is stamped by the renderer from the prompt offset
+    # (no routed_experts_prompt_start set here -> prompt_len - 1 = 2).
     assert result["routed_experts"] == {
         "data": "AQI=",
         "shape": [2, 1, 1],
-        "start": 0,
+        "start": 2,
         "dtype": "uint8",
     }
 

@@ -405,10 +405,15 @@ class _DynamoChatTransport(_Transport):
             )
         completion_ids = list(completion_ids or [])
 
-        logprobs = _flatten_chat_logprobs(choice)
+        # Prefer engine_data.completion_logprobs — the same authoritative source
+        # as the engine completion_token_ids used above — so logprobs stay
+        # positionally aligned with the ids. The choices[0] chat logprobs are a
+        # detokenize/retokenize echo that can diverge from the sampled ids, which
+        # would misalign while still passing the length check below. Fall back to
+        # the chat logprobs only when the engine channel carries none.
+        logprobs = [float(x) for x in engine.get("completion_logprobs") or []]
         if not logprobs:
-            # Dynamo-only fallback when chat logprobs are absent.
-            logprobs = [float(x) for x in engine.get("completion_logprobs") or []]
+            logprobs = _flatten_chat_logprobs(choice)
         # Logprobs are indexed positionally against completion_ids downstream;
         # a length mismatch would silently misalign tokens and logprobs.
         if logprobs and len(logprobs) != len(completion_ids):

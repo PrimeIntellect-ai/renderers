@@ -338,7 +338,7 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
         "stream": False,
         "nvext": {
             "token_data": [1, 2, 3],
-            "extra_fields": ["engine_data", "routed_experts"],
+            "extra_fields": ["engine_data"],
             "cache_salt": "ckpt-42",
             "agent_hints": {"priority": 17},
         },
@@ -521,8 +521,8 @@ def test_dynamo_transport_merges_caller_nvext():
     )
     nvext = client.calls[0]["body"]["nvext"]
     assert nvext["token_data"] == [1, 2, 3]
-    # extra_fields union preserves caller "timing" + our "engine_data"/"routed_experts"
-    assert nvext["extra_fields"] == ["timing", "engine_data", "routed_experts"]
+    # extra_fields union preserves caller "timing" + our "engine_data"
+    assert nvext["extra_fields"] == ["timing", "engine_data"]
     # agent_hints merged: caller osl kept, priority overlaid
     assert nvext["agent_hints"] == {"osl": 4, "priority": 9}
     # unrelated caller nvext keys survive

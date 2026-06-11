@@ -292,20 +292,18 @@ class _DynamoChatTransport(_Transport):
                 "path for VLMs."
             )
         body = self._build_body(model, prompt_ids, sp, cache_salt, priority)
-        post_kwargs: dict[str, Any] = {
-            "cast_to": cast(Any, dict[str, Any]),
-            "body": body,
-        }
+        post_kwargs: dict[str, Any] = {"cast_to": httpx.Response, "body": body}
         if extra_headers:
             post_kwargs["options"] = cast(Any, {"headers": extra_headers})
         # Engine 4xx propagate raw (matches the vLLM path).
-        resp = await client.post("/chat/completions", **post_kwargs)
-        # Dynamo's NvExt request schema carries no field for
-        # routed_experts_prompt_start, so the worker can't trim the prompt rows:
-        # it returns full-sequence routing with start=0. Trim the leading prompt
-        # rows here and set start, so the payload matches the consumer contract
-        # (row 0 == position start). NOTE: if a forwarded prompt-start field is
-        # later added to NvExt (worker trims + reports start), drop this.
+        raw_response = await client.post("/chat/completions", **post_kwargs)
+        # Keep the (potentially large) routed_experts base64 blob as a zero-copy
+        # memoryview instead of decoding it through json.loads — a synchronous
+        # full parse of the blob stalls the event loop. Mirrors vllm_generate.
+        resp = _parse_dynamo_chat_response(raw_response.content)
+        # Back-compat trim: when the worker did NOT trim engine-side (start=0; it
+        # trims when it honors nvext.routed_experts_prompt_start), drop the leading
+        # prompt rows here so row 0 == start. No-op once the worker stamps start>0.
         _trim_dynamo_routed_experts(resp, sp)
         return resp
 
@@ -519,7 +517,9 @@ def _trim_dynamo_routed_experts(resp: Any, sp: dict[str, Any]) -> None:
         return
     data = routed.get("data")
     shape = routed.get("shape")
-    if not isinstance(data, str) or not (
+    # data may be a zero-copy memoryview/bytes (engine_data blob kept un-parsed)
+    # or a str; base64.b64decode accepts all three.
+    if not isinstance(data, (str, bytes, memoryview)) or not (
         isinstance(shape, (list, tuple)) and len(shape) == 3
     ):
         return
@@ -573,6 +573,28 @@ def parse_generate_response(raw: bytes) -> dict[str, Any]:
     payload: dict[str, Any] = json.loads(stripped)
     if routed_data is not None:
         payload["choices"][0]["routed_experts"]["data"] = routed_data
+    return payload
+
+
+def _parse_dynamo_chat_response(raw: bytes) -> dict[str, Any]:
+    """Parse a dynamo_chat response, keeping the routed_experts base64 blob as a
+    zero-copy ``memoryview`` instead of decoding it through ``json.loads`` (a
+    large blob would block the event loop). Mirrors ``parse_generate_response``,
+    but re-attaches the blob at the nvext location (``nvext.routed_experts`` or
+    ``nvext.engine_data.routed_experts``) rather than ``choices[0]``."""
+    stripped, routed_data = strip_routed_experts_data(raw)
+    payload: dict[str, Any] = json.loads(stripped)
+    if routed_data is not None:
+        nvext = payload.get("nvext")
+        if isinstance(nvext, dict):
+            routed = nvext.get("routed_experts")
+            if not isinstance(routed, dict):
+                engine = nvext.get("engine_data")
+                routed = (
+                    engine.get("routed_experts") if isinstance(engine, dict) else None
+                )
+            if isinstance(routed, dict):
+                routed["data"] = routed_data
     return payload
 
 

@@ -68,6 +68,17 @@ class _FakeClient:
         self.calls = []
         self.base_url = "http://fake-host:8000/v1"
 
+    @staticmethod
+    def _as_response(payload, cast_to):
+        """Both transports request cast_to=httpx.Response; deliver the payload as
+        JSON bytes off the wire so the client exercises the zero-copy
+        routed_experts strip. Falls back to the raw dict otherwise."""
+        if cast_to is httpx.Response:
+            return httpx.Response(
+                200, content=json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            )
+        return payload
+
     async def post(self, path, *, cast_to=dict, body=None, options=None):
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
@@ -286,26 +297,31 @@ class _DynamoFakeClient(_FakeClient):
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
         )
-        return {
-            "id": "gen-dyn",
-            "choices": [
-                {
-                    "index": 0,
-                    "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-                    "finish_reason": "stop",
-                }
-            ],
-            "nvext": {
-                "engine_data": {"completion_token_ids": [7, 8]},
-                "routed_experts": {
-                    # full-sequence routing (4 rows); worker can't trim
-                    "data": "AQIDBA==",
-                    "shape": [4, 1, 1],
-                    "start": 0,
-                    "dtype": "uint8",
+        return self._as_response(
+            {
+                "id": "gen-dyn",
+                "choices": [
+                    {
+                        "index": 0,
+                        "logprobs": {
+                            "content": [{"logprob": -0.1}, {"logprob": -0.2}]
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "nvext": {
+                    "engine_data": {"completion_token_ids": [7, 8]},
+                    "routed_experts": {
+                        # full-sequence routing (4 rows); worker can't trim
+                        "data": "AQIDBA==",
+                        "shape": [4, 1, 1],
+                        "start": 0,
+                        "dtype": "uint8",
+                    },
                 },
             },
-        }
+            cast_to,
+        )
 
 
 def test_dynamo_transport_forwards_priority_and_detokenize():
@@ -358,12 +374,11 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
     # contract. No routed_experts_prompt_start is set here (first-turn case), so
     # the renderer does NOT trim — full-sequence routing passes through with
     # start=0.
-    assert result["routed_experts"] == {
-        "data": "AQIDBA==",
-        "shape": [4, 1, 1],
-        "start": 0,
-        "dtype": "uint8",
-    }
+    re = result["routed_experts"]
+    assert re["shape"] == [4, 1, 1] and re["start"] == 0 and re["dtype"] == "uint8"
+    # data rides as a zero-copy memoryview (not json-parsed), like vllm_generate.
+    assert isinstance(re["data"], memoryview)
+    assert re["data"].tobytes() == b"AQIDBA=="
 
 
 class _NoCompletionIdsClient(_FakeClient):
@@ -373,7 +388,10 @@ class _NoCompletionIdsClient(_FakeClient):
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
         )
-        return {"request_id": "x", "choices": [{"index": 0, "finish_reason": "stop"}]}
+        return self._as_response(
+            {"request_id": "x", "choices": [{"index": 0, "finish_reason": "stop"}]},
+            cast_to,
+        )
 
 
 def test_dynamo_transport_raises_without_completion_ids():
@@ -399,13 +417,16 @@ class _EmptyCompletionClient(_FakeClient):
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
         )
-        return {
-            "request_id": "x",
-            "choices": [
-                {"index": 0, "finish_reason": "stop", "logprobs": {"content": []}}
-            ],
-            "nvext": {"engine_data": {"completion_token_ids": []}},
-        }
+        return self._as_response(
+            {
+                "request_id": "x",
+                "choices": [
+                    {"index": 0, "finish_reason": "stop", "logprobs": {"content": []}}
+                ],
+                "nvext": {"engine_data": {"completion_token_ids": []}},
+            },
+            cast_to,
+        )
 
 
 class _EmptyParseRenderer(_FakeRenderer):
@@ -525,6 +546,15 @@ def test_trim_dynamo_routed_experts():
     re2 = resp2["nvext"]["routed_experts"]
     assert re2["shape"] == [2, 1, 1] and re2["start"] == 3
 
+    # data as a zero-copy memoryview (the parse keeps the blob un-decoded) still
+    # trims on the back-compat path: b64decode accepts memoryview.
+    resp_mv = _payload("engine_data")
+    re_mv = resp_mv["nvext"]["engine_data"]["routed_experts"]
+    re_mv["data"] = memoryview(re_mv["data"].encode("ascii"))
+    _trim_dynamo_routed_experts(resp_mv, {"routed_experts_prompt_start": 3})
+    assert re_mv["shape"] == [2, 1, 1] and re_mv["start"] == 3
+    assert base64.b64decode(re_mv["data"]) == bytes([3, 4])
+
     # worker already trimmed engine-side (start>0) -> no-op (don't double-trim)
     resp_wt = {"nvext": {"engine_data": {"routed_experts": {
         "data": base64.b64encode(bytes([3, 4])).decode(),
@@ -643,18 +673,23 @@ class _BothTokenIdsClient(_FakeClient):
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
         )
-        return {
-            "id": "gen-dyn",
-            "choices": [
-                {
-                    "index": 0,
-                    "token_ids": [99, 99],  # divergent echo — must be ignored
-                    "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-                    "finish_reason": "stop",
-                }
-            ],
-            "nvext": {"engine_data": {"completion_token_ids": [7, 8]}},
-        }
+        return self._as_response(
+            {
+                "id": "gen-dyn",
+                "choices": [
+                    {
+                        "index": 0,
+                        "token_ids": [99, 99],  # divergent echo — must be ignored
+                        "logprobs": {
+                            "content": [{"logprob": -0.1}, {"logprob": -0.2}]
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "nvext": {"engine_data": {"completion_token_ids": [7, 8]}},
+            },
+            cast_to,
+        )
 
 
 def test_dynamo_transport_prefers_engine_data_over_choices_token_ids():
@@ -681,17 +716,20 @@ class _MisalignedLogprobsClient(_FakeClient):
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
         )
-        return {
-            "id": "gen-dyn",
-            "choices": [
-                {
-                    "index": 0,
-                    "logprobs": {"content": [{"logprob": -0.1}]},  # only 1 logprob
-                    "finish_reason": "stop",
-                }
-            ],
-            "nvext": {"engine_data": {"completion_token_ids": [7, 8]}},  # 2 tokens
-        }
+        return self._as_response(
+            {
+                "id": "gen-dyn",
+                "choices": [
+                    {
+                        "index": 0,
+                        "logprobs": {"content": [{"logprob": -0.1}]},  # only 1 logprob
+                        "finish_reason": "stop",
+                    }
+                ],
+                "nvext": {"engine_data": {"completion_token_ids": [7, 8]}},  # 2 tokens
+            },
+            cast_to,
+        )
 
 
 def test_dynamo_transport_raises_on_logprob_length_mismatch():

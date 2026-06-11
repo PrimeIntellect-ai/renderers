@@ -1,4 +1,4 @@
-"""Renderer-based generate client for vLLM 0.20 + Dynamo.
+"""Renderer-based generate client for vLLM + Dynamo.
 
 Two transports, selected per-call via ``transport=`` parameter:
 
@@ -14,7 +14,7 @@ Two transports, selected per-call via ``transport=`` parameter:
         → Renderer.parse_response() → structured message
         Dynamo has no ``/inference/v1/generate`` route; this branch posts to
         the standard OpenAI chat-completions surface and reads the engine
-        token IDs back via the PR #8119 ``nvext.engine_data`` channel.
+        token IDs back via the ``nvext.engine_data`` channel.
 
 When a RendererPool is passed instead of a single Renderer, the sync tokenization
 and parsing work is offloaded to threads for parallel execution across rollouts.
@@ -202,7 +202,7 @@ class _Transport(ABC):
 
 
 class _VllmGenerateTransport(_Transport):
-    """vLLM 0.20 TITO surface: ``POST /inference/v1/generate``."""
+    """vLLM TITO surface: ``POST /inference/v1/generate``."""
 
     async def post(
         self,
@@ -264,8 +264,7 @@ class _DynamoChatTransport(_Transport):
     Dynamo has no /inference/v1/generate route. ``nvext.token_data`` carries
     the pre-tokenized prompt (Dynamo skips tokenization when present) and
     ``extra_fields=["engine_data", "routed_experts"]`` opts into the
-    completion-IDs/logprobs channel (PR #8119) and the MoE routed_experts
-    channel. Mirrors
+    completion-IDs/logprobs channel and the MoE routed_experts channel. Mirrors
     ``verifiers.clients.openai_chat_completions_token_client._post_dynamo_chat``
     so the wire payload is identical via either client. routed_experts is read
     from ``nvext.routed_experts`` (or ``nvext.engine_data.routed_experts``) and
@@ -390,8 +389,8 @@ class _DynamoChatTransport(_Transport):
         nvext = data.get("nvext") or {}
         engine = nvext.get("engine_data") or {}
 
-        # Canonical Dynamo channel first (PR #8119: nvext.engine_data, then
-        # top-level nvext), then the OpenAI-extended choices[0].token_ids. The
+        # Canonical Dynamo channel first (nvext.engine_data, then top-level
+        # nvext), then the OpenAI-extended choices[0].token_ids. The
         # engine channel is authoritative — choices[0].token_ids may be a
         # detokenize-then-retokenize echo that differs from what was sampled.
         completion_ids = None
@@ -749,7 +748,7 @@ def _build_mm_features(
     model-family specific. For now we dispatch on the renderer class;
     extend the dispatch table as more multimodal renderers land.
 
-    NOTE — future engine pluggability: this encoder is vLLM 0.20-specific
+    NOTE — future engine pluggability: this encoder is vLLM-specific
     (uses ``vllm.multimodal.inputs.MultiModalKwargsItems``,
     ``vllm.entrypoints.serve.disagg.mm_serde.encode_mm_kwargs_item``, and
     ``_create_qwen2vl_field_factory``). When a second inference engine

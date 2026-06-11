@@ -14,6 +14,18 @@ from renderers.base import (
 from renderers.client import generate
 
 
+@pytest.fixture(autouse=True)
+def _reset_mm_hash_cache():
+    """Isolate the module-level hash-only send cache between tests (its whole job
+    is to persist sent hashes across generate() calls, which would otherwise leak
+    between tests)."""
+    import renderers.client as _client
+
+    _client._mm_sent.clear()
+    yield
+    _client._mm_sent.clear()
+
+
 class _FakeRenderer:
     supports_tools = True
 
@@ -369,6 +381,122 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     # Items are base64 strings (encode_mm_kwargs_item output).
     for item in features["kwargs_data"]["image"]:
         assert isinstance(item, str) and len(item) > 0
+
+
+def test_generate_sends_pixels_once_then_hash_only(monkeypatch):
+    """With hash-only send enabled: first send of an image carries full
+    ``pixel_values``; a later send of the same hash carries a descriptor-only
+    (``None``) slot so the engine serves it from its mm-hash cache. Mixed prompts
+    keep per-item alignment."""
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm", reason="vllm needed for features serialization")
+    monkeypatch.setattr("renderers.client._MM_HASH_CACHE_ENABLED", True)
+
+    import torch as _torch
+    from renderers.base import MultiModalData, PlaceholderRange, load_tokenizer
+    from renderers.qwen3_vl import Qwen3VLRenderer
+
+    renderer = Qwen3VLRenderer(load_tokenizer("Qwen/Qwen3-VL-4B-Instruct"))
+
+    def _img():
+        return {
+            "pixel_values": _torch.zeros(4, 8, dtype=_torch.float32),
+            "image_grid_thw": _torch.tensor([[1, 2, 2]], dtype=_torch.int64),
+        }
+
+    def _mm(hashes):
+        return MultiModalData(
+            mm_hashes={"image": list(hashes)},
+            mm_placeholders={
+                "image": [PlaceholderRange(offset=5 + i, length=1) for i in range(len(hashes))]
+            },
+            mm_items={"image": [_img() for _ in hashes]},
+        )
+
+    def _features_for(hashes):
+        client = _FakeClient()
+        asyncio.run(
+            generate(
+                client=client,
+                renderer=renderer,
+                messages=[],
+                model="qwen3-vl",
+                prompt_ids=list(range(20)),
+                multi_modal_data=_mm(hashes),
+                sampling_params={"max_tokens": 4},
+            )
+        )
+        return client.calls[0]["body"]["features"]
+
+    # First turn: image "aaa" sent in full.
+    f1 = _features_for(["aaa"])
+    assert f1["kwargs_data"] is not None
+    assert f1["kwargs_data"]["image"][0] is not None
+
+    # Second turn: same image -> hash-only (kwargs_data dropped), descriptors kept
+    # so the engine can look it up in its mm-hash cache.
+    f2 = _features_for(["aaa"])
+    assert f2["kwargs_data"] is None
+    assert f2["mm_hashes"] == {"image": ["aaa"]}
+    assert f2["mm_placeholders"]["image"] == [{"offset": 5, "length": 1}]
+
+    # Mixed turn: prior "aaa" hash-only, new "bbb" full -> [None, <full str>],
+    # aligned with mm_hashes.
+    f3 = _features_for(["aaa", "bbb"])
+    slots = f3["kwargs_data"]["image"]
+    assert slots[0] is None
+    assert isinstance(slots[1], str) and len(slots[1]) > 0
+    assert f3["mm_hashes"] == {"image": ["aaa", "bbb"]}
+
+
+def test_generate_ephemeral_returns_descriptor_only(monkeypatch):
+    """With ephemeral enabled, the engine still receives full ``pixel_values`` but
+    ``generate`` returns ``multi_modal_data`` stripped to a descriptor (grid +
+    hashes + placeholders, no ``pixel_values``), so the trajectory retains no
+    decoded image tensors."""
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm", reason="vllm needed for features serialization")
+    monkeypatch.setattr("renderers.client._MM_EPHEMERAL", True)
+
+    import torch as _torch
+    from renderers.base import MultiModalData, PlaceholderRange, load_tokenizer
+    from renderers.qwen3_vl import Qwen3VLRenderer
+
+    renderer = Qwen3VLRenderer(load_tokenizer("Qwen/Qwen3-VL-4B-Instruct"))
+    mm = MultiModalData(
+        mm_hashes={"image": ["aaa"]},
+        mm_placeholders={"image": [PlaceholderRange(offset=5, length=1)]},
+        mm_items={
+            "image": [
+                {
+                    "pixel_values": _torch.zeros(4, 8, dtype=_torch.float32),
+                    "image_grid_thw": _torch.tensor([[1, 2, 2]], dtype=_torch.int64),
+                }
+            ]
+        },
+    )
+    client = _FakeClient()
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=renderer,
+            messages=[],
+            model="qwen3-vl",
+            prompt_ids=list(range(20)),
+            multi_modal_data=mm,
+            sampling_params={"max_tokens": 4},
+        )
+    )
+
+    # Engine still got full pixels (send is unaffected by ephemeral).
+    sent = client.calls[0]["body"]["features"]
+    assert sent["kwargs_data"]["image"][0] is not None
+    # Returned mm is descriptor-only: grid kept, pixel_values dropped.
+    out = result["multi_modal_data"]
+    item = out.mm_items["image"][0]
+    assert "pixel_values" not in item
+    assert "image_grid_thw" in item
+    assert out.mm_hashes == {"image": ["aaa"]}
 
 
 # ---------------------------------------------------------------------------

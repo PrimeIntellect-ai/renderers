@@ -2,12 +2,12 @@
 
 Two transports, selected per-call via ``transport=`` parameter:
 
-    "vllm_generate" (default)
+    "vllm" (default)
         messages → Renderer.render_ids() → token IDs → POST /inference/v1/generate
         → completion tokens → Renderer.parse_response() → structured message
         vLLM's TITO surface (server.py mounts the route in prime-rl).
 
-    "dynamo_chat"
+    "dynamo"
         messages → Renderer.render_ids() → token IDs → POST /v1/chat/completions
         with ``nvext.token_data`` + ``nvext.extra_fields=["engine_data"]``
         → completion tokens via ``nvext.engine_data.completion_token_ids``
@@ -124,7 +124,7 @@ async def _resolve_max_prompt_len(client: AsyncOpenAI, model: str) -> int | None
 
 
 # Public type alias; matches verifiers.types.RendererTransport string set.
-RendererTransport = Literal["vllm_generate", "dynamo_chat"]
+RendererTransport = Literal["vllm", "dynamo"]
 
 # Keys never forwarded to Dynamo at the top level: vLLM/prime-only fields its
 # strict validator rejects (mirrors the token client's drop set). ``priority``
@@ -145,7 +145,7 @@ _DYNAMO_DROP_KEYS = frozenset(
 _vllm_endpoint_cache: dict[str, str] = {}
 
 
-def _vllm_generate_endpoint(base_url: str) -> str:
+def _vllm_endpoint(base_url: str) -> str:
     """Absolute ``/inference/v1/generate`` URL for ``base_url`` (cached).
 
     The route is mounted at the server root, not under /v1, so strip the
@@ -234,7 +234,7 @@ class _VllmGenerateTransport(_Transport):
         if priority is not None:
             body["priority"] = priority
 
-        endpoint = _vllm_generate_endpoint(str(client.base_url))
+        endpoint = _vllm_endpoint(str(client.base_url))
         _request_logger.debug(
             "POST %s prompt_len=%d max_tokens=%s",
             endpoint,
@@ -265,7 +265,7 @@ class _DynamoChatTransport(_Transport):
     the pre-tokenized prompt (Dynamo skips tokenization when present) and
     ``extra_fields=["engine_data", "routed_experts"]`` opts into the
     completion-IDs/logprobs channel and the MoE routed_experts channel. Mirrors
-    ``verifiers.clients.openai_chat_completions_token_client._post_dynamo_chat``
+    ``verifiers.clients.openai_chat_completions_token_client._post_dynamo``
     so the wire payload is identical via either client. routed_experts is read
     from ``nvext.routed_experts`` (or ``nvext.engine_data.routed_experts``) and
     surfaced as the prime-rl ``{data, shape, start, dtype}`` contract.
@@ -284,11 +284,11 @@ class _DynamoChatTransport(_Transport):
         priority: int | None,
         extra_headers: dict[str, str] | None,
     ) -> dict[str, Any]:
-        # TODO: Implement multimodal support for dynamo_chat transport.
+        # TODO: Implement multimodal support for dynamo transport.
         if mm_data is not None and not mm_data.is_empty():
             raise NotImplementedError(
-                "Multimodal renderers are not yet supported on the dynamo_chat "
-                "transport. Use vllm_generate or stay on the token-client TITO "
+                "Multimodal renderers are not yet supported on the dynamo "
+                "transport. Use vllm or stay on the token-client TITO "
                 "path for VLMs."
             )
         body = self._build_body(model, prompt_ids, sp, cache_salt, priority)
@@ -299,8 +299,8 @@ class _DynamoChatTransport(_Transport):
         raw_response = await client.post("/chat/completions", **post_kwargs)
         # Keep the (potentially large) routed_experts base64 blob as a zero-copy
         # memoryview instead of decoding it through json.loads — a synchronous
-        # full parse of the blob stalls the event loop. Mirrors vllm_generate.
-        resp = _parse_dynamo_chat_response(raw_response.content)
+        # full parse of the blob stalls the event loop. Mirrors vllm.
+        resp = _parse_dynamo_response(raw_response.content)
         # Back-compat trim: when the worker did NOT trim engine-side (start=0; it
         # trims when it honors nvext.routed_experts_prompt_start), drop the leading
         # prompt rows here so row 0 == start. No-op once the worker stamps start>0.
@@ -318,7 +318,7 @@ class _DynamoChatTransport(_Transport):
         # cache_salt / priority may arrive as dedicated kwargs or inside
         # sampling_params (the kwargs win). On Dynamo both belong in nvext, so
         # they're routed there and never forwarded as top-level chat fields —
-        # keeping a shared sampling_params dict consistent with vllm_generate.
+        # keeping a shared sampling_params dict consistent with vllm.
         if cache_salt is None:
             cache_salt = sp.get("cache_salt")
         if priority is None:
@@ -405,7 +405,7 @@ class _DynamoChatTransport(_Transport):
             # Field absent (vs. an empty completion) — usually a missing
             # nvext.extra_fields=["engine_data"] opt-in.
             raise RuntimeError(
-                "dynamo_chat response carried no completion token IDs "
+                "dynamo response carried no completion token IDs "
                 "(expected nvext.engine_data.completion_token_ids)."
             )
         completion_ids = list(completion_ids or [])
@@ -429,7 +429,7 @@ class _DynamoChatTransport(_Transport):
         # produce samples that prime-rl later rejects.
         if len(logprobs) != len(completion_ids):
             raise RuntimeError(
-                f"dynamo_chat logprobs length ({len(logprobs)}) does not match "
+                f"dynamo logprobs length ({len(logprobs)}) does not match "
                 f"completion token count ({len(completion_ids)})."
             )
 
@@ -453,13 +453,13 @@ class _DynamoChatTransport(_Transport):
 
 
 _TRANSPORTS: dict[str, _Transport] = {
-    "vllm_generate": _VllmGenerateTransport(),
-    "dynamo_chat": _DynamoChatTransport(),
+    "vllm": _VllmGenerateTransport(),
+    "dynamo": _DynamoChatTransport(),
 }
 
 
 def _normalize_routed_experts(payload: Any) -> dict[str, Any] | None:
-    """Validate/normalize a dynamo_chat routed_experts payload to the
+    """Validate/normalize a dynamo routed_experts payload to the
     ``{data, shape, start, dtype}`` contract.
 
     Defaults ``start=0`` and ``dtype="uint8"`` for back-compat with payloads
@@ -472,13 +472,13 @@ def _normalize_routed_experts(payload: Any) -> dict[str, Any] | None:
         return None
     if not isinstance(payload, Mapping) or "data" not in payload or "shape" not in payload:
         raise RuntimeError(
-            "dynamo_chat routed_experts must be a mapping with 'data' and "
+            "dynamo routed_experts must be a mapping with 'data' and "
             f"'shape'; got {type(payload).__name__}"
         )
     shape = payload["shape"]
     if not (isinstance(shape, (list, tuple)) and len(shape) == 3):
         raise RuntimeError(
-            "dynamo_chat routed_experts 'shape' must be 3-D [seq, layers, topk]; "
+            "dynamo routed_experts 'shape' must be 3-D [seq, layers, topk]; "
             f"got {shape!r}"
         )
     return {
@@ -493,7 +493,7 @@ _ROUTED_EXPERTS_ITEMSIZE = {"uint8": 1, "uint16": 2, "int16": 2, "int32": 4}
 
 
 def _trim_dynamo_routed_experts(resp: Any, sp: dict[str, Any]) -> None:
-    """Client-side trim of a dynamo_chat routed_experts payload, in place.
+    """Client-side trim of a dynamo routed_experts payload, in place.
 
     This is a **back-compat fallback**. The renderer now forwards
     ``routed_experts_prompt_start`` via ``nvext`` (see ``_build_body``), so a
@@ -578,8 +578,8 @@ def parse_generate_response(raw: bytes) -> dict[str, Any]:
     return payload
 
 
-def _parse_dynamo_chat_response(raw: bytes) -> dict[str, Any]:
-    """Parse a dynamo_chat response, keeping the routed_experts base64 blob as a
+def _parse_dynamo_response(raw: bytes) -> dict[str, Any]:
+    """Parse a dynamo response, keeping the routed_experts base64 blob as a
     zero-copy ``memoryview`` instead of decoding it through ``json.loads`` (a
     large blob would block the event loop). Mirrors ``parse_generate_response``,
     but re-attaches the blob at the nvext location (``nvext.routed_experts`` or
@@ -611,7 +611,7 @@ async def generate(
     prompt_attribution: RenderedTokens | None = None,
     tools: list[ToolSpec] | None = None,
     sampling_params: dict[str, Any] | None = None,
-    transport: RendererTransport = "vllm_generate",
+    transport: RendererTransport = "vllm",
     cache_salt: str | None = None,
     priority: int | None = None,
     extra_headers: dict[str, str] | None = None,
@@ -725,7 +725,7 @@ async def generate(
 
     # /inference/v1/generate never returns "tool_calls", so promote
     # stop→tool_calls when we parsed tool calls client-side (keeps agent
-    # loops going). No-op on dynamo_chat, which can return it directly.
+    # loops going). No-op on dynamo, which can return it directly.
     finish_reason = wire.finish_reason
     ok_tool_calls = [
         tc for tc in parsed.tool_calls if tc.status == ToolCallParseStatus.OK

@@ -291,7 +291,7 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
 
 class _DynamoFakeClient(_FakeClient):
     """Dynamo-shaped response: engine fields + routed_experts under nvext (not
-    choices[0]); used to prove routed_experts now surfaces on dynamo_chat."""
+    choices[0]); used to prove routed_experts now surfaces on dynamo."""
 
     async def post(self, path, *, cast_to=dict, body=None, options=None):
         self.calls.append(
@@ -343,7 +343,7 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
             },
             cache_salt="ckpt-42",
             priority=17,
-            transport="dynamo_chat",
+            transport="dynamo",
         )
     )
 
@@ -370,13 +370,13 @@ def test_dynamo_transport_forwards_priority_and_detokenize():
         "detokenize": False,
     }
     assert result["completion_ids"] == [7, 8]
-    # routed_experts surfaces on dynamo_chat as the {data, shape, start, dtype}
+    # routed_experts surfaces on dynamo as the {data, shape, start, dtype}
     # contract. No routed_experts_prompt_start is set here (first-turn case), so
     # the renderer does NOT trim — full-sequence routing passes through with
     # start=0.
     re = result["routed_experts"]
     assert re["shape"] == [4, 1, 1] and re["start"] == 0 and re["dtype"] == "uint8"
-    # data rides as a zero-copy memoryview (not json-parsed), like vllm_generate.
+    # data rides as a zero-copy memoryview (not json-parsed), like vllm.
     assert isinstance(re["data"], memoryview)
     assert re["data"].tobytes() == b"AQIDBA=="
 
@@ -404,7 +404,7 @@ def test_dynamo_transport_raises_without_completion_ids():
                 model="test-model",
                 tools=[{"type": "function", "function": {"name": "echo"}}],
                 sampling_params={"max_tokens": 7},
-                transport="dynamo_chat",
+                transport="dynamo",
                 max_prompt_len=10_000,
             )
         )
@@ -446,7 +446,7 @@ def test_dynamo_transport_allows_present_but_empty_completion():
             model="test-model",
             tools=[{"type": "function", "function": {"name": "echo"}}],
             sampling_params={"max_tokens": 7},
-            transport="dynamo_chat",
+            transport="dynamo",
             max_prompt_len=10_000,
         )
     )
@@ -458,7 +458,7 @@ class _BoomClient(_FakeClient):
         raise ValueError("boom")
 
 
-@pytest.mark.parametrize("transport", ["vllm_generate", "dynamo_chat"])
+@pytest.mark.parametrize("transport", ["vllm", "dynamo"])
 def test_generate_propagates_post_errors_raw(transport):
     # POST errors must propagate unchanged (no NameError from a stale handler).
     with pytest.raises(ValueError, match="boom"):
@@ -500,7 +500,7 @@ def test_dynamo_transport_forwards_extra_sampling_fields_and_drops_denylist():
                 # routing engine-side
                 "routed_experts_prompt_start": 3,
             },
-            transport="dynamo_chat",
+            transport="dynamo",
             max_prompt_len=10_000,
         )
     )
@@ -603,7 +603,7 @@ def test_dynamo_parse_present_empty_engine_logprobs_raises_for_nonempty_completi
     from renderers.client import _TRANSPORTS
 
     with pytest.raises(RuntimeError, match="logprobs length"):
-        _TRANSPORTS["dynamo_chat"].parse(data)
+        _TRANSPORTS["dynamo"].parse(data)
 
 
 def test_dynamo_transport_merges_caller_nvext():
@@ -626,7 +626,7 @@ def test_dynamo_transport_merges_caller_nvext():
                 },
             },
             priority=9,
-            transport="dynamo_chat",
+            transport="dynamo",
             max_prompt_len=10_000,
         )
     )
@@ -652,7 +652,7 @@ def test_dynamo_transport_routes_sampling_params_cache_salt_and_priority_to_nvex
             model="test-model",
             tools=[{"type": "function", "function": {"name": "echo"}}],
             sampling_params={"max_tokens": 7, "cache_salt": "ckpt-9", "priority": 5},
-            transport="dynamo_chat",
+            transport="dynamo",
             max_prompt_len=10_000,
         )
     )
@@ -701,7 +701,7 @@ def test_dynamo_transport_prefers_engine_data_over_choices_token_ids():
             model="test-model",
             tools=[{"type": "function", "function": {"name": "echo"}}],
             sampling_params={"max_tokens": 7},
-            transport="dynamo_chat",
+            transport="dynamo",
             max_prompt_len=10_000,
         )
     )
@@ -741,7 +741,7 @@ def test_dynamo_transport_raises_on_logprob_length_mismatch():
                 model="test-model",
                 tools=[{"type": "function", "function": {"name": "echo"}}],
                 sampling_params={"max_tokens": 7},
-                transport="dynamo_chat",
+                transport="dynamo",
                 max_prompt_len=10_000,
             )
         )

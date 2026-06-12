@@ -582,9 +582,9 @@ def test_trim_dynamo_routed_experts():
     assert resp4 == {"nvext": {"engine_data": {}}}
 
 
-def test_dynamo_parse_present_empty_engine_logprobs_does_not_fall_back_to_chat():
-    """A present-but-empty engine_data.completion_logprobs is authoritative
-    (logprobs off): parse must NOT fall through to the divergent chat echo."""
+def test_dynamo_parse_present_empty_engine_logprobs_raises_for_nonempty_completion():
+    """A present-but-empty engine_data.completion_logprobs is authoritative for
+    source selection, but nonempty completions still require aligned logprobs."""
     data = {
         "choices": [
             {
@@ -602,9 +602,8 @@ def test_dynamo_parse_present_empty_engine_logprobs_does_not_fall_back_to_chat()
     }
     from renderers.client import _TRANSPORTS
 
-    wire = _TRANSPORTS["dynamo_chat"].parse(data)
-    assert wire.completion_ids == [7, 8]
-    assert wire.completion_logprobs == []  # engine present-empty wins over chat echo
+    with pytest.raises(RuntimeError, match="logprobs length"):
+        _TRANSPORTS["dynamo_chat"].parse(data)
 
 
 def test_dynamo_transport_merges_caller_nvext():

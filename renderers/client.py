@@ -439,7 +439,7 @@ class _DynamoChatTransport(_Transport):
         # {data, shape, start, dtype} contract so a malformed/legacy payload
         # fails here with context instead of deep in trajectory processing.
         routed_experts = nvext.get("routed_experts")
-        if routed_experts is None:
+        if not isinstance(routed_experts, Mapping):
             routed_experts = engine.get("routed_experts")
         routed_experts = _normalize_routed_experts(routed_experts)
 

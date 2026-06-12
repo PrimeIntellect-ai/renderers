@@ -606,6 +606,37 @@ def test_dynamo_parse_present_empty_engine_logprobs_raises_for_nonempty_completi
         _TRANSPORTS["dynamo"].parse(data)
 
 
+def test_dynamo_parse_falls_back_to_engine_routed_experts_for_placeholder():
+    """A non-dict top-level routed_experts placeholder must not hide the valid
+    engine_data.routed_experts payload."""
+    data = {
+        "choices": [{"index": 0, "finish_reason": "stop"}],
+        "nvext": {
+            "routed_experts": "placeholder",
+            "engine_data": {
+                "completion_token_ids": [7, 8],
+                "completion_logprobs": [-0.1, -0.2],
+                "routed_experts": {
+                    "data": "AQI=",
+                    "shape": [2, 1, 1],
+                    "start": 3,
+                    "dtype": "uint8",
+                },
+            },
+        },
+    }
+    from renderers.client import _TRANSPORTS
+
+    result = _TRANSPORTS["dynamo"].parse(data)
+
+    assert result.routed_experts == {
+        "data": "AQI=",
+        "shape": [2, 1, 1],
+        "start": 3,
+        "dtype": "uint8",
+    }
+
+
 def test_dynamo_transport_merges_caller_nvext():
     """F2: caller-supplied nvext is merged — extra_fields union with engine_data,
     agent_hints merged with priority, unrelated caller keys preserved."""

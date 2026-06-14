@@ -1689,19 +1689,44 @@ def _get_offset_tokenizer(tokenizer):
             kwargs = {"trust_remote_code": True, "revision": revision}
         else:
             kwargs = {"trust_remote_code": False}
-        # Explicitly vanilla — we want HF's Rust tokenizer with offset
-        # tracking, not the fastokens shim. ``load_tokenizer`` would
-        # patch fastokens in by default; routing through
-        # ``_load_tokenizer_via_auto`` keeps the fastokens patch out
-        # of this code path while still applying the config-build
-        # fallback (RoPE-validation failures on nested
-        # ``rope_parameters``, etc.).
+        def _has_offsets(tok) -> bool:
+            if not getattr(tok, "is_fast", False):
+                return False
+            try:
+                tok("a", add_special_tokens=False, return_offsets_mapping=True)
+                return True
+            except (NotImplementedError, ValueError, TypeError):
+                return False
+
+        # We want HF's Rust tokenizer with offset tracking, not the fastokens
+        # shim. The shim is installed by a *process-global* monkeypatch that
+        # ``load_tokenizer`` toggles per pool-slot load, so a plain reload here
+        # can race a concurrent slot's open patch window and silently pick up
+        # the offset-less shim (then get cached, poisoning the process). So:
+        # load, verify offsets, and if missing, reload with the patch forced
+        # off — serialized against pool patch/unpatch via ``_FASTOKENS_PATCH_LOCK``
+        # so no concurrent window can swap the shim back in mid-load — then
+        # restore the prior patch state. Never cache a non-offset tokenizer.
         offset_tok = _load_tokenizer_via_auto(name_or_path, **kwargs)
-        if not getattr(offset_tok, "is_fast", False):
+        if not _has_offsets(offset_tok):
+            import fastokens
+
+            with _FASTOKENS_PATCH_LOCK:
+                was_patched = bool(getattr(fastokens, "_patched", False))
+                if was_patched:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        fastokens.unpatch_transformers()
+                try:
+                    offset_tok = _load_tokenizer_via_auto(name_or_path, **kwargs)
+                finally:
+                    if was_patched:
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            fastokens.patch_transformers()
+        if not _has_offsets(offset_tok):
             raise RuntimeError(
-                f"Vanilla tokenizer for {name_or_path!r} is not a fast "
-                "tokenizer; offset_mapping is unavailable. Hand-coded "
-                "renderers require a fast tokenizer for body/scaffold "
+                f"Could not load an offset-capable tokenizer for {name_or_path!r}: "
+                "offset_mapping is unavailable even with the fastokens patch off. "
+                "Hand-coded renderers require a fast tokenizer for body/scaffold "
                 "attribution."
             )
         _offset_tokenizers[name_or_path] = offset_tok

@@ -1689,6 +1689,7 @@ def _get_offset_tokenizer(tokenizer):
             kwargs = {"trust_remote_code": True, "revision": revision}
         else:
             kwargs = {"trust_remote_code": False}
+
         def _has_offsets(tok) -> bool:
             if not getattr(tok, "is_fast", False):
                 return False

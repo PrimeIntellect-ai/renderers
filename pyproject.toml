@@ -19,6 +19,11 @@ dependencies = [
     "openai>=1.108.1",
     "tiktoken",
     "jinja2",
+    # HuggingFace's Rust BPE library. ``_get_offset_tokenizer`` uses
+    # ``tokenizers.Tokenizer.from_pretrained`` for offset-aware encoding
+    # (body/scaffold attribution on the render path) — keeps the heavy
+    # ``transformers`` framework off the offset path for most models.
+    "tokenizers>=0.20",
     "transformers>=4.50.0",
     # Used by GptOssRenderer to render and parse harmony tokens. Vendoring
     # OpenAI's reference implementation keeps us byte-identical with vLLM

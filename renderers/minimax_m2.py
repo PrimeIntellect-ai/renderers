@@ -17,11 +17,11 @@ from typing import Any
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from renderers.base import (
+    attribute_text_segments,
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
-    attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
@@ -133,8 +133,25 @@ class MiniMaxM2Renderer:
         def emit_text_segments(
             segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
         ) -> None:
+            collapsed: list[tuple[str, bool]] = []
+            for text, label in segments:
+                if not text:
+                    continue
+                if collapsed and collapsed[-1][1] == label:
+                    collapsed[-1] = (collapsed[-1][0] + text, label)
+                else:
+                    collapsed.append((text, label))
+            if not collapsed:
+                return
+            if len(collapsed) == 1:
+                # Homogeneous — single joined encode preserves all BPE merges.
+                text, label = collapsed[0]
+                emit_text(text, msg_idx, is_sampled=is_sampled, is_content=label)
+                return
+            # Mixed labels remain — joined encode + offset attribution handles
+            # BPE merges across label-transition boundaries (e.g., ``.\n\n``).
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, collapsed
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -152,23 +169,22 @@ class MiniMaxM2Renderer:
             """Tokenize ``full_text`` and mark tokens that overlap the body
             char span as ``is_content=True``.
 
-            Differs from :func:`attribute_text_segments` only in the
-            boundary-token rule: a token straddling scaffold→body gets
-            ``True`` if any of its bytes are body bytes (overlap rule),
-            rather than being attributed to whichever segment its first
-            char belongs to. The body's first byte is preserved even when
-            BPE merges it with the wrap's trailing byte (``>The`` →
-            single token).
+            Uses an "intersects body span" rule: a token straddling
+            scaffold→body gets ``True`` if any of its bytes are body
+            bytes, rather than being attributed to whichever segment its
+            first char belongs to. The body's first byte is preserved
+            even when BPE merges it with the wrap's trailing byte
+            (``>The`` → single token). The other renderers don't need
+            this because their scaffolds break at characters BPE
+            doesn't merge across (``\\n``, special tokens); the
+            ``<response>...`` template here glues scaffold and body
+            with no separator.
             """
             from renderers.base import _get_offset_tokenizer
 
             offset_tok = _get_offset_tokenizer(self._tokenizer)
-            encoding = offset_tok(
-                full_text, add_special_tokens=False, return_offsets_mapping=True
-            )
-            for tok_id, (start, end) in zip(
-                encoding["input_ids"], encoding["offset_mapping"]
-            ):
+            encoding = offset_tok.encode(full_text, add_special_tokens=False)
+            for tok_id, (start, end) in zip(encoding.ids, encoding.offsets):
                 overlaps = start < body_end and end > body_start
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -381,8 +397,25 @@ class MiniMaxM2Renderer:
             *,
             is_sampled: bool = False,
         ) -> None:
+            collapsed: list[tuple[str, bool]] = []
+            for text, label in segments:
+                if not text:
+                    continue
+                if collapsed and collapsed[-1][1] == label:
+                    collapsed[-1] = (collapsed[-1][0] + text, label)
+                else:
+                    collapsed.append((text, label))
+            if not collapsed:
+                return
+            if len(collapsed) == 1:
+                # Homogeneous — single joined encode preserves all BPE merges.
+                text, label = collapsed[0]
+                emit_text(text, msg_idx, is_sampled=is_sampled, is_content=label)
+                return
+            # Mixed labels remain — joined encode + offset attribution handles
+            # BPE merges across label-transition boundaries.
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, collapsed
             ):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)
@@ -627,15 +660,13 @@ class MiniMaxM2Renderer:
 
         # ``<response>`` is plain text with no separator between the
         # closing ``>`` and ``content``'s first byte, so BPE can merge
-        # them into a single token (e.g., ``>The``). The shared
-        # ``attribute_text_segments`` helper picks the segment of a
-        # boundary-spanning token by its *first* char (here scaffold),
-        # which would drop the body's leading letter out of the body
-        # run. We instead use an "intersects body" rule: any token whose
-        # ``[start, end)`` char range overlaps the body span gets
+        # them into a single token (e.g., ``>The``). A "first char
+        # wins" rule would drop the body's leading letter out of the
+        # body run. We instead use an "intersects body" rule: any token
+        # whose ``[start, end)`` char range overlaps the body span gets
         # ``is_content=True``. A few scaffold bytes (the leading ``>``
-        # or trailing ``<``) bleed into the body run, but body bytes are
-        # recoverable as a substring of the decoded body span.
+        # or trailing ``<``) bleed into the body run, but body bytes
+        # are recoverable as a substring of the decoded body span.
         body_text = prefix + "<response>" + content + "</response>" + suffix
         body_start = len(prefix) + len("<response>")
         body_end = body_start + len(content)

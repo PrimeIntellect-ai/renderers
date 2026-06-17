@@ -14,11 +14,11 @@ import json
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from renderers.base import (
+    attribute_text_segments,
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
-    attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
@@ -127,15 +127,25 @@ class Qwen3Renderer:
         def emit_text_segments(
             segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
         ) -> None:
-            """Tokenize concatenated segments as one BPE pass; per-token
-            ``is_content`` follows each token's source segment.
-
-            Lets call sites express "this wrap + this body, joined the
-            same way as the chat template, but attributed separately"
-            without splitting the encode call (which could shift BPE
-            merges at the boundary)."""
+            collapsed: list[tuple[str, bool]] = []
+            for text, label in segments:
+                if not text:
+                    continue
+                if collapsed and collapsed[-1][1] == label:
+                    collapsed[-1] = (collapsed[-1][0] + text, label)
+                else:
+                    collapsed.append((text, label))
+            if not collapsed:
+                return
+            if len(collapsed) == 1:
+                # Homogeneous — single joined encode preserves all BPE merges.
+                text, label = collapsed[0]
+                emit_text(text, msg_idx, is_sampled=is_sampled, is_content=label)
+                return
+            # Mixed labels remain — joined encode + offset attribution handles
+            # BPE merges across label-transition boundaries (e.g., ``.\n\n``).
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, collapsed
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -351,8 +361,25 @@ class Qwen3Renderer:
             *,
             is_sampled: bool = False,
         ) -> None:
+            collapsed: list[tuple[str, bool]] = []
+            for text, label in segments:
+                if not text:
+                    continue
+                if collapsed and collapsed[-1][1] == label:
+                    collapsed[-1] = (collapsed[-1][0] + text, label)
+                else:
+                    collapsed.append((text, label))
+            if not collapsed:
+                return
+            if len(collapsed) == 1:
+                # Homogeneous — single joined encode preserves all BPE merges.
+                text, label = collapsed[0]
+                emit_text(text, msg_idx, is_sampled=is_sampled, is_content=label)
+                return
+            # Mixed labels remain — joined encode + offset attribution handles
+            # BPE merges across label-transition boundaries.
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, collapsed
             ):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)

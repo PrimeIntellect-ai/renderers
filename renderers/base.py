@@ -1609,27 +1609,44 @@ def trim_to_turn_close(
 
 
 def _get_offset_tokenizer(tokenizer):
-    """Assert ``tokenizer`` supports ``return_offsets_mapping=True``.
+    """Return a ``tokenizers.Tokenizer`` (Rust BPE) for offset-aware encoding.
 
     Hand-coded renderers concatenate scaffold + body in one BPE pass to
     preserve cross-boundary merges, then attribute each resulting token
-    back to its source segment via the fast tokenizer's
-    ``offset_mapping`` (see :func:`attribute_text_segments`). The
-    contract: every BYO tokenizer must be a fast tokenizer with offset
-    support. Tokenizers loaded via :func:`load_tokenizer` are
-    ``PreTrainedTokenizerFast`` instances that satisfy this trivially.
+    back to its source segment via the Rust tokenizer's native
+    ``Encoding.offsets`` (see :func:`attribute_text_segments`).
+
+    Resolution:
+
+    1. If ``tokenizer`` is already a ``tokenizers.Tokenizer``, return
+       it as-is (BYO Rust BPE — no extra load).
+    2. If ``tokenizer.backend_tokenizer`` is a ``tokenizers.Tokenizer``
+       (the standard ``PreTrainedTokenizerFast`` shape), use it
+       directly — no extra load.
+
+    Errors loudly otherwise. Slow / wrapper tokenizers without a Rust
+    backend can't produce offsets, and silently falling back would
+    lose attribution at the wrap/body boundary.
     """
-    try:
-        tokenizer("a", add_special_tokens=False, return_offsets_mapping=True)
-    except (NotImplementedError, ValueError, TypeError) as exc:
-        raise RuntimeError(
-            "Hand-coded renderers require a fast tokenizer with "
-            "``return_offsets_mapping=True`` support for body/scaffold "
-            "attribution. Pass a tokenizer loaded via "
-            "``renderers.base.load_tokenizer``, or any "
-            "``transformers.PreTrainedTokenizerFast`` instance."
-        ) from exc
-    return tokenizer
+    from tokenizers import Tokenizer as RustTokenizer
+
+    # Path 1: already a tokenizers.Tokenizer.
+    if isinstance(tokenizer, RustTokenizer):
+        return tokenizer
+
+    # Path 2: PreTrainedTokenizerFast exposes its underlying
+    # tokenizers.Tokenizer via ``backend_tokenizer``.
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if isinstance(backend, RustTokenizer):
+        return backend
+
+    raise RuntimeError(
+        "Hand-coded renderers require a fast tokenizer with a "
+        "``tokenizers.Tokenizer`` backend for body/scaffold attribution. "
+        "Pass a tokenizer loaded via ``renderers.base.load_tokenizer``, "
+        "any ``transformers.PreTrainedTokenizerFast`` instance, or a "
+        "``tokenizers.Tokenizer`` directly."
+    )
 
 
 def attribute_text_segments(
@@ -1644,22 +1661,23 @@ def attribute_text_segments(
     (content, True)]`` for a user message. Concatenation is done before
     encoding to preserve BPE merges across the wrap/body boundary; the
     resulting tokens are then attributed back to their source segment
-    via the fast tokenizer's ``offset_mapping``.
+    via ``tokenizers.Encoding.offsets``.
 
     A token is attributed to the segment containing its first source
-    character (``offset_mapping[k][0]``). Tokens whose first character
-    falls exactly on a segment boundary are attributed to the segment
-    that *starts* at that offset (the "later" segment). Zero-length
-    tokens (rare; usually pre-tokenizer artefacts) are attributed to
-    the most recently entered segment.
+    character (``offsets[k][0]``). Tokens whose first character falls
+    exactly on a segment boundary go to the segment that *starts* at
+    that offset (the "later" segment). Zero-length tokens (rare;
+    pre-tokenizer artefacts) are attributed to the most recently
+    entered segment.
 
-    Requires a HuggingFace fast tokenizer with offset tracking. Every
-    model in ``MODEL_RENDERER_MAP`` ships one, so the offset lookup
-    always succeeds for tokenizers obtained via :func:`load_tokenizer`.
-    BYO tokenizers must be a ``PreTrainedTokenizerFast`` (or anything
-    else exposing ``return_offsets_mapping=True``); slow tokenizers
-    aren't supported — BPE drift at the wrap/body boundary would
-    defeat the whole point.
+    Uses the Rust ``tokenizers`` library directly via
+    :func:`_get_offset_tokenizer` — no ``transformers`` dependency on
+    this path. Every model in ``MODEL_RENDERER_MAP`` ships a fast
+    ``tokenizer.json`` so the Rust backend resolves universally. BYO
+    tokenizers must expose a ``tokenizers.Tokenizer`` (either directly
+    or as ``PreTrainedTokenizerFast.backend_tokenizer``); slow
+    tokenizers aren't supported — BPE drift at the wrap/body boundary
+    would defeat the whole point.
 
     Empty input or empty joined text returns an empty list.
     """
@@ -1670,47 +1688,34 @@ def attribute_text_segments(
         return []
 
     offset_tokenizer = _get_offset_tokenizer(tokenizer)
-    encoding = offset_tokenizer(
-        full_text,
-        add_special_tokens=False,
-        return_offsets_mapping=True,
-    )
-    token_ids = list(encoding["input_ids"])
-    offsets = list(encoding["offset_mapping"])
+    encoding = offset_tokenizer.encode(full_text, add_special_tokens=False)
+    token_ids = list(encoding.ids)
+    offsets = list(encoding.offsets)
 
     # Build segment char-span lookup. Track the half-open span
     # [seg_start, seg_end) of each segment and its is_content bit.
-    spans: list[tuple[int, int, bool]] = []
+    spans: "list[tuple[int, int, bool]]" = []
     pos = 0
     for text, is_content in segments:
         spans.append((pos, pos + len(text), is_content))
         pos += len(text)
     total_len = pos
 
-    out: list[tuple[int, bool]] = []
+    out: "list[tuple[int, bool]]" = []
     last_is_content = spans[-1][2] if spans else False
     for tok_id, (start, _end) in zip(token_ids, offsets):
         if start >= total_len:
-            # Token's character offset is past every segment (shouldn't
-            # normally happen for add_special_tokens=False, but defensive
-            # against tokenizer-specific edge cases).
+            # Token's char offset is past every segment (shouldn't
+            # normally happen for add_special_tokens=False, but defensive).
             out.append((tok_id, last_is_content))
             continue
-        # Find the segment that contains `start`. Segments are
-        # contiguous and ordered, so a linear scan is fine — the inner
-        # loop runs at most len(segments) times per token and segments
+        # Find the segment that contains `start`. Linear scan — segments
         # is typically 2-3 in practice.
         is_content = last_is_content
         for seg_start, seg_end, seg_is_content in spans:
             if seg_start <= start < seg_end:
                 is_content = seg_is_content
                 break
-        else:
-            # start == total_len handled above; the remaining case is
-            # an empty segment in the middle. Empty segments emit no
-            # characters, so no token can land in them; fall through to
-            # the last non-empty segment's bit.
-            pass
         out.append((tok_id, is_content))
     return out
 

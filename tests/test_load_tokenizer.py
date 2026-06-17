@@ -123,21 +123,20 @@ def test_tokenizer_source_overrides_are_exact_llama_mirrors():
 
 
 def test_get_offset_tokenizer_rejects_offsetless_byo():
-    """BYO tokenizers without ``return_offsets_mapping`` support raise a
+    """BYO tokenizers without a ``tokenizers.Tokenizer`` backend raise a
     clear error. Hand-coded renderers concatenate scaffold + body in one
-    BPE pass and attribute tokens via the fast tokenizer's offset map;
-    no transparent reload-from-name_or_path fallback exists. The
-    contract is: pass a fast tokenizer or get a loud error at construct
-    time, not silent BPE drift at the wrap/body boundary."""
+    BPE pass and attribute tokens via the Rust tokenizer's
+    ``Encoding.offsets``; no transparent reload-from-name_or_path
+    fallback exists. The contract is: pass a fast tokenizer with a
+    Rust backend or get a loud error at construct time, not silent BPE
+    drift at the wrap/body boundary."""
 
-    class _NoOffsets:
+    class _NoRustBackend:
         name_or_path = "anywhere/anything"
+        # No ``backend_tokenizer`` attribute, not a ``tokenizers.Tokenizer``.
 
-        def __call__(self, *args, **kwargs):
-            raise NotImplementedError("BYO tokenizer has no offsets")
-
-    with pytest.raises(RuntimeError, match="fast tokenizer.*offsets"):
-        base._get_offset_tokenizer(_NoOffsets())
+    with pytest.raises(RuntimeError, match=r"fast tokenizer.*tokenizers\.Tokenizer"):
+        base._get_offset_tokenizer(_NoRustBackend())
 
 
 # ---------------------------------------------------------------------------

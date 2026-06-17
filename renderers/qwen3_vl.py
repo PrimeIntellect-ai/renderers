@@ -36,13 +36,13 @@ from urllib.parse import urlparse
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from renderers.base import (
+    attribute_text_segments,
     Message,
     MultiModalData,
     ParsedResponse,
     PlaceholderRange,
     RenderedTokens,
     ToolSpec,
-    attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
     trim_to_turn_close,
@@ -223,11 +223,10 @@ class _Emitter:
         if not text:
             return
         # Adjacent text under different msg_idx or is_sampled is rare in
-        # this template — but flush at those boundaries so attribution
-        # and the sampled signal stay accurate. is_content boundaries do
-        # NOT force a flush: they're carried through the joined BPE pass
-        # via :func:`attribute_text_segments`, preserving merges across
-        # the wrap/body boundary.
+        # this template — but flush at those boundaries so the sampled
+        # signal stays accurate. is_content boundaries do NOT force a
+        # flush: mixed-is_content flushes encode each segment
+        # independently (see ``_flush``).
         if self._segments and (
             self._buf_idx != self.msg_idx or self._buf_sampled != is_sampled
         ):
@@ -274,13 +273,11 @@ class _Emitter:
             self.sampled.extend([self._buf_sampled] * len(ids))
             self.is_content.extend([first_ic] * len(ids))
             return
-        # Mixed body/scaffold flush — encode once and attribute back to
-        # each segment via the fast tokenizer's offset_mapping. Requires
-        # a tokenizer (not just the encode fn) to look up offsets.
-        assert self._tokenizer is not None, (
-            "_Emitter mixed-is_content flush requires a tokenizer; "
-            "pass one to the constructor."
-        )
+        # Mixed body/scaffold flush — joined encode + offset attribution
+        # preserves BPE merges across the label-transition boundary
+        # (e.g., ``"user\n"`` scaffold ↔ caller body, where a trailing
+        # char of the body could merge with the leading scaffold byte
+        # of the next segment).
         for tok_id, is_content in attribute_text_segments(self._tokenizer, segments):
             self.token_ids.append(tok_id)
             self.message_indices.append(self._buf_idx)

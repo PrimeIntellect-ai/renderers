@@ -209,8 +209,7 @@ class Qwen3Renderer:
                 preserve_thinking = should_preserve_past_thinking(
                     messages,
                     i,
-                    preserve_all_thinking=self.config.preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
+                    thinking_retention=self.config.thinking_retention,
                 )
                 self._render_assistant(
                     msg,

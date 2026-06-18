@@ -48,7 +48,7 @@ class DeepSeekV3Renderer:
     assistant content is emitted verbatim. The reasoning variant
     (``<think>``-prefilled prompt, history reasoning stripped) lives in
     :class:`renderers.deepseek_r1.DeepSeekR1Renderer`, which subclasses
-    this one. ``preserve_*`` flags are no-ops here (no reasoning channel),
+    this one. ``thinking_retention`` is a no-op here (no reasoning channel),
     stored for protocol uniformity.
     """
 

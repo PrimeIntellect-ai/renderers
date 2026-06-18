@@ -4,14 +4,15 @@ discriminated union (``RendererConfig``).
 Each renderer accepts its own typed config; bad combinations (e.g.
 ``add_vision_id`` under ``name="qwen3"``) fail at config-load time with a
 pydantic ``ValidationError`` rather than at runtime via an allowlist
-check. The shared ``preserve_*`` flags live on ``BaseRendererConfig``
-and OR-compose with template-level toggles (e.g. GLM-5
-``clear_thinking``) inside each renderer — they extend retention, never
-override the template into a drop.
+check. The shared ``thinking_retention`` flag lives on
+``BaseRendererConfig`` and OR-composes with template-level toggles (e.g.
+GLM-5 ``clear_thinking``) inside each renderer — it extends retention,
+never overrides the template into a drop.
 
 ``AutoRendererConfig`` is a placeholder variant: ``create_renderer``
 resolves it via ``MODEL_RENDERER_MAP`` and constructs the matching
-typed config with the auto config's ``preserve_*`` fields carried over.
+typed config with the auto config's ``thinking_retention`` field carried
+over.
 
 ``DefaultRendererConfig`` uses ``extra="allow"`` to accept arbitrary
 Jinja kwargs as ``model_extra`` — ``DefaultRenderer`` doesn't know which
@@ -25,6 +26,12 @@ from typing import Annotated, ClassVar, Literal, Union
 from pydantic import ConfigDict, Field
 from pydantic_config import BaseConfig
 
+ThinkingRetention = Literal["template", "tool_cycle", "all"]
+"""How far past-assistant ``reasoning_content`` is retained, as an override
+*above* the chat-template floor. ``"template"`` defers to the template;
+``"tool_cycle"`` and ``"all"`` progressively extend retention and never force a
+drop. See :attr:`BaseRendererConfig.thinking_retention`."""
+
 
 class BaseRendererConfig(BaseConfig):
     """Shared fields and config for every renderer config variant.
@@ -35,28 +42,32 @@ class BaseRendererConfig(BaseConfig):
     this class adds ``frozen=True`` so configs are hashable value
     objects.
 
-    ``preserve_all_thinking`` and ``preserve_thinking_between_tool_calls``
-    are renderer-internal behaviour flags — they don't map to any Jinja
-    chat-template kwarg. They OR-compose with template-level toggles on
-    renderers that expose one (GLM-5 ``clear_thinking``, Nemotron-3
-    ``truncate_history_thinking``): either flag saying "keep this
-    thinking" wins. preserve_* can only ever extend retention; setting
-    ``preserve_all_thinking=True`` always keeps past thinking, regardless
-    of the template kwarg. See ``renderers.base.should_preserve_past_thinking``.
+    ``thinking_retention`` is a renderer-internal behaviour flag — it
+    doesn't map to any Jinja chat-template kwarg. It OR-composes with
+    template-level toggles on renderers that expose one (GLM-5
+    ``clear_thinking``, Nemotron-3 ``truncate_history_thinking``):
+    whichever side says "keep this thinking" wins. The chat template is
+    the floor — ``thinking_retention`` can only ever *extend* retention,
+    never override the template into a drop. See
+    ``renderers.base.should_preserve_past_thinking``.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    preserve_all_thinking: bool = False
-    """Restore ``reasoning_content`` on every past assistant turn, even
-    when the chat template would drop it. Strict superset of
-    ``preserve_thinking_between_tool_calls``."""
+    thinking_retention: ThinkingRetention = "template"
+    """How much past-assistant ``reasoning_content`` to re-emit, layered as
+    an override *above* the chat template's own decision. The template is
+    the floor — each level only ever *extends* retention, never forces a
+    drop:
 
-    preserve_thinking_between_tool_calls: bool = False
-    """Restore ``reasoning_content`` only inside the in-flight tool cycle:
-    the contiguous A-T-...-A block after the most recent ``user`` turn,
-    and only if it contains at least one ``tool`` response. A new user
-    turn closes the block and drops its thinking (template default)."""
+    - ``"template"`` (default) — defer entirely to the chat template.
+    - ``"tool_cycle"`` — additionally keep thinking inside the in-flight
+      tool cycle: the contiguous A-T-...-A block after the most recent
+      ``user`` turn, when it contains at least one ``tool`` response. A new
+      user turn closes the block.
+    - ``"all"`` — additionally keep thinking on every past assistant turn.
+
+    Ascending and nested: ``"all"`` ⊇ ``"tool_cycle"`` ⊇ ``"template"``."""
 
     # Fields that are renderer-internal — not forwarded to (or mirrored
     # by) ``apply_chat_template``. Override in subclasses that hold
@@ -87,8 +98,9 @@ class BaseRendererConfig(BaseConfig):
 
 class AutoRendererConfig(BaseRendererConfig):
     """Resolve the renderer from ``tokenizer.name_or_path`` at construction
-    time via ``MODEL_RENDERER_MAP``. Carries only the shared ``preserve_*``
-    fields; template kwargs require an explicit renderer choice so that
+    time via ``MODEL_RENDERER_MAP``. Carries only the shared
+    ``thinking_retention`` field; template kwargs require an explicit
+    renderer choice so that
     template-dependent behaviour stays visible at the call site."""
 
     name: Literal["auto"] = "auto"
@@ -199,8 +211,8 @@ class GLM5RendererConfig(BaseRendererConfig):
     """When ``False``, the renderer keeps ``<think>{reasoning}</think>``
     on past-cycle assistant turns instead of dropping them. Mirrors the
     chat template's ``clear_thinking`` toggle. OR-composes with
-    ``preserve_all_thinking`` / ``preserve_thinking_between_tool_calls``
-    — see :class:`BaseRendererConfig` for the contract."""
+    ``thinking_retention`` — see :class:`BaseRendererConfig` for the
+    contract."""
 
 
 class GLM51RendererConfig(BaseRendererConfig):
@@ -321,10 +333,11 @@ class LagunaXS2RendererConfig(BaseRendererConfig):
 class Llama3RendererConfig(BaseRendererConfig):
     """Llama-3.x Instruct renderer config.
 
-    Llama-3 ships no reasoning channel, so the base ``preserve_*_thinking``
-    flags don't apply: ``Llama3Renderer`` raises ``NotImplementedError``
-    if either is set (matching ``DefaultRenderer``'s contract for the
-    same case). Both fields below mirror real ``apply_chat_template``
+    Llama-3 ships no reasoning channel, so the base ``thinking_retention``
+    flag is a no-op: there's never any past-assistant thinking to retain
+    or drop, so any level leaves the token stream unchanged (same contract
+    as Kimi-K2 / Qwen3-VL). Both fields below mirror real
+    ``apply_chat_template``
     kwargs.
     """
 
@@ -373,8 +386,8 @@ class Nemotron3RendererConfig(BaseRendererConfig):
     """When ``False``, keep ``<think>{reasoning}</think>`` on past-cycle
     assistant turns instead of dropping them. Mirrors the chat
     template's ``truncate_history_thinking`` toggle. OR-composes with
-    ``preserve_all_thinking`` / ``preserve_thinking_between_tool_calls``
-    — see :class:`BaseRendererConfig` for the contract."""
+    ``thinking_retention`` — see :class:`BaseRendererConfig` for the
+    contract."""
 
     low_effort: bool = False
     """When ``True``, append ``\\n\\n{reasoning effort: low}`` to the last user
@@ -426,8 +439,8 @@ class DeepSeekR1RendererConfig(BaseRendererConfig):
     R1 always reasons — its chat template unconditionally prefills
     ``<think>\\n`` at the generation prompt and strips ``</think>`` from
     historical assistant turns. There is therefore no ``enable_thinking``
-    knob (thinking is not optional), and ``preserve_*`` flags are no-ops
-    (history reasoning is always dropped); both stored for protocol
+    knob (thinking is not optional), and ``thinking_retention`` is a no-op
+    (history reasoning is always dropped); stored for protocol
     uniformity. Applies to full ``deepseek-ai/DeepSeek-R1`` / ``-R1-0528``
     — NOT the R1-Distill-Qwen/Llama models, which use those base
     tokenizers and route to the Qwen3 / Llama-3 renderers.
@@ -473,7 +486,7 @@ that renderer supports. Bogus combinations (e.g. ``add_vision_id`` under
 # Map discriminator → config class. Used by ``create_renderer`` when
 # resolving ``AutoRendererConfig`` against ``MODEL_RENDERER_MAP``: the
 # resolved renderer name picks the corresponding typed config, and the
-# auto config's ``preserve_*`` fields are carried over.
+# auto config's ``thinking_retention`` field is carried over.
 _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "auto": AutoRendererConfig,
     "default": DefaultRendererConfig,
@@ -543,5 +556,6 @@ __all__ = [
     "Qwen3RendererConfig",
     "Qwen3VLRendererConfig",
     "RendererConfig",
+    "ThinkingRetention",
     "config_from_name",
 ]

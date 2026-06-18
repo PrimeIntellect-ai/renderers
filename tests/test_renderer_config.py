@@ -85,7 +85,7 @@ def test_create_renderer_forwards_typed_config_to_renderer(monkeypatch):
 def test_create_renderer_auto_resolves_via_model_map(monkeypatch):
     """``AutoRendererConfig`` (or ``config=None``) routes through
     ``MODEL_RENDERER_MAP`` to pick the matching renderer + typed config,
-    carrying the shared ``preserve_*`` flags over from the auto config."""
+    carrying the shared ``thinking_retention`` field over from the auto config."""
 
     class _FakeQwen35:
         def __init__(self, tokenizer, config):
@@ -97,13 +97,13 @@ def test_create_renderer_auto_resolves_via_model_map(monkeypatch):
 
     renderer = create_renderer(
         SimpleNamespace(name_or_path="fake/qwen35"),
-        AutoRendererConfig(preserve_all_thinking=True),
+        AutoRendererConfig(thinking_retention="all"),
     )
 
     assert isinstance(renderer.config, Qwen35RendererConfig)
-    assert renderer.config.preserve_all_thinking is True
+    assert renderer.config.thinking_retention == "all"
     # Template-level kwargs stay at their per-renderer defaults — auto
-    # carries only the preserve_* flags.
+    # carries only the thinking_retention flag.
     assert renderer.config.add_vision_id is False
 
 

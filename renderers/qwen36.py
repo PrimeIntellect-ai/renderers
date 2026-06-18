@@ -10,8 +10,7 @@ Delta vs Qwen3.5 (template line 122):
 Historical-thinking retention follows Qwen3.5's default (drop past
 ``<think>`` blocks). The upstream template carries a ``preserve_thinking``
 Jinja toggle for the opposite polarity; on the renderer side that intent
-maps to the renderer-agnostic ``preserve_all_thinking`` /
-``preserve_thinking_between_tool_calls`` flags on
+maps to the renderer-agnostic ``thinking_retention`` flag on
 :class:`renderers.Qwen36RendererConfig`.
 
 Everything else — tool system prompt, tool-call XML structure, thinking

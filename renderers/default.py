@@ -95,11 +95,12 @@ class DefaultRenderer:
         config: DefaultRendererConfig | None = None,
     ):
         cfg = config or DefaultRendererConfig()
-        if cfg.preserve_all_thinking or cfg.preserve_thinking_between_tool_calls:
+        if cfg.thinking_retention != "template":
             raise NotImplementedError(
                 "DefaultRenderer falls back to apply_chat_template and can't "
                 "selectively re-emit dropped reasoning_content. Configure a "
-                "model-specific renderer if you need preserve_*_thinking."
+                "model-specific renderer if you need thinking_retention != "
+                "'template'."
             )
         self._tokenizer = tokenizer
         self.config = cfg

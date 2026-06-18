@@ -50,10 +50,10 @@ Configs are frozen. To override a field, construct a new instance or call
 
 ```python
 r = create_renderer(tokenizer)                                 # AutoRendererConfig() is the default
-r = create_renderer(tokenizer, AutoRendererConfig(preserve_all_thinking=True))
+r = create_renderer(tokenizer, AutoRendererConfig(thinking_retention="all"))
 ```
 
-`AutoRendererConfig` carries only the shared `preserve_*` flags. Template
+`AutoRendererConfig` carries only the shared `thinking_retention` flag. Template
 kwargs depend on the renderer, so overriding them requires naming the
 renderer explicitly:
 
@@ -67,33 +67,37 @@ falling back for a VLM would produce token streams the trainer can't
 reconstruct. Text-only fine-tunes without a registered renderer fall back to
 `DefaultRenderer` and log the choice at INFO.
 
-## `preserve_*` flags
+## `thinking_retention`
 
-Every variant carries two renderer-agnostic flags on `_BaseRendererConfig`:
+Every variant carries one renderer-agnostic flag on `_BaseRendererConfig`,
+an ascending scale whose floor is the chat template's own decision:
 
-- `preserve_all_thinking: bool = False` — re-emit `reasoning_content` on
-  every past assistant turn, even when the chat template would drop it.
-- `preserve_thinking_between_tool_calls: bool = False` — re-emit
-  `reasoning_content` only inside the in-flight tool cycle (the contiguous
-  A-T-…-A block after the most recent `user` message, when it contains at
-  least one `tool` response). A new user turn closes the block and drops
-  its thinking.
+- `thinking_retention: Literal["template", "tool_cycle", "all"] = "template"`
+  - `"template"` (default) — defer entirely to the chat template.
+  - `"tool_cycle"` — additionally re-emit `reasoning_content` inside the
+    in-flight tool cycle (the contiguous A-T-…-A block after the most
+    recent `user` message, when it contains at least one `tool` response).
+    A new user turn closes the block and drops its thinking.
+  - `"all"` — additionally re-emit `reasoning_content` on every past
+    assistant turn, even when the chat template would drop it.
 
-These OR-compose with template-level toggles. GLM-5's `clear_thinking` and
-Nemotron-3's `truncate_history_thinking` already gate past thinking; the
-`preserve_*` flags add to that:
+The levels are nested: `"all"` ⊇ `"tool_cycle"` ⊇ `"template"`. They
+OR-compose with template-level toggles — GLM-5's `clear_thinking` and
+Nemotron-3's `truncate_history_thinking` already gate past thinking, and
+`thinking_retention` adds to that:
 
-| `clear_thinking` | `preserve_all_thinking` | past thinking? |
-|------------------|-------------------------|----------------|
-| `True` (default — drop) | `False` (default) | dropped |
-| `True`           | `True`                  | kept           |
-| `False` (keep)   | `False`                 | kept           |
-| `False`          | `True`                  | kept           |
+| `clear_thinking` | `thinking_retention` | past thinking? |
+|------------------|----------------------|----------------|
+| `True` (default — drop) | `"template"` (default) | dropped |
+| `True`           | `"all"`              | kept           |
+| `False` (keep)   | `"template"`         | kept           |
+| `False`          | `"all"`              | kept           |
 
-`preserve_*` can only extend retention, never force a drop. The canonical
-use case is **compaction**: injecting a `user` turn like *"summarize the work
-so far"* puts every prior assistant in a past cycle, and
-`preserve_all_thinking=True` keeps reasoning visible end-to-end.
+`thinking_retention` can only extend retention, never force a drop — the
+template is the floor. The canonical use case is **compaction**: injecting
+a `user` turn like *"summarize the work so far"* puts every prior assistant
+in a past cycle, and `thinking_retention="all"` keeps reasoning visible
+end-to-end.
 
 ## `DefaultRendererConfig` accepts arbitrary Jinja kwargs
 
@@ -139,7 +143,7 @@ In TOML / YAML, the discriminator routes deserialization:
 name = "qwen3.5"
 enable_thinking = false
 add_vision_id = true
-preserve_all_thinking = true
+thinking_retention = "all"
 ```
 
 Pydantic dispatches on `name = "qwen3.5"` to `Qwen35RendererConfig`. Bogus

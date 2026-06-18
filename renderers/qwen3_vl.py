@@ -302,9 +302,9 @@ class Qwen3VLRenderer:
             keyed off ``tokenizer.name_or_path`` the first time a
             multimodal part is seen.
 
-    ``preserve_all_thinking`` / ``preserve_thinking_between_tool_calls``
-    on the config are no-ops here — the chat template drops past
-    ``<think>`` blocks unconditionally. Stored for Protocol parity.
+    ``thinking_retention`` on the config is a no-op here — the chat
+    template drops past ``<think>`` blocks unconditionally. Stored for
+    Protocol parity.
     """
 
     def __init__(

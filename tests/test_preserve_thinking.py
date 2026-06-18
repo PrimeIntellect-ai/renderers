@@ -1,16 +1,17 @@
-"""Smoke coverage for the ``preserve_*_thinking`` override flags.
+"""Smoke coverage for the ``thinking_retention`` override flag.
 
-Flags live on the typed renderer config (e.g.
-``Qwen3RendererConfig(preserve_all_thinking=True)``) and are stored on
-the renderer as ``self.config.preserve_*``. Each test that wants a
-non-default flag builds a fresh renderer for that configuration via
+The flag lives on the typed renderer config (e.g.
+``Qwen3RendererConfig(thinking_retention="all")``) and is stored on the
+renderer as ``self.config.thinking_retention``. Each test that wants a
+non-default level builds a fresh renderer for that configuration via
 ``_make`` below.
 
 Two invariants per renderer:
 
-1. Default render (no flags) is byte-identical to the existing
-   ``apply_chat_template`` parity baseline — covered exhaustively elsewhere.
-2. Setting either flag never *removes* tokens compared to the default and,
+1. Default render (``thinking_retention="template"``) is byte-identical to
+   the existing ``apply_chat_template`` parity baseline — covered
+   exhaustively elsewhere.
+2. Raising the level never *removes* tokens compared to the default and,
    for renderers whose template would drop past-asst thinking, actually
    adds tokens for a conversation containing past-asst ``reasoning_content``.
 
@@ -31,7 +32,7 @@ from renderers.configs import _config_class_for
 
 
 def _make(tokenizer, renderer_name, **flags):
-    """Build a fresh renderer with the given preserve_*_thinking flags
+    """Build a fresh renderer with the given thinking_retention level
     bound at construction. Reuses the cached tokenizer fixture."""
     if renderer_name == "auto":
         renderer_name = MODEL_RENDERER_MAP.get(
@@ -51,8 +52,8 @@ NO_OP_MODELS = {
     "Qwen/Qwen3-VL-8B-Instruct",
     "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "poolside/Laguna-XS.2",
-    # Llama-3 has no reasoning channel at all — preserve flags can't add
-    # or drop anything, so they're pure no-ops.
+    # Llama-3 has no reasoning channel at all — thinking_retention can't
+    # add or drop anything, so it's a pure no-op.
     "unsloth/Llama-3.2-1B-Instruct",
 }
 
@@ -78,7 +79,7 @@ CONVERSATION = [
 
 
 def test_should_preserve_past_thinking_classification():
-    # CURRENT-block-only behaviour. between_tool_calls preserves thinking
+    # CURRENT-block-only behaviour. "tool_cycle" preserves thinking
     # ONLY for asst messages that sit AFTER the last user turn AND are in
     # a segment that contains a tool. Anything before the last user turn
     # falls back to template default (typically dropped).
@@ -98,44 +99,38 @@ def test_should_preserve_past_thinking_classification():
     assert should_preserve_past_thinking(
         live_cycle,
         1,
-        preserve_all_thinking=False,
-        preserve_thinking_between_tool_calls=True,
+        thinking_retention="tool_cycle",
     )
     assert should_preserve_past_thinking(
         live_cycle,
         3,
-        preserve_all_thinking=False,
-        preserve_thinking_between_tool_calls=True,
+        thinking_retention="tool_cycle",
     )
 
     # Same shape with a NEW user appended → now the prior tool block is
-    # "older" and between_tool_calls must drop its thinking (template
-    # default). Only preserve_all_thinking would keep them.
+    # "older" and "tool_cycle" must drop its thinking (template default).
+    # Only thinking_retention="all" would keep them.
     closed_cycle = live_cycle + [{"role": "user", "content": "next"}]
     assert not should_preserve_past_thinking(
         closed_cycle,
         1,
-        preserve_all_thinking=False,
-        preserve_thinking_between_tool_calls=True,
+        thinking_retention="tool_cycle",
     )
     assert not should_preserve_past_thinking(
         closed_cycle,
         3,
-        preserve_all_thinking=False,
-        preserve_thinking_between_tool_calls=True,
+        thinking_retention="tool_cycle",
     )
-    # preserve_all_thinking still keeps them.
+    # thinking_retention="all" still keeps them.
     assert should_preserve_past_thinking(
         closed_cycle,
         1,
-        preserve_all_thinking=True,
-        preserve_thinking_between_tool_calls=False,
+        thinking_retention="all",
     )
     assert should_preserve_past_thinking(
         closed_cycle,
         3,
-        preserve_all_thinking=True,
-        preserve_thinking_between_tool_calls=False,
+        thinking_retention="all",
     )
 
     # Current segment without a tool → not a tool cycle → not preserved.
@@ -146,37 +141,35 @@ def test_should_preserve_past_thinking_classification():
     assert not should_preserve_past_thinking(
         no_tool_yet,
         1,
-        preserve_all_thinking=False,
-        preserve_thinking_between_tool_calls=True,
+        thinking_retention="tool_cycle",
     )
 
-    # Both flags False → always False.
+    # thinking_retention="template" → always False.
     assert not should_preserve_past_thinking(
         live_cycle,
         1,
-        preserve_all_thinking=False,
-        preserve_thinking_between_tool_calls=False,
+        thinking_retention="template",
     )
 
 
-def test_preserve_flags_default_unchanged(
+def test_thinking_retention_template_unchanged(
     model_name, tokenizer, renderer_name, renderer
 ):
-    # A renderer constructed with both flags explicitly ``False`` must
-    # produce byte-identical output to one constructed with the defaults.
+    # A renderer constructed with thinking_retention="template" explicitly
+    # must produce byte-identical output to one constructed with the defaults.
     bare = renderer.render_ids(CONVERSATION)
     explicit_off = _make(
         tokenizer,
         renderer_name,
-        preserve_all_thinking=False,
-        preserve_thinking_between_tool_calls=False,
+        thinking_retention="template",
     ).render_ids(CONVERSATION)
     assert bare == explicit_off, (
-        f"{model_name}: explicit flags=False must equal bare default render"
+        f"{model_name}: explicit thinking_retention='template' must equal "
+        f"bare default render"
     )
 
 
-def test_preserve_all_thinking_grows_or_no_op(
+def test_thinking_retention_all_grows_or_no_op(
     model_name, tokenizer, renderer_name, renderer
 ):
     from renderers.default import DefaultRenderer
@@ -184,37 +177,37 @@ def test_preserve_all_thinking_grows_or_no_op(
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
     default = renderer.render_ids(CONVERSATION)
-    preserved = _make(tokenizer, renderer_name, preserve_all_thinking=True).render_ids(
+    preserved = _make(tokenizer, renderer_name, thinking_retention="all").render_ids(
         CONVERSATION
     )
 
     if model_name in NO_OP_MODELS:
         assert preserved == default, (
-            f"{model_name} is a no-op renderer; preserve_all_thinking must "
+            f"{model_name} is a no-op renderer; thinking_retention='all' must "
             f"not change output (got {len(default)} → {len(preserved)})"
         )
     else:
         assert len(preserved) > len(default), (
-            f"{model_name}: preserve_all_thinking should add tokens for a "
+            f"{model_name}: thinking_retention='all' should add tokens for a "
             f"conversation with past-asst reasoning_content "
             f"(default={len(default)}, preserved={len(preserved)})"
         )
 
 
-def test_preserve_between_tool_calls_strict_subset(
+def test_thinking_retention_tool_cycle_strict_subset(
     model_name, tokenizer, renderer_name, renderer
 ):
-    """``preserve_thinking_between_tool_calls`` is strictly weaker than
-    ``preserve_all_thinking``: token count satisfies default <= between <= all."""
+    """``thinking_retention="tool_cycle"`` is strictly weaker than
+    ``"all"``: token count satisfies default <= tool_cycle <= all."""
     from renderers.default import DefaultRenderer
 
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
     default = renderer.render_ids(CONVERSATION)
     between = _make(
-        tokenizer, renderer_name, preserve_thinking_between_tool_calls=True
+        tokenizer, renderer_name, thinking_retention="tool_cycle"
     ).render_ids(CONVERSATION)
-    all_ = _make(tokenizer, renderer_name, preserve_all_thinking=True).render_ids(
+    all_ = _make(tokenizer, renderer_name, thinking_retention="all").render_ids(
         CONVERSATION
     )
     assert len(default) <= len(between) <= len(all_), (
@@ -242,28 +235,28 @@ LIVE_TOOL_CYCLE = [
 ]
 
 
-def test_preserve_btc_on_live_cycle_matches_all(
+def test_thinking_retention_tool_cycle_matches_all_on_live_cycle(
     model_name, tokenizer, renderer_name, renderer
 ):
     """In a live tool cycle (no trailing user), every past-asst sits in
-    the current tool-bearing segment. ``preserve_thinking_between_tool_calls``
+    the current tool-bearing segment. ``thinking_retention="tool_cycle"``
     should preserve all of their thinking — same set of asst messages as
-    ``preserve_all_thinking``, so the resulting token sequences must be
+    ``"all"``, so the resulting token sequences must be
     identical (independent of which template-default condition each
     renderer uses internally)."""
     from renderers.default import DefaultRenderer
 
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
-    btc = _make(
-        tokenizer, renderer_name, preserve_thinking_between_tool_calls=True
-    ).render_ids(LIVE_TOOL_CYCLE)
-    all_ = _make(tokenizer, renderer_name, preserve_all_thinking=True).render_ids(
+    btc = _make(tokenizer, renderer_name, thinking_retention="tool_cycle").render_ids(
+        LIVE_TOOL_CYCLE
+    )
+    all_ = _make(tokenizer, renderer_name, thinking_retention="all").render_ids(
         LIVE_TOOL_CYCLE
     )
     assert btc == all_, (
-        f"{model_name}: in a live tool cycle btc must match preserve_all "
-        f"(got len(btc)={len(btc)}, len(all)={len(all_)})"
+        f"{model_name}: in a live tool cycle tool_cycle must match all "
+        f"(got len(tool_cycle)={len(btc)}, len(all)={len(all_)})"
     )
 
 
@@ -323,15 +316,15 @@ NEVER_PRESERVES_MODELS = {
     "Qwen/Qwen3-VL-8B-Instruct",
     "Qwen/Qwen3-VL-30B-A3B-Instruct",
     # Llama-3 ships no <think> rendering path, so reasoning_content never
-    # surfaces in the output regardless of the preserve flags.
+    # surfaces in the output regardless of thinking_retention.
     "unsloth/Llama-3.2-1B-Instruct",
 }
 
 
-def test_preserve_all_thinking_emits_every_asst_reasoning(
+def test_thinking_retention_all_emits_every_asst_reasoning(
     model_name, tokenizer, renderer_name, renderer
 ):
-    """``preserve_all_thinking=True`` must surface every past-asst's
+    """``thinking_retention="all"`` must surface every past-asst's
     ``reasoning_content`` in the decoded output — for renderers that
     have any pathway to render reasoning at all."""
     from renderers.default import DefaultRenderer
@@ -339,7 +332,7 @@ def test_preserve_all_thinking_emits_every_asst_reasoning(
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
 
-    ids = _make(tokenizer, renderer_name, preserve_all_thinking=True).render_ids(
+    ids = _make(tokenizer, renderer_name, thinking_retention="all").render_ids(
         TWO_BLOCK_CONV, tools=TWO_BLOCK_TOOLS
     )
     text = tokenizer.decode(ids)
@@ -348,38 +341,38 @@ def test_preserve_all_thinking_emits_every_asst_reasoning(
         for sentinel in ALL_SENTINELS:
             assert sentinel not in text, (
                 f"{model_name}: never-preserves renderer leaked {sentinel} "
-                f"under preserve_all_thinking"
+                f"under thinking_retention='all'"
             )
     else:
         for sentinel in ALL_SENTINELS:
             assert sentinel in text, (
-                f"{model_name}: preserve_all_thinking did not emit {sentinel} "
+                f"{model_name}: thinking_retention='all' did not emit {sentinel} "
                 f"in decoded output"
             )
 
 
-def test_preserve_btc_emits_current_block_reasoning(
+def test_thinking_retention_tool_cycle_emits_current_block_reasoning(
     model_name, tokenizer, renderer_name, renderer
 ):
-    """``preserve_thinking_between_tool_calls=True`` must surface the
-    current (post-last-user) tool block's reasoning. Older blocks fall
-    back to template default, which varies per renderer — no universal
-    assertion there."""
+    """``thinking_retention="tool_cycle"`` must surface the current
+    (post-last-user) tool block's reasoning. Older blocks fall back to
+    template default, which varies per renderer — no universal assertion
+    there."""
     from renderers.default import DefaultRenderer
 
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on these flags — covered separately")
 
-    ids = _make(
-        tokenizer, renderer_name, preserve_thinking_between_tool_calls=True
-    ).render_ids(TWO_BLOCK_CONV, tools=TWO_BLOCK_TOOLS)
+    ids = _make(tokenizer, renderer_name, thinking_retention="tool_cycle").render_ids(
+        TWO_BLOCK_CONV, tools=TWO_BLOCK_TOOLS
+    )
     text = tokenizer.decode(ids)
 
     if model_name in NEVER_PRESERVES_MODELS:
         for sentinel in ALL_SENTINELS:
             assert sentinel not in text, (
                 f"{model_name}: never-preserves renderer leaked {sentinel} "
-                f"under preserve_thinking_between_tool_calls"
+                f"under thinking_retention='tool_cycle'"
             )
     else:
         for sentinel in CURRENT_BLOCK_SENTINELS:
@@ -389,23 +382,23 @@ def test_preserve_btc_emits_current_block_reasoning(
             )
 
 
-def test_default_renderer_raises_on_flags():
+def test_default_renderer_raises_above_template():
     """``DefaultRenderer`` falls back to apply_chat_template with no
-    selective re-emit pathway, so constructing one with either flag set
-    must raise — fail fast, before any render is attempted."""
+    selective re-emit pathway, so constructing one with thinking_retention
+    above ``"template"`` must raise — fail fast, before any render."""
     from renderers import DefaultRendererConfig
     from renderers.base import load_tokenizer
 
     tok = load_tokenizer("Qwen/Qwen2.5-0.5B-Instruct")
-    # No flags → constructs cleanly.
+    # Default "template" → constructs cleanly.
     create_renderer(tok, DefaultRendererConfig())
-    # Either flag set → raises at construction.
+    # Any level above "template" → raises at construction.
     with pytest.raises(NotImplementedError):
-        create_renderer(tok, DefaultRendererConfig(preserve_all_thinking=True))
+        create_renderer(tok, DefaultRendererConfig(thinking_retention="all"))
     with pytest.raises(NotImplementedError):
         create_renderer(
             tok,
-            DefaultRendererConfig(preserve_thinking_between_tool_calls=True),
+            DefaultRendererConfig(thinking_retention="tool_cycle"),
         )
 
 
@@ -421,21 +414,16 @@ def test_create_renderer_records_flag_state(model_name, renderer_name, tokenizer
     from renderers.default import DefaultRenderer
 
     bare = _make(tokenizer, renderer_name)
-    assert bare.config.preserve_all_thinking is False
-    assert bare.config.preserve_thinking_between_tool_calls is False
+    assert bare.config.thinking_retention == "template"
 
     if not isinstance(bare, DefaultRenderer):
-        # DefaultRenderer raises at construction with either flag set —
+        # DefaultRenderer raises at construction above "template" —
         # covered by ``test_default_renderer_raises_on_flags``.
-        all_on = _make(tokenizer, renderer_name, preserve_all_thinking=True)
-        assert all_on.config.preserve_all_thinking is True
-        assert all_on.config.preserve_thinking_between_tool_calls is False
+        all_on = _make(tokenizer, renderer_name, thinking_retention="all")
+        assert all_on.config.thinking_retention == "all"
 
-        btc_on = _make(
-            tokenizer, renderer_name, preserve_thinking_between_tool_calls=True
-        )
-        assert btc_on.config.preserve_all_thinking is False
-        assert btc_on.config.preserve_thinking_between_tool_calls is True
+        btc_on = _make(tokenizer, renderer_name, thinking_retention="tool_cycle")
+        assert btc_on.config.thinking_retention == "tool_cycle"
 
 
 # ---------------------------------------------------------------------------
@@ -463,8 +451,8 @@ def test_glm5_config_accepts_clear_thinking():
 def test_qwen36_config_rejects_unknown_field():
     """``preserve_thinking`` on Qwen3.6 was a chat-template-kwarg
     pass-through in an earlier revision. It is superseded by the
-    renderer-agnostic ``preserve_all_thinking`` override and must not
-    appear on the typed config — its default-False semantics are now
+    renderer-agnostic ``thinking_retention`` override and must not
+    appear on the typed config — its default semantics are now
     inherited from Qwen3.5's render gate. ``extra="forbid"`` on the
     pydantic model enforces this at construction."""
     from renderers import Qwen36RendererConfig

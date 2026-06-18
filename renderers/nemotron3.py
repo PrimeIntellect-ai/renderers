@@ -424,14 +424,13 @@ class Nemotron3Renderer:
             elif role == "assistant":
                 # Template: ``include_content = not (truncate_history_thinking
                 # and loop.index0 < last_user_idx)``. The renderer-internal
-                # preserve_* overrides only ever *extend* retention, so OR them
-                # in (a preserved turn keeps its thinking even when the
-                # template default would drop it).
+                # ``thinking_retention`` override only ever *extends*
+                # retention, so OR it in (a preserved turn keeps its thinking
+                # even when the template default would drop it).
                 preserve_thinking = msg_orig_idx >= 0 and should_preserve_past_thinking(
                     original_messages,
                     msg_orig_idx,
-                    preserve_all_thinking=self.config.preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
+                    thinking_retention=self.config.thinking_retention,
                 )
                 include_content = (
                     not self.config.truncate_history_thinking
@@ -704,8 +703,9 @@ class Nemotron3Renderer:
         """Assemble the assistant body string exactly as the chat template.
 
         ``include_content`` is the template's ``not (truncate_history_thinking
-        and loop.index0 < last_user_idx)`` (already OR-ed with the preserve_*
-        overrides by the caller): ``True`` keeps the full think+content block,
+        and loop.index0 < last_user_idx)`` (already OR-ed with the
+        ``thinking_retention`` override by the caller): ``True`` keeps the
+        full think+content block,
         ``False`` collapses historical thinking to an empty ``<think></think>``.
         """
         ultra = self._ultra

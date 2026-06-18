@@ -241,8 +241,7 @@ class GLM5Renderer:
                 preserve_thinking = should_preserve_past_thinking(
                     messages,
                     i,
-                    preserve_all_thinking=self.config.preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
+                    thinking_retention=self.config.thinking_retention,
                 )
                 self._render_assistant(
                     msg,
@@ -501,7 +500,7 @@ class GLM5Renderer:
         # ``preserve_thinking`` is the override output of
         # ``should_preserve_past_thinking`` — it adds historical assistants
         # back when the renderer was constructed with
-        # ``preserve_all_thinking=True``. ``clear_thinking=False`` mirrors
+        # ``thinking_retention="all"``. ``clear_thinking=False`` mirrors
         # the template's per-call ``clear_thinking is defined and not
         # clear_thinking`` gate: a chat_template_kwarg surface for the
         # same behaviour, gated explicitly by the caller per render.

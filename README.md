@@ -122,9 +122,9 @@ from renderers import (
 )
 
 # Auto-resolve renderer from the tokenizer's model name. Carries the
-# shared preserve_* flags; template kwargs require an explicit choice.
+# shared thinking_retention flag; template kwargs require an explicit choice.
 renderer = create_renderer(tokenizer)
-renderer = create_renderer(tokenizer, AutoRendererConfig(preserve_all_thinking=True))
+renderer = create_renderer(tokenizer, AutoRendererConfig(thinking_retention="all"))
 
 # Explicit choice — the typed config exposes exactly the fields that
 # renderer's chat template honours.
@@ -142,12 +142,13 @@ renderer = create_renderer(
 
 Discriminated union: every per-renderer config is a variant of `RendererConfig`, dispatched on the `name` field. Bogus combinations (e.g. `add_vision_id` under `name="qwen3"`) error at construction with a `pydantic.ValidationError`. Downstream pydantic configs (prime-rl orchestrator, verifiers `ClientConfig`) hold a single field typed as `RendererConfig` and inherit the same strict-per-variant validation.
 
-Two shared behaviour flags live on every variant via `_BaseRendererConfig`:
+One shared behaviour flag lives on every variant via `_BaseRendererConfig`: `thinking_retention`, an ascending scale (`"template"` < `"tool_cycle"` < `"all"`) whose floor is the chat template's own decision.
 
-- `preserve_all_thinking=True` — every past assistant's `reasoning_content` is kept, even when the chat template would drop it.
-- `preserve_thinking_between_tool_calls=True` — reasoning is kept on assistants in the in-flight tool cycle (post-last-user A-T-…-A block when it contains a tool response). A new user turn closes the block and drops its thinking.
+- `thinking_retention="template"` (default) — defer entirely to the chat template.
+- `thinking_retention="tool_cycle"` — additionally keep reasoning on assistants in the in-flight tool cycle (post-last-user A-T-…-A block when it contains a tool response). A new user turn closes the block and drops its thinking.
+- `thinking_retention="all"` — additionally keep every past assistant's `reasoning_content`, even when the chat template would drop it.
 
-These OR-compose with template-level toggles (e.g. GLM-5 `clear_thinking`, Nemotron-3 `truncate_history_thinking`): either flag saying "keep" wins. preserve_* can only ever *extend* retention — never override a template kwarg into a "drop" decision. The canonical use case is **compaction**: injecting a `user` turn like *"summarize the work so far"* puts every prior assistant in a past cycle, and `preserve_all_thinking=True` keeps reasoning visible end-to-end.
+It OR-composes with template-level toggles (e.g. GLM-5 `clear_thinking`, Nemotron-3 `truncate_history_thinking`): whichever side says "keep" wins. `thinking_retention` can only ever *extend* retention — never override a template kwarg into a "drop" decision. The canonical use case is **compaction**: injecting a `user` turn like *"summarize the work so far"* puts every prior assistant in a past cycle, and `thinking_retention="all"` keeps reasoning visible end-to-end.
 
 ## `DefaultRenderer`
 

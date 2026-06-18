@@ -17,10 +17,8 @@ Main properties:
   a ``### Tools`` header with an ``<available_tools>`` listing and prose
   format instructions that vary on ``enable_thinking``).
 - Reasoning is rendered for every assistant message — no last-user-index
-  gating. ``preserve_all_thinking`` and
-  ``preserve_thinking_between_tool_calls`` are accepted for protocol
-  uniformity but are effectively no-ops since past reasoning is preserved
-  by default.
+  gating. ``thinking_retention`` is accepted for protocol uniformity but
+  is effectively a no-op since past reasoning is preserved by default.
 """
 
 from __future__ import annotations

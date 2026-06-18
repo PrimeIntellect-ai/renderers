@@ -38,9 +38,9 @@ class KimiK2Renderer:
 
     Kimi K2's chat template doesn't read any thinking-related variable —
     ``content`` renders verbatim with no reasoning branch. The
-    ``enable_thinking`` / ``preserve_*`` fields on the config are stored
-    for protocol uniformity with the rest of the renderer family but
-    have no effect on the byte-level output.
+    ``enable_thinking`` / ``thinking_retention`` fields on the config are
+    stored for protocol uniformity with the rest of the renderer family
+    but have no effect on the byte-level output.
     """
 
     def __init__(

@@ -20,7 +20,11 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from renderers.configs import AutoRendererConfig, RendererConfig
+    from renderers.configs import (
+        AutoRendererConfig,
+        RendererConfig,
+        ThinkingRetention,
+    )
 
 logger = logging.getLogger("renderers.base")
 
@@ -666,14 +670,13 @@ class Renderer(Protocol):
         """Render messages to token IDs with per-token message attribution.
 
         Behaviour around historical ``reasoning_content`` is owned by the
-        renderer instance — the ``preserve_all_thinking`` and
-        ``preserve_thinking_between_tool_calls`` flags are constructor
-        kwargs, not call-site kwargs. To render with a different
-        configuration, build a different renderer (or different pool).
-        Defaults preserve byte-identity with each model's chat template;
-        flipping a flag at construction restores ``reasoning_content``
-        the template would otherwise drop. See
-        ``should_preserve_past_thinking`` for the per-message
+        renderer instance — the ``thinking_retention`` level is a
+        constructor kwarg, not a call-site kwarg. To render with a
+        different configuration, build a different renderer (or different
+        pool). The ``"template"`` default preserves byte-identity with
+        each model's chat template; raising the level at construction
+        restores ``reasoning_content`` the template would otherwise drop.
+        See ``should_preserve_past_thinking`` for the per-message
         classification.
         """
         ...
@@ -1468,10 +1471,7 @@ def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
     model_name = getattr(tokenizer, "name_or_path", "")
     renderer_name = MODEL_RENDERER_MAP.get(model_name)
 
-    preserve_carry = {
-        "preserve_all_thinking": auto.preserve_all_thinking,
-        "preserve_thinking_between_tool_calls": auto.preserve_thinking_between_tool_calls,
-    }
+    preserve_carry = {"thinking_retention": auto.thinking_retention}
 
     if renderer_name is not None:
         cfg_cls = _config_class_for(renderer_name)
@@ -1496,11 +1496,12 @@ def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
     # Text-only fall back to default (apply_chat_template). For fine-tunes
     # with customized chat templates this is the *correct* choice, so we
     # don't warn. Note the pick at INFO and advertise the parser knobs.
-    if auto.preserve_all_thinking or auto.preserve_thinking_between_tool_calls:
+    if auto.thinking_retention != "template":
         raise NotImplementedError(
             "Auto-resolved DefaultRenderer can't selectively re-emit "
             "dropped reasoning_content. Pass an explicit typed renderer "
-            "config (model-specific) if you need preserve_*_thinking."
+            "config (model-specific) if you need thinking_retention != "
+            "'template'."
         )
     logger.info(
         "No model-specific renderer matched %r. Using DefaultRenderer "
@@ -1851,8 +1852,7 @@ def should_preserve_past_thinking(
     messages: list[Message],
     msg_idx: int,
     *,
-    preserve_all_thinking: bool,
-    preserve_thinking_between_tool_calls: bool,
+    thinking_retention: ThinkingRetention,
 ) -> bool:
     """Should ``messages[msg_idx]``'s ``reasoning_content`` be emitted as
     thinking even when the chat template would drop it?
@@ -1860,25 +1860,25 @@ def should_preserve_past_thinking(
     Returns ``True`` only as an override above the template default. Each
     renderer ORs this into its own "render thinking?" condition; a result
     of ``False`` means "follow the template" (drop or keep as the template
-    decides), not "force-drop".
+    decides), not "force-drop". ``thinking_retention`` selects how far the
+    override reaches:
 
-    Override rules:
-
-    - ``preserve_all_thinking`` — every past-asst's thinking is kept.
-    - ``preserve_thinking_between_tool_calls`` — keeps thinking only
-      inside the *current* tool cycle: the contiguous A-T-...-A block
-      after the most recent ``user`` message, and only if that block
-      contains at least one ``tool`` response. As soon as a new
-      ``user`` turn arrives, the previous block becomes "older" and
-      its thinking is dropped (template default), matching how most
-      chat templates already handle multi-turn contexts. Use
-      ``preserve_all_thinking`` if you need thinking on older blocks
-      to survive the user-turn boundary too.
+    - ``"template"`` — no override; defer to the template (always ``False``).
+    - ``"all"`` — every past-asst's thinking is kept (always ``True``).
+    - ``"tool_cycle"`` — keeps thinking only inside the *current* tool
+      cycle: the contiguous A-T-...-A block after the most recent ``user``
+      message, and only if that block contains at least one ``tool``
+      response. As soon as a new ``user`` turn arrives, the previous block
+      becomes "older" and its thinking is dropped (template default),
+      matching how most chat templates handle multi-turn contexts. Use
+      ``"all"`` if you need thinking on older blocks to survive the
+      user-turn boundary too.
     """
-    if preserve_all_thinking:
+    if thinking_retention == "all":
         return True
-    if not preserve_thinking_between_tool_calls:
+    if thinking_retention == "template":
         return False
+    # thinking_retention == "tool_cycle"
     # Most recent user message (or -1 if none).
     last_user = -1
     for j in range(len(messages) - 1, -1, -1):

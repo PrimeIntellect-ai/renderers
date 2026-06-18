@@ -9,7 +9,7 @@ verified.
 Notable differences from the Qwen / GLM family renderers:
 
 * No ``<think>`` / reasoning channel — Llama-3 doesn't ship a
-  reasoning-content concept, so ``preserve_*_thinking`` flags don't
+  reasoning-content concept, so the ``thinking_retention`` flag doesn't
   apply.
 * ``<|begin_of_text|>`` (BOS) is emitted at the very start of every
   render. The chat template never omits it.
@@ -94,10 +94,10 @@ class Llama3Renderer:
         tokenizer: PreTrainedTokenizer,
         config: Llama3RendererConfig | None = None,
     ):
-        # ``preserve_*_thinking`` are accepted but no-ops: Llama-3 ships no
+        # ``thinking_retention`` is accepted but a no-op: Llama-3 ships no
         # reasoning_content channel, so there's never any past-assistant
-        # thinking to retain or drop. The flags are stored on ``self.config``
-        # for cross-renderer uniformity but never change the token stream —
+        # thinking to retain or drop. The level is stored on ``self.config``
+        # for cross-renderer uniformity but never changes the token stream —
         # the same contract as Kimi-K2 / Qwen3-VL (see the never-preserves
         # renderers in tests/test_preserve_thinking.py).
         self._tokenizer = tokenizer

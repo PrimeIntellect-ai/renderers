@@ -25,6 +25,12 @@ from typing import Annotated, ClassVar, Literal, Union
 from pydantic import ConfigDict, Field
 from pydantic_config import BaseConfig
 
+QWEN_VL_IMAGE_PATCH_SIZE = 16
+QWEN_VL_IMAGE_TEMPORAL_PATCH_SIZE = 2
+QWEN_VL_IMAGE_MERGE_SIZE = 2
+QWEN_VL_IMAGE_MIN_PIXELS = 65536
+QWEN_VL_IMAGE_MAX_PIXELS = 16777216
+
 
 class BaseRendererConfig(BaseConfig):
     """Shared fields and config for every renderer config variant.
@@ -148,11 +154,30 @@ class Qwen35RendererConfig(BaseRendererConfig):
     running across the entire conversation. Mirrors the chat template's
     ``add_vision_id`` toggle."""
 
-    image_cache_max: int = 256
-    """FIFO bound on the per-renderer image processor cache. Renderer-
-    internal — not a Jinja chat-template kwarg."""
+    image_patch_size: int = QWEN_VL_IMAGE_PATCH_SIZE
+    """Qwen image patch size used to compute placeholder layout."""
 
-    _internal_fields = frozenset({"image_cache_max"})
+    image_temporal_patch_size: int = QWEN_VL_IMAGE_TEMPORAL_PATCH_SIZE
+    """Qwen temporal patch size used in the image layout fingerprint."""
+
+    image_merge_size: int = QWEN_VL_IMAGE_MERGE_SIZE
+    """Qwen spatial merge size used to compute image pad-token counts."""
+
+    image_min_pixels: int = QWEN_VL_IMAGE_MIN_PIXELS
+    """Minimum resized image area used by Qwen smart-resize layout math."""
+
+    image_max_pixels: int = QWEN_VL_IMAGE_MAX_PIXELS
+    """Maximum resized image area used by Qwen smart-resize layout math."""
+
+    _internal_fields = frozenset(
+        {
+            "image_patch_size",
+            "image_temporal_patch_size",
+            "image_merge_size",
+            "image_min_pixels",
+            "image_max_pixels",
+        }
+    )
 
 
 class Qwen36RendererConfig(BaseRendererConfig):
@@ -166,10 +191,30 @@ class Qwen36RendererConfig(BaseRendererConfig):
     add_vision_id: bool = False
     """See :class:`Qwen35RendererConfig.add_vision_id`."""
 
-    image_cache_max: int = 256
-    """See :class:`Qwen35RendererConfig.image_cache_max`."""
+    image_patch_size: int = QWEN_VL_IMAGE_PATCH_SIZE
+    """See :class:`Qwen35RendererConfig.image_patch_size`."""
 
-    _internal_fields = frozenset({"image_cache_max"})
+    image_temporal_patch_size: int = QWEN_VL_IMAGE_TEMPORAL_PATCH_SIZE
+    """See :class:`Qwen35RendererConfig.image_temporal_patch_size`."""
+
+    image_merge_size: int = QWEN_VL_IMAGE_MERGE_SIZE
+    """See :class:`Qwen35RendererConfig.image_merge_size`."""
+
+    image_min_pixels: int = QWEN_VL_IMAGE_MIN_PIXELS
+    """See :class:`Qwen35RendererConfig.image_min_pixels`."""
+
+    image_max_pixels: int = QWEN_VL_IMAGE_MAX_PIXELS
+    """See :class:`Qwen35RendererConfig.image_max_pixels`."""
+
+    _internal_fields = frozenset(
+        {
+            "image_patch_size",
+            "image_temporal_patch_size",
+            "image_merge_size",
+            "image_min_pixels",
+            "image_max_pixels",
+        }
+    )
 
 
 class Qwen3VLRendererConfig(BaseRendererConfig):
@@ -180,10 +225,30 @@ class Qwen3VLRendererConfig(BaseRendererConfig):
     add_vision_id: bool = False
     """See :class:`Qwen35RendererConfig.add_vision_id`."""
 
-    image_cache_max: int = 256
-    """See :class:`Qwen35RendererConfig.image_cache_max`."""
+    image_patch_size: int = QWEN_VL_IMAGE_PATCH_SIZE
+    """See :class:`Qwen35RendererConfig.image_patch_size`."""
 
-    _internal_fields = frozenset({"image_cache_max"})
+    image_temporal_patch_size: int = QWEN_VL_IMAGE_TEMPORAL_PATCH_SIZE
+    """See :class:`Qwen35RendererConfig.image_temporal_patch_size`."""
+
+    image_merge_size: int = QWEN_VL_IMAGE_MERGE_SIZE
+    """See :class:`Qwen35RendererConfig.image_merge_size`."""
+
+    image_min_pixels: int = QWEN_VL_IMAGE_MIN_PIXELS
+    """See :class:`Qwen35RendererConfig.image_min_pixels`."""
+
+    image_max_pixels: int = QWEN_VL_IMAGE_MAX_PIXELS
+    """See :class:`Qwen35RendererConfig.image_max_pixels`."""
+
+    _internal_fields = frozenset(
+        {
+            "image_patch_size",
+            "image_temporal_patch_size",
+            "image_merge_size",
+            "image_min_pixels",
+            "image_max_pixels",
+        }
+    )
 
 
 class GLM5RendererConfig(BaseRendererConfig):
@@ -295,7 +360,7 @@ class KimiK25RendererConfig(BaseRendererConfig):
     template's native variable name."""
 
     image_cache_max: int = 256
-    """See :class:`Qwen35RendererConfig.image_cache_max`."""
+    """FIFO bound on Kimi's per-renderer image processor cache."""
 
     _internal_fields = frozenset({"image_cache_max"})
 

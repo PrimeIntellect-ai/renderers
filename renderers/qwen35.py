@@ -7,9 +7,9 @@ Multimodal: the Qwen3.5 family is itself a VLM (HF tag ``image-text-to-text``;
 processor class ``Qwen3VLProcessor``). When a user/tool message carries an
 ``ImagePart``, the renderer emits the same ``<|vision_start|>``+N×``<|image_pad|>``
 +``<|vision_end|>`` expansion as the HF chat template (``N =
-image_grid_thw.prod() // merge_size**2``) and ships processed pixel_values via
-``RenderedTokens.multi_modal_data``. Text-only inputs take the original fast
-path and remain byte-identical to ``apply_chat_template``.
+image_grid_thw.prod() // merge_size**2``) using renderer-declared image layout
+metadata. It does not call the HF image processor; vLLM receives run image refs
+for images it must process.
 """
 
 from __future__ import annotations
@@ -35,10 +35,10 @@ from renderers.base import (
 from renderers.configs import Qwen35RendererConfig
 from renderers.parsing import parse_qwen35
 from renderers.qwen3_vl import (
-    _image_hash,
     _is_image_part,
     _is_video_part,
-    _load_pil_image,
+    materialize_image_refs,
+    qwen_image_item_for_render,
 )
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ class Qwen35Renderer:
         processor: Any = None,
     ):
         self._tokenizer = tokenizer
-        self._processor = processor
+        _ = processor
         cfg = config or type(self)._config_cls()
         # ``enable_thinking=None`` defers to the model's known default (see
         # ``_ENABLE_THINKING_DEFAULTS``). Materialise here so downstream reads
@@ -147,11 +147,6 @@ class Qwen35Renderer:
         self._image_pad = self._token_id("<|image_pad|>")
         self._video_pad = self._token_id("<|video_pad|>")
 
-        # Per-instance image-processor cache; see Qwen3VLRenderer for the
-        # rationale (FIFO-bounded; same image seen across rollouts /
-        # bridge re-renders).
-        self._image_cache: dict[str, tuple[Any, int]] = {}
-
     @property
     def mm_token_type_id_map(self) -> dict[int, int]:
         """Token-id → modality marker (1 = image, 2 = video) used by the
@@ -160,45 +155,10 @@ class Qwen35Renderer:
         """
         return {self._image_pad: 1, self._video_pad: 2}
 
-    def _get_processor(self):
-        if self._processor is not None:
-            return self._processor
-        from transformers import AutoProcessor
-
-        name = getattr(self._tokenizer, "name_or_path", None)
-        if not name:
-            raise RuntimeError(
-                "Qwen35Renderer needs a processor to render image / video parts. "
-                "Pass `processor=AutoProcessor.from_pretrained(...)` to the "
-                "constructor, or load the tokenizer with a known name_or_path "
-                "so the processor can be auto-loaded."
-            )
-        self._processor = AutoProcessor.from_pretrained(name)
-        return self._processor
-
-    def _process_image(self, part: dict[str, Any]):
-        """Resolve, process, and characterize a single image part.
-
-        Returns ``(pil, processor_out, num_image_tokens, image_hash)``.
-        Mirrors ``Qwen3VLRenderer._process_image``: hashes the loaded PIL,
-        consults ``self._image_cache``, runs the HF image processor on
-        miss, FIFO-evicts on overflow.
-        """
-        pil = _load_pil_image(part)
-        h = _image_hash(pil)
-        cached = self._image_cache.get(h)
-        if cached is not None:
-            out, num_image_tokens = cached
-            return pil, out, num_image_tokens, h
-        proc = self._get_processor()
-        out = proc.image_processor(images=[pil], return_tensors="np")
-        grid_thw = out["image_grid_thw"][0]
-        merge_size = proc.image_processor.merge_size
-        num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)
-        if len(self._image_cache) >= self.config.image_cache_max:
-            self._image_cache.pop(next(iter(self._image_cache)))
-        self._image_cache[h] = (out, num_image_tokens)
-        return pil, out, num_image_tokens, h
+    def materialize_image_refs(
+        self, mm_data: MultiModalData, messages: list[Message]
+    ) -> MultiModalData:
+        return materialize_image_refs(self, mm_data, messages)
 
     @staticmethod
     def _content_has_media(content: Any) -> bool:
@@ -364,7 +324,7 @@ class Qwen35Renderer:
             # image data, so they ARE body content (is_content=True);
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # specials are template scaffold.
-            _, out, n, h = self._process_image(part)
+            n, h, mm_item = qwen_image_item_for_render(self, part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(
@@ -386,12 +346,7 @@ class Qwen35Renderer:
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
             )
-            mm_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            mm_items.setdefault("image", []).append(mm_item)
 
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             """Emit a user message whose content list contains image parts.
@@ -715,7 +670,7 @@ class Qwen35Renderer:
                 content_mask.append(is_content)
 
         def emit_image(part: dict[str, Any], msg_idx: int = -1) -> None:
-            _, out, n, h = self._process_image(part)
+            n, h, mm_item = qwen_image_item_for_render(self, part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(f"Picture {vision_counts['image']}: ", msg_idx)
@@ -728,12 +683,7 @@ class Qwen35Renderer:
             new_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
             )
-            new_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            new_items.setdefault("image", []).append(mm_item)
 
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             emit_special(self._im_start, msg_idx)

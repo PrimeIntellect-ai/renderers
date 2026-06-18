@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import json
 
 import httpx
@@ -99,6 +100,141 @@ class _FakeClient:
             200,
             content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         )
+
+
+def test_run_image_dir_resolution_prefers_explicit_image_dir(tmp_path, monkeypatch):
+    from renderers.mm_store import run_image_dir
+
+    image_dir = tmp_path / "custom-images"
+    monkeypatch.setenv("VF_RENDERER_IMAGE_OFFLOAD_DIR", str(image_dir))
+    monkeypatch.setenv("PRIME_RL_RUN_DIR", str(tmp_path / "run_other"))
+    monkeypatch.setenv("RUN_ID", "other")
+
+    assert run_image_dir() == image_dir.resolve()
+
+
+def test_run_image_dir_resolution_owns_run_prefix(monkeypatch):
+    from renderers.mm_store import run_image_dir
+
+    monkeypatch.delenv("VF_RENDERER_IMAGE_OFFLOAD_DIR", raising=False)
+    monkeypatch.delenv("PRIME_RL_RUN_DIR", raising=False)
+    monkeypatch.setenv("RUN_ID", "run_abc")
+
+    assert run_image_dir().as_posix() == "/data/outputs/run_abc/assets/images"
+
+
+class _TinyQwenTokenizer:
+    unk_token_id = -1
+    _specials = {
+        "<|im_start|>": 1,
+        "<|im_end|>": 2,
+        "<|endoftext|>": 3,
+        "<tool_call>": 4,
+        "</tool_call>": 5,
+        "<tool_response>": 6,
+        "</tool_response>": 7,
+        "</think>": 8,
+        "<|vision_start|>": 9,
+        "<|vision_end|>": 10,
+        "<|image_pad|>": 11,
+        "<|video_pad|>": 12,
+    }
+
+    def convert_tokens_to_ids(self, token):
+        return self._specials.get(token, self.unk_token_id)
+
+    def encode(self, text, add_special_tokens=False):
+        return [100 + ord(ch) % 50 for ch in text]
+
+
+def test_qwen3_vl_render_emits_image_descriptor_without_processor(tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+    from renderers.mm_store import IMAGE_REF_PAYLOAD_KEY, IMAGE_REF_PAYLOAD_VALUE
+    from renderers.qwen3_vl import Qwen3VLRenderer
+
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (32, 32), color=(255, 0, 0)).save(image_path)
+    renderer = Qwen3VLRenderer(_TinyQwenTokenizer())
+
+    rendered = renderer.render(
+        [
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": image_path.as_uri()}}],
+            }
+        ],
+        add_generation_prompt=True,
+    )
+
+    item = rendered.multi_modal_data.mm_items["image"][0]
+    assert "pixel_values" not in item
+    assert item["image_grid_thw"] == [[1, 16, 16]]
+    assert item["raw_image_id"] == "image.png"
+    assert item[IMAGE_REF_PAYLOAD_KEY] == IMAGE_REF_PAYLOAD_VALUE
+    assert rendered.multi_modal_data.mm_placeholders["image"][0].length == 64
+
+
+def test_generate_materialize_all_image_refs_rehydrates_descriptor_slots(tmp_path, monkeypatch):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    from renderers.base import MultiModalData, ParsedResponse, PlaceholderRange
+    from renderers.mm_store import split_image_ref
+    from renderers.qwen3_vl import Qwen3VLRenderer
+
+    class _RetryRenderer(Qwen3VLRenderer):
+        supports_tools = True
+
+        def get_stop_token_ids(self):
+            return [99]
+
+        def parse_response(self, completion_ids, *, tools=None):
+            return ParsedResponse(content="done")
+
+    image_dir = tmp_path / "run_retry" / "assets" / "images"
+    image_dir.mkdir(parents=True)
+    image_path = image_dir / "image.png"
+    Image.new("RGB", (32, 32), color=(0, 255, 0)).save(image_path)
+    monkeypatch.setenv("VF_RENDERER_IMAGE_OFFLOAD_DIR", str(image_dir))
+    monkeypatch.setenv("RUN_ID", "retry")
+
+    mm_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()[:32]
+    mm_data = MultiModalData(
+        mm_hashes={"image": [mm_hash]},
+        mm_placeholders={"image": [PlaceholderRange(offset=5, length=64)]},
+        mm_items={"image": [{"image_grid_thw": [[1, 16, 16]]}]},
+    )
+    renderer = _RetryRenderer(_TinyQwenTokenizer())
+    client = _FakeClient()
+
+    asyncio.run(
+        generate(
+            client=client,
+            renderer=renderer,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": {"url": image_path.as_uri()}}],
+                }
+            ],
+            model="qwen3-vl",
+            prompt_ids=list(range(20)),
+            multi_modal_data=mm_data,
+            sampling_params={"max_tokens": 4},
+            materialize_all_image_refs=True,
+        )
+    )
+
+    ref = client.calls[0]["body"]["features"]["kwargs_data"]["image"][0]
+    run_id, _fingerprint, modality, parsed_hash, raw_image_id, grid = split_image_ref(ref)
+    assert (run_id, modality, parsed_hash, raw_image_id, grid) == (
+        "retry",
+        "image",
+        mm_hash,
+        "image.png",
+        [1, 16, 16],
+    )
 
 
 def test_generate_builds_request_body_and_parses_response():
@@ -281,47 +417,63 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
 
 
 @pytest.mark.parametrize(
-    "model_id,renderer_class_path",
+    "renderer_class_path",
     [
-        ("Qwen/Qwen3-VL-4B-Instruct", "renderers.qwen3_vl:Qwen3VLRenderer"),
-        ("Qwen/Qwen3.5-2B", "renderers.qwen35:Qwen35Renderer"),
+        "renderers.qwen3_vl:Qwen3VLRenderer",
+        "renderers.qwen35:Qwen35Renderer",
     ],
     ids=["qwen3_vl", "qwen35"],
 )
-def test_generate_serializes_multimodal_features_for_qwen_vl_family(
-    model_id, renderer_class_path
+def test_generate_serializes_image_refs_for_qwen_vl_family(
+    tmp_path, monkeypatch, renderer_class_path
 ):
     """When the renderer emits ``MultiModalData``, ``generate`` translates
     it into vLLM's ``features`` payload (mm_hashes + mm_placeholders +
-    base64-encoded kwargs_data) and sticks it in the request body. Covers
-    every renderer routed through ``_build_qwen_vl_features``."""
+    image-ref kwargs_data) and sticks it in the request body. Descriptor-only
+    images stay ``None`` so vLLM can resolve them from its cache."""
     import importlib
 
-    pytest.importorskip("torch")
-    pytest.importorskip("vllm", reason="vllm needed for features serialization")
-
-    import torch as _torch
     from renderers.base import (
         MultiModalData,
+        ParsedResponse,
         PlaceholderRange,
-        load_tokenizer,
+    )
+    from renderers.mm_store import (
+        IMAGE_REF_PAYLOAD_KEY,
+        IMAGE_REF_PAYLOAD_VALUE,
+        image_layout_fingerprint,
+        split_image_ref,
     )
 
     mod_name, cls_name = renderer_class_path.split(":")
     renderer_cls = getattr(importlib.import_module(mod_name), cls_name)
 
-    # Build a minimal real renderer so type dispatch in
-    # _build_mm_features hits the qwen branch. The tokenizer is only
-    # touched in __init__ to grab special-token ids; render() / etc.
-    # aren't called here because we pre-supply prompt_ids + mm_data.
-    tokenizer = load_tokenizer(model_id)
-    renderer = renderer_cls(tokenizer)
+    class _BareRenderer(renderer_cls):
+        supports_tools = True
 
-    # Two synthetic 1×2×2 images. Field factory expects pixel_values
-    # shape ``(sum_HW, embed_dim)`` and grid_thw shape ``(N, 3)``; the
-    # values themselves don't matter for the encoding round-trip.
+        def get_stop_token_ids(self):
+            return [99]
+
+        def parse_response(self, completion_ids, *, tools=None):
+            return ParsedResponse(content="done")
+
+    renderer = _BareRenderer.__new__(_BareRenderer)
+    image_dir = tmp_path / "run_rawtest" / "assets" / "images"
+    image_dir.mkdir(parents=True)
+    (image_dir / "image.png").write_bytes(b"image-bytes")
+    monkeypatch.setenv("VF_RENDERER_IMAGE_OFFLOAD_DIR", str(image_dir))
+    monkeypatch.setenv("RUN_ID", "rawtest")
+    fingerprint = image_layout_fingerprint(
+        family="qwen_vl",
+        patch_size=16,
+        merge_size=2,
+        temporal_patch_size=2,
+        min_pixels=65536,
+        max_pixels=16777216,
+    )
+
     mm_data = MultiModalData(
-        mm_hashes={"image": ["aaa", "bbb"]},
+        mm_hashes={"image": ["a" * 32, "b" * 32]},
         mm_placeholders={
             "image": [
                 PlaceholderRange(offset=5, length=1),
@@ -331,19 +483,18 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
         mm_items={
             "image": [
                 {
-                    "pixel_values": _torch.zeros(4, 8, dtype=_torch.float32),
-                    "image_grid_thw": _torch.tensor([[1, 2, 2]], dtype=_torch.int64),
+                    "image_grid_thw": [[1, 2, 2]],
+                    "raw_image_id": "image.png",
+                    "image_layout_fingerprint": fingerprint,
+                    IMAGE_REF_PAYLOAD_KEY: IMAGE_REF_PAYLOAD_VALUE,
                 },
-                {
-                    "pixel_values": _torch.zeros(4, 8, dtype=_torch.float32),
-                    "image_grid_thw": _torch.tensor([[1, 2, 2]], dtype=_torch.int64),
-                },
+                {"image_grid_thw": [[1, 2, 2]]},
             ],
         },
     )
 
     client = _FakeClient()
-    asyncio.run(
+    result = asyncio.run(
         generate(
             client=client,
             renderer=renderer,
@@ -358,17 +509,21 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     body = client.calls[0]["body"]
     assert "features" in body, "multimodal call should attach features"
     features = body["features"]
-    assert features["mm_hashes"] == {"image": ["aaa", "bbb"]}
+    assert features["mm_hashes"] == {"image": ["a" * 32, "b" * 32]}
     assert features["mm_placeholders"] == {
         "image": [{"offset": 5, "length": 1}, {"offset": 10, "length": 1}],
     }
-    assert "kwargs_data" in features
-    assert features["kwargs_data"] is not None
-    assert "image" in features["kwargs_data"]
-    assert len(features["kwargs_data"]["image"]) == 2
-    # Items are base64 strings (encode_mm_kwargs_item output).
-    for item in features["kwargs_data"]["image"]:
-        assert isinstance(item, str) and len(item) > 0
+    items = features["kwargs_data"]["image"]
+    assert items[1] is None
+    assert split_image_ref(items[0]) == (
+        "rawtest",
+        fingerprint,
+        "image",
+        "a" * 32,
+        "image.png",
+        [1, 2, 2],
+    )
+    assert "raw_image_id" not in result["multi_modal_data"].mm_items["image"][0]
 
 
 # ---------------------------------------------------------------------------

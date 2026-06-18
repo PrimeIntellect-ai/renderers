@@ -6,14 +6,11 @@ byte-for-byte for text-only inputs and emits the same
 for image inputs as the HF processor (``N = image_grid_thw.prod() //
 merge_size**2``).
 
-Image data is shipped to the inference engine via
-``RenderedTokens.multi_modal_data``: ``mm_placeholders`` records the
-``(offset, length)`` span of each image's placeholder tokens in the
-prompt, ``mm_items`` carries the per-image processor output
-(``pixel_values``, ``image_grid_thw``), and ``mm_hashes`` carries a
-stable identifier for cache lookup. The wire-format conversion to
-vLLM's ``/inference/v1/generate`` ``features`` field lives in
-``renderers.client``.
+Image data is shipped to the inference engine via run image refs, not
+processed image-processor payloads. ``RenderedTokens.multi_modal_data``
+records placeholder spans, stable image hashes, and Qwen layout metadata
+(``image_grid_thw``) so vLLM can cache-match prior images and process new
+image refs itself.
 
 BPE boundary discipline: text runs that the chat template emits
 contiguously (e.g. ``"user\\n" + content_text``) must be encoded as a
@@ -30,8 +27,11 @@ import base64
 import hashlib
 import io
 import json
+import math
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
@@ -48,6 +48,11 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import Qwen3VLRendererConfig
+from renderers.mm_store import (
+    IMAGE_REF_PAYLOAD_KEY,
+    IMAGE_REF_PAYLOAD_VALUE,
+    image_layout_fingerprint,
+)
 from renderers.parsing import parse_qwen3
 
 _TOOLS_HEADER = (
@@ -161,6 +166,261 @@ def _image_hash(pil_image) -> str:
     h.update(pil_image.tobytes())
     h.update(f"{pil_image.size}".encode())
     return h.hexdigest()[:32]
+
+
+@dataclass(frozen=True)
+class QwenImageLayoutConfig:
+    patch_size: int
+    temporal_patch_size: int
+    merge_size: int
+    min_pixels: int
+    max_pixels: int
+
+
+@dataclass(frozen=True)
+class QwenImageLayoutDescriptor:
+    mm_hash: str
+    image_grid_thw: list[list[int]]
+    num_image_tokens: int
+    fingerprint: str
+    raw_uri: str | None = None
+    raw_image_id: str | None = None
+
+
+def qwen_image_layout_config_for_renderer(renderer: Any) -> QwenImageLayoutConfig:
+    config = renderer.config
+    values = {
+        "patch_size": getattr(config, "image_patch_size", None),
+        "temporal_patch_size": getattr(config, "image_temporal_patch_size", None),
+        "merge_size": getattr(config, "image_merge_size", None),
+        "min_pixels": getattr(config, "image_min_pixels", None),
+        "max_pixels": getattr(config, "image_max_pixels", None),
+    }
+    missing = [name for name, value in values.items() if value is None]
+    if missing:
+        raise RuntimeError(
+            "Qwen image layout must be declared on the renderer config; missing "
+            + ", ".join(missing)
+        )
+    return QwenImageLayoutConfig(
+        patch_size=int(values["patch_size"]),
+        temporal_patch_size=int(values["temporal_patch_size"]),
+        merge_size=int(values["merge_size"]),
+        min_pixels=int(values["min_pixels"]),
+        max_pixels=int(values["max_pixels"]),
+    )
+
+
+def _smart_resize(
+    height: int,
+    width: int,
+    *,
+    factor: int,
+    min_pixels: int,
+    max_pixels: int,
+) -> tuple[int, int]:
+    """Qwen image resize math without materializing resized pixels."""
+    if height <= 0 or width <= 0:
+        raise ValueError(f"image dimensions must be positive, got {height}x{width}")
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError(
+            "absolute aspect ratio must be smaller than 200, got "
+            f"{max(height, width) / min(height, width)}"
+        )
+    h_bar = round(height / factor) * factor
+    w_bar = round(width / factor) * factor
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = max(factor, math.floor(height / beta / factor) * factor)
+        w_bar = max(factor, math.floor(width / beta / factor) * factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+    return h_bar, w_bar
+
+
+def _image_source(item: dict[str, Any]) -> Any:
+    if "image" in item:
+        return item["image"]
+    if "image_url" in item:
+        image_url = item.get("image_url")
+        return image_url.get("url") if isinstance(image_url, dict) else image_url
+    return item.get("url") or item.get("path")
+
+
+def _file_path_from_source(source: Any) -> Path | None:
+    if not isinstance(source, str):
+        return None
+    parsed = urlparse(source)
+    if parsed.scheme == "file":
+        return Path(unquote(parsed.path)).resolve()
+    if parsed.scheme == "":
+        return Path(source).resolve()
+    return None
+
+
+def _image_dimensions(source: Any) -> tuple[int, int]:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError(
+            "Pillow is required to read image dimensions for multimodal rendering."
+        ) from exc
+
+    path = _file_path_from_source(source)
+    if path is not None:
+        with Image.open(path) as image:
+            return image.height, image.width
+
+    image = _load_pil_image({"image": source})
+    return image.height, image.width
+
+
+def _image_content_hash(source: Any) -> str:
+    path = _file_path_from_source(source)
+    if path is not None:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:32]
+    return _image_hash(_load_pil_image({"image": source}))
+
+
+def _raw_uri_and_id(source: Any) -> tuple[str | None, str | None]:
+    path = _file_path_from_source(source)
+    if path is None:
+        return None, None
+    return path.as_uri(), path.name
+
+
+def describe_qwen_image_layout(renderer: Any, part: dict[str, Any]) -> QwenImageLayoutDescriptor:
+    """Return Qwen image layout metadata without invoking an image processor."""
+    source = _image_source(part)
+    height, width = _image_dimensions(source)
+    layout = qwen_image_layout_config_for_renderer(renderer)
+    resized_h, resized_w = _smart_resize(
+        height,
+        width,
+        factor=layout.patch_size * layout.merge_size,
+        min_pixels=layout.min_pixels,
+        max_pixels=layout.max_pixels,
+    )
+    grid_t = 1
+    grid_h = resized_h // layout.patch_size
+    grid_w = resized_w // layout.patch_size
+    num_image_tokens = grid_t * grid_h * grid_w // (layout.merge_size * layout.merge_size)
+    fingerprint = image_layout_fingerprint(
+        family="qwen_vl",
+        patch_size=layout.patch_size,
+        merge_size=layout.merge_size,
+        temporal_patch_size=layout.temporal_patch_size,
+        min_pixels=layout.min_pixels,
+        max_pixels=layout.max_pixels,
+    )
+    raw_uri, raw_image_id = _raw_uri_and_id(source)
+    return QwenImageLayoutDescriptor(
+        mm_hash=_image_content_hash(source),
+        image_grid_thw=[[grid_t, grid_h, grid_w]],
+        num_image_tokens=num_image_tokens,
+        fingerprint=fingerprint,
+        raw_uri=raw_uri,
+        raw_image_id=raw_image_id,
+    )
+
+
+def qwen_image_item_for_render(renderer: Any, part: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
+    desc = describe_qwen_image_layout(renderer, part)
+    item: dict[str, Any] = {"image_grid_thw": desc.image_grid_thw}
+    if desc.raw_uri is not None and desc.raw_image_id is not None:
+        item.update(
+            {
+                "raw_uri": desc.raw_uri,
+                "raw_image_id": desc.raw_image_id,
+                "image_layout_fingerprint": desc.fingerprint,
+                IMAGE_REF_PAYLOAD_KEY: IMAGE_REF_PAYLOAD_VALUE,
+            }
+        )
+    return desc.num_image_tokens, desc.mm_hash, item
+
+
+def _iter_image_parts(messages: list[Any]):
+    for msg in messages or []:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and _is_image_part(item):
+                yield item
+
+
+def _grids_equal(a: Any, b: Any) -> bool:
+    if a is None or b is None:
+        return False
+    al = a.tolist() if hasattr(a, "tolist") else list(a)
+    bl = b.tolist() if hasattr(b, "tolist") else list(b)
+    return al == bl
+
+
+def materialize_image_refs(renderer: Any, mm_data: MultiModalData, messages: list[Message]) -> MultiModalData:
+    """Attach run-image refs to every Qwen image descriptor that can be found."""
+    image_items = mm_data.mm_items.get("image") or []
+    if not image_items:
+        return mm_data
+    hashes = mm_data.mm_hashes.get("image") or []
+    if len(hashes) != len(image_items):
+        raise ValueError(
+            "materialize_image_refs: mm_hashes/mm_items length mismatch "
+            f"({len(hashes)} vs {len(image_items)})"
+        )
+
+    missing = set(hashes)
+    resolved: dict[str, QwenImageLayoutDescriptor] = {}
+    for part in _iter_image_parts(messages):
+        if not missing:
+            break
+        desc = describe_qwen_image_layout(renderer, part)
+        if desc.mm_hash in missing:
+            resolved[desc.mm_hash] = desc
+            missing.discard(desc.mm_hash)
+    if missing:
+        raise ValueError(
+            f"materialize_image_refs: {len(missing)} image hash(es) not found in messages"
+        )
+
+    new_image_items: list[dict[str, Any]] = []
+    for i, item in enumerate(image_items):
+        desc = resolved[hashes[i]]
+        if desc.raw_uri is None or desc.raw_image_id is None:
+            raise ValueError("materialize_image_refs requires file-backed image URLs")
+        item_grid = item.get("image_grid_thw")
+        if item_grid is not None and not _grids_equal(desc.image_grid_thw, item_grid):
+            raise ValueError(
+                "materialize_image_refs: reconstructed image_grid_thw "
+                f"{desc.image_grid_thw!r} != descriptor {item_grid!r}"
+            )
+        new_item = {
+            k: v
+            for k, v in item.items()
+            if k
+            not in {
+                "raw_uri",
+                "raw_image_id",
+                "image_layout_fingerprint",
+                IMAGE_REF_PAYLOAD_KEY,
+            }
+        }
+        new_item.update(
+            {
+                "image_grid_thw": item_grid if item_grid is not None else desc.image_grid_thw,
+                "raw_uri": desc.raw_uri,
+                "raw_image_id": desc.raw_image_id,
+                "image_layout_fingerprint": desc.fingerprint,
+                IMAGE_REF_PAYLOAD_KEY: IMAGE_REF_PAYLOAD_VALUE,
+            }
+        )
+        new_image_items.append(new_item)
+
+    new_items = dict(mm_data.mm_items)
+    new_items["image"] = new_image_items
+    return replace(mm_data, mm_items=new_items)
 
 
 class _Emitter:
@@ -296,11 +556,9 @@ class Qwen3VLRenderer:
         config: Typed renderer config (see
             :class:`renderers.Qwen3VLRendererConfig`). Defaults to a
             blank config with template defaults.
-        processor: Optional ``Qwen3VLProcessor``. Required when rendering
-            messages that contain image / video parts. If not supplied,
-            the renderer lazy-loads it via ``AutoProcessor.from_pretrained``
-            keyed off ``tokenizer.name_or_path`` the first time a
-            multimodal part is seen.
+        processor: Deprecated and ignored. Image layout is declared by the
+            renderer config; the renderer never loads or calls an HF image
+            processor.
 
     ``preserve_all_thinking`` / ``preserve_thinking_between_tool_calls``
     on the config are no-ops here — the chat template drops past
@@ -315,7 +573,7 @@ class Qwen3VLRenderer:
         processor: Any = None,
     ):
         self._tokenizer = tokenizer
-        self._processor = processor
+        _ = processor
         self.config = config or Qwen3VLRendererConfig()
 
         self._im_start = self._token_id("<|im_start|>")
@@ -330,16 +588,6 @@ class Qwen3VLRenderer:
         self._vision_end = self._token_id("<|vision_end|>")
         self._image_pad = self._token_id("<|image_pad|>")
         self._video_pad = self._token_id("<|video_pad|>")
-
-        # Per-instance image-processor cache. The HF image processor is the
-        # most expensive step on the renderer hot path (~tens of ms per
-        # image for typical grid_thw). The same image gets re-seen across
-        # ``rollouts_per_example`` rollouts of one example and (for
-        # multi-turn) across turn boundaries when the bridge re-renders
-        # rather than extends. Cache keyed by content hash — values are
-        # tuples of ``(processor_out, num_image_tokens)`` — bounded to
-        # avoid unbounded growth on long-lived pools.
-        self._image_cache: dict[str, tuple[Any, int]] = {}
 
     def _token_id(self, token: str) -> int:
         tid = self._tokenizer.convert_tokens_to_ids(token)
@@ -365,22 +613,6 @@ class Qwen3VLRenderer:
         if not text:
             return []
         return self._tokenizer.encode(text, add_special_tokens=False)
-
-    def _get_processor(self):
-        if self._processor is not None:
-            return self._processor
-        from transformers import AutoProcessor
-
-        name = getattr(self._tokenizer, "name_or_path", None)
-        if not name:
-            raise RuntimeError(
-                "Qwen3VLRenderer needs a processor to render image / video parts. "
-                "Pass `processor=AutoProcessor.from_pretrained(...)` to the "
-                "constructor, or load the tokenizer with a known name_or_path "
-                "so the processor can be auto-loaded."
-            )
-        self._processor = AutoProcessor.from_pretrained(name)
-        return self._processor
 
     @staticmethod
     def _render_text_content(content: Any) -> str:
@@ -410,30 +642,10 @@ class Qwen3VLRenderer:
             return "".join(parts)
         raise TypeError(f"Unexpected content type: {type(content)}")
 
-    def _process_image(self, part: dict[str, Any]):
-        """Resolve, process, and characterize a single image part.
-
-        Returns ``(pil, processor_out, num_image_tokens, image_hash)``.
-        Hashes the loaded PIL first and consults ``self._image_cache``;
-        on hit the HF image-processor call is skipped entirely.
-        """
-        pil = _load_pil_image(part)
-        h = _image_hash(pil)
-        cached = self._image_cache.get(h)
-        if cached is not None:
-            out, num_image_tokens = cached
-            return pil, out, num_image_tokens, h
-        proc = self._get_processor()
-        out = proc.image_processor(images=[pil], return_tensors="np")
-        grid_thw = out["image_grid_thw"][0]
-        merge_size = proc.image_processor.merge_size
-        num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)
-        if len(self._image_cache) >= self.config.image_cache_max:
-            # FIFO eviction — Python dicts preserve insertion order, so
-            # ``next(iter(...))`` is the oldest key.
-            self._image_cache.pop(next(iter(self._image_cache)))
-        self._image_cache[h] = (out, num_image_tokens)
-        return pil, out, num_image_tokens, h
+    def materialize_image_refs(
+        self, mm_data: MultiModalData, messages: list[Message]
+    ) -> MultiModalData:
+        return materialize_image_refs(self, mm_data, messages)
 
     def render(
         self,
@@ -464,7 +676,7 @@ class Qwen3VLRenderer:
             # image data, so they ARE body content (is_content=True);
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # markers are renderer-emitted scaffold.
-            _, out, n, h = self._process_image(part)
+            n, h, mm_item = qwen_image_item_for_render(self, part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 em.text(
@@ -481,12 +693,7 @@ class Qwen3VLRenderer:
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
             )
-            mm_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            mm_items.setdefault("image", []).append(mm_item)
 
         def render_media_content(content: Any) -> None:
             """Emit a user/tool content list with media handled inline.
@@ -730,7 +937,7 @@ class Qwen3VLRenderer:
         vision_counts = {"image": prev_image_count, "video": prev_video_count}
 
         def emit_image(part: dict[str, Any]) -> None:
-            _, out, n, h = self._process_image(part)
+            n, h, mm_item = qwen_image_item_for_render(self, part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 em.text(
@@ -747,12 +954,7 @@ class Qwen3VLRenderer:
             new_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
             )
-            new_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            new_items.setdefault("image", []).append(mm_item)
 
         def render_media_content(content: Any) -> None:
             if isinstance(content, str):

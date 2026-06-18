@@ -204,11 +204,10 @@ class MultiModalData:
     """Multimodal sidecar produced alongside the token stream.
 
     Renderer output is framework-agnostic: ``mm_items[modality][i]`` is a
-    plain ``dict`` mirroring the per-item output of a HuggingFace processor
-    (e.g. ``{"pixel_values": Tensor, "image_grid_thw": Tensor}`` for
-    Qwen3-VL images). Translation to engine-specific wire formats — vLLM's
-    ``MultiModalKwargsItem``, SGLang's payload, etc. — happens in the
-    inference glue layer (see ``renderers.client``).
+    plain descriptor dict (e.g. ``{"image_grid_thw": [[1, h, w]]}`` for
+    Qwen-VL images). Translation to engine-specific wire formats — vLLM image
+    refs, SGLang payloads, etc. — happens in the inference glue layer (see
+    ``renderers.client``).
     """
 
     mm_hashes: dict[str, list[str]] = field(default_factory=dict)
@@ -761,8 +760,8 @@ class Renderer(Protocol):
         Text-only renderers return :class:`RenderedTokens` with
         ``multi_modal_data=None``. Multimodal renderers (see
         :class:`MultimodalRenderer`) populate ``multi_modal_data`` so
-        the caller can recover placeholder offsets + per-item processed
-        tensors for the new full prompt; they also accept a
+        the caller can recover placeholder offsets + per-item image
+        descriptors for the new full prompt; they also accept a
         ``previous_multi_modal_data`` kwarg via the
         :class:`MultimodalRenderer` Protocol override.
 
@@ -818,8 +817,8 @@ class MultimodalRenderer(Renderer, Protocol):
           the combined token sequence and silently falls back to
           hash-cache lookup (or errors)
         - returns :class:`RenderedTokens` (not ``list[int]``) so the
-          caller can recover the placeholder offsets + per-item
-          processed tensors for the new full prompt
+          caller can recover the placeholder offsets + per-item image
+          descriptors for the new full prompt
         """
         ...
 
@@ -966,6 +965,10 @@ class RendererPool:
     def bridge_to_next_turn(self, *args: Any, **kwargs: Any) -> "RenderedTokens | None":
         with self.checkout() as r:
             return r.bridge_to_next_turn(*args, **kwargs)
+
+    def materialize_image_refs(self, *args: Any, **kwargs: Any) -> "MultiModalData":
+        with self.checkout() as r:
+            return r.materialize_image_refs(*args, **kwargs)
 
     # ``mm_token_type_id_map`` (the MultimodalRenderer protocol attribute)
     # is set in ``__init__`` only for pools wrapping multimodal renderers;

@@ -58,6 +58,7 @@ from renderers.base import (
     ToolSpec,
     extract_message_tool_names,
     reject_assistant_in_extension,
+    reject_thinking_strip_in_extension,
     should_preserve_past_thinking,
     trim_to_turn_close,
 )
@@ -154,6 +155,14 @@ class GptOssRenderer:
         self._channel = self._token_id("<|channel|>")
         self._message = self._token_id("<|message|>")
         self._constrain = self._token_id("<|constrain|>")
+        # Harmony marks reasoning as an analysis channel:
+        # ``<|channel|>analysis<|message|>``. Its presence in prior tokens
+        # signals a sampled thinking block the template strips from history.
+        self._analysis_marker_ids = [
+            self._channel,
+            *self._encode("analysis"),
+            self._message,
+        ]
 
     # ── token utilities ──────────────────────────────────────────────────────
 
@@ -520,6 +529,20 @@ class GptOssRenderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+
+        # Faithfulness across a user-query boundary: harmony strips the
+        # analysis (reasoning) channel from history once a new user turn
+        # arrives, so the bridge can't carry it verbatim there (see
+        # reject_thinking_strip_in_extension). gpt-oss always reasons.
+        if reject_thinking_strip_in_extension(
+            previous_prompt_ids,
+            previous_completion_ids,
+            new_messages,
+            thinking_retention=self.config.thinking_retention,
+            thinking_marker_ids=self._analysis_marker_ids,
+            enable_thinking=True,
         ):
             return None
 

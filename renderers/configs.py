@@ -23,8 +23,37 @@ from __future__ import annotations
 
 from typing import Annotated, ClassVar, Literal, Union
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 from pydantic_config import BaseConfig
+
+
+def _reject_thinking_retention_conflict(config: BaseConfig, kwarg_name: str) -> None:
+    """Raise if an explicit template thinking-kwarg contradicts an explicit
+    ``thinking_retention``.
+
+    ``clear_thinking`` (GLM) / ``truncate_history_thinking`` (Nemotron) are
+    byte-equivalent to ``thinking_retention``: setting one ``False`` keeps
+    all past thinking, i.e. ``thinking_retention="all"``. They're the same
+    knob, so a user who explicitly sets both to disagreeing values almost
+    certainly has a bug — surface it rather than silently resolving. Only
+    fires when BOTH are explicit; a defaulted value is not an intent (and
+    this keeps the per-kwarg parity matrix, which sets one field at a time,
+    working).
+    """
+    fields_set = config.__pydantic_fields_set__
+    if (
+        kwarg_name in fields_set
+        and "thinking_retention" in fields_set
+        and getattr(config, kwarg_name) is False
+        and config.thinking_retention != "all"
+    ):
+        raise ValueError(
+            f"{kwarg_name}=False keeps all past thinking (the same as "
+            f"thinking_retention='all'), which conflicts with the explicit "
+            f"thinking_retention={config.thinking_retention!r}. They are the "
+            f"same knob — set thinking_retention='all' (or drop {kwarg_name})."
+        )
+
 
 ThinkingRetention = Literal["template", "tool_cycle", "all"]
 """How far past-assistant ``reasoning_content`` is retained, as an override
@@ -214,6 +243,11 @@ class GLM5RendererConfig(BaseRendererConfig):
     ``thinking_retention`` — see :class:`BaseRendererConfig` for the
     contract."""
 
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        _reject_thinking_retention_conflict(self, "clear_thinking")
+        return self
+
 
 class GLM51RendererConfig(BaseRendererConfig):
     """GLM-5.1 renderer config — same template surface as GLM-5, distinct
@@ -226,6 +260,11 @@ class GLM51RendererConfig(BaseRendererConfig):
 
     clear_thinking: bool = True
     """See :class:`GLM5RendererConfig.clear_thinking`."""
+
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        _reject_thinking_retention_conflict(self, "clear_thinking")
+        return self
 
 
 class GLM45RendererConfig(BaseRendererConfig):
@@ -389,6 +428,11 @@ class Nemotron3RendererConfig(BaseRendererConfig):
     ``thinking_retention`` — see :class:`BaseRendererConfig` for the
     contract."""
 
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        _reject_thinking_retention_conflict(self, "truncate_history_thinking")
+        return self
+
     low_effort: bool = False
     """When ``True``, append ``\\n\\n{reasoning effort: low}`` to the last user
     message, nudging the model toward shorter reasoning. Mirrors the **Super**
@@ -416,6 +460,11 @@ class Nemotron3UltraRendererConfig(BaseRendererConfig):
 
     truncate_history_thinking: bool = True
     """See :class:`Nemotron3RendererConfig.truncate_history_thinking`."""
+
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        _reject_thinking_retention_conflict(self, "truncate_history_thinking")
+        return self
 
     medium_effort: bool = False
     """When ``True``, append ``\\n\\n{reasoning effort: efficient}`` to the last

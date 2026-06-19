@@ -306,7 +306,7 @@ class Qwen3Renderer:
             previous_completion_ids,
             new_messages,
             thinking_retention=self.config.thinking_retention,
-            think_end_id=self._think_end,
+            thinking_marker_ids=[self._think_end],
             enable_thinking=self.config.enable_thinking,
         ):
             return None

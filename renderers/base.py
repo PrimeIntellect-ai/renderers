@@ -1880,39 +1880,59 @@ def introduces_user_query(new_messages: list[Message]) -> bool:
     return False
 
 
+def _contains_subsequence(haystack: list[int], needle: list[int]) -> bool:
+    """True if ``needle`` appears as a contiguous run inside ``haystack``."""
+    n = len(needle)
+    if n == 0:
+        return False
+    if n == 1:
+        return needle[0] in haystack
+    first = needle[0]
+    for i in range(len(haystack) - n + 1):
+        if haystack[i] == first and haystack[i : i + n] == needle:
+            return True
+    return False
+
+
 def reject_thinking_strip_in_extension(
     previous_prompt_ids: list[int],
     previous_completion_ids: list[int],
     new_messages: list[Message],
     *,
     thinking_retention: ThinkingRetention,
-    think_end_id: int,
+    thinking_marker_ids: list[int],
     enable_thinking: bool = True,
 ) -> bool:
     """Return True if a bridge must refuse to span ``new_messages``.
 
     A renderer whose template drops a past block's thinking once a new user
     query arrives can't span that boundary while keeping prior tokens
-    verbatim — the kept ``<think>`` would diverge from a faithful re-render
+    verbatim — the kept thinking would diverge from a faithful re-render
     (which honours ``thinking_retention`` and drops the stale thinking).
-    Token-based thinking renderers OR this into their bridge's reject check,
-    passing the ``</think>`` token id; ``thinking_retention="all"`` keeps
-    thinking on every path, so it never declines.
+    Thinking renderers OR this into their bridge's reject check.
+
+    ``thinking_marker_ids`` is a token subsequence whose presence in the
+    prior tokens signals a sampled thinking block — a single-token close
+    like ``[</think>]`` (Qwen3, GLM, Nemotron), a multi-token close
+    (``Kimi-K2.5``), or a harmony analysis-channel header
+    (``[<|channel|>, …"analysis"…, <|message|>]`` for gpt-oss).
+    ``thinking_retention="all"`` keeps thinking on every path, so it never
+    declines.
 
     Returns ``False`` (safe to bridge) when: ``thinking_retention="all"``;
-    thinking is disabled (no sampled ``<think>`` to strip — also avoids the
+    thinking is disabled (no sampled thinking to strip — also avoids the
     empty ``<think></think>`` generation-prompt scaffold a disabled model
     leaves in ``previous_prompt_ids``); ``new_messages`` stays in the
     in-flight cycle (no new user query); or the prior tokens carry no
-    ``<think>`` block to strip.
+    thinking marker to strip.
     """
     if thinking_retention == "all" or not enable_thinking:
         return False
     if not introduces_user_query(new_messages):
         return False
-    return (
-        think_end_id in previous_completion_ids or think_end_id in previous_prompt_ids
-    )
+    return _contains_subsequence(
+        previous_completion_ids, thinking_marker_ids
+    ) or _contains_subsequence(previous_prompt_ids, thinking_marker_ids)
 
 
 def should_preserve_past_thinking(

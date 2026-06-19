@@ -293,7 +293,7 @@ class GLM45Renderer:
             token_ids,
             stop_ids={self._endoftext, self._user, self._observation},
             think_id=self._think,
-            think_end_id=self._think_end,
+            thinking_marker_ids=[self._think_end],
             tool_call_id=self._tool_call_tok,
             tool_call_end_id=self._tool_call_end_tok,
             arg_key_id=self._arg_key,
@@ -329,7 +329,7 @@ class GLM45Renderer:
             previous_completion_ids,
             new_messages,
             thinking_retention=self.config.thinking_retention,
-            think_end_id=self._think_end,
+            thinking_marker_ids=[self._think_end],
             enable_thinking=self.config.enable_thinking,
         ):
             return None

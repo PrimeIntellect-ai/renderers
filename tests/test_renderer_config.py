@@ -114,3 +114,28 @@ def test_create_renderer_default_argument_is_auto():
     renderer = create_renderer(tok)
     # Falls through to DefaultRenderer when no match and no vision config.
     assert renderer.__class__.__name__ == "DefaultRenderer"
+
+
+def test_thinking_retention_conflict_raises():
+    """``clear_thinking`` / ``truncate_history_thinking`` are byte-equivalent
+    to ``thinking_retention`` (``False`` ≡ ``"all"``). Explicitly setting both
+    to disagreeing values raises; a consistent pair, or a single field (the
+    parity matrix sets one at a time), is fine."""
+    from renderers import Nemotron3RendererConfig
+
+    # explicit conflict: keep-all kwarg vs a non-"all" retention
+    with pytest.raises(ValidationError, match="same knob"):
+        GLM5RendererConfig(clear_thinking=False, thinking_retention="template")
+    with pytest.raises(ValidationError, match="same knob"):
+        GLM5RendererConfig(clear_thinking=False, thinking_retention="tool_cycle")
+    with pytest.raises(ValidationError, match="same knob"):
+        Nemotron3RendererConfig(
+            truncate_history_thinking=False, thinking_retention="template"
+        )
+
+    # consistent (both keep all), single-field, and the normal override
+    # (template-default drop + retention="all") are all accepted.
+    GLM5RendererConfig(clear_thinking=False, thinking_retention="all")
+    GLM5RendererConfig(clear_thinking=False)
+    GLM5RendererConfig(thinking_retention="tool_cycle")
+    GLM5RendererConfig(clear_thinking=True, thinking_retention="all")

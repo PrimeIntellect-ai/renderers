@@ -308,3 +308,33 @@ def test_bridge_declines_across_user_turn_when_thinking_present(br_renderer, br_
         prev_prompt, prev_completion, [{"role": "tool", "content": "result"}]
     )
     assert extended is not None, f"{br_model}: should still bridge within a tool cycle"
+
+
+def test_bridge_keeps_thinking_when_history_kwarg_disables_truncation():
+    """GLM ``clear_thinking=False`` / Nemotron ``truncate_history_thinking=
+    False`` keep all past thinking (the template doesn't strip it), so the
+    bridge must NOT decline across a user turn — declining would re-render and
+    re-tokenize model-sampled thinking bytes."""
+    from renderers import create_renderer
+    from renderers.base import load_tokenizer
+    from renderers.configs import GLM5RendererConfig, Nemotron3RendererConfig
+
+    asst = [
+        {"role": "assistant", "reasoning_content": "Let me think.", "content": "Hi"}
+    ]
+    cases = [
+        ("zai-org/GLM-5", GLM5RendererConfig(clear_thinking=False)),
+        (
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            Nemotron3RendererConfig(truncate_history_thinking=False),
+        ),
+    ]
+    for model, cfg in cases:
+        r = create_renderer(load_tokenizer(model), cfg)
+        prev_prompt, prev_completion = _simulate_prior_turn(r, asst)
+        bridged = r.bridge_to_next_turn(
+            prev_prompt, prev_completion, [{"role": "user", "content": "next"}]
+        )
+        assert bridged is not None, (
+            f"{model}: bridge must keep verbatim when the template keeps all thinking"
+        )

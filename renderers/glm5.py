@@ -339,12 +339,18 @@ class GLM5Renderer:
 
         # Faithfulness across a user-query boundary: the template drops a past
         # block's thinking once a new user turn arrives (see
-        # reject_thinking_strip_in_extension).
+        # reject_thinking_strip_in_extension). ``clear_thinking=False`` keeps
+        # all past thinking (≡ thinking_retention="all"), so the bridge stays
+        # faithful carrying it verbatim — fold it into the effective level so
+        # we don't over-decline and re-tokenize sampled thinking.
+        retention = (
+            "all" if not self.config.clear_thinking else self.config.thinking_retention
+        )
         if reject_thinking_strip_in_extension(
             previous_prompt_ids,
             previous_completion_ids,
             new_messages,
-            thinking_retention=self.config.thinking_retention,
+            thinking_retention=retention,
             thinking_marker_ids=[self._think_end],
             enable_thinking=self.config.enable_thinking,
         ):

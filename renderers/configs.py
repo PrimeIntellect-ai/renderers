@@ -160,6 +160,26 @@ class DefaultRendererConfig(BaseRendererConfig):
     # template. Jinja kwargs live in ``model_extra`` (extra="allow").
     _internal_fields = frozenset({"tool_parser", "reasoning_parser"})
 
+    @model_validator(mode="after")
+    def _reject_legacy_preserve_flags(self):
+        # ``extra="allow"`` would otherwise swallow the removed ``preserve_*``
+        # bools into ``model_extra`` and forward them to apply_chat_template,
+        # silently dropping the user's intent (DefaultRenderer can't
+        # selectively re-emit reasoning_content). Reject them like every other
+        # config's ``extra="forbid"`` does, pointing at the replacement.
+        legacy = {
+            "preserve_all_thinking",
+            "preserve_thinking_between_tool_calls",
+        } & set(self.model_extra or {})
+        if legacy:
+            raise ValueError(
+                f"{sorted(legacy)} were replaced by thinking_retention. "
+                "DefaultRenderer falls back to apply_chat_template and can't "
+                "selectively re-emit reasoning_content — use thinking_retention "
+                "on a model-specific renderer."
+            )
+        return self
+
 
 class Qwen3RendererConfig(BaseRendererConfig):
     """Qwen3 (text-only) renderer config."""

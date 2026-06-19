@@ -139,3 +139,17 @@ def test_thinking_retention_conflict_raises():
     GLM5RendererConfig(clear_thinking=False)
     GLM5RendererConfig(thinking_retention="tool_cycle")
     GLM5RendererConfig(clear_thinking=True, thinking_retention="all")
+
+
+def test_default_renderer_config_rejects_legacy_preserve_flags():
+    """``DefaultRendererConfig`` is ``extra="allow"``, so the removed
+    ``preserve_*`` bools would otherwise slip into ``model_extra`` and be
+    forwarded to ``apply_chat_template`` silently. A validator rejects them
+    with a migration message; genuine Jinja kwargs still pass through."""
+    with pytest.raises(ValidationError, match="thinking_retention"):
+        DefaultRendererConfig(preserve_all_thinking=True)
+    with pytest.raises(ValidationError, match="thinking_retention"):
+        DefaultRendererConfig(preserve_thinking_between_tool_calls=True)
+
+    cfg = DefaultRendererConfig(some_jinja_kwarg=True)
+    assert cfg.model_extra["some_jinja_kwarg"] is True

@@ -772,7 +772,13 @@ class Renderer(Protocol):
         Return ``None`` whenever the renderer can't prove that contract
         holds — the caller falls back to a full re-render. In particular,
         bridges refuse assistant messages in ``new_messages`` (those would
-        re-tokenize model-sampled content). Hand-coded renderers know their
+        re-tokenize model-sampled content), and a renderer whose template
+        drops a past block's thinking once a new user query arrives refuses
+        to span that boundary while carrying ``<think>`` verbatim would keep
+        it (it falls back to a re-render, which honours ``thinking_retention``
+        and drops the stale thinking — keeping the bridge faithful to the
+        template). ``thinking_retention="all"`` keeps thinking on every path,
+        so no decline is needed there. Hand-coded renderers know their
         canonical close and synthesise it on truncated priors;
         DefaultRenderer always returns ``None`` because the template's
         close is unknown.
@@ -1846,6 +1852,32 @@ def reject_assistant_in_extension(new_messages: list[Message]) -> bool:
     the contract that sampled tokens land in training exactly as emitted.
     """
     return any(m.get("role") == "assistant" for m in new_messages)
+
+
+def introduces_user_query(new_messages: list[Message]) -> bool:
+    """Return True if ``new_messages`` opens a new user-query turn.
+
+    A query boundary is a ``user`` message whose content isn't a
+    ``<tool_response>...</tool_response>`` wrapper — tool responses
+    (``role="tool"``, or folded into a wrapped user turn) continue the
+    in-flight cycle rather than starting a new query. This mirrors the
+    boundary chat templates use to decide when a past assistant block's
+    thinking becomes "older" and is dropped, so a bridge can tell whether
+    spanning ``new_messages`` would cross that boundary (cf.
+    ``should_preserve_past_thinking`` and per-renderer ``_last_query_index``).
+    """
+    for m in new_messages:
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if (
+            isinstance(content, str)
+            and content.startswith("<tool_response>")
+            and content.endswith("</tool_response>")
+        ):
+            continue
+        return True
+    return False
 
 
 def should_preserve_past_thinking(

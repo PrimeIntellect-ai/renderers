@@ -20,6 +20,7 @@ from renderers.base import (
     ToolSpec,
     attribute_text_segments,
     extract_message_tool_names,
+    introduces_user_query,
     reject_assistant_in_extension,
     should_preserve_past_thinking,
     trim_to_turn_close,
@@ -294,6 +295,25 @@ class Qwen3Renderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+
+        # Faithfulness across a user-query boundary. Qwen3's template drops a
+        # past assistant block's thinking once a new user turn arrives, but
+        # the bridge carries prior tokens verbatim — so spanning that boundary
+        # would keep ``<think>`` the template strips. Decline (the caller
+        # re-renders, honoring the same ``thinking_retention``, which drops the
+        # stale thinking) when the prior turns carry sampled thinking that
+        # would be dropped. ``thinking_retention="all"`` keeps it on every
+        # path, so the bridge stays faithful there and need not decline.
+        prior_has_thinking = self.config.enable_thinking and (
+            self._think_end in previous_completion_ids
+            or self._think_end in previous_prompt_ids
+        )
+        if (
+            self.config.thinking_retention != "all"
+            and prior_has_thinking
+            and introduces_user_query(new_messages)
         ):
             return None
 

@@ -67,6 +67,24 @@ def br_renderer(br_model, br_renderer_name):
     return _load(br_model, br_renderer_name)[1]
 
 
+@pytest.fixture
+def br_renderer_all(br_model, br_renderer_name):
+    """Renderer forced to ``thinking_retention="all"``.
+
+    The verbatim-extension mechanic tests below cross a user-query
+    boundary. For thinking models the template drops a past block's
+    thinking there, so the faithful bridge declines (covered by
+    ``test_bridge_declines_across_user_query_when_template_drops_thinking``).
+    ``"all"`` keeps thinking on every path, isolating the pure extension
+    mechanic from the retention policy across all renderers.
+    """
+    from renderers import create_renderer
+
+    tok, base = _load(br_model, br_renderer_name)
+    cfg = base.config.model_copy(update={"thinking_retention": "all"})
+    return create_renderer(tok, cfg)
+
+
 def _simulate_prior_turn(renderer):
     """Build a (prev_prompt, prev_completion) pair that a real rollout
     would produce for a one-turn prior with a clean stop.
@@ -105,11 +123,11 @@ def _simulate_prior_turn(renderer):
     return prev_prompt, prev_completion
 
 
-def test_bridge_extends_prev_verbatim_on_clean_stop(br_renderer, br_model):
-    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer)
+def test_bridge_extends_prev_verbatim_on_clean_stop(br_renderer_all, br_model):
+    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer_all)
     new_messages = [{"role": "user", "content": "What's 2+2?"}]
 
-    bridged = br_renderer.bridge_to_next_turn(
+    bridged = br_renderer_all.bridge_to_next_turn(
         prev_prompt, prev_completion, new_messages
     )
     assert bridged is not None, f"{br_model}: bridge returned None on clean stop"
@@ -148,8 +166,8 @@ def test_bridge_rejects_empty_prev_or_new(br_renderer):
     assert br_renderer.bridge_to_next_turn(prev_prompt, prev_completion, []) is None
 
 
-def test_bridge_synthesises_close_on_truncation(br_renderer, br_model):
-    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer)
+def test_bridge_synthesises_close_on_truncation(br_renderer_all, br_model):
+    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer_all)
     # Drop the final close token to simulate a max_tokens truncation.
     prev_completion_trunc = prev_completion[:-1] if prev_completion else prev_completion
     if len(prev_completion_trunc) == 0:
@@ -157,7 +175,7 @@ def test_bridge_synthesises_close_on_truncation(br_renderer, br_model):
             f"{br_model}: simulated prior had no completion tokens — can't truncate"
         )
 
-    bridged = br_renderer.bridge_to_next_turn(
+    bridged = br_renderer_all.bridge_to_next_turn(
         prev_prompt,
         prev_completion_trunc,
         [{"role": "user", "content": "What's 2+2?"}],
@@ -176,12 +194,12 @@ def test_bridge_synthesises_close_on_truncation(br_renderer, br_model):
 
 
 def test_bridge_extension_includes_new_message_text(
-    br_renderer, br_tokenizer, br_model
+    br_renderer_all, br_tokenizer, br_model
 ):
-    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer)
+    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer_all)
     new_messages = [{"role": "user", "content": "HELLO_SENTINEL_XYZ"}]
 
-    bridged = br_renderer.bridge_to_next_turn(
+    bridged = br_renderer_all.bridge_to_next_turn(
         prev_prompt, prev_completion, new_messages
     )
     assert bridged is not None
@@ -190,3 +208,59 @@ def test_bridge_extension_includes_new_message_text(
     assert "HELLO_SENTINEL_XYZ" in decoded, (
         f"{br_model}: new-message content missing from extension; got {decoded!r}"
     )
+
+
+def test_bridge_declines_across_user_query_when_template_drops_thinking():
+    """Qwen3's template drops a past block's thinking once a new user turn
+    arrives. The bridge carries prior tokens verbatim, so spanning that
+    boundary would keep thinking the template strips. The faithful bridge
+    must DECLINE there (the caller then re-renders, byte-faithfully) — but
+    only when it actually matters:
+
+      - new user query + prior thinking + retention!="all" -> decline,
+        and the fallback re-render equals ``apply_chat_template``.
+      - thinking_retention="all" keeps thinking on every path -> extend.
+      - a tool response (in-flight cycle, no new query) keeps thinking in
+        the template too -> extend.
+      - no prior thinking -> nothing to strip -> extend.
+    """
+    from renderers import create_renderer
+    from renderers.base import load_tokenizer
+    from renderers.configs import Qwen3RendererConfig
+
+    tok = load_tokenizer("Qwen/Qwen3-8B")
+    im_end = tok.convert_tokens_to_ids("<|im_end|>")
+
+    u1 = {"role": "user", "content": "What is 2+2?"}
+    u2 = {"role": "user", "content": "Multiply that by 3."}
+    tool = {"role": "tool", "content": "ok"}
+    think = "<think>\n2 plus 2 is 4.\n</think>\n\n4"
+
+    def prior(r, asst_text):
+        p = r.render_ids([u1], add_generation_prompt=True)
+        completion = tok.encode(asst_text, add_special_tokens=False) + [im_end]
+        return p, completion
+
+    # new user query + prior thinking + default retention -> decline
+    r = create_renderer(tok, Qwen3RendererConfig())
+    p, comp = prior(r, think)
+    assert r.bridge_to_next_turn(p, comp, [u2]) is None
+    # ...and the caller's faithful re-render matches the chat template
+    hist = [u1, {"role": "assistant", "content": think}, u2]
+    rendered = tok.decode(r.render_ids(hist, add_generation_prompt=True))
+    assert rendered == tok.apply_chat_template(
+        hist, tokenize=False, add_generation_prompt=True
+    )
+
+    # thinking_retention="all" keeps thinking everywhere -> extend
+    r_all = create_renderer(tok, Qwen3RendererConfig(thinking_retention="all"))
+    p, comp = prior(r_all, think)
+    assert r_all.bridge_to_next_turn(p, comp, [u2]) is not None
+
+    # tool response continues the in-flight cycle (no new query) -> extend
+    p, comp = prior(r, think)
+    assert r.bridge_to_next_turn(p, comp, [tool]) is not None
+
+    # no prior thinking -> nothing to strip -> extend even across a user turn
+    p, comp = prior(r, "4")
+    assert r.bridge_to_next_turn(p, comp, [u2]) is not None

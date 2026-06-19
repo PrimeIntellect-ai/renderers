@@ -29,6 +29,7 @@ from renderers.base import (
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
+    reject_thinking_strip_in_extension,
     should_preserve_past_thinking,
     trim_to_turn_close,
 )
@@ -615,6 +616,19 @@ class Qwen35Renderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+
+        # Faithfulness across a user-query boundary: the template drops a past
+        # block's thinking once a new user turn arrives (see
+        # reject_thinking_strip_in_extension).
+        if reject_thinking_strip_in_extension(
+            previous_prompt_ids,
+            previous_completion_ids,
+            new_messages,
+            thinking_retention=self.config.thinking_retention,
+            think_end_id=self._think_end,
+            enable_thinking=self.config.enable_thinking,
         ):
             return None
 

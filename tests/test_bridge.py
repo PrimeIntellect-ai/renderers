@@ -85,7 +85,7 @@ def br_renderer_all(br_model, br_renderer_name):
     return create_renderer(tok, cfg)
 
 
-def _simulate_prior_turn(renderer):
+def _simulate_prior_turn(renderer, assistant=None):
     """Build a (prev_prompt, prev_completion) pair that a real rollout
     would produce for a one-turn prior with a clean stop.
 
@@ -94,13 +94,15 @@ def _simulate_prior_turn(renderer):
     gen_prompt, and take the diff as prev_completion. We then trim
     prev_completion to the last close token so it matches what vLLM
     actually hands back (vLLM stops at the close token and excludes the
-    trailing template scaffolding).
+    trailing template scaffolding). Pass ``assistant`` to override the
+    default no-thinking turn (e.g. one carrying ``reasoning_content``).
     """
     prior = [
         {"role": "system", "content": "You are helpful."},
         {"role": "user", "content": "Hi."},
     ]
-    assistant = [{"role": "assistant", "content": "Hello!"}]
+    if assistant is None:
+        assistant = [{"role": "assistant", "content": "Hello!"}]
 
     prev_prompt = renderer.render_ids(prior, add_generation_prompt=True)
     full_with_assistant = renderer.render_ids(
@@ -264,3 +266,41 @@ def test_bridge_declines_across_user_query_when_template_drops_thinking():
     # no prior thinking -> nothing to strip -> extend even across a user turn
     p, comp = prior(r, "4")
     assert r.bridge_to_next_turn(p, comp, [u2]) is not None
+
+
+# Renderers wired with the bridge faithfulness guard (token-based <think>
+# detection). Others (minimax has no bridge; kimi_k25 multi-token close;
+# gpt_oss harmony channels; non-thinking models) are out of scope here.
+_GUARDED_THINKING_MODELS = {
+    "Qwen/Qwen3-8B",
+    "Qwen/Qwen3.5-9B",
+    "Qwen/Qwen3.6-35B-A3B",
+    "zai-org/GLM-5",
+    "zai-org/GLM-5.1",
+    "THUDM/GLM-4.5-Air",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+}
+
+
+def test_bridge_declines_across_user_turn_when_thinking_present(br_renderer, br_model):
+    """Across every guarded thinking renderer: a prior turn carrying
+    ``reasoning_content`` makes the bridge decline a new *user* query (the
+    template would strip that thinking) but still extend a *tool* response
+    (in-flight cycle keeps it). Non-guarded models are skipped."""
+    if br_model not in _GUARDED_THINKING_MODELS:
+        pytest.skip(f"{br_model}: no bridge thinking-guard")
+
+    asst = [
+        {"role": "assistant", "reasoning_content": "Let me think.", "content": "Hello!"}
+    ]
+    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer, asst)
+
+    declined = br_renderer.bridge_to_next_turn(
+        prev_prompt, prev_completion, [{"role": "user", "content": "next"}]
+    )
+    assert declined is None, f"{br_model}: expected faithful decline across a user turn"
+
+    extended = br_renderer.bridge_to_next_turn(
+        prev_prompt, prev_completion, [{"role": "tool", "content": "result"}]
+    )
+    assert extended is not None, f"{br_model}: should still bridge within a tool cycle"

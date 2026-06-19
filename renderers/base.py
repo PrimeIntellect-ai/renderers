@@ -1880,6 +1880,41 @@ def introduces_user_query(new_messages: list[Message]) -> bool:
     return False
 
 
+def reject_thinking_strip_in_extension(
+    previous_prompt_ids: list[int],
+    previous_completion_ids: list[int],
+    new_messages: list[Message],
+    *,
+    thinking_retention: ThinkingRetention,
+    think_end_id: int,
+    enable_thinking: bool = True,
+) -> bool:
+    """Return True if a bridge must refuse to span ``new_messages``.
+
+    A renderer whose template drops a past block's thinking once a new user
+    query arrives can't span that boundary while keeping prior tokens
+    verbatim — the kept ``<think>`` would diverge from a faithful re-render
+    (which honours ``thinking_retention`` and drops the stale thinking).
+    Token-based thinking renderers OR this into their bridge's reject check,
+    passing the ``</think>`` token id; ``thinking_retention="all"`` keeps
+    thinking on every path, so it never declines.
+
+    Returns ``False`` (safe to bridge) when: ``thinking_retention="all"``;
+    thinking is disabled (no sampled ``<think>`` to strip — also avoids the
+    empty ``<think></think>`` generation-prompt scaffold a disabled model
+    leaves in ``previous_prompt_ids``); ``new_messages`` stays in the
+    in-flight cycle (no new user query); or the prior tokens carry no
+    ``<think>`` block to strip.
+    """
+    if thinking_retention == "all" or not enable_thinking:
+        return False
+    if not introduces_user_query(new_messages):
+        return False
+    return (
+        think_end_id in previous_completion_ids or think_end_id in previous_prompt_ids
+    )
+
+
 def should_preserve_past_thinking(
     messages: list[Message],
     msg_idx: int,

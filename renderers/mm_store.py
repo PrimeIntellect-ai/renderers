@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import re
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 RUN_OUTPUT_ROOT = Path("/data/outputs")
@@ -22,15 +24,19 @@ RUN_DIR_ENV = "PRIME_RL_RUN_DIR"
 RUN_ID_ENV = "RUN_ID"
 
 IMAGE_ASSET_SUBDIR = Path("assets/images")
-IMAGE_REF_PREFIX = "mmraw:v1"
+IMAGE_REF_PREFIX = "mmraw:v2"
 IMAGE_REF_PAYLOAD_KEY = "_prime_rl_image_ref"
 IMAGE_REF_PAYLOAD_VALUE = "raw_image"
+RAW_MM_ITEM_KIND = "prime_raw_mm_item"
+RAW_MM_ITEM_VERSION = 1
 
 _SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SAFE_FAMILY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SAFE_MODALITY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SAFE_FINGERPRINT_RE = re.compile(r"^[a-f0-9]{16,64}$")
 _SAFE_MM_HASH_RE = re.compile(r"^[a-f0-9]{16,128}$")
 _SAFE_IMAGE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_SAFE_GRID_THW_RE = re.compile(r"^[0-9]+x[0-9]+x[0-9]+$")
+_SAFE_REF_PAYLOAD_RE = re.compile(r"^[A-Za-z0-9_-]*$")
 
 _MEDIA_TYPE_EXT = {"jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "webp": ".webp", "gif": ".gif"}
 
@@ -156,67 +162,132 @@ def raw_image_path(*, run_id: str, raw_image_id: str) -> Path:
     return path
 
 
-def image_layout_fingerprint(
-    *,
-    family: str,
-    patch_size: int,
-    merge_size: int,
-    temporal_patch_size: int,
-    min_pixels: int,
-    max_pixels: int,
-) -> str:
-    raw = (
-        f"image-layout:v1:{family}:{int(patch_size)}:{int(merge_size)}:"
-        f"{int(temporal_patch_size)}:{int(min_pixels)}:{int(max_pixels)}"
-    ).encode("utf-8")
+def _json_fingerprint_value(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def image_layout_fingerprint(*, family: str, **values: object) -> str:
+    """Stable adapter-owned fingerprint for raw multimodal layout contracts."""
+    if not _SAFE_FAMILY_RE.fullmatch(family):
+        raise ValueError(f"Invalid multimodal family: {family!r}")
+    encoded_values = ":".join(f"{key}={_json_fingerprint_value(values[key])}" for key in sorted(values))
+    raw = f"image-layout:v1:{family}:{encoded_values}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:32]
 
 
-def _grid_to_ref(grid_thw: object) -> str:
-    data = grid_thw.tolist() if hasattr(grid_thw, "tolist") else grid_thw
-    if isinstance(data, list) and data and isinstance(data[0], list):
-        data = data[0]
-    if not isinstance(data, (list, tuple)) or len(data) != 3:
-        raise ValueError(f"Invalid image grid_thw for image ref: {grid_thw!r}")
-    return "x".join(str(int(v)) for v in data)
+def raw_mm_item(
+    *,
+    modality: str,
+    family: str,
+    layout_fingerprint: str,
+    payload: dict[str, object],
+    raw_uri: str | None = None,
+    raw_image_id: str | None = None,
+    vllm_modality: str | None = None,
+) -> dict[str, object]:
+    """Build the JSON-safe raw multimodal descriptor envelope.
+
+    ``payload`` is intentionally adapter-owned. Shared consumers may route by
+    ``family`` and validate the common envelope, but must not inspect adapter
+    payload keys.
+    """
+    if not _SAFE_FAMILY_RE.fullmatch(family):
+        raise ValueError(f"Invalid multimodal family: {family!r}")
+    if not _SAFE_MODALITY_RE.fullmatch(modality):
+        raise ValueError(f"Invalid raw multimodal modality: {modality!r}")
+    if not _SAFE_FINGERPRINT_RE.fullmatch(layout_fingerprint):
+        raise ValueError(f"Invalid image layout fingerprint: {layout_fingerprint!r}")
+    out: dict[str, object] = {
+        "kind": RAW_MM_ITEM_KIND,
+        "version": RAW_MM_ITEM_VERSION,
+        "modality": modality,
+        "family": family,
+        "layout_fingerprint": layout_fingerprint,
+        "payload": payload,
+    }
+    if vllm_modality is not None:
+        out["vllm_modality"] = vllm_modality
+    if raw_uri is not None and raw_image_id is not None:
+        out.update(
+            {
+                "raw_uri": raw_uri,
+                "raw_image_id": raw_image_id,
+                IMAGE_REF_PAYLOAD_KEY: IMAGE_REF_PAYLOAD_VALUE,
+            }
+        )
+    return out
 
 
-def _grid_from_ref(value: str) -> list[int]:
-    if not _SAFE_GRID_THW_RE.fullmatch(value):
-        raise ValueError(f"Invalid image grid_thw ref segment: {value!r}")
-    return [int(v) for v in value.split("x")]
+@dataclass(frozen=True)
+class RawMMRef:
+    run_id: str
+    family: str
+    fingerprint: str
+    modality: str
+    mm_hash: str
+    raw_image_id: str
+    payload: dict[str, object]
 
 
-def image_ref(
+def raw_mm_ref(
     *,
     run_id: str,
+    family: str,
     fingerprint: str,
     modality: str,
     mm_hash: str,
     raw_image_id: str,
-    grid_thw: object,
+    payload: dict[str, object] | None = None,
 ) -> str:
+    """Generic raw multimodal asset ref.
+
+    Adapter-owned details stay in the descriptor payload so refs can serve
+    future families without baking shape names into the wire id.
+    """
     run_id = normalize_run_id(run_id)
+    if not _SAFE_FAMILY_RE.fullmatch(family):
+        raise ValueError(f"Invalid multimodal family: {family!r}")
     if not _SAFE_FINGERPRINT_RE.fullmatch(fingerprint):
         raise ValueError(f"Invalid image layout fingerprint: {fingerprint!r}")
-    if modality != "image":
-        raise ValueError(f"Unsupported image ref modality: {modality!r}")
+    if not _SAFE_MODALITY_RE.fullmatch(modality):
+        raise ValueError(f"Invalid raw multimodal modality: {modality!r}")
     if not _SAFE_MM_HASH_RE.fullmatch(mm_hash):
         raise ValueError(f"Invalid image hash: {mm_hash!r}")
     raw_image_path(run_id=run_id, raw_image_id=raw_image_id)
-    return f"{IMAGE_REF_PREFIX}:{run_id}:{fingerprint}:{modality}:{mm_hash}:{raw_image_id}:{_grid_to_ref(grid_thw)}"
+    encoded_payload = base64.urlsafe_b64encode(
+        json.dumps(payload or {}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    return (
+        f"{IMAGE_REF_PREFIX}:{run_id}:{family}:{fingerprint}:"
+        f"{modality}:{mm_hash}:{raw_image_id}:{encoded_payload}"
+    )
 
 
-def split_image_ref(ref: str) -> tuple[str, str, str, str, str, list[int]]:
+def split_raw_mm_ref(ref: str) -> RawMMRef:
     parts = ref.split(":")
-    if parts[:2] != ["mmraw", "v1"] or len(parts) != 8:
-        raise ValueError(f"Invalid image ref shape: {ref!r}")
-    return normalize_run_id(parts[2]), parts[3], parts[4], parts[5], parts[6], _grid_from_ref(parts[7])
+    if parts[:2] != ["mmraw", "v2"] or len(parts) != 9:
+        raise ValueError(f"Invalid raw multimodal ref shape: {ref!r}")
+    run_id, family, fingerprint, modality, mm_hash, raw_image_id, encoded_payload = parts[2:]
+    if not _SAFE_REF_PAYLOAD_RE.fullmatch(encoded_payload):
+        raise ValueError("Invalid raw multimodal ref payload segment")
+    padded = encoded_payload + "=" * (-len(encoded_payload) % 4)
+    payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Raw multimodal ref payload must decode to a dict")
+    return RawMMRef(
+        run_id=normalize_run_id(run_id),
+        family=family,
+        fingerprint=fingerprint,
+        modality=modality,
+        mm_hash=mm_hash,
+        raw_image_id=raw_image_id,
+        payload=payload,
+    )
 
 
 # Backwards-compatible names for consumers that already speak the mmraw wire format.
 MMRAW_PREFIX = IMAGE_REF_PREFIX
 MM_RAW_PAYLOAD_KEY = IMAGE_REF_PAYLOAD_KEY
 MM_RAW_PAYLOAD_VALUE = IMAGE_REF_PAYLOAD_VALUE
-mmraw_ref = image_ref
-split_mmraw_ref = split_image_ref
+mmraw_ref = raw_mm_ref
+split_mmraw_ref = split_raw_mm_ref

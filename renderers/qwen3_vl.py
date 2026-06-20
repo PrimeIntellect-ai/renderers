@@ -52,6 +52,7 @@ from renderers.mm_store import (
     IMAGE_REF_PAYLOAD_KEY,
     IMAGE_REF_PAYLOAD_VALUE,
     image_layout_fingerprint,
+    raw_mm_item,
 )
 from renderers.parsing import parse_qwen3
 
@@ -328,16 +329,14 @@ def describe_qwen_image_layout(renderer: Any, part: dict[str, Any]) -> QwenImage
 
 def qwen_image_item_for_render(renderer: Any, part: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
     desc = describe_qwen_image_layout(renderer, part)
-    item: dict[str, Any] = {"image_grid_thw": desc.image_grid_thw}
-    if desc.raw_uri is not None and desc.raw_image_id is not None:
-        item.update(
-            {
-                "raw_uri": desc.raw_uri,
-                "raw_image_id": desc.raw_image_id,
-                "image_layout_fingerprint": desc.fingerprint,
-                IMAGE_REF_PAYLOAD_KEY: IMAGE_REF_PAYLOAD_VALUE,
-            }
-        )
+    item = raw_mm_item(
+        modality="image",
+        family="qwen_vl",
+        layout_fingerprint=desc.fingerprint,
+        payload={"image_grid_thw": desc.image_grid_thw},
+        raw_uri=desc.raw_uri,
+        raw_image_id=desc.raw_image_id,
+    )
     return desc.num_image_tokens, desc.mm_hash, item
 
 
@@ -357,6 +356,54 @@ def _grids_equal(a: Any, b: Any) -> bool:
     al = a.tolist() if hasattr(a, "tolist") else list(a)
     bl = b.tolist() if hasattr(b, "tolist") else list(b)
     return al == bl
+
+
+def _qwen_grid_from_item(item: dict[str, Any]) -> Any:
+    payload = item.get("payload")
+    if isinstance(payload, dict) and payload.get("image_grid_thw") is not None:
+        return payload["image_grid_thw"]
+    return item.get("image_grid_thw")
+
+
+def _qwen_item_with_grid_and_ref(
+    item: dict[str, Any],
+    *,
+    image_grid_thw: Any,
+    fingerprint: str,
+    raw_uri: str,
+    raw_image_id: str,
+) -> dict[str, Any]:
+    new_item = {
+        k: v
+        for k, v in item.items()
+        if k
+        not in {
+            "raw_uri",
+            "raw_image_id",
+            "image_layout_fingerprint",
+            IMAGE_REF_PAYLOAD_KEY,
+        }
+    }
+    if new_item.get("family") == "qwen_vl" and isinstance(new_item.get("payload"), dict):
+        payload = dict(new_item["payload"])
+        payload["image_grid_thw"] = image_grid_thw
+        new_item["payload"] = payload
+        new_item["layout_fingerprint"] = fingerprint
+    else:
+        new_item = raw_mm_item(
+            modality="image",
+            family="qwen_vl",
+            layout_fingerprint=fingerprint,
+            payload={"image_grid_thw": image_grid_thw},
+        )
+    new_item.update(
+        {
+            "raw_uri": raw_uri,
+            "raw_image_id": raw_image_id,
+            IMAGE_REF_PAYLOAD_KEY: IMAGE_REF_PAYLOAD_VALUE,
+        }
+    )
+    return new_item
 
 
 def materialize_image_refs(renderer: Any, mm_data: MultiModalData, messages: list[Message]) -> MultiModalData:
@@ -390,31 +437,18 @@ def materialize_image_refs(renderer: Any, mm_data: MultiModalData, messages: lis
         desc = resolved[hashes[i]]
         if desc.raw_uri is None or desc.raw_image_id is None:
             raise ValueError("materialize_image_refs requires file-backed image URLs")
-        item_grid = item.get("image_grid_thw")
+        item_grid = _qwen_grid_from_item(item)
         if item_grid is not None and not _grids_equal(desc.image_grid_thw, item_grid):
             raise ValueError(
                 "materialize_image_refs: reconstructed image_grid_thw "
                 f"{desc.image_grid_thw!r} != descriptor {item_grid!r}"
             )
-        new_item = {
-            k: v
-            for k, v in item.items()
-            if k
-            not in {
-                "raw_uri",
-                "raw_image_id",
-                "image_layout_fingerprint",
-                IMAGE_REF_PAYLOAD_KEY,
-            }
-        }
-        new_item.update(
-            {
-                "image_grid_thw": item_grid if item_grid is not None else desc.image_grid_thw,
-                "raw_uri": desc.raw_uri,
-                "raw_image_id": desc.raw_image_id,
-                "image_layout_fingerprint": desc.fingerprint,
-                IMAGE_REF_PAYLOAD_KEY: IMAGE_REF_PAYLOAD_VALUE,
-            }
+        new_item = _qwen_item_with_grid_and_ref(
+            item,
+            image_grid_thw=item_grid if item_grid is not None else desc.image_grid_thw,
+            fingerprint=desc.fingerprint,
+            raw_uri=desc.raw_uri,
+            raw_image_id=desc.raw_image_id,
         )
         new_image_items.append(new_item)
 

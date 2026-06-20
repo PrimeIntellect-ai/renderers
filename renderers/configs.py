@@ -31,6 +31,14 @@ QWEN_VL_IMAGE_MERGE_SIZE = 2
 QWEN_VL_IMAGE_MIN_PIXELS = 65536
 QWEN_VL_IMAGE_MAX_PIXELS = 16777216
 
+KIMI_K25_IMAGE_PATCH_SIZE = 14
+KIMI_K25_IMAGE_MERGE_KERNEL_SIZE = 2
+KIMI_K25_IMAGE_IN_PATCH_LIMIT = 16384
+KIMI_K25_IMAGE_PATCH_LIMIT_ON_ONE_SIDE = 512
+KIMI_K25_IMAGE_FIXED_OUTPUT_TOKENS: int | None = None
+KIMI_K25_IMAGE_MEAN = (0.5, 0.5, 0.5)
+KIMI_K25_IMAGE_STD = (0.5, 0.5, 0.5)
+
 
 class BaseRendererConfig(BaseConfig):
     """Shared fields and config for every renderer config variant.
@@ -362,7 +370,39 @@ class KimiK25RendererConfig(BaseRendererConfig):
     image_cache_max: int = 256
     """FIFO bound on Kimi's per-renderer image processor cache."""
 
-    _internal_fields = frozenset({"image_cache_max"})
+    image_patch_size: int = KIMI_K25_IMAGE_PATCH_SIZE
+    """Kimi MoonViT patch size used to compute raw image layout descriptors."""
+
+    image_merge_kernel_size: int = KIMI_K25_IMAGE_MERGE_KERNEL_SIZE
+    """Kimi spatial merge kernel used to compute output media-token layout."""
+
+    image_in_patch_limit: int = KIMI_K25_IMAGE_IN_PATCH_LIMIT
+    """Kimi NavIT input patch budget used by image resize layout math."""
+
+    image_patch_limit_on_one_side: int = KIMI_K25_IMAGE_PATCH_LIMIT_ON_ONE_SIDE
+    """Kimi per-side patch cap used by image resize layout math."""
+
+    image_fixed_output_tokens: int | None = KIMI_K25_IMAGE_FIXED_OUTPUT_TOKENS
+    """Optional fixed Kimi output token count. Current K2.5/K2.6 configs use ``None``."""
+
+    image_mean: tuple[float, float, float] = KIMI_K25_IMAGE_MEAN
+    """Kimi image normalization mean, included in processor fingerprints."""
+
+    image_std: tuple[float, float, float] = KIMI_K25_IMAGE_STD
+    """Kimi image normalization std, included in processor fingerprints."""
+
+    _internal_fields = frozenset(
+        {
+            "image_cache_max",
+            "image_patch_size",
+            "image_merge_kernel_size",
+            "image_in_patch_limit",
+            "image_patch_limit_on_one_side",
+            "image_fixed_output_tokens",
+            "image_mean",
+            "image_std",
+        }
+    )
 
 
 class LagunaXS2RendererConfig(BaseRendererConfig):

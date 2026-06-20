@@ -172,12 +172,12 @@ async def generate(
     attribution (``is_content`` / ``sampled_mask`` / ``message_indices`` /
     ``message_roles``) into the result without re-rendering.
 
-    For multimodal renderers (e.g. ``Qwen3VLRenderer``), the call goes
+    For multimodal renderers, the call goes
     through ``renderer.render(...)`` to recover the ``multi_modal_data``
     sidecar, then serializes it to vLLM's ``features`` schema (mm_hashes,
-    mm_placeholders, kwargs_data) before POSTing. Qwen-family image
-    ``kwargs_data`` slots are either ``None`` (cache lookup for a prior
-    image) or run image refs (new/current images that vLLM should process).
+    mm_placeholders, kwargs_data) before POSTing. Raw image ``kwargs_data``
+    slots are either ``None`` (cache lookup for a prior image) or descriptor
+    refs (new/current images that vLLM should process).
 
     ``max_prompt_len`` controls the pre-flight overflow check. When the
     rendered prompt is strictly longer than the cap, the request is never
@@ -364,7 +364,6 @@ def _descriptor_only_mm_data(mm_data: MultiModalData) -> MultiModalData:
                     "pixel_values",
                     "raw_uri",
                     "raw_image_id",
-                    "image_layout_fingerprint",
                     IMAGE_REF_PAYLOAD_KEY,
                 }
             }
@@ -380,41 +379,18 @@ def _build_vllm_mm_features(
     """Serialize ``MultiModalData`` to vLLM's ``/inference/v1/generate`` features payload.
 
     vLLM's ``MultiModalFeatures`` carries three things: hashes (for cache
-    lookup), placeholder positions (so the engine knows where in the
-    token stream each item lives), and per-item payload selectors. For
-    Qwen images, payload selectors are ``None`` for cache-only prior images
-    or run image refs for images vLLM should process.
-    """
-    from renderers.qwen3_vl import Qwen3VLRenderer
-    from renderers.qwen35 import Qwen35Renderer
-
-    # Type dispatch only needs the renderer class. Pools expose
-    # ``renderer_cls`` as a snapshot attribute, so we don't have to check
-    # out a slot just to read ``type(r)``.
-    renderer_cls = (
-        renderer.renderer_cls if isinstance(renderer, RendererPool) else type(renderer)
-    )
-
-    if issubclass(renderer_cls, (Qwen3VLRenderer, Qwen35Renderer)):
-        return _build_qwen_vl_image_ref_features(mm_data)
-
-    raise NotImplementedError(
-        f"Multimodal serialization not implemented for {renderer_cls.__name__}. "
-        "Add a dispatch branch in renderers.client._build_vllm_mm_features."
-    )
-
-
-def _build_qwen_vl_image_ref_features(mm_data: MultiModalData) -> dict[str, Any]:
-    """vLLM features payload for Qwen-VL image refs.
-
-    Returns ``None`` semantics live one level up — this helper assumes
-    the caller already verified ``mm_data`` is non-empty.
+    lookup), placeholder positions (so the engine knows where in the token
+    stream each item lives), and per-item payload selectors. Raw multimodal
+    descriptors use the common envelope emitted by renderers; family-specific
+    geometry stays inside the descriptor payload and is interpreted downstream
+    by prime-rl/vLLM adapters.
     """
     from renderers.mm_store import (
         IMAGE_REF_PAYLOAD_KEY,
         IMAGE_REF_PAYLOAD_VALUE,
+        RAW_MM_ITEM_KIND,
         current_run_id,
-        image_ref,
+        raw_mm_ref,
     )
 
     out: dict[str, Any] = {
@@ -423,44 +399,53 @@ def _build_qwen_vl_image_ref_features(mm_data: MultiModalData) -> dict[str, Any]
         "kwargs_data": {},
     }
 
-    image_items = mm_data.mm_items.get("image") or []
-    if image_items:
-        mm_hashes = list(mm_data.mm_hashes.get("image") or [])
-        placeholders = list(mm_data.mm_placeholders.get("image") or [])
-        if len(mm_hashes) != len(image_items) or len(placeholders) != len(image_items):
+    run_id = current_run_id()
+    for source_modality, items in mm_data.mm_items.items():
+        if not items:
+            continue
+        mm_hashes = list(mm_data.mm_hashes.get(source_modality) or [])
+        placeholders = list(mm_data.mm_placeholders.get(source_modality) or [])
+        if len(mm_hashes) != len(items) or len(placeholders) != len(items):
             raise ValueError(
-                "Qwen-VL mm sidecar length mismatch: "
-                f"items={len(image_items)} hashes={len(mm_hashes)} placeholders={len(placeholders)}"
+                "Multimodal sidecar length mismatch: "
+                f"modality={source_modality} items={len(items)} "
+                f"hashes={len(mm_hashes)} placeholders={len(placeholders)}"
             )
 
-        encoded: list[Any] = [None] * len(image_items)
-        run_id = current_run_id()
-        for idx, item in enumerate(image_items):
+        for idx, item in enumerate(items):
+            if item.get("kind") != RAW_MM_ITEM_KIND:
+                raise NotImplementedError(
+                    "Multimodal serialization requires raw descriptor envelopes; "
+                    f"got item keys {sorted(item)} for modality {source_modality!r}."
+                )
+            feature_modality = item.get("vllm_modality") or source_modality
+            if not isinstance(feature_modality, str) or not feature_modality:
+                raise ValueError("raw multimodal item has invalid vllm_modality")
+            out["mm_hashes"].setdefault(feature_modality, []).append(mm_hashes[idx])
+            out["mm_placeholders"].setdefault(feature_modality, []).append(
+                {"offset": placeholders[idx].offset, "length": placeholders[idx].length}
+            )
+            out["kwargs_data"].setdefault(feature_modality, []).append(None)
             if item.get(IMAGE_REF_PAYLOAD_KEY) != IMAGE_REF_PAYLOAD_VALUE:
                 continue
             raw_image_id = item.get("raw_image_id")
-            grid_thw = item.get("image_grid_thw")
-            fingerprint = item.get("image_layout_fingerprint")
+            family = item.get("family")
+            fingerprint = item.get("layout_fingerprint")
             if not isinstance(raw_image_id, str) or not raw_image_id:
-                raise ValueError("image-ref multimodal item is missing raw_image_id")
-            if grid_thw is None:
-                raise ValueError("image-ref multimodal item is missing image_grid_thw")
+                raise ValueError("raw multimodal item is missing raw_image_id")
+            if not isinstance(family, str) or not family:
+                raise ValueError("raw multimodal item is missing family")
             if not isinstance(fingerprint, str) or not fingerprint:
-                raise ValueError("image-ref multimodal item is missing image_layout_fingerprint")
-            encoded[idx] = image_ref(
+                raise ValueError("raw multimodal item is missing layout_fingerprint")
+            out["kwargs_data"][feature_modality][-1] = raw_mm_ref(
                 run_id=run_id,
+                family=family,
                 fingerprint=fingerprint,
-                modality="image",
+                modality=feature_modality,
                 mm_hash=mm_hashes[idx],
                 raw_image_id=raw_image_id,
-                grid_thw=grid_thw,
+                payload=item.get("payload") or {},
             )
-
-        out["kwargs_data"]["image"] = encoded
-        out["mm_hashes"]["image"] = mm_hashes
-        out["mm_placeholders"]["image"] = [
-            {"offset": p.offset, "length": p.length} for p in placeholders
-        ]
 
     if not any(item is not None for values in out["kwargs_data"].values() for item in values):
         out["kwargs_data"] = None

@@ -22,7 +22,9 @@ Generation prompt (thinking disabled):
 from __future__ import annotations
 
 import json
+import math
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from transformers.tokenization_utils import PreTrainedTokenizer
@@ -44,17 +46,25 @@ from renderers.base import (
 from renderers.configs import KimiK25RendererConfig
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
 from renderers.qwen3_vl import (
+    _image_content_hash,
+    _image_dimensions,
     _image_hash,
+    _image_source,
     _is_image_part,
     _is_video_part,
     _load_pil_image,
+    _raw_uri_and_id,
 )
+from renderers.mm_store import image_layout_fingerprint, raw_mm_item
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 _DEFAULT_SYSTEM_PROMPT = "You are Kimi, an AI assistant created by Moonshot AI."
+
+KIMI_K25_FAMILY = "kimi_k25"
+KIMI_K25_VLLM_MODALITY = "vision_chunk"
 
 # ---------------------------------------------------------------------------
 # TypeScript-style tool declaration
@@ -401,6 +411,218 @@ def _encode_tools_typescript(tools: list[ToolSpec]) -> str:
     return "# Tools\n\n## functions\nnamespace functions {\n" + functions_str + "\n}\n"
 
 
+@dataclass(frozen=True)
+class KimiImageLayoutConfig:
+    patch_size: int
+    merge_kernel_size: int
+    in_patch_limit: int
+    patch_limit_on_one_side: int
+    fixed_output_tokens: int | None
+    image_mean: tuple[float, ...]
+    image_std: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class KimiImageLayoutDescriptor:
+    mm_hash: str
+    grid_thws: list[list[int]]
+    num_media_tokens: int
+    fingerprint: str
+    raw_uri: str | None = None
+    raw_image_id: str | None = None
+
+
+def kimi_image_layout_config_for_renderer(renderer: Any) -> KimiImageLayoutConfig:
+    config = renderer.config
+    values = {
+        "patch_size": getattr(config, "image_patch_size", None),
+        "merge_kernel_size": getattr(config, "image_merge_kernel_size", None),
+        "in_patch_limit": getattr(config, "image_in_patch_limit", None),
+        "patch_limit_on_one_side": getattr(config, "image_patch_limit_on_one_side", None),
+        "fixed_output_tokens": getattr(config, "image_fixed_output_tokens", None),
+        "image_mean": getattr(config, "image_mean", None),
+        "image_std": getattr(config, "image_std", None),
+    }
+    missing = [
+        name
+        for name, value in values.items()
+        if value is None and name != "fixed_output_tokens"
+    ]
+    if missing:
+        raise RuntimeError(
+            "Kimi image layout must be declared on the renderer config; missing "
+            + ", ".join(missing)
+        )
+    return KimiImageLayoutConfig(
+        patch_size=int(values["patch_size"]),
+        merge_kernel_size=int(values["merge_kernel_size"]),
+        in_patch_limit=int(values["in_patch_limit"]),
+        patch_limit_on_one_side=int(values["patch_limit_on_one_side"]),
+        fixed_output_tokens=(
+            None if values["fixed_output_tokens"] is None else int(values["fixed_output_tokens"])
+        ),
+        image_mean=tuple(float(v) for v in values["image_mean"]),
+        image_std=tuple(float(v) for v in values["image_std"]),
+    )
+
+
+def _ceil_to_factor(value: int, factor: int) -> int:
+    return max(factor, math.ceil(value / factor) * factor)
+
+
+def _kimi_resize_config(width: int, height: int, layout: KimiImageLayoutConfig) -> tuple[int, int, int]:
+    """Kimi MoonViT/NavIT image resize layout without materializing pixels."""
+    if height <= 0 or width <= 0:
+        raise ValueError(f"image dimensions must be positive, got {height}x{width}")
+    patch_size = layout.patch_size
+    patch_limit_pixels = layout.patch_limit_on_one_side * patch_size
+    s1 = math.sqrt(
+        layout.in_patch_limit
+        / (
+            max(1.0, width // patch_size)
+            * max(1.0, height // patch_size)
+        )
+    )
+    s2 = patch_limit_pixels / width
+    s3 = patch_limit_pixels / height
+    scale = min(1.0, s1, s2, s3)
+    resized_w = min(max(1, int(width * scale)), patch_limit_pixels)
+    resized_h = min(max(1, int(height * scale)), patch_limit_pixels)
+
+    factor = layout.merge_kernel_size * patch_size
+    padded_w = _ceil_to_factor(resized_w, factor)
+    padded_h = _ceil_to_factor(resized_h, factor)
+    if layout.fixed_output_tokens is not None:
+        num_tokens = layout.fixed_output_tokens
+    else:
+        num_tokens = (padded_h // factor) * (padded_w // factor)
+    return padded_w, padded_h, int(num_tokens)
+
+
+def describe_kimi_image_layout(renderer: Any, part: dict[str, Any]) -> KimiImageLayoutDescriptor:
+    source = _image_source(part)
+    height, width = _image_dimensions(source)
+    layout = kimi_image_layout_config_for_renderer(renderer)
+    padded_w, padded_h, num_media_tokens = _kimi_resize_config(width, height, layout)
+    grid_thws = [[1, padded_h // layout.patch_size, padded_w // layout.patch_size]]
+    fingerprint = image_layout_fingerprint(
+        family=KIMI_K25_FAMILY,
+        patch_size=layout.patch_size,
+        merge_kernel_size=layout.merge_kernel_size,
+        in_patch_limit=layout.in_patch_limit,
+        patch_limit_on_one_side=layout.patch_limit_on_one_side,
+        fixed_output_tokens=layout.fixed_output_tokens,
+        image_mean=list(layout.image_mean),
+        image_std=list(layout.image_std),
+    )
+    raw_uri, raw_image_id = _raw_uri_and_id(source)
+    return KimiImageLayoutDescriptor(
+        mm_hash=_image_content_hash(source),
+        grid_thws=grid_thws,
+        num_media_tokens=num_media_tokens,
+        fingerprint=fingerprint,
+        raw_uri=raw_uri,
+        raw_image_id=raw_image_id,
+    )
+
+
+def kimi_image_item_for_render(renderer: Any, part: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
+    desc = describe_kimi_image_layout(renderer, part)
+    item = raw_mm_item(
+        modality="image",
+        family=KIMI_K25_FAMILY,
+        layout_fingerprint=desc.fingerprint,
+        payload={
+            "grid_thws": desc.grid_thws,
+            "num_media_tokens": desc.num_media_tokens,
+        },
+        raw_uri=desc.raw_uri,
+        raw_image_id=desc.raw_image_id,
+        vllm_modality=KIMI_K25_VLLM_MODALITY,
+    )
+    return 1, desc.mm_hash, item
+
+
+def _kimi_grid_from_item(item: dict[str, Any]) -> Any:
+    payload = item.get("payload")
+    if isinstance(payload, dict) and payload.get("grid_thws") is not None:
+        return payload["grid_thws"]
+    return item.get("grid_thws")
+
+
+def _kimi_grids_equal(a: Any, b: Any) -> bool:
+    if a is None or b is None:
+        return False
+    al = a.tolist() if hasattr(a, "tolist") else a
+    bl = b.tolist() if hasattr(b, "tolist") else b
+    return al == bl
+
+
+def materialize_kimi_image_refs(renderer: Any, mm_data: MultiModalData, messages: list[Message]) -> MultiModalData:
+    """Attach run-image refs to every Kimi image descriptor that can be found."""
+    from dataclasses import replace
+
+    image_items = mm_data.mm_items.get("image") or []
+    if not image_items:
+        return mm_data
+    hashes = mm_data.mm_hashes.get("image") or []
+    if len(hashes) != len(image_items):
+        raise ValueError(
+            "materialize_kimi_image_refs: mm_hashes/mm_items length mismatch "
+            f"({len(hashes)} vs {len(image_items)})"
+        )
+
+    missing = set(hashes)
+    resolved: dict[str, KimiImageLayoutDescriptor] = {}
+    for msg in messages or []:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not missing:
+                break
+            if not (isinstance(part, dict) and _is_image_part(part)):
+                continue
+            desc = describe_kimi_image_layout(renderer, part)
+            if desc.mm_hash in missing:
+                resolved[desc.mm_hash] = desc
+                missing.discard(desc.mm_hash)
+    if missing:
+        raise ValueError(
+            f"materialize_kimi_image_refs: {len(missing)} image hash(es) not found in messages"
+        )
+
+    new_image_items: list[dict[str, Any]] = []
+    for i, item in enumerate(image_items):
+        desc = resolved[hashes[i]]
+        if desc.raw_uri is None or desc.raw_image_id is None:
+            raise ValueError("materialize_kimi_image_refs requires file-backed image URLs")
+        item_grid = _kimi_grid_from_item(item)
+        if item_grid is not None and not _kimi_grids_equal(desc.grid_thws, item_grid):
+            raise ValueError(
+                "materialize_kimi_image_refs: reconstructed grid_thws "
+                f"{desc.grid_thws!r} != descriptor {item_grid!r}"
+            )
+        new_image_items.append(
+            raw_mm_item(
+                modality="image",
+                family=KIMI_K25_FAMILY,
+                layout_fingerprint=desc.fingerprint,
+                payload={
+                    "grid_thws": item_grid if item_grid is not None else desc.grid_thws,
+                    "num_media_tokens": desc.num_media_tokens,
+                },
+                raw_uri=desc.raw_uri,
+                raw_image_id=desc.raw_image_id,
+                vllm_modality=KIMI_K25_VLLM_MODALITY,
+            )
+        )
+
+    new_items = dict(mm_data.mm_items)
+    new_items["image"] = new_image_items
+    return replace(mm_data, mm_items=new_items)
+
+
 # ---------------------------------------------------------------------------
 # Kimi K2.5 response parsing (mirrors K2 format, same token structure)
 # ---------------------------------------------------------------------------
@@ -647,6 +869,11 @@ class KimiK25Renderer:
         internally from ``pixel_values``."""
         return {self._media_pad: 1}
 
+    def materialize_image_refs(
+        self, mm_data: MultiModalData, messages: list[Message]
+    ) -> MultiModalData:
+        return materialize_kimi_image_refs(self, mm_data, messages)
+
     def _get_processor(self):
         if self._processor is not None:
             return self._processor
@@ -815,7 +1042,7 @@ class KimiK25Renderer:
             ``<|media_content|>``, ``<|media_end|>``, the trailing
             ``\\n``) are template-injected scaffold.
             """
-            _, out, _num_patches, h = self._process_image(part)
+            _placeholder_len, h, mm_item = kimi_image_item_for_render(self, part)
             emit_special(
                 self._media_begin, msg_idx, is_sampled=is_sampled, is_content=False
             )
@@ -838,16 +1065,7 @@ class KimiK25Renderer:
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=1)
             )
-            # ``grid_thws`` (Kimi) is the per-image equivalent of Qwen-VL's
-            # ``image_grid_thw``. Ship under Kimi's native key so the
-            # orchestrator's generic ``torch.cat``-based packer routes it
-            # directly into the model's forward kwargs.
-            mm_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "grid_thws": out["grid_thws"],
-                }
-            )
+            mm_items.setdefault("image", []).append(mm_item)
 
         # ── Tool declaration prefix (comes first) ──
         # K2.5/K2.6's tokenizer auto-computes ``tools_ts_str`` and threads
@@ -1110,7 +1328,7 @@ class KimiK25Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            _, out, _num_patches, h = self._process_image(part)
+            _placeholder_len, h, mm_item = kimi_image_item_for_render(self, part)
             emit_special(self._media_begin, msg_idx)
             emit_text("image", msg_idx)
             emit_special(self._media_content, msg_idx)
@@ -1124,12 +1342,7 @@ class KimiK25Renderer:
             new_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=1)
             )
-            new_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "grid_thws": out["grid_thws"],
-                }
-            )
+            new_items.setdefault("image", []).append(mm_item)
 
         # Bridge handles user/system/tool only (reject_assistant_in_extension
         # blocks assistants), so no hist/suffix split needed.

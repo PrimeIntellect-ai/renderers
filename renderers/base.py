@@ -204,9 +204,9 @@ class MultiModalData:
     """Multimodal sidecar produced alongside the token stream.
 
     Renderer output is framework-agnostic: ``mm_items[modality][i]`` is a
-    plain descriptor dict (e.g. ``{"image_grid_thw": [[1, h, w]]}`` for
-    Qwen-VL images). Translation to engine-specific wire formats — vLLM image
-    refs, SGLang payloads, etc. — happens in the inference glue layer (see
+    plain raw descriptor envelope with a model-family key and an adapter-owned
+    payload. Translation to engine-specific wire formats — vLLM image refs,
+    SGLang payloads, etc. — happens in the inference glue layer (see
     ``renderers.client``).
     """
 

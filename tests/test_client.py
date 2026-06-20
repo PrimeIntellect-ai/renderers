@@ -169,7 +169,8 @@ def test_qwen3_vl_render_emits_image_descriptor_without_processor(tmp_path):
 
     item = rendered.multi_modal_data.mm_items["image"][0]
     assert "pixel_values" not in item
-    assert item["image_grid_thw"] == [[1, 16, 16]]
+    assert item["family"] == "qwen_vl"
+    assert item["payload"]["image_grid_thw"] == [[1, 16, 16]]
     assert item["raw_image_id"] == "image.png"
     assert item[IMAGE_REF_PAYLOAD_KEY] == IMAGE_REF_PAYLOAD_VALUE
     assert rendered.multi_modal_data.mm_placeholders["image"][0].length == 64
@@ -180,7 +181,7 @@ def test_generate_materialize_all_image_refs_rehydrates_descriptor_slots(tmp_pat
     from PIL import Image
 
     from renderers.base import MultiModalData, ParsedResponse, PlaceholderRange
-    from renderers.mm_store import split_image_ref
+    from renderers.mm_store import split_raw_mm_ref
     from renderers.qwen3_vl import Qwen3VLRenderer
 
     class _RetryRenderer(Qwen3VLRenderer):
@@ -226,14 +227,14 @@ def test_generate_materialize_all_image_refs_rehydrates_descriptor_slots(tmp_pat
         )
     )
 
-    ref = client.calls[0]["body"]["features"]["kwargs_data"]["image"][0]
-    run_id, _fingerprint, modality, parsed_hash, raw_image_id, grid = split_image_ref(ref)
-    assert (run_id, modality, parsed_hash, raw_image_id, grid) == (
+    ref_item = client.calls[0]["body"]["features"]["kwargs_data"]["image"][0]
+    ref = split_raw_mm_ref(ref_item)
+    assert ref.payload["image_grid_thw"] == [[1, 16, 16]]
+    assert (ref.run_id, ref.modality, ref.mm_hash, ref.raw_image_id) == (
         "retry",
         "image",
         mm_hash,
         "image.png",
-        [1, 16, 16],
     )
 
 
@@ -439,10 +440,9 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
         PlaceholderRange,
     )
     from renderers.mm_store import (
-        IMAGE_REF_PAYLOAD_KEY,
-        IMAGE_REF_PAYLOAD_VALUE,
         image_layout_fingerprint,
-        split_image_ref,
+        raw_mm_item,
+        split_raw_mm_ref,
     )
 
     mod_name, cls_name = renderer_class_path.split(":")
@@ -482,13 +482,20 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
         },
         mm_items={
             "image": [
-                {
-                    "image_grid_thw": [[1, 2, 2]],
-                    "raw_image_id": "image.png",
-                    "image_layout_fingerprint": fingerprint,
-                    IMAGE_REF_PAYLOAD_KEY: IMAGE_REF_PAYLOAD_VALUE,
-                },
-                {"image_grid_thw": [[1, 2, 2]]},
+                raw_mm_item(
+                    modality="image",
+                    family="qwen_vl",
+                    layout_fingerprint=fingerprint,
+                    payload={"image_grid_thw": [[1, 2, 2]]},
+                    raw_uri=(image_dir / "image.png").as_uri(),
+                    raw_image_id="image.png",
+                ),
+                raw_mm_item(
+                    modality="image",
+                    family="qwen_vl",
+                    layout_fingerprint=fingerprint,
+                    payload={"image_grid_thw": [[1, 2, 2]]},
+                ),
             ],
         },
     )
@@ -515,13 +522,15 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
     }
     items = features["kwargs_data"]["image"]
     assert items[1] is None
-    assert split_image_ref(items[0]) == (
+    ref = split_raw_mm_ref(items[0])
+    assert ref.payload == {"image_grid_thw": [[1, 2, 2]]}
+    assert (ref.run_id, ref.family, ref.fingerprint, ref.modality, ref.mm_hash, ref.raw_image_id) == (
         "rawtest",
+        "qwen_vl",
         fingerprint,
         "image",
         "a" * 32,
         "image.png",
-        [1, 2, 2],
     )
     assert "raw_image_id" not in result["multi_modal_data"].mm_items["image"][0]
 

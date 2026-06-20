@@ -1161,6 +1161,17 @@ TRUSTED_REVISIONS: dict[str, str] = {
 }
 
 
+# Tokenizer repos to use when a canonical model repo is gated but an
+# audited unrestricted mirror ships byte-identical tokenizer files and
+# chat_template. The returned tokenizer keeps the caller's original
+# ``name_or_path`` so exact-match renderer resolution still uses
+# ``MODEL_RENDERER_MAP``.
+TOKENIZER_SOURCE_OVERRIDES: dict[str, str] = {
+    "meta-llama/Llama-3.2-1B-Instruct": "unsloth/Llama-3.2-1B-Instruct",
+    "meta-llama/Llama-3.2-3B-Instruct": "unsloth/Llama-3.2-3B-Instruct",
+}
+
+
 # Models for which ``fastokens`` is known to diverge from vanilla
 # ``transformers.AutoTokenizer`` and therefore must NOT be patched.
 # Empirical audit ran each entry of ``MODEL_RENDERER_MAP`` through both
@@ -1182,6 +1193,42 @@ FASTOKENS_INCOMPATIBLE: frozenset[str] = frozenset(
 
 _FASTOKENS_PATCH_LOCK = threading.Lock()
 _FASTOKENS_ANNOUNCED = False
+
+
+def _tokenizer_source_for(model_name_or_path: str) -> str:
+    return TOKENIZER_SOURCE_OVERRIDES.get(model_name_or_path, model_name_or_path)
+
+
+def _tokenizer_load_kwargs(model_name_or_path: str) -> dict[str, Any]:
+    revision = TRUSTED_REVISIONS.get(model_name_or_path)
+    if revision is not None:
+        return {"trust_remote_code": True, "revision": revision}
+    return {"trust_remote_code": False}
+
+
+def _preserve_requested_tokenizer_name(
+    tokenizer,
+    *,
+    requested_name_or_path: str,
+    loaded_name_or_path: str,
+):
+    if requested_name_or_path == loaded_name_or_path:
+        return tokenizer
+
+    try:
+        tokenizer.name_or_path = requested_name_or_path
+    except Exception:
+        init_kwargs = getattr(tokenizer, "init_kwargs", None)
+        if isinstance(init_kwargs, dict):
+            init_kwargs["name_or_path"] = requested_name_or_path
+
+    if getattr(tokenizer, "name_or_path", "") != requested_name_or_path:
+        raise RuntimeError(
+            f"Loaded tokenizer for {requested_name_or_path!r} from "
+            f"{loaded_name_or_path!r}, but could not preserve the requested "
+            "name_or_path for renderer auto-resolution."
+        )
+    return tokenizer
 
 
 def _patched_load(model_name_or_path: str, **kwargs):
@@ -1321,29 +1368,41 @@ def load_tokenizer(
     validation for configs with nested ``rope_parameters``), we fall
     back to loading the repo's self-contained ``tokenizer.json``
     directly — see ``_load_tokenizer_via_auto``.
-    """
-    kwargs: dict[str, Any] = {}
-    revision = TRUSTED_REVISIONS.get(model_name_or_path)
-    if revision is not None:
-        kwargs = {"trust_remote_code": True, "revision": revision}
-    else:
-        kwargs = {"trust_remote_code": False}
 
-    if not use_fastokens or model_name_or_path in FASTOKENS_INCOMPATIBLE:
-        return _load_tokenizer_via_auto(model_name_or_path, **kwargs)
+    Canonical Meta Llama-3.2 Instruct repos are gated on HuggingFace. For
+    those exact IDs we load tokenizer files from the audited unrestricted
+    ``unsloth`` mirrors instead, then restore ``tokenizer.name_or_path`` to
+    the requested Meta ID so auto-resolution still selects ``Llama3Renderer``.
+    """
+    load_name_or_path = _tokenizer_source_for(model_name_or_path)
+    kwargs = _tokenizer_load_kwargs(load_name_or_path)
+
+    if not use_fastokens or load_name_or_path in FASTOKENS_INCOMPATIBLE:
+        tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
+        return _preserve_requested_tokenizer_name(
+            tok,
+            requested_name_or_path=model_name_or_path,
+            loaded_name_or_path=load_name_or_path,
+        )
 
     try:
-        return _patched_load(model_name_or_path, **kwargs)
+        tok = _patched_load(load_name_or_path, **kwargs)
     except Exception as exc:
         logger.info(
             "fastokens could not load %r (%s: %s); falling back to vanilla "
             "AutoTokenizer. Add this model to FASTOKENS_INCOMPATIBLE in "
             "renderers.base to suppress the retry.",
-            model_name_or_path,
+            load_name_or_path,
             type(exc).__name__,
             str(exc)[:160],
         )
-        return _load_tokenizer_via_auto(model_name_or_path, **kwargs)
+        tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
+
+    return _preserve_requested_tokenizer_name(
+        tok,
+        requested_name_or_path=model_name_or_path,
+        loaded_name_or_path=load_name_or_path,
+    )
 
 
 def _populate_registry():
@@ -1709,12 +1768,8 @@ def _get_offset_tokenizer(tokenizer):
         if cached is not None:
             return cached
 
-        kwargs: dict[str, Any] = {}
-        revision = TRUSTED_REVISIONS.get(name_or_path)
-        if revision is not None:
-            kwargs = {"trust_remote_code": True, "revision": revision}
-        else:
-            kwargs = {"trust_remote_code": False}
+        load_name_or_path = _tokenizer_source_for(name_or_path)
+        kwargs = _tokenizer_load_kwargs(load_name_or_path)
 
         def _has_offsets(tok) -> bool:
             if not getattr(tok, "is_fast", False):
@@ -1734,7 +1789,12 @@ def _get_offset_tokenizer(tokenizer):
         # off — serialized against pool patch/unpatch via ``_FASTOKENS_PATCH_LOCK``
         # so no concurrent window can swap the shim back in mid-load — then
         # restore the prior patch state. Never cache a non-offset tokenizer.
-        offset_tok = _load_tokenizer_via_auto(name_or_path, **kwargs)
+        offset_tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
+        offset_tok = _preserve_requested_tokenizer_name(
+            offset_tok,
+            requested_name_or_path=name_or_path,
+            loaded_name_or_path=load_name_or_path,
+        )
         if not _has_offsets(offset_tok):
             import fastokens
 
@@ -1744,7 +1804,12 @@ def _get_offset_tokenizer(tokenizer):
                     with contextlib.redirect_stdout(io.StringIO()):
                         fastokens.unpatch_transformers()
                 try:
-                    offset_tok = _load_tokenizer_via_auto(name_or_path, **kwargs)
+                    offset_tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
+                    offset_tok = _preserve_requested_tokenizer_name(
+                        offset_tok,
+                        requested_name_or_path=name_or_path,
+                        loaded_name_or_path=load_name_or_path,
+                    )
                 finally:
                     if was_patched:
                         with contextlib.redirect_stdout(io.StringIO()):

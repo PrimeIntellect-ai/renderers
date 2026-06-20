@@ -1,10 +1,10 @@
 """Llama-3 renderer coverage.
 
 Covers ``Llama3Renderer`` and the ``meta-llama/Llama-3.2-{1B,3B}-Instruct``
-entries in ``MODEL_RENDERER_MAP``. Tokenizers are loaded via the
-unrestricted ``unsloth/Llama-3.2-{1B,3B}-Instruct`` mirrors (verified
-byte-identical chat templates) so CI doesn't need an HF token with Meta
-license access.
+entries in ``MODEL_RENDERER_MAP``. ``load_tokenizer`` uses the
+unrestricted ``unsloth/Llama-3.2-{1B,3B}-Instruct`` mirrors underneath
+(verified byte-identical chat templates) so CI doesn't need an HF token
+with Meta license access.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ _MODEL_PAIRS = [
 @pytest.fixture(scope="module", params=_MODEL_PAIRS, ids=[m for m, _ in _MODEL_PAIRS])
 def llama_pair(request):
     canonical, mirror = request.param
-    tok = load_tokenizer(mirror)
+    tok = load_tokenizer(canonical)
     renderer = Llama3Renderer(tok, Llama3RendererConfig(date_string=_PINNED_DATE))
     return canonical, mirror, tok, renderer
 
@@ -56,6 +56,14 @@ def test_create_renderer_via_explicit_config(llama_pair):
     _, _, tok, _ = llama_pair
     r = create_renderer(tok, Llama3RendererConfig())
     assert isinstance(r, Llama3Renderer)
+
+
+def test_create_renderer_auto_resolves_after_mirror_load(llama_pair):
+    """``load_tokenizer(canonical_meta_id)`` loads from the unrestricted
+    mirror but preserves the canonical name needed for auto-resolution."""
+    canonical, _, tok, _ = llama_pair
+    assert tok.name_or_path == canonical
+    assert isinstance(create_renderer(tok), Llama3Renderer)
 
 
 # ---------------------------------------------------------------------------

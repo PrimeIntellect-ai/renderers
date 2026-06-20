@@ -95,7 +95,6 @@ For RL the trainer must see the exact token ids the sampler saw. The standard al
 - **Boolean round-trip.** Engine emits `false`; client parses to Python `bool(False)`; `apply_chat_template` re-renders via `str(False)` → `"False"`. Capital F. Reproducible on Qwen3.5-35B-A3B + mini-swe-agent-plus at ~50% break rate per rollout.
 - **BPE retokenization drift.** The same substring tokenizes differently depending on neighbouring bytes. `json` + `p` + `enderer` (3 tokens) vs `jsonp` + `enderer` (2 tokens) when whitespace shifts by one character. Every subsequent token is shifted from there on.
 - **Tool-call XML drift.** The engine emits a no-arg call with a stylistic empty `</parameter>`; the Jinja re-render of the reconstructed dict drops it. Extension property broken at every such call.
-- **Thinking stripped from non-latest assistants.** Some templates strip `<think>…</think>` blocks from prior assistant turns when re-rendering. The recorded stream has the thinking; the next prompt does not.
 - **Max-seq-len truncation zeroing the anchor.** Client-side `max_seq_len` enforcement zeros `completion_ids` when `prompt_len > max_seq_len`. The bridge anchor is empty, falling back to full re-render — triggering every mode above.
 - **Scaffold-level history rewriting.** Some agent scaffolds (e.g. opencode's `experimental_repairToolCall`) rewrite tool calls before sending them back as history. The next turn's prompt contains a tool call the model never emitted. *A renderer cannot fix this — the drift happens before rendering.*
 
@@ -148,7 +147,7 @@ One shared behaviour flag lives on every variant via `_BaseRendererConfig`: `thi
 - `thinking_retention="tool_cycle"` — additionally keep reasoning on assistants in the in-flight tool cycle (post-last-user A-T-…-A block when it contains a tool response). A new user turn closes the block and drops its thinking.
 - `thinking_retention="all"` — additionally keep every past assistant's `reasoning_content`, even when the chat template would drop it.
 
-It OR-composes with template-level toggles (e.g. GLM-5 `clear_thinking`, Nemotron-3 `truncate_history_thinking`): whichever side says "keep" wins. `thinking_retention` can only ever *extend* retention — never override a template kwarg into a "drop" decision. The canonical use case is **compaction**: injecting a `user` turn like *"summarize the work so far"* puts every prior assistant in a past cycle, and `thinking_retention="all"` keeps reasoning visible end-to-end.
+`thinking_retention` is honoured end-to-end — both `render()` and `bridge_to_next_turn` consult it. So a multi-turn rollout reproduces the chat template's history handling **faithfully by default**: when a new user turn arrives, a past block's reasoning is dropped exactly as `apply_chat_template` would, and the bridge declines that boundary (letting the caller re-render) rather than carrying the stale `<think>` forward. The override can only ever *extend* retention above the template floor — it never forces a drop the template would keep. GLM-5 `clear_thinking` / Nemotron-3 `truncate_history_thinking` are byte-equivalent template kwargs (`False` ≡ `"all"`); setting one of them *and* a contradictory `thinking_retention` raises at config-load rather than silently resolving. The canonical override use case is **compaction**: injecting a `user` turn like *"summarize the work so far"* puts every prior assistant in a past cycle, and `thinking_retention="all"` keeps reasoning visible end-to-end.
 
 ## `DefaultRenderer`
 
@@ -157,7 +156,7 @@ Fallback for unsupported models. Wraps `apply_chat_template` and accepts `tool_p
 ## Roadmap
 
 - **VLM support.** `ContentPart` is text-only today; `Qwen3VLRenderer` ships only because Qwen3-VL's text-only chat template differs from Qwen3's. Plan: add `ImagePart` / `VideoPart`, multimodal bridges, validate against a Qwen3-VL RL run.
-- **Patched chat templates.** Some shipped templates re-tokenize history, normalize JSON, or auto-strip thinking — each breaks the extension property. Plan: a `use_patched` opt-in per renderer that renders the same surface form while avoiding known-bad patterns.
+- **Patched chat templates.** Some shipped templates re-tokenize history or normalize JSON in ways that break token identity. Plan: a `use_patched` opt-in per renderer that renders the same surface form while avoiding known-bad patterns. (Auto-stripping thinking from past turns is *not* one of these — that's intended template behaviour the renderer reproduces; use `thinking_retention` to override it.)
 
 ## Testing
 

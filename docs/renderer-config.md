@@ -81,10 +81,13 @@ an ascending scale whose floor is the chat template's own decision:
   - `"all"` — additionally re-emit `reasoning_content` on every past
     assistant turn, even when the chat template would drop it.
 
-The levels are nested: `"all"` ⊇ `"tool_cycle"` ⊇ `"template"`. They
-OR-compose with template-level toggles — GLM-5's `clear_thinking` and
-Nemotron-3's `truncate_history_thinking` already gate past thinking, and
-`thinking_retention` adds to that:
+The levels are nested: `"all"` ⊇ `"tool_cycle"` ⊇ `"template"`, and the
+level is honoured end-to-end — `render()` and `bridge_to_next_turn` both
+consult it, so multi-turn rollouts reproduce the template's history handling
+faithfully by default. GLM-5's `clear_thinking` and Nemotron-3's
+`truncate_history_thinking` are byte-equivalent template kwargs (`False` ≡
+`"all"`) gating the same past thinking; `thinking_retention` composes with
+them as:
 
 | `clear_thinking` | `thinking_retention` | past thinking? |
 |------------------|----------------------|----------------|
@@ -94,7 +97,10 @@ Nemotron-3's `truncate_history_thinking` already gate past thinking, and
 | `False`          | `"all"`              | kept           |
 
 `thinking_retention` can only extend retention, never force a drop — the
-template is the floor. The canonical use case is **compaction**: injecting
+template is the floor. Because the kwarg and `thinking_retention` name the
+same thing, explicitly setting a keep-history kwarg to `False` *and* a
+non-`"all"` `thinking_retention` is contradictory and raises at config-load
+(set `thinking_retention="all"` instead). The canonical use case is **compaction**: injecting
 a `user` turn like *"summarize the work so far"* puts every prior assistant
 in a past cycle, and `thinking_retention="all"` keeps reasoning visible
 end-to-end.

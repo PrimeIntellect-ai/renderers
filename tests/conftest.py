@@ -47,11 +47,10 @@ RENDERER_MODELS = [
     # there's just no byte-output to parity-check against. Split-specific
     # parity (V3 bare prompt vs R1 <think>+history-strip) is covered in
     # tests/test_deepseek_r1.py.
-    # Llama-3 loads via the unrestricted unsloth mirror (byte-identical
-    # chat template) so CI needs no Meta-gated HF token. Pinned to the
-    # explicit "llama-3" config because the mirror name isn't in
-    # MODEL_RENDERER_MAP (so "auto" would fall back to DefaultRenderer).
-    ("unsloth/Llama-3.2-1B-Instruct", "llama-3"),
+    # Llama-3 uses the canonical Meta ID for renderer auto-resolution, while
+    # load_tokenizer fetches the tokenizer/chat_template from the unrestricted
+    # unsloth mirror so CI needs no Meta-gated HF token.
+    ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
     ("Qwen/Qwen2.5-0.5B-Instruct", "default"),
 ]
@@ -139,7 +138,7 @@ _LLAMA_HF_PARITY_TEST_FILES = {
 def _skip_llama_for_hf_parity_tests(request):
     callspec = getattr(request.node, "callspec", None)
     model_name = callspec.params.get("model_name") if callspec else None
-    if model_name != "unsloth/Llama-3.2-1B-Instruct":
+    if model_name != "meta-llama/Llama-3.2-1B-Instruct":
         return
     test_file = os.path.basename(str(request.node.fspath))
     if test_file in _LLAMA_HF_PARITY_TEST_FILES:

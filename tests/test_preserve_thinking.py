@@ -53,6 +53,8 @@ NO_OP_MODELS = {
     "poolside/Laguna-XS.2",
     # Llama-3 has no reasoning channel at all — preserve flags can't add
     # or drop anything, so they're pure no-ops.
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "meta-llama/Llama-3.2-3B-Instruct",
     "unsloth/Llama-3.2-1B-Instruct",
 }
 
@@ -324,6 +326,8 @@ NEVER_PRESERVES_MODELS = {
     "Qwen/Qwen3-VL-30B-A3B-Instruct",
     # Llama-3 ships no <think> rendering path, so reasoning_content never
     # surfaces in the output regardless of the preserve flags.
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "meta-llama/Llama-3.2-3B-Instruct",
     "unsloth/Llama-3.2-1B-Instruct",
 }
 

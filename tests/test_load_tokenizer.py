@@ -9,9 +9,11 @@ repo doesn't auto-propagate.
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from renderers.base import TRUSTED_REVISIONS, load_tokenizer
+from renderers import base
+from renderers.base import TOKENIZER_SOURCE_OVERRIDES, TRUSTED_REVISIONS, load_tokenizer
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +73,23 @@ def test_kimi_loads_with_pinned_revision(mock_from_pretrained):
 
 
 @patch("transformers.AutoTokenizer.from_pretrained")
+def test_meta_llama_loads_tokenizer_from_unsloth_mirror(mock_from_pretrained):
+    """Canonical Meta Llama repos are gated; load their tokenizer/chat
+    template from the audited unrestricted mirror while preserving the
+    canonical name for renderer auto-resolution."""
+    canonical = "meta-llama/Llama-3.2-1B-Instruct"
+    mirror = "unsloth/Llama-3.2-1B-Instruct"
+    mock_from_pretrained.return_value = SimpleNamespace(name_or_path=mirror)
+
+    tok = load_tokenizer(canonical, use_fastokens=False)
+
+    args, kwargs = mock_from_pretrained.call_args
+    assert args == (mirror,)
+    assert kwargs == {"trust_remote_code": False}
+    assert tok.name_or_path == canonical
+
+
+@patch("transformers.AutoTokenizer.from_pretrained")
 def test_unknown_path_falls_through_to_no_remote_code(mock_from_pretrained):
     """Unknown / fine-tuned model paths — including ``moonshotai/Kimi-K2*``
     look-alikes that aren't in the allow-list — must fall through to
@@ -90,6 +109,53 @@ def test_unknown_path_falls_through_to_no_remote_code(mock_from_pretrained):
         assert kwargs == {"trust_remote_code": False}, (
             f"{name}: unlisted path leaked trust_remote_code=True"
         )
+
+
+def test_tokenizer_source_overrides_are_exact_llama_mirrors():
+    """Mirror overrides are intentionally narrow: only verified
+    byte-identical Llama tokenizer/template mirrors should live here."""
+    assert TOKENIZER_SOURCE_OVERRIDES == {
+        "meta-llama/Llama-3.2-1B-Instruct": "unsloth/Llama-3.2-1B-Instruct",
+        "meta-llama/Llama-3.2-3B-Instruct": "unsloth/Llama-3.2-3B-Instruct",
+    }
+
+
+def test_offset_tokenizer_uses_unsloth_mirror_for_meta_llama(monkeypatch):
+    """Offset-tokenizer reloads must use the same unrestricted source
+    override, otherwise Llama rendering can hit the gated Meta repo after
+    the initial tokenizer load succeeds."""
+
+    class _NoOffsets:
+        name_or_path = "meta-llama/Llama-3.2-1B-Instruct"
+
+        def __call__(self, *args, **kwargs):
+            raise NotImplementedError("fastokens shim has no offsets")
+
+    class _OffsetTokenizer:
+        is_fast = True
+
+        def __init__(self, name_or_path: str):
+            self.name_or_path = name_or_path
+
+        def __call__(self, *args, **kwargs):
+            return {"offset_mapping": [(0, 1)]}
+
+    calls = []
+
+    def _fake_load(name_or_path, **kwargs):
+        calls.append((name_or_path, kwargs))
+        return _OffsetTokenizer(name_or_path)
+
+    base._offset_tokenizers.clear()
+    monkeypatch.setattr(base, "_load_tokenizer_via_auto", _fake_load)
+
+    try:
+        tok = base._get_offset_tokenizer(_NoOffsets())
+    finally:
+        base._offset_tokenizers.clear()
+
+    assert calls == [("unsloth/Llama-3.2-1B-Instruct", {"trust_remote_code": False})]
+    assert tok.name_or_path == "meta-llama/Llama-3.2-1B-Instruct"
 
 
 # ---------------------------------------------------------------------------

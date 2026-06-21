@@ -1,8 +1,8 @@
 """Coverage for the fastokens fast-path in ``renderers.base.load_tokenizer``.
 
-``load_tokenizer`` defaults to routing every supported model through
-``fastokens.patch_transformers()`` for ~10x faster encode. Models in
-``FASTOKENS_INCOMPATIBLE`` skip the patch (DeepSeek's Metaspace
+``load_tokenizer`` defaults to adapting every supported model's returned
+backend with fastokens for ~10x faster encode. Models in
+``FASTOKENS_INCOMPATIBLE`` skip adaptation (DeepSeek's Metaspace
 pretokenizer isn't supported). Callers can opt out per-call with
 ``use_fastokens=False``.
 
@@ -16,16 +16,18 @@ These tests pin the policy:
 3. With ``use_fastokens=False``, the resulting tokenizer is vanilla.
 4. For incompat models, the fast path is silently skipped and the
    tokenizer still loads + encodes correctly.
-5. The fastokens patch is removed immediately after the load so it
-   doesn't leak into the caller's process — subsequent
-   ``AutoTokenizer.from_pretrained`` calls outside ``load_tokenizer``
-   use vanilla.
+5. Fastokens adaptation is scoped to the returned tokenizer, so concurrent
+   and subsequent ``AutoTokenizer.from_pretrained`` calls stay vanilla.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
+import threading
+
 import pytest
-from transformers import AutoTokenizer
+from tokenizers import Tokenizer, models
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from renderers.base import (
     FASTOKENS_INCOMPATIBLE,
@@ -93,13 +95,16 @@ def test_fast_and_vanilla_encode_identically_on_compatible_model():
         " ".join([f"word_{i}" for i in range(50)]),
     ]
     for s in samples:
-        assert fast.encode(s, add_special_tokens=False) == vanilla.encode(
-            s, add_special_tokens=False
-        ), f"encode diverged on {s!r}"
+        fast_ids = fast.encode(s, add_special_tokens=False)
+        vanilla_ids = vanilla.encode(s, add_special_tokens=False)
+        assert fast_ids == vanilla_ids, f"encode diverged on {s!r}"
+        assert fast.decode(fast_ids) == vanilla.decode(vanilla_ids), (
+            f"decode diverged on {s!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
-# Denylist: incompat models silently skip the patch and still load.
+# Denylist: incompat models silently skip adaptation and still load.
 # ---------------------------------------------------------------------------
 
 
@@ -120,7 +125,7 @@ def test_incompat_model_loads_via_vanilla_backend(model):
             pytest.skip(f"{model}: repo unreachable in this env ({e})")
     tok = load_tokenizer(model)
     assert "Shim" not in _backend_class_name(tok), (
-        f"{model}: should NOT have been patched; got {_backend_class_name(tok)!r}"
+        f"{model}: should NOT have been adapted; got {_backend_class_name(tok)!r}"
     )
     # And it still encodes.
     ids = tok.encode("hello", add_special_tokens=False)
@@ -128,41 +133,70 @@ def test_incompat_model_loads_via_vanilla_backend(model):
 
 
 # ---------------------------------------------------------------------------
-# Patch must not leak: AutoTokenizer.from_pretrained calls OUTSIDE
-# load_tokenizer should still produce a vanilla tokenizer.
+# Adaptation must not leak: AutoTokenizer.from_pretrained calls OUTSIDE
+# load_tokenizer should always produce a vanilla tokenizer.
 # ---------------------------------------------------------------------------
 
 
-def test_patch_is_unloaded_after_call():
-    """``load_tokenizer`` brackets the fastokens patch. After it returns
-    a fastokens-shimmed tokenizer, a fresh ``AutoTokenizer.from_pretrained``
-    call must NOT pick up the patch — the user's process stays clean."""
+def test_fastokens_is_scoped_to_loaded_tokenizer():
+    """A fresh ``AutoTokenizer`` call stays vanilla after fast adaptation."""
     fast = load_tokenizer(_FAST_MODEL)
     assert "Shim" in _backend_class_name(fast), "preconditions: fast path active"
 
     # Now call AutoTokenizer.from_pretrained directly. It MUST be vanilla.
     direct = AutoTokenizer.from_pretrained(_FAST_MODEL, trust_remote_code=False)
     assert "Shim" not in _backend_class_name(direct), (
-        f"fastokens patch leaked into user-side AutoTokenizer call: "
+        f"fastokens leaked into user-side AutoTokenizer call: "
         f"got {_backend_class_name(direct)!r}"
     )
 
 
+def test_fastokens_load_does_not_patch_transformers_concurrently(monkeypatch, tmp_path):
+    """A slow renderer load must not expose fastokens to unrelated callers."""
+    import renderers.base as rb
+
+    backend = Tokenizer(models.BPE({"[UNK]": 0, "hello": 1}, [], unk_token="[UNK]"))
+    PreTrainedTokenizerFast(
+        tokenizer_object=backend, unk_token="[UNK]"
+    ).save_pretrained(tmp_path)
+
+    started = threading.Event()
+    release = threading.Event()
+    tokenizer = AutoTokenizer.from_pretrained(tmp_path)
+
+    def slow_load(*args, **kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+        return tokenizer
+
+    monkeypatch.setattr(rb, "_load_tokenizer_via_auto", slow_load)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        loaded = executor.submit(load_tokenizer, "test-model")
+        assert started.wait(timeout=5)
+        try:
+            direct = AutoTokenizer.from_pretrained(tmp_path)
+            assert "Shim" not in _backend_class_name(direct)
+        finally:
+            release.set()
+
+    assert "Shim" in _backend_class_name(loaded.result())
+
+
 # ---------------------------------------------------------------------------
-# Failure-mode fallback: if fastokens raises during the patched load,
+# Failure-mode fallback: if fastokens raises during per-tokenizer adaptation,
 # load_tokenizer falls back to vanilla without surfacing the error.
 # ---------------------------------------------------------------------------
 
 
-def test_fallback_on_fastokens_load_error(monkeypatch):
-    """Simulate fastokens raising during patched load — load_tokenizer
-    should fall back to vanilla and return a working tokenizer."""
+def test_fallback_on_fastokens_adaptation_error(monkeypatch):
+    """An adaptation error returns the already-loaded vanilla tokenizer."""
     import renderers.base as rb
 
     def _boom(*args, **kwargs):
         raise ValueError("simulated fastokens failure: unsupported pre-tokenizer")
 
-    monkeypatch.setattr(rb, "_patched_load", _boom)
+    monkeypatch.setattr(rb, "_adapt_tokenizer_with_fastokens", _boom)
 
     tok = load_tokenizer(_FAST_MODEL)  # default use_fastokens=True
     # The vanilla fallback ran — backend is not a fastokens shim.
@@ -172,18 +206,12 @@ def test_fallback_on_fastokens_load_error(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Print suppression: fastokens itself prints "[fastokens]
-# patch_transformers: ..." on every patch/unpatch call. Building a
-# RendererPool of size N would emit ~N lines (the pool factory calls
-# load_tokenizer once per slot). load_tokenizer swallows that stdout
-# chatter and emits a single INFO log on the first patch instead.
+# Fastokens adaptation emits one INFO log per process, not once per pool slot.
 # ---------------------------------------------------------------------------
 
 
 def test_no_fastokens_stdout_chatter(capsys, caplog):
-    """``load_tokenizer`` must not leak ``[fastokens]`` prints onto
-    stdout, and must emit exactly one INFO log per process announcing
-    the fast path (not once per call)."""
+    """Fast adaptation stays quiet and announces its path once per process."""
     import logging
 
     import renderers.base as rb

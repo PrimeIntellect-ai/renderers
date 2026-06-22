@@ -293,7 +293,7 @@ class GLM45Renderer:
             token_ids,
             stop_ids={self._endoftext, self._user, self._observation},
             think_id=self._think,
-            thinking_marker_ids=[self._think_end],
+            think_end_id=self._think_end,
             tool_call_id=self._tool_call_tok,
             tool_call_end_id=self._tool_call_end_tok,
             arg_key_id=self._arg_key,

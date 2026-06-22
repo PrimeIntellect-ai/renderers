@@ -510,7 +510,7 @@ class Nemotron3Renderer:
             token_ids,
             stop_ids=stop_ids,
             think_id=self._think,
-            thinking_marker_ids=[self._think_end],
+            think_end_id=self._think_end,
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
             tools=tools,

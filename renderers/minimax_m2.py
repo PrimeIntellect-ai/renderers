@@ -24,6 +24,7 @@ from renderers.base import (
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
+    reject_thinking_strip_in_extension,
     should_preserve_past_thinking,
     trim_to_turn_close,
 )
@@ -326,6 +327,20 @@ class MiniMaxM2Renderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+
+        # Faithfulness across a user-query boundary: the template drops a past
+        # block's thinking once a new user turn arrives (see
+        # reject_thinking_strip_in_extension). MiniMax always thinks (no
+        # enable-thinking toggle).
+        if reject_thinking_strip_in_extension(
+            previous_prompt_ids,
+            previous_completion_ids,
+            new_messages,
+            thinking_retention=self.config.thinking_retention,
+            thinking_marker_ids=[self._think_end],
+            enable_thinking=True,
         ):
             return None
 

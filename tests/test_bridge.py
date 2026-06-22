@@ -269,10 +269,9 @@ def test_bridge_declines_across_user_query_when_template_drops_thinking():
 
 
 # Renderers wired with the bridge faithfulness guard. Detection markers
-# vary: single ``</think>`` token (Qwen3, GLM, Nemotron), multi-token
+# vary: single ``</think>`` token (Qwen3, GLM, Nemotron, MiniMax), multi-token
 # ``</think>`` (Kimi-K2.5), or harmony analysis-channel header (gpt-oss).
-# minimax has no bridge; non-thinking models (llama, deepseek-v3) are out
-# of scope.
+# Non-thinking models (llama, deepseek-v3) are out of scope.
 _GUARDED_THINKING_MODELS = {
     "Qwen/Qwen3-8B",
     "Qwen/Qwen3.5-9B",
@@ -281,6 +280,7 @@ _GUARDED_THINKING_MODELS = {
     "zai-org/GLM-5.1",
     "THUDM/GLM-4.5-Air",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "MiniMaxAI/MiniMax-M2.5",
     "moonshotai/Kimi-K2.5",
     "openai/gpt-oss-20b",
 }

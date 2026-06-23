@@ -334,6 +334,83 @@ async def generate(
     }
 
 
+async def score_prompt_logprobs(
+    *,
+    client: AsyncOpenAI,
+    model: str,
+    token_ids: list[int],
+    extra_headers: dict[str, str] | None = None,
+) -> list[float]:
+    """Prefill-score ``token_ids`` under ``model``; return one logprob per input
+    token, aligned 1:1 — ``len(out) == len(token_ids)``, with ``out[0] == 0.0``
+    (the leading token has no preceding context to score against). Raises
+    ``ValueError`` if the engine returns anything other than exactly one entry
+    per token, rather than silently handing back a misaligned list.
+
+    Unlike :func:`generate`, this neither renders nor samples: the caller
+    already holds token ids, so no renderer is involved. It issues a single
+    ``max_tokens=1`` prefill to ``/inference/v1/generate`` with
+    ``prompt_logprobs=1`` and reads the engine's *top-level* ``prompt_logprobs``
+    (distinct from the per-completion ``logprobs`` :func:`generate` reads under
+    ``choices``). The body is parsed with this module's own
+    :func:`parse_generate_response`, so there is **no ``vllm`` import**: each
+    ``prompt_logprobs`` entry is a plain ``{token_id: {"logprob": float, ...}}``
+    dict, or ``null`` for the unscored leading token.
+
+    Owns the same wire as :func:`generate`: the absolute-URL base strip (the
+    endpoint is mounted at the server root, not under ``/v1``) and the
+    ``cast_to=httpx.Response`` escape hatch, so the OpenAI client's auth /
+    retries / timeouts still apply.
+    """
+    base = str(client.base_url).rstrip("/").removesuffix("/v1")
+    endpoint = f"{base}/inference/v1/generate"
+    body: dict[str, Any] = {
+        "model": model,
+        "token_ids": list(token_ids),
+        # max_tokens=1: the engine must run a forward pass to emit prompt
+        # logprobs; the single sampled token is discarded. prompt_logprobs=1
+        # requests the logprob of each prefilled position.
+        "sampling_params": {
+            "max_tokens": 1,
+            "prompt_logprobs": 1,
+            "temperature": 1.0,
+            "top_p": 1.0,
+        },
+    }
+    post_kwargs: dict[str, Any] = {"cast_to": httpx.Response, "body": body}
+    if extra_headers:
+        post_kwargs["options"] = cast(Any, {"headers": extra_headers})
+    raw_response = await client.post(endpoint, **post_kwargs)
+    data = parse_generate_response(raw_response.content)
+
+    # ``prompt_logprobs`` is top-level on the response (not under ``choices``,
+    # unlike completion ``logprobs``): one entry per prompt token, each a
+    # ``{token_id: {"logprob": float, ...}}`` dict, or ``None`` for the leading
+    # token (no preceding context). Tie the output length to ``token_ids`` and
+    # fail loud on any mismatch: a missing / short / long field means the engine
+    # didn't prefill-score as requested (e.g. ``prompt_logprobs`` not honored, or
+    # a truncated response), and silently returning a wrong-length list would
+    # corrupt the caller's per-token alignment (OPD/OPSD map these 1:1 onto
+    # training positions) instead of surfacing the problem.
+    prompt_logprobs = data.get("prompt_logprobs")
+    if prompt_logprobs is None or len(prompt_logprobs) != len(token_ids):
+        got = "null" if prompt_logprobs is None else len(prompt_logprobs)
+        raise ValueError(
+            f"/inference/v1/generate returned {got} prompt_logprobs for "
+            f"{len(token_ids)} token(s); expected exactly one per token. Check that "
+            f"the engine honors sampling_params.prompt_logprobs."
+        )
+    flat: list[float] = []
+    for entry in prompt_logprobs:
+        if not entry:  # None for the unscored leading token
+            flat.append(0.0)
+            continue
+        first = next(iter(entry.values()))
+        lp = first.get("logprob") if isinstance(first, dict) else None
+        flat.append(float(lp) if lp is not None else 0.0)
+    return flat
+
+
 def _build_mm_features(
     renderer: Renderer | RendererPool,
     mm_data: MultiModalData,

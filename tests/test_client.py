@@ -502,3 +502,114 @@ def test_generate_caches_max_prompt_len_lookup_failure():
     assert len(client.calls) == 1
     assert result["prompt_ids"] == list(range(10))
     assert _max_prompt_len_cache[("http://no-models:8000/v1", "test-model")] is None
+
+
+# ---------------------------------------------------------------------------
+# Prefill scoring (score_prompt_logprobs).
+# ---------------------------------------------------------------------------
+
+
+class _ScoreClient:
+    """Mocks AsyncOpenAI.post() for the prefill-scoring path: returns a response
+    whose *top-level* ``prompt_logprobs`` mirrors vLLM's shape (a list parallel
+    to the prompt tokens; the leading entry is ``null``, unscored)."""
+
+    def __init__(self, prompt_logprobs):
+        self.calls = []
+        self.base_url = "http://fake-host:8000/v1"
+        self._prompt_logprobs = prompt_logprobs
+
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        self.calls.append(
+            {"path": path, "cast_to": cast_to, "body": body, "options": options}
+        )
+        payload = {
+            "request_id": "score-test",
+            "choices": [{"index": 0, "token_ids": [0], "finish_reason": "length"}],
+            "prompt_logprobs": self._prompt_logprobs,
+        }
+        return httpx.Response(
+            200, content=json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        )
+
+
+def test_score_prompt_logprobs_builds_request_and_flattens():
+    from renderers.client import score_prompt_logprobs
+
+    client = _ScoreClient(
+        prompt_logprobs=[None, {"11": {"logprob": -0.7}}, {"12": {"logprob": -0.3}}]
+    )
+    out = asyncio.run(
+        score_prompt_logprobs(client=client, model="test-model", token_ids=[10, 11, 12])
+    )
+    assert len(client.calls) == 1
+    # Same absolute-URL escape hatch as generate (endpoint at the server root).
+    assert client.calls[0]["path"] == "http://fake-host:8000/inference/v1/generate"
+    assert client.calls[0]["cast_to"] is httpx.Response
+    # Prefill body: max_tokens=1 + prompt_logprobs=1, no completion logprobs /
+    # stop_token_ids / skip_special_tokens (those are generate's concern).
+    assert client.calls[0]["body"] == {
+        "model": "test-model",
+        "token_ids": [10, 11, 12],
+        "sampling_params": {
+            "max_tokens": 1,
+            "prompt_logprobs": 1,
+            "temperature": 1.0,
+            "top_p": 1.0,
+        },
+    }
+    # One logprob per input token, 0.0 in the unscored leading slot.
+    assert out == [0.0, -0.7, -0.3]
+    assert len(out) == 3 and out[0] == 0.0
+
+
+def test_score_prompt_logprobs_handles_null_within_length():
+    from renderers.client import score_prompt_logprobs
+
+    # A lone null leading entry (one per token) -> 0.0.
+    assert asyncio.run(
+        score_prompt_logprobs(
+            client=_ScoreClient(prompt_logprobs=[None]), model="m", token_ids=[1]
+        )
+    ) == [0.0]
+    # A scored entry whose logprob is explicitly null -> 0.0.
+    assert asyncio.run(
+        score_prompt_logprobs(
+            client=_ScoreClient(prompt_logprobs=[{"5": {"logprob": None}}]),
+            model="m",
+            token_ids=[5],
+        )
+    ) == [0.0]
+
+
+def test_score_prompt_logprobs_raises_on_length_mismatch():
+    from renderers.client import score_prompt_logprobs
+
+    token_ids = [1, 2]  # the engine must return exactly two entries
+    entry = {"9": {"logprob": -0.1}}
+    # Missing field (None), too short (1 of 2), and too long (3 of 2) all violate
+    # the one-per-token contract and must raise rather than return a misaligned list.
+    for bad in (None, [None], [None, entry, entry]):
+        with pytest.raises(ValueError, match="prompt_logprobs"):
+            asyncio.run(
+                score_prompt_logprobs(
+                    client=_ScoreClient(prompt_logprobs=bad),
+                    model="m",
+                    token_ids=token_ids,
+                )
+            )
+
+
+def test_score_prompt_logprobs_forwards_extra_headers():
+    from renderers.client import score_prompt_logprobs
+
+    client = _ScoreClient(prompt_logprobs=[None])
+    asyncio.run(
+        score_prompt_logprobs(
+            client=client,
+            model="m",
+            token_ids=[1],
+            extra_headers={"X-Session-ID": "abc"},
+        )
+    )
+    assert client.calls[0]["options"] == {"headers": {"X-Session-ID": "abc"}}

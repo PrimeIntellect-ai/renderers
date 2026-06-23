@@ -505,7 +505,7 @@ def test_generate_caches_max_prompt_len_lookup_failure():
 
 
 # ---------------------------------------------------------------------------
-# Prefill scoring (score_prompt_logprobs).
+# Prefill scoring (score).
 # ---------------------------------------------------------------------------
 
 
@@ -533,15 +533,13 @@ class _ScoreClient:
         )
 
 
-def test_score_prompt_logprobs_builds_request_and_flattens():
-    from renderers.client import score_prompt_logprobs
+def test_score_builds_request_and_flattens():
+    from renderers.client import score
 
     client = _ScoreClient(
         prompt_logprobs=[None, {"11": {"logprob": -0.7}}, {"12": {"logprob": -0.3}}]
     )
-    out = asyncio.run(
-        score_prompt_logprobs(client=client, model="test-model", token_ids=[10, 11, 12])
-    )
+    out = asyncio.run(score(client=client, model="test-model", token_ids=[10, 11, 12]))
     assert len(client.calls) == 1
     # Same absolute-URL escape hatch as generate (endpoint at the server root).
     assert client.calls[0]["path"] == "http://fake-host:8000/inference/v1/generate"
@@ -563,18 +561,16 @@ def test_score_prompt_logprobs_builds_request_and_flattens():
     assert len(out) == 3 and out[0] == 0.0
 
 
-def test_score_prompt_logprobs_handles_null_within_length():
-    from renderers.client import score_prompt_logprobs
+def test_score_handles_null_within_length():
+    from renderers.client import score
 
     # A lone null leading entry (one per token) -> 0.0.
     assert asyncio.run(
-        score_prompt_logprobs(
-            client=_ScoreClient(prompt_logprobs=[None]), model="m", token_ids=[1]
-        )
+        score(client=_ScoreClient(prompt_logprobs=[None]), model="m", token_ids=[1])
     ) == [0.0]
     # A scored entry whose logprob is explicitly null -> 0.0.
     assert asyncio.run(
-        score_prompt_logprobs(
+        score(
             client=_ScoreClient(prompt_logprobs=[{"5": {"logprob": None}}]),
             model="m",
             token_ids=[5],
@@ -582,8 +578,8 @@ def test_score_prompt_logprobs_handles_null_within_length():
     ) == [0.0]
 
 
-def test_score_prompt_logprobs_raises_on_length_mismatch():
-    from renderers.client import score_prompt_logprobs
+def test_score_raises_on_length_mismatch():
+    from renderers.client import score
 
     token_ids = [1, 2]  # the engine must return exactly two entries
     entry = {"9": {"logprob": -0.1}}
@@ -592,7 +588,7 @@ def test_score_prompt_logprobs_raises_on_length_mismatch():
     for bad in (None, [None], [None, entry, entry]):
         with pytest.raises(ValueError, match="prompt_logprobs"):
             asyncio.run(
-                score_prompt_logprobs(
+                score(
                     client=_ScoreClient(prompt_logprobs=bad),
                     model="m",
                     token_ids=token_ids,
@@ -600,12 +596,12 @@ def test_score_prompt_logprobs_raises_on_length_mismatch():
             )
 
 
-def test_score_prompt_logprobs_forwards_extra_headers():
-    from renderers.client import score_prompt_logprobs
+def test_score_forwards_extra_headers():
+    from renderers.client import score
 
     client = _ScoreClient(prompt_logprobs=[None])
     asyncio.run(
-        score_prompt_logprobs(
+        score(
             client=client,
             model="m",
             token_ids=[1],

@@ -334,7 +334,7 @@ async def generate(
     }
 
 
-async def score_prompt_logprobs(
+async def score(
     *,
     client: AsyncOpenAI,
     model: str,

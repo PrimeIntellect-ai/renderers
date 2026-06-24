@@ -34,15 +34,14 @@ class DeepSeekR1Renderer(DeepSeekV3Renderer):
     _implied_thinking_retention = "template"
     _GEN_THINK_PREFILL: str = "<think>\n"
 
-    def _prepare_assistant_content(
-        self, msg: Message, *, preserve_thinking: bool = False
-    ) -> str:
-        """Assistant content with R1's default history-stripping behaviour.
+    def _prepare_assistant_content(self, msg: Message) -> str:
+        """Assistant content with the reasoning trace stripped, mirroring the
+        R1 template's ``content.split('</think>')[-1]`` on historical turns.
 
         Structured ``thinking``/``text`` parts are reconstructed inline first
-        so the same ``</think>`` split applies. When ``preserve_thinking`` is
-        true, this renderer-level override preserves inline thinking or
-        reconstructs it from the separate ``reasoning_content`` field.
+        so the same ``</think>`` split applies. The separate
+        ``reasoning_content`` field is ignored — the R1 chat template never
+        reads it, and history reasoning is dropped regardless.
         """
         content = msg.get("content") or ""
         if isinstance(content, list):
@@ -55,15 +54,6 @@ class DeepSeekR1Renderer(DeepSeekV3Renderer):
                 elif p.get("type") == "text":
                     parts.append(p.get("text", ""))
             content = "".join(parts)
-        reasoning = msg.get("reasoning_content")
-        if preserve_thinking:
-            if "</think>" in content:
-                return content
-            if isinstance(reasoning, str) and reasoning:
-                if content:
-                    return f"<think>\n{reasoning.strip()}\n</think>\n\n{content}"
-                return f"<think>\n{reasoning.strip()}\n</think>"
-            return content
         if "</think>" in content:
             content = content.split("</think>")[-1]
         return content

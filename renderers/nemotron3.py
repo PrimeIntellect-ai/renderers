@@ -28,9 +28,7 @@ from renderers.base import (
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
-    should_preserve_past_thinking,
     should_rerender_for_thinking_retention,
-    thinking_retention_override,
     trim_to_turn_close,
 )
 from renderers.configs import Nemotron3RendererConfig, Nemotron3UltraRendererConfig
@@ -431,19 +429,10 @@ class Nemotron3Renderer:
 
             elif role == "assistant":
                 # Template: ``include_content = not (truncate_history_thinking
-                # and loop.index0 < last_user_idx)``. The renderer-internal
-                # ``thinking_retention`` override only ever *extends*
-                # retention, so OR it in (a preserved turn keeps its thinking
-                # even when the template default would drop it).
-                preserve_thinking = msg_orig_idx >= 0 and should_preserve_past_thinking(
-                    original_messages,
-                    msg_orig_idx,
-                    thinking_retention=thinking_retention_override(self.config),
-                )
+                # and loop.index0 < last_user_idx)``.
                 include_content = (
                     not self.config.truncate_history_thinking
                     or i >= last_user_idx_norm
-                    or preserve_thinking
                 )
                 self._render_assistant(
                     msg,

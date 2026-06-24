@@ -39,9 +39,7 @@ from renderers.base import (
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
-    should_preserve_past_thinking,
     should_rerender_for_thinking_retention,
-    thinking_retention_override,
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
@@ -892,16 +890,10 @@ class KimiK25Renderer:
             # Body
             if role == "assistant":
                 is_suffix = i > last_non_tc_assistant
-                preserve_thinking = should_preserve_past_thinking(
-                    messages,
-                    i,
-                    thinking_retention=thinking_retention_override(self.config),
-                )
                 self._render_assistant_body(
                     msg,
                     i,
                     is_suffix=is_suffix,
-                    preserve_thinking=preserve_thinking,
                     emit_special=emit_special,
                     emit_text=emit_text,
                 )
@@ -1323,7 +1315,6 @@ class KimiK25Renderer:
         msg_idx: int,
         *,
         is_suffix: bool,
-        preserve_thinking: bool = False,
         emit_special,
         emit_text,
     ) -> None:
@@ -1378,7 +1369,7 @@ class KimiK25Renderer:
         # ``render`` (also is_sampled=True; it's the model's stop
         # signal). On assistant tokens ``is_content == sampled_mask`` by
         # construction.
-        if is_suffix or (preserve_thinking and reasoning_content):
+        if is_suffix:
             emit_text(
                 f"<think>{reasoning_content}</think>",
                 msg_idx,

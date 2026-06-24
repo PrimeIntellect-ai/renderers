@@ -24,9 +24,7 @@ from renderers.base import (
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
-    should_preserve_past_thinking,
     should_rerender_for_thinking_retention,
-    thinking_retention_override,
 )
 from renderers.configs import GLM45RendererConfig
 from renderers.parsing import parse_glm
@@ -232,17 +230,11 @@ class GLM45Renderer:
                 emit_text_segments(user_segments, i, is_sampled=False)
 
             elif role == "assistant":
-                preserve_thinking = should_preserve_past_thinking(
-                    messages,
-                    i,
-                    thinking_retention=thinking_retention_override(self.config),
-                )
                 self._render_assistant(
                     msg,
                     i,
                     content,
                     last_ui,
-                    preserve_thinking=preserve_thinking,
                     emit_special=emit_special,
                     emit_text=emit_text,
                     emit_text_segments=emit_text_segments,
@@ -469,7 +461,6 @@ class GLM45Renderer:
         content,
         last_user_index,
         *,
-        preserve_thinking: bool = False,
         emit_special,
         emit_text,
         emit_text_segments,
@@ -507,7 +498,7 @@ class GLM45Renderer:
         emit_special(self._assistant, msg_idx, is_sampled=False, is_content=False)
         emit_text("\n", msg_idx, is_sampled=False, is_content=False)
 
-        if (msg_idx > last_user_index or preserve_thinking) and reasoning_content:
+        if msg_idx > last_user_index and reasoning_content:
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
             emit_text(
                 reasoning_content.strip(), msg_idx, is_sampled=True, is_content=True

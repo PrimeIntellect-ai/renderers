@@ -59,7 +59,6 @@ from renderers.base import (
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
-    should_preserve_past_thinking,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
@@ -609,13 +608,6 @@ class GptOssRenderer:
 
     def _should_emit_analysis(self, messages: list[Message], msg_idx: int) -> bool:
         """Whether to render ``reasoning_content`` as a harmony analysis message."""
-        requested = self.config.thinking_retention
-        if requested is not None:
-            return should_preserve_past_thinking(
-                messages,
-                msg_idx,
-                thinking_retention=requested,
-            )
         if not self.config.auto_drop_analysis:
             return True
 
@@ -703,8 +695,9 @@ class GptOssRenderer:
         its analysis block is dropped from context.
 
         ``preserve_thinking=True``: prepend an analysis-channel message
-        carrying ``reasoning_content`` so callers that want the trace in
-        history (e.g. tool-call-chain training) see it surface.
+        carrying ``reasoning_content``. The render path sets this from
+        harmony's own ``auto_drop_analysis`` behaviour, not from generic
+        ``thinking_retention``.
         """
         out: list[HarmonyMessage] = []
 

@@ -25,9 +25,7 @@ from renderers.base import (
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
-    should_preserve_past_thinking,
     should_rerender_for_thinking_retention,
-    thinking_retention_override,
     trim_to_turn_close,
 )
 from renderers.configs import DeepSeekV3RendererConfig
@@ -422,17 +420,14 @@ class DeepSeekV3Renderer:
     # Assistant rendering
     # ------------------------------------------------------------------
 
-    def _prepare_assistant_content(
-        self, msg: Message, *, preserve_thinking: bool = False
-    ) -> str:
+    def _prepare_assistant_content(self, msg: Message) -> str:
         """Assistant content as the V3 template would emit it: verbatim.
 
         V3 is non-reasoning — its template emits ``message['content']`` as-is
         and never reads ``reasoning_content``. A structured content list is
         flattened to its ``text`` parts. The R1 subclass overrides this to
-        strip or preserve ``<think>`` history.
+        strip ``</think>`` from history.
         """
-        _ = preserve_thinking
         content = msg.get("content") or ""
         if isinstance(content, list):
             content = "".join(
@@ -457,15 +452,7 @@ class DeepSeekV3Renderer:
         # without a new <｜Assistant｜> token in that case.
         prev_is_tool = msg_idx > 0 and messages[msg_idx - 1]["role"] == "tool"
 
-        preserve_thinking = should_preserve_past_thinking(
-            messages,
-            msg_idx,
-            thinking_retention=thinking_retention_override(self.config),
-        )
-        content = self._prepare_assistant_content(
-            msg,
-            preserve_thinking=preserve_thinking,
-        )
+        content = self._prepare_assistant_content(msg)
         tool_calls = msg.get("tool_calls") or []
 
         # ``<｜Assistant｜>`` is template-injected scaffolding — at

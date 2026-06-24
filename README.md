@@ -141,13 +141,13 @@ renderer = create_renderer(
 
 Discriminated union: every per-renderer config is a variant of `RendererConfig`, dispatched on the `name` field. Bogus combinations (e.g. `add_vision_id` under `name="qwen3"`) error at construction with a `pydantic.ValidationError`. Downstream pydantic configs (prime-rl orchestrator, verifiers `ClientConfig`) hold a single field typed as `RendererConfig` and inherit the same strict-per-variant validation.
 
-One shared behaviour flag lives on every variant via `_BaseRendererConfig`: `thinking_retention`, an optional renderer-level override. Leave it unset to derive history handling from the chat template and its renderer-exposed kwargs.
+One shared behaviour flag lives on every variant via `_BaseRendererConfig`: `thinking_retention`, an optional bridge-policy override. Leave it unset to derive bridge behaviour from the chat template and its renderer-exposed kwargs.
 
 - `thinking_retention=None` (default) — derive from the chat template / renderer kwargs.
-- `thinking_retention="tool_cycle"` — additionally keep reasoning on assistants in the in-flight tool cycle (post-last-user A-T-…-A block when it contains a tool response). A new user turn closes the block and drops its thinking.
-- `thinking_retention="all"` — additionally keep every past assistant's `reasoning_content`, even when the chat template would drop it.
+- `thinking_retention="tool_cycle"` — bridge within the in-flight tool cycle; a new user query falls back to a full re-render.
+- `thinking_retention="all"` — bridge across user-query boundaries when the bridge is otherwise structurally valid.
 
-`thinking_retention` is honoured end-to-end — both `render()` and `bridge_to_next_turn` consult the resolved policy. So a multi-turn rollout reproduces the chat template's history handling **faithfully by default**: when a new user turn arrives, a past block's reasoning is dropped exactly as `apply_chat_template` would, and the bridge declines that boundary (letting the caller re-render) rather than carrying the stale `<think>` forward. Explicit overrides can extend retention above the template floor. GLM-5 `clear_thinking` / Nemotron-3 `truncate_history_thinking` are byte-equivalent template kwargs (`False` ≡ `"all"`); setting one of them *and* a contradictory `thinking_retention` raises at config-load rather than silently resolving. The canonical override use case is **compaction**: injecting a `user` turn like *"summarize the work so far"* puts every prior assistant in a past cycle, and `thinking_retention="all"` keeps reasoning visible end-to-end.
+Generic `thinking_retention` does **not** change full `render()` output: a full re-render always follows the Python chat-template implementation. Only real template knobs can change full-render thinking behaviour. GLM-5 `clear_thinking` / Nemotron-3 `truncate_history_thinking` are byte-equivalent template kwargs (`False` ≡ bridge policy `"all"`); Qwen3.6 `preserve_thinking` is likewise exposed as its own template kwarg. Setting one of these and a contradictory `thinking_retention` raises at config-load rather than silently resolving.
 
 ## `DefaultRenderer`
 

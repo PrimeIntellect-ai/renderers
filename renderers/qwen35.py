@@ -30,9 +30,7 @@ from renderers.base import (
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
-    should_preserve_past_thinking,
     should_rerender_for_thinking_retention,
-    thinking_retention_override,
     trim_to_turn_close,
 )
 from renderers.configs import Qwen35RendererConfig
@@ -523,17 +521,11 @@ class Qwen35Renderer:
                     emit_text("\n", i, is_sampled=False, is_content=False)
 
             elif role == "assistant":
-                preserve_thinking = should_preserve_past_thinking(
-                    messages,
-                    i,
-                    thinking_retention=thinking_retention_override(self.config),
-                )
                 self._render_assistant(
                     msg,
                     i,
                     content,
                     last_qi,
-                    preserve_thinking=preserve_thinking,
                     emit_special=emit_special,
                     emit_text=emit_text,
                     emit_ids=emit_ids,
@@ -924,7 +916,6 @@ class Qwen35Renderer:
         content: str,
         last_query_index: int,
         *,
-        preserve_thinking: bool = False,
         emit_special,
         emit_text,
         emit_ids,
@@ -968,7 +959,6 @@ class Qwen35Renderer:
         emit_thinking = (
             self._should_render_thinking(msg_idx, last_query_index)
             or getattr(self.config, "preserve_thinking", False)
-            or (preserve_thinking and bool(reasoning_content))
         )
         if emit_thinking:
             # Include thinking block

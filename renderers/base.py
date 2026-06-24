@@ -1971,11 +1971,6 @@ def resolve_thinking_retention(
     return requested
 
 
-def thinking_retention_override(config: Any) -> ResolvedThinkingRetention:
-    """Return the explicit full-render override, or ``template`` if unset."""
-    return getattr(config, "thinking_retention", None) or "template"
-
-
 def should_rerender_for_thinking_retention(
     thinking_retention: ResolvedThinkingRetention,
     new_messages: list[Message],
@@ -1988,52 +1983,6 @@ def should_rerender_for_thinking_retention(
     if thinking_retention == "all":
         return False
     return introduces_user_query(new_messages, is_user_query=is_user_query)
-
-
-def should_preserve_past_thinking(
-    messages: list[Message],
-    msg_idx: int,
-    *,
-    thinking_retention: ResolvedThinkingRetention,
-) -> bool:
-    """Should ``messages[msg_idx]``'s ``reasoning_content`` be emitted as
-    thinking even when the chat template would drop it?
-
-    Returns ``True`` only as an override above the template default. Each
-    renderer ORs this into its own "render thinking?" condition; a result
-    of ``False`` means "follow the template" (drop or keep as the template
-    decides), not "force-drop". ``thinking_retention`` selects how far the
-    override reaches:
-
-    - ``"template"`` — no override; defer to the template (always ``False``).
-    - ``"all"`` — every past-asst's thinking is kept (always ``True``).
-    - ``"tool_cycle"`` — keeps thinking only inside the *current* tool
-      cycle: the contiguous A-T-...-A block after the most recent ``user``
-      message, and only if that block contains at least one ``tool``
-      response. As soon as a new ``user`` turn arrives, the previous block
-      becomes "older" and its thinking is dropped (template default),
-      matching how most chat templates handle multi-turn contexts. Use
-      ``"all"`` if you need thinking on older blocks to survive the
-      user-turn boundary too.
-    """
-    if thinking_retention == "all":
-        return True
-    if thinking_retention == "template":
-        return False
-    # thinking_retention == "tool_cycle"
-    # Most recent user message (or -1 if none).
-    last_user = -1
-    for j in range(len(messages) - 1, -1, -1):
-        if messages[j].get("role") == "user":
-            last_user = j
-            break
-    if msg_idx <= last_user:
-        return False
-    # The current segment must contain a tool response for it to count
-    # as an in-flight tool cycle.
-    return any(
-        messages[j].get("role") == "tool" for j in range(last_user + 1, len(messages))
-    )
 
 
 def build_trajectory_step(

@@ -22,9 +22,7 @@ from renderers.base import (
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
-    should_preserve_past_thinking,
     should_rerender_for_thinking_retention,
-    thinking_retention_override,
     trim_to_turn_close,
 )
 from renderers.configs import Qwen3RendererConfig
@@ -216,18 +214,12 @@ class Qwen3Renderer:
                 emit_text("\n", i, is_sampled=False, is_content=False)
 
             elif role == "assistant":
-                preserve_thinking = should_preserve_past_thinking(
-                    messages,
-                    i,
-                    thinking_retention=thinking_retention_override(self.config),
-                )
                 self._render_assistant(
                     msg,
                     i,
                     content,
                     last_qi,
                     i == num_messages - 1,
-                    preserve_thinking=preserve_thinking,
                     emit_special=emit_special,
                     emit_text=emit_text,
                     emit_text_segments=emit_text_segments,
@@ -434,7 +426,6 @@ class Qwen3Renderer:
         last_query_index,
         is_last,
         *,
-        preserve_thinking: bool = False,
         emit_special,
         emit_text,
         emit_text_segments,
@@ -474,8 +465,7 @@ class Qwen3Renderer:
         emit_in_template_window = msg_idx > last_query_index and (
             is_last or reasoning_content
         )
-        emit_via_override = preserve_thinking and bool(reasoning_content)
-        if emit_in_template_window or emit_via_override:
+        if emit_in_template_window:
             body = (
                 "<think>\n"
                 + reasoning_content.strip("\n")

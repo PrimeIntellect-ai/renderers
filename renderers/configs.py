@@ -6,7 +6,7 @@ Each renderer accepts its own typed config; bad combinations (e.g.
 pydantic ``ValidationError`` rather than at runtime via an allowlist
 check. The shared ``thinking_retention`` flag is optional: ``None`` means
 "derive bridge policy from this renderer's chat-template knobs"; an
-explicit value is a renderer-level override.
+explicit value is a bridge-policy override.
 
 ``AutoRendererConfig`` is a placeholder variant: ``create_renderer``
 resolves it via ``MODEL_RENDERER_MAP`` and constructs the matching
@@ -81,8 +81,9 @@ class BaseRendererConfig(BaseConfig):
       a new user query arrives.
     - ``"all"`` — allow bridges across user-query boundaries.
 
-    Explicit values also re-emit dropped ``reasoning_content`` during full
-    renders via ``renderers.base.should_preserve_past_thinking``."""
+    This does not change full ``render()`` output; full renders stay faithful
+    to the Python chat-template implementation and its explicit template
+    kwargs."""
 
     # Fields that are renderer-internal — not forwarded to (or mirrored
     # by) ``apply_chat_template``. Override in subclasses that hold
@@ -549,7 +550,7 @@ class DeepSeekR1RendererConfig(BaseRendererConfig):
     historical assistant turns. There is therefore no ``enable_thinking``
     knob (thinking is not optional). With ``thinking_retention=None`` the
     resolved bridge policy is ``"template"``; explicit ``"tool_cycle"`` /
-    ``"all"`` are renderer-level overrides. Applies to full
+    ``"all"`` are bridge-policy overrides. Applies to full
     ``deepseek-ai/DeepSeek-R1`` / ``-R1-0528``
     — NOT the R1-Distill-Qwen/Llama models, which use those base
     tokenizers and route to the Qwen3 / Llama-3 renderers.

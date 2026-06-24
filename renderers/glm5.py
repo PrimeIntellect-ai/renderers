@@ -25,9 +25,7 @@ from renderers.base import (
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
-    should_preserve_past_thinking,
     should_rerender_for_thinking_retention,
-    thinking_retention_override,
 )
 from renderers.configs import GLM5RendererConfig, GLM51RendererConfig
 from renderers.parsing import parse_glm
@@ -246,17 +244,11 @@ class GLM5Renderer:
                 emit_text(content, i, is_sampled=False, is_content=True)
 
             elif role == "assistant":
-                preserve_thinking = should_preserve_past_thinking(
-                    messages,
-                    i,
-                    thinking_retention=thinking_retention_override(self.config),
-                )
                 self._render_assistant(
                     msg,
                     i,
                     content,
                     last_ui,
-                    preserve_thinking=preserve_thinking,
                     emit_special=emit_special,
                     emit_text=emit_text,
                     emit_text_segments=emit_text_segments,
@@ -481,7 +473,6 @@ class GLM5Renderer:
         content,
         last_user_index,
         *,
-        preserve_thinking: bool = False,
         emit_special,
         emit_text,
         emit_text_segments,
@@ -511,16 +502,12 @@ class GLM5Renderer:
 
         # Chat-template default: keep ``<think>`` only on the in-flight cycle
         # (post-last-user). Past-cycle assistants drop their reasoning.
-        # ``preserve_thinking`` is the override output of
-        # ``should_preserve_past_thinking`` — it adds historical assistants
-        # back when the renderer was constructed with
-        # ``thinking_retention="all"``. ``clear_thinking=False`` mirrors
+        # ``clear_thinking=False`` mirrors
         # the template's per-call ``clear_thinking is defined and not
         # clear_thinking`` gate: a chat_template_kwarg surface for the
         # same behaviour, gated explicitly by the caller per render.
         include_thinking = (
             msg_idx > last_user_index
-            or preserve_thinking
             or not self.config.clear_thinking
         ) and reasoning_content
 

@@ -581,6 +581,14 @@ def test_trim_dynamo_routed_experts():
     _trim_dynamo_routed_experts(resp4, {"routed_experts_prompt_start": 3})
     assert resp4 == {"nvext": {"engine_data": {}}}
 
+    # unknown dtype -> RuntimeError (hard fail, not silent itemsize=1 fallback)
+    resp_bad = {"nvext": {"engine_data": {"routed_experts": {
+        "data": base64.b64encode(bytes([0, 1, 2, 3, 4])).decode(),
+        "shape": [5, 1, 1], "start": 0, "dtype": "float16",
+    }}}}
+    with pytest.raises(RuntimeError, match="unknown routed_experts dtype"):
+        _trim_dynamo_routed_experts(resp_bad, {"routed_experts_prompt_start": 3})
+
 
 def test_dynamo_parse_present_empty_engine_logprobs_raises_for_nonempty_completion():
     """A present-but-empty engine_data.completion_logprobs is authoritative for

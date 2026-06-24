@@ -261,14 +261,10 @@ class _VllmGenerateTransport(_Transport):
 class _DynamoChatTransport(_Transport):
     """NVIDIA Dynamo: ``POST /v1/chat/completions`` with the nvext envelope.
 
-    Dynamo has no /inference/v1/generate route. ``nvext.token_data`` carries
-    the pre-tokenized prompt (Dynamo skips tokenization when present) and
-    ``extra_fields=["engine_data", "routed_experts"]`` opts into the
-    completion-IDs/logprobs channel and the MoE routed_experts channel. Mirrors
-    ``verifiers.clients.openai_chat_completions_token_client._post_dynamo``
-    so the wire payload is identical via either client. routed_experts is read
-    from ``nvext.routed_experts`` (or ``nvext.engine_data.routed_experts``) and
-    surfaced as the prime-rl ``{data, shape, start, dtype}`` contract.
+    ``nvext.token_data`` carries the pre-tokenized prompt; ``extra_fields=
+    ["engine_data"]`` opts into the completion-IDs/logprobs/routed_experts
+    channel. routed_experts is normalized to the ``{data, shape, start,
+    dtype}`` contract.
     """
 
     async def post(
@@ -297,13 +293,9 @@ class _DynamoChatTransport(_Transport):
             post_kwargs["options"] = cast(Any, {"headers": extra_headers})
         # Engine 4xx propagate raw (matches the vLLM path).
         raw_response = await client.post("/chat/completions", **post_kwargs)
-        # Keep the (potentially large) routed_experts base64 blob as a zero-copy
-        # memoryview instead of decoding it through json.loads — a synchronous
-        # full parse of the blob stalls the event loop. Mirrors vllm.
+        # Keep routed_experts blob as zero-copy memoryview (avoids event-loop json.loads).
         resp = _parse_dynamo_response(raw_response.content)
-        # Back-compat trim: when the worker did NOT trim engine-side (start=0; it
-        # trims when it honors nvext.routed_experts_prompt_start), drop the leading
-        # prompt rows here so row 0 == start. No-op once the worker stamps start>0.
+        # Back-compat trim: no-op when worker already trimmed engine-side (start>0).
         _trim_dynamo_routed_experts(resp, sp)
         return resp
 
@@ -315,26 +307,18 @@ class _DynamoChatTransport(_Transport):
         cache_salt: str | None,
         priority: int | None,
     ) -> dict[str, Any]:
-        # cache_salt / priority may arrive as dedicated kwargs or inside
-        # sampling_params (the kwargs win). On Dynamo both belong in nvext, so
-        # they're routed there and never forwarded as top-level chat fields —
-        # keeping a shared sampling_params dict consistent with vllm.
+        # kwargs win over sampling_params; both route into nvext on Dynamo.
         if cache_salt is None:
             cache_salt = sp.get("cache_salt")
         if priority is None:
             priority = sp.get("priority")
 
-        # Merge caller-supplied nvext rather than overwriting it, then layer on
-        # the required fields: token_data (authoritative renderer tokens) and a
-        # cumulative extra_fields union with "engine_data". The cache_salt /
-        # priority values win over any caller nvext values.
+        # Merge caller nvext; layer required fields on top.
         nvext: dict[str, Any] = dict(sp.get("nvext") or {})
         nvext["token_data"] = list(prompt_ids)
         extra_fields = list(nvext.get("extra_fields") or [])
-        # Only request "engine_data": the worker nests routed_experts inside it
-        # (engine_data.routed_experts), so also requesting the dedicated
-        # "routed_experts" field would duplicate the (large) base64 blob on the
-        # wire — once under engine_data and once promoted at the top level.
+        # Only "engine_data": routed_experts nests inside it, so requesting
+        # the dedicated field separately would duplicate the blob on the wire.
         if "engine_data" not in extra_fields:
             extra_fields.append("engine_data")
         nvext["extra_fields"] = extra_fields
@@ -344,10 +328,7 @@ class _DynamoChatTransport(_Transport):
             agent_hints = dict(nvext.get("agent_hints") or {})
             agent_hints["priority"] = priority
             nvext["agent_hints"] = agent_hints
-        # routed_experts_prompt_start rides nvext (Dynamo rejects unknown
-        # top-level chat fields). The worker applies it to SamplingParams so vLLM
-        # trims the leading prompt rows engine-side and stamps the payload's
-        # `start` — the client-side trim then no-ops (see _trim_dynamo_routed_experts).
+        # Rides nvext; Dynamo rejects unknown top-level chat fields.
         reps = sp.get("routed_experts_prompt_start")
         if reps is not None:
             nvext["routed_experts_prompt_start"] = reps
@@ -433,11 +414,7 @@ class _DynamoChatTransport(_Transport):
                 f"completion token count ({len(completion_ids)})."
             )
 
-        # routed_experts: read the dedicated nvext.routed_experts field if a
-        # caller opted into it, else the engine_data passthrough where the
-        # worker nests it (engine_data.routed_experts). Normalize to the
-        # {data, shape, start, dtype} contract so a malformed/legacy payload
-        # fails here with context instead of deep in trajectory processing.
+        # Prefer nvext.routed_experts, fall back to engine_data.routed_experts.
         routed_experts = nvext.get("routed_experts")
         if not isinstance(routed_experts, Mapping):
             routed_experts = engine.get("routed_experts")
@@ -536,7 +513,13 @@ def _trim_dynamo_routed_experts(resp: Any, sp: dict[str, Any]) -> None:
     if offset == 0:
         return
 
-    itemsize = _ROUTED_EXPERTS_ITEMSIZE.get(routed.get("dtype", "uint8"), 1)
+    dtype = routed.get("dtype", "uint8")
+    itemsize = _ROUTED_EXPERTS_ITEMSIZE.get(dtype)
+    if itemsize is None:
+        raise RuntimeError(
+            f"unknown routed_experts dtype {dtype!r}; "
+            f"expected one of {sorted(_ROUTED_EXPERTS_ITEMSIZE)}"
+        )
     row_size = int(shape[1]) * int(shape[2]) * itemsize
     trimmed = base64.b64decode(data)[offset * row_size :]
     routed["data"] = base64.b64encode(trimmed).decode("ascii")

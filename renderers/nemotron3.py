@@ -27,8 +27,10 @@ from renderers.base import (
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
-    reject_thinking_strip_in_extension,
+    resolve_thinking_retention,
     should_preserve_past_thinking,
+    should_rerender_for_thinking_retention,
+    thinking_retention_override,
     trim_to_turn_close,
 )
 from renderers.configs import Nemotron3RendererConfig, Nemotron3UltraRendererConfig
@@ -118,6 +120,11 @@ class Nemotron3Renderer:
         self._tokenizer = tokenizer
         cfg = config or type(self)._config_cls()
         self.config = cfg
+        self.effective_thinking_retention = resolve_thinking_retention(
+            cfg,
+            "all" if not cfg.truncate_history_thinking else "tool_cycle",
+            explicit_template_fields=("truncate_history_thinking",),
+        )
 
         # Resolve the per-variant reasoning-effort hint appended to the last
         # user message. Ultra honours ``medium_effort``; Super honours
@@ -431,7 +438,7 @@ class Nemotron3Renderer:
                 preserve_thinking = msg_orig_idx >= 0 and should_preserve_past_thinking(
                     original_messages,
                     msg_orig_idx,
-                    thinking_retention=self.config.thinking_retention,
+                    thinking_retention=thinking_retention_override(self.config),
                 )
                 include_content = (
                     not self.config.truncate_history_thinking
@@ -542,25 +549,9 @@ class Nemotron3Renderer:
         ):
             return None
 
-        # Faithfulness across a user-query boundary: the template drops a past
-        # block's thinking once a new user turn arrives (see
-        # reject_thinking_strip_in_extension). ``truncate_history_thinking=
-        # False`` keeps all past thinking (≡ thinking_retention="all"), so the
-        # bridge stays faithful carrying it verbatim — fold it into the
-        # effective level so we don't over-decline and re-tokenize sampled
-        # thinking.
-        retention = (
-            "all"
-            if not self.config.truncate_history_thinking
-            else self.config.thinking_retention
-        )
-        if reject_thinking_strip_in_extension(
-            previous_prompt_ids,
-            previous_completion_ids,
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
             new_messages,
-            thinking_retention=retention,
-            thinking_marker_ids=[self._think_end],
-            enable_thinking=self.config.enable_thinking,
         ):
             return None
 

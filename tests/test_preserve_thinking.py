@@ -8,7 +8,7 @@ non-default level builds a fresh renderer for that configuration via
 
 Two invariants per renderer:
 
-1. Default render (``thinking_retention="template"``) is byte-identical to
+1. Default render (``thinking_retention=None``) is byte-identical to
    the existing ``apply_chat_template`` parity baseline — covered
    exhaustively elsewhere.
 2. Raising the level never *removes* tokens compared to the default and,
@@ -24,7 +24,6 @@ default==override equality instead of strict growth.
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
 
 from renderers import create_renderer
 from renderers.base import MODEL_RENDERER_MAP, should_preserve_past_thinking
@@ -394,12 +393,12 @@ def test_default_renderer_raises_above_template():
     from renderers.base import load_tokenizer
 
     tok = load_tokenizer("Qwen/Qwen2.5-0.5B-Instruct")
-    # Default "template" → constructs cleanly.
+    # Default unset policy → constructs cleanly.
     create_renderer(tok, DefaultRendererConfig())
     # Any level above "template" → raises at construction.
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError):
         create_renderer(tok, DefaultRendererConfig(thinking_retention="all"))
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError):
         create_renderer(
             tok,
             DefaultRendererConfig(thinking_retention="tool_cycle"),
@@ -418,7 +417,8 @@ def test_create_renderer_records_flag_state(model_name, renderer_name, tokenizer
     from renderers.default import DefaultRenderer
 
     bare = _make(tokenizer, renderer_name)
-    assert bare.config.thinking_retention == "template"
+    assert bare.config.thinking_retention is None
+    assert bare.effective_thinking_retention in {"template", "tool_cycle", "all"}
 
     if not isinstance(bare, DefaultRenderer):
         # DefaultRenderer raises at construction above "template" —
@@ -452,14 +452,9 @@ def test_glm5_config_accepts_clear_thinking():
     GLM5Renderer(tok, GLM5RendererConfig(clear_thinking=False))
 
 
-def test_qwen36_config_rejects_unknown_field():
-    """``preserve_thinking`` on Qwen3.6 was a chat-template-kwarg
-    pass-through in an earlier revision. It is superseded by the
-    renderer-agnostic ``thinking_retention`` override and must not
-    appear on the typed config — its default semantics are now
-    inherited from Qwen3.5's render gate. ``extra="forbid"`` on the
-    pydantic model enforces this at construction."""
+def test_qwen36_config_accepts_preserve_thinking():
+    """``preserve_thinking`` is a Qwen3.6 chat-template kwarg and should be
+    exposed directly on the typed config."""
     from renderers import Qwen36RendererConfig
 
-    with pytest.raises(ValidationError, match="preserve_thinking"):
-        Qwen36RendererConfig(preserve_thinking=True)  # type: ignore[call-arg]
+    Qwen36RendererConfig(preserve_thinking=True)

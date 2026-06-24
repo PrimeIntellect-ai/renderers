@@ -214,17 +214,16 @@ def test_bridge_extension_includes_new_message_text(
 
 def test_bridge_declines_across_user_query_when_template_drops_thinking():
     """Qwen3's template drops a past block's thinking once a new user turn
-    arrives. The bridge carries prior tokens verbatim, so spanning that
-    boundary would keep thinking the template strips. The faithful bridge
-    must DECLINE there (the caller then re-renders, byte-faithfully) — but
-    only when it actually matters:
+    arrives. The resolved ``tool_cycle`` bridge policy therefore treats a
+    new user query as a hard re-render boundary, independent of whether the
+    prior token stream happens to contain sampled thinking:
 
-      - new user query + prior thinking + retention!="all" -> decline,
+      - new user query + retention="tool_cycle" -> decline,
         and the fallback re-render equals ``apply_chat_template``.
       - thinking_retention="all" keeps thinking on every path -> extend.
       - a tool response (in-flight cycle, no new query) keeps thinking in
         the template too -> extend.
-      - no prior thinking -> nothing to strip -> extend.
+      - no prior thinking + new user query -> decline; no marker lookback.
     """
     from renderers import create_renderer
     from renderers.base import load_tokenizer
@@ -263,15 +262,15 @@ def test_bridge_declines_across_user_query_when_template_drops_thinking():
     p, comp = prior(r, think)
     assert r.bridge_to_next_turn(p, comp, [tool]) is not None
 
-    # no prior thinking -> nothing to strip -> extend even across a user turn
+    # tool_cycle is a user-query-boundary policy; it does not scan prior tokens.
     p, comp = prior(r, "4")
-    assert r.bridge_to_next_turn(p, comp, [u2]) is not None
+    assert r.bridge_to_next_turn(p, comp, [u2]) is None
 
 
-# Renderers wired with the bridge faithfulness guard. Detection markers
-# vary: single ``</think>`` token (Qwen3, GLM, Nemotron, MiniMax), multi-token
-# ``</think>`` (Kimi-K2.5), or harmony analysis-channel header (gpt-oss).
-# Non-thinking models (llama, deepseek-v3) are out of scope.
+# Renderers whose default/effective bridge policy declines at a new user-query
+# boundary. The exact query-boundary predicate can still be renderer-specific
+# (for example Qwen's folded ``<tool_response>`` user messages).
+# Non-thinking models (llama, deepseek-v3) are out of scope for this check.
 _GUARDED_THINKING_MODELS = {
     "Qwen/Qwen3-8B",
     "Qwen/Qwen3.5-9B",

@@ -51,6 +51,8 @@ from renderers.base import (
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import Llama3RendererConfig
@@ -102,6 +104,10 @@ class Llama3Renderer:
         # renderers in tests/test_preserve_thinking.py).
         self._tokenizer = tokenizer
         self.config = config or Llama3RendererConfig()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            "all",
+        )
 
         self._bos = self._token_id("<|begin_of_text|>")
         self._start_header = self._token_id("<|start_header_id|>")
@@ -432,6 +438,11 @@ class Llama3Renderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
+            new_messages,
         ):
             return None
 

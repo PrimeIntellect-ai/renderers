@@ -19,6 +19,7 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     extract_message_tool_names,
+    resolve_thinking_retention,
 )
 from renderers.configs import DefaultRendererConfig
 from renderers.parsers import (
@@ -95,13 +96,11 @@ class DefaultRenderer:
         config: DefaultRendererConfig | None = None,
     ):
         cfg = config or DefaultRendererConfig()
-        if cfg.thinking_retention != "template":
-            raise NotImplementedError(
-                "DefaultRenderer falls back to apply_chat_template and can't "
-                "selectively re-emit dropped reasoning_content. Configure a "
-                "model-specific renderer if you need thinking_retention != "
-                "'template'."
-            )
+        self.effective_thinking_retention = resolve_thinking_retention(
+            cfg,
+            "template",
+            supported=("template",),
+        )
         self._tokenizer = tokenizer
         self.config = cfg
         self._tool_parser = _resolve_parser(cfg.tool_parser, tokenizer, get_tool_parser)

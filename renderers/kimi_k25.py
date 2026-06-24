@@ -38,8 +38,10 @@ from renderers.base import (
     ToolSpec,
     extract_message_tool_names,
     reject_assistant_in_extension,
-    reject_thinking_strip_in_extension,
+    resolve_thinking_retention,
     should_preserve_past_thinking,
+    should_rerender_for_thinking_retention,
+    thinking_retention_override,
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
@@ -600,6 +602,10 @@ class KimiK25Renderer:
         self._tokenizer = tokenizer
         self._processor = processor
         self.config = config or KimiK25RendererConfig()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            "tool_cycle" if self.config.thinking else "all",
+        )
 
         # Core structural tokens — all must be single special tokens in the vocab
         self._im_user = self._token_id("<|im_user|>")
@@ -889,7 +895,7 @@ class KimiK25Renderer:
                 preserve_thinking = should_preserve_past_thinking(
                     messages,
                     i,
-                    thinking_retention=self.config.thinking_retention,
+                    thinking_retention=thinking_retention_override(self.config),
                 )
                 self._render_assistant_body(
                     msg,
@@ -1036,17 +1042,9 @@ class KimiK25Renderer:
         ):
             return None
 
-        # Faithfulness across a user-query boundary: the template drops a past
-        # block's thinking once a new user turn arrives. ``</think>`` is
-        # multi-token here, so pass the full close subsequence (see
-        # reject_thinking_strip_in_extension).
-        if reject_thinking_strip_in_extension(
-            previous_prompt_ids,
-            previous_completion_ids,
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
             new_messages,
-            thinking_retention=self.config.thinking_retention,
-            thinking_marker_ids=self._think_close_ids,
-            enable_thinking=self.config.thinking,
         ):
             return None
 

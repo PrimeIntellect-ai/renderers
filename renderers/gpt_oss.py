@@ -58,8 +58,9 @@ from renderers.base import (
     ToolSpec,
     extract_message_tool_names,
     reject_assistant_in_extension,
-    reject_thinking_strip_in_extension,
+    resolve_thinking_retention,
     should_preserve_past_thinking,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import GptOssRendererConfig
@@ -135,6 +136,11 @@ class GptOssRenderer:
         """
         self._tokenizer = tokenizer
         self.config = config or GptOssRendererConfig()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            "tool_cycle" if self.config.auto_drop_analysis else "all",
+            explicit_template_fields=("auto_drop_analysis",),
+        )
         self._enc: HarmonyEncoding = load_harmony_encoding(
             HarmonyEncodingName.HARMONY_GPT_OSS
         )
@@ -155,14 +161,6 @@ class GptOssRenderer:
         self._channel = self._token_id("<|channel|>")
         self._message = self._token_id("<|message|>")
         self._constrain = self._token_id("<|constrain|>")
-        # Harmony marks reasoning as an analysis channel:
-        # ``<|channel|>analysis<|message|>``. Its presence in prior tokens
-        # signals a sampled thinking block the template strips from history.
-        self._analysis_marker_ids = [
-            self._channel,
-            *self._encode("analysis"),
-            self._message,
-        ]
 
     # ── token utilities ──────────────────────────────────────────────────────
 
@@ -430,13 +428,7 @@ class GptOssRenderer:
             if i == first_system_idx:
                 continue  # already emitted as developer
             is_assistant = msg.get("role") == "assistant"
-            preserve_thinking = is_assistant and (
-                should_preserve_past_thinking(
-                    messages,
-                    i,
-                    thinking_retention=self.config.thinking_retention,
-                )
-            )
+            preserve_thinking = is_assistant and self._should_emit_analysis(messages, i)
             for hm in self._to_harmony_messages(
                 msg, preserve_thinking=preserve_thinking
             ):
@@ -532,17 +524,9 @@ class GptOssRenderer:
         ):
             return None
 
-        # Faithfulness across a user-query boundary: harmony strips the
-        # analysis (reasoning) channel from history once a new user turn
-        # arrives, so the bridge can't carry it verbatim there (see
-        # reject_thinking_strip_in_extension). gpt-oss always reasons.
-        if reject_thinking_strip_in_extension(
-            previous_prompt_ids,
-            previous_completion_ids,
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
             new_messages,
-            thinking_retention=self.config.thinking_retention,
-            thinking_marker_ids=self._analysis_marker_ids,
-            enable_thinking=True,
         ):
             return None
 
@@ -622,6 +606,33 @@ class GptOssRenderer:
         )
 
     # ── message conversion ───────────────────────────────────────────────────
+
+    def _should_emit_analysis(self, messages: list[Message], msg_idx: int) -> bool:
+        """Whether to render ``reasoning_content`` as a harmony analysis message."""
+        requested = self.config.thinking_retention
+        if requested is not None:
+            return should_preserve_past_thinking(
+                messages,
+                msg_idx,
+                thinking_retention=requested,
+            )
+        if not self.config.auto_drop_analysis:
+            return True
+
+        msg = messages[msg_idx]
+        if not msg.get("tool_calls"):
+            return False
+
+        # Harmony keeps analysis for an unfinished tool-call cycle, but once a
+        # later final assistant answer is present it drops the stale analysis.
+        for later in messages[msg_idx + 1 :]:
+            if later.get("role") != "assistant":
+                continue
+            if later.get("tool_calls"):
+                continue
+            if _content_text(later.get("content")):
+                return False
+        return True
 
     def _to_harmony_messages(
         self, msg: Message, *, preserve_thinking: bool = False

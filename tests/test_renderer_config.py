@@ -121,14 +121,14 @@ def test_thinking_retention_conflict_raises():
     from renderers import Nemotron3RendererConfig
 
     with pytest.raises(ValidationError, match="thinking_retention"):
-        GLM5RendererConfig(clear_thinking=False, thinking_retention="template")
+        GLM5RendererConfig(thinking_retention="template")
     with pytest.raises(ValidationError, match="thinking_retention"):
         GLM5RendererConfig(clear_thinking=False, thinking_retention="tool_cycle")
     with pytest.raises(ValidationError, match="thinking_retention"):
         GLM5RendererConfig(clear_thinking=True, thinking_retention="all")
     with pytest.raises(ValidationError, match="thinking_retention"):
         Nemotron3RendererConfig(
-            truncate_history_thinking=False, thinking_retention="template"
+            truncate_history_thinking=False, thinking_retention="tool_cycle"
         )
 
     # Consistent pairs and single-field configs are accepted.

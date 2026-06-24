@@ -145,29 +145,14 @@ def test_should_preserve_past_thinking_classification():
         thinking_retention="tool_cycle",
     )
 
-    # thinking_retention="template" → always False.
-    assert not should_preserve_past_thinking(
-        live_cycle,
-        1,
-        thinking_retention="template",
-    )
-
-
-def test_thinking_retention_template_unchanged(
+def test_thinking_retention_default_unchanged(
     model_name, tokenizer, renderer_name, renderer
 ):
-    # A renderer constructed with thinking_retention="template" explicitly
-    # must produce byte-identical output to one constructed with the defaults.
+    # A renderer constructed without an explicit retention override should
+    # produce byte-identical output to the fixture's default renderer.
     bare = renderer.render_ids(CONVERSATION)
-    explicit_off = _make(
-        tokenizer,
-        renderer_name,
-        thinking_retention="template",
-    ).render_ids(CONVERSATION)
-    assert bare == explicit_off, (
-        f"{model_name}: explicit thinking_retention='template' must equal "
-        f"bare default render"
-    )
+    derived = _make(tokenizer, renderer_name).render_ids(CONVERSATION)
+    assert bare == derived, f"{model_name}: default construction changed output"
 
 
 def test_thinking_retention_all_grows_or_no_op(
@@ -385,17 +370,17 @@ def test_thinking_retention_tool_cycle_emits_current_block_reasoning(
             )
 
 
-def test_default_renderer_raises_above_template():
+def test_default_renderer_raises_on_explicit_retention():
     """``DefaultRenderer`` falls back to apply_chat_template with no
-    selective re-emit pathway, so constructing one with thinking_retention
-    above ``"template"`` must raise — fail fast, before any render."""
+    selective re-emit pathway, so constructing one with explicit
+    thinking_retention must raise — fail fast, before any render."""
     from renderers import DefaultRendererConfig
     from renderers.base import load_tokenizer
 
     tok = load_tokenizer("Qwen/Qwen2.5-0.5B-Instruct")
     # Default unset policy → constructs cleanly.
     create_renderer(tok, DefaultRendererConfig())
-    # Any level above "template" → raises at construction.
+    # Any explicit level → raises at construction.
     with pytest.raises(ValueError):
         create_renderer(tok, DefaultRendererConfig(thinking_retention="all"))
     with pytest.raises(ValueError):
@@ -421,8 +406,8 @@ def test_create_renderer_records_flag_state(model_name, renderer_name, tokenizer
     assert bare.effective_thinking_retention in {"template", "tool_cycle", "all"}
 
     if not isinstance(bare, DefaultRenderer):
-        # DefaultRenderer raises at construction above "template" —
-        # covered by ``test_default_renderer_raises_on_flags``.
+        # DefaultRenderer raises at construction with explicit retention —
+        # covered by ``test_default_renderer_raises_on_explicit_retention``.
         all_on = _make(tokenizer, renderer_name, thinking_retention="all")
         assert all_on.config.thinking_retention == "all"
 

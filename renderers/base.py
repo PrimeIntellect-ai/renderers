@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from renderers.configs import (
         AutoRendererConfig,
         RendererConfig,
-        ThinkingRetention,
+        ResolvedThinkingRetention,
     )
 
 logger = logging.getLogger("renderers.base")
@@ -1560,7 +1560,7 @@ def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
     # Text-only fall back to default (apply_chat_template). For fine-tunes
     # with customized chat templates this is the *correct* choice, so we
     # don't warn. Note the pick at INFO and advertise the parser knobs.
-    if auto.thinking_retention not in (None, "template"):
+    if auto.thinking_retention is not None:
         raise NotImplementedError(
             "Auto-resolved DefaultRenderer can't selectively re-emit "
             "dropped reasoning_content. Pass an explicit typed renderer "
@@ -1938,11 +1938,15 @@ def introduces_user_query(
 
 def resolve_thinking_retention(
     config: Any,
-    implied: ThinkingRetention,
+    implied: ResolvedThinkingRetention,
     *,
     explicit_template_fields: Collection[str] = (),
-    supported: Collection[ThinkingRetention] = ("template", "tool_cycle", "all"),
-) -> ThinkingRetention:
+    supported: Collection[ResolvedThinkingRetention] = (
+        "template",
+        "tool_cycle",
+        "all",
+    ),
+) -> ResolvedThinkingRetention:
     """Resolve the effective bridge policy for a renderer instance.
 
     ``config.thinking_retention is None`` means "derive from template knobs".
@@ -1967,13 +1971,13 @@ def resolve_thinking_retention(
     return requested
 
 
-def thinking_retention_override(config: Any) -> ThinkingRetention:
+def thinking_retention_override(config: Any) -> ResolvedThinkingRetention:
     """Return the explicit full-render override, or ``template`` if unset."""
     return getattr(config, "thinking_retention", None) or "template"
 
 
 def should_rerender_for_thinking_retention(
-    thinking_retention: ThinkingRetention,
+    thinking_retention: ResolvedThinkingRetention,
     new_messages: list[Message],
     *,
     is_user_query: Callable[[Message], bool] = _is_user_message,
@@ -1990,7 +1994,7 @@ def should_preserve_past_thinking(
     messages: list[Message],
     msg_idx: int,
     *,
-    thinking_retention: ThinkingRetention,
+    thinking_retention: ResolvedThinkingRetention,
 ) -> bool:
     """Should ``messages[msg_idx]``'s ``reasoning_content`` be emitted as
     thinking even when the chat template would drop it?

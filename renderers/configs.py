@@ -30,8 +30,8 @@ def _reject_thinking_retention_conflict(
     config: BaseConfig,
     kwarg_name: str,
     *,
-    true_implies: "ThinkingRetention",
-    false_implies: "ThinkingRetention",
+    true_implies: "ResolvedThinkingRetention",
+    false_implies: "ResolvedThinkingRetention",
 ) -> None:
     """Raise if explicit template and renderer retention knobs disagree."""
     fields_set = config.__pydantic_fields_set__
@@ -47,8 +47,11 @@ def _reject_thinking_retention_conflict(
         )
 
 
-ThinkingRetention = Literal["template", "tool_cycle", "all"]
-"""Resolved bridge policy for historical thinking/analysis retention."""
+ThinkingRetention = Literal["tool_cycle", "all"]
+"""User-facing historical thinking/analysis retention override."""
+
+ResolvedThinkingRetention = Literal["template", "tool_cycle", "all"]
+"""Internal bridge policy after template kwargs have been resolved."""
 
 
 class BaseRendererConfig(BaseConfig):
@@ -60,28 +63,26 @@ class BaseRendererConfig(BaseConfig):
     this class adds ``frozen=True`` so configs are hashable value
     objects.
 
-    ``thinking_retention`` is a renderer-internal bridge policy. Leave it
-    ``None`` to derive the effective policy from the renderer's own
-    chat-template knobs. Set it explicitly to force one of the three
-    bridge modes; renderers fail loudly when an explicit template knob
-    says the opposite thing.
+    ``thinking_retention`` is an optional renderer-level retention override.
+    Leave it ``None`` to derive the effective policy from the renderer's own
+    chat-template knobs. Set it explicitly to request retention beyond the
+    template default; renderers fail loudly when an explicit template knob says
+    the opposite thing.
     """
 
     model_config = ConfigDict(frozen=True)
 
     thinking_retention: ThinkingRetention | None = None
-    """Explicit bridge policy / render override, or ``None`` to derive from
-    template knobs:
+    """Explicit retention override, or ``None`` to derive from template knobs:
 
     - ``None`` — derive the effective bridge policy from this renderer's
       chat-template knobs while keeping full renders template-faithful.
-    - ``"template"`` — never bridge; full re-render owns every turn.
     - ``"tool_cycle"`` — bridge within the current tool cycle; re-render when
       a new user query arrives.
     - ``"all"`` — allow bridges across user-query boundaries.
 
-    Explicit non-template values also re-emit dropped ``reasoning_content``
-    during full renders via ``renderers.base.should_preserve_past_thinking``."""
+    Explicit values also re-emit dropped ``reasoning_content`` during full
+    renders via ``renderers.base.should_preserve_past_thinking``."""
 
     # Fields that are renderer-internal — not forwarded to (or mirrored
     # by) ``apply_chat_template``. Override in subclasses that hold
@@ -546,8 +547,9 @@ class DeepSeekR1RendererConfig(BaseRendererConfig):
     R1 always reasons — its chat template unconditionally prefills
     ``<think>\\n`` at the generation prompt and strips ``</think>`` from
     historical assistant turns. There is therefore no ``enable_thinking``
-    knob (thinking is not optional), and the resolved bridge policy is
-    ``"template"`` unless explicitly set to the same value. Applies to full
+    knob (thinking is not optional). With ``thinking_retention=None`` the
+    resolved bridge policy is ``"template"``; explicit ``"tool_cycle"`` /
+    ``"all"`` are renderer-level overrides. Applies to full
     ``deepseek-ai/DeepSeek-R1`` / ``-R1-0528``
     — NOT the R1-Distill-Qwen/Llama models, which use those base
     tokenizers and route to the Qwen3 / Llama-3 renderers.
@@ -663,6 +665,7 @@ __all__ = [
     "Qwen3RendererConfig",
     "Qwen3VLRendererConfig",
     "RendererConfig",
+    "ResolvedThinkingRetention",
     "ThinkingRetention",
     "config_from_name",
 ]

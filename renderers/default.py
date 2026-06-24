@@ -96,10 +96,15 @@ class DefaultRenderer:
         config: DefaultRendererConfig | None = None,
     ):
         cfg = config or DefaultRendererConfig()
+        if cfg.thinking_retention is not None:
+            raise ValueError(
+                "DefaultRenderer cannot implement explicit thinking_retention "
+                "bridge policy because its template close/turn structure is "
+                "opaque. Use a typed renderer for this model."
+            )
         self.effective_thinking_retention = resolve_thinking_retention(
             cfg,
             "template",
-            supported=("template",),
         )
         self._tokenizer = tokenizer
         self.config = cfg

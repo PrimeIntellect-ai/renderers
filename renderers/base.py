@@ -1941,11 +1941,6 @@ def resolve_thinking_retention(
     implied: ResolvedThinkingRetention,
     *,
     explicit_template_fields: Collection[str] = (),
-    supported: Collection[ResolvedThinkingRetention] = (
-        "template",
-        "tool_cycle",
-        "all",
-    ),
 ) -> ResolvedThinkingRetention:
     """Resolve the effective bridge policy for a renderer instance.
 
@@ -1956,11 +1951,6 @@ def resolve_thinking_retention(
     requested = getattr(config, "thinking_retention", None)
     if requested is None:
         return implied
-    if requested not in supported:
-        raise ValueError(
-            f"thinking_retention={requested!r} is not supported by "
-            f"{type(config).__name__}; supported values are {sorted(supported)!r}."
-        )
     fields_set = getattr(config, "__pydantic_fields_set__", set())
     conflicts = sorted(f for f in explicit_template_fields if f in fields_set)
     if conflicts and requested != implied:

@@ -57,7 +57,6 @@ class DeepSeekV3Renderer:
     #: Default typed config; the R1 subclass overrides this.
     _config_cls: type = DeepSeekV3RendererConfig
     _implied_thinking_retention = "all"
-    _supported_thinking_retention = ("template", "tool_cycle", "all")
     #: Generation-prompt reasoning prefill. Empty for V3 (bare
     #: ``<｜Assistant｜>``); the R1 subclass overrides to ``"<think>\n"``.
     _GEN_THINK_PREFILL: str = ""
@@ -72,7 +71,6 @@ class DeepSeekV3Renderer:
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
             self._implied_thinking_retention,
-            supported=self._supported_thinking_retention,
         )
 
         # ── BOS / EOS ────────────────────────────────────────────────

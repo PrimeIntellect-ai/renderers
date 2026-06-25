@@ -82,12 +82,24 @@ class Qwen3Renderer:
         return self._tokenizer.encode(text, add_special_tokens=False)
 
     @staticmethod
+    def _query_boundary_text(content) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            return "".join(parts).strip()
+        return ""
+
+    @staticmethod
     def _is_user_query_message(msg: Message) -> bool:
         if msg.get("role") != "user":
             return False
-        content = msg.get("content")
-        if not isinstance(content, str):
-            return False
+        content = Qwen3Renderer._query_boundary_text(msg.get("content"))
         return not (
             content.startswith("<tool_response>")
             and content.endswith("</tool_response>")

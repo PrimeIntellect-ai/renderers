@@ -62,7 +62,7 @@ class GLM45Renderer:
         self.config = config or GLM45RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
-            "tool_cycle",
+            "all" if not self.config.enable_thinking else "tool_cycle",
         )
 
         self._gmask = self._token_id("[gMASK]")

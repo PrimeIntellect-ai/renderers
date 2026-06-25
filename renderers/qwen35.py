@@ -132,9 +132,15 @@ class Qwen35Renderer:
                 update={"enable_thinking": _default_enable_thinking(tokenizer)}
             )
         self.config = cfg
+        if getattr(cfg, "preserve_thinking", False):
+            implied_thinking_retention = "all"
+        elif not cfg.enable_thinking:
+            implied_thinking_retention = "all"
+        else:
+            implied_thinking_retention = "tool_cycle"
         self.effective_thinking_retention = resolve_thinking_retention(
             cfg,
-            "all" if getattr(cfg, "preserve_thinking", False) else "tool_cycle",
+            implied_thinking_retention,
         )
 
         # Look up special token IDs from the tokenizer (not hardcoded)

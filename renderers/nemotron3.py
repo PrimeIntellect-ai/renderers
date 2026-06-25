@@ -118,9 +118,15 @@ class Nemotron3Renderer:
         self._tokenizer = tokenizer
         cfg = config or type(self)._config_cls()
         self.config = cfg
+        if not cfg.truncate_history_thinking:
+            implied_thinking_retention = "all"
+        elif not cfg.enable_thinking:
+            implied_thinking_retention = "all"
+        else:
+            implied_thinking_retention = "tool_cycle"
         self.effective_thinking_retention = resolve_thinking_retention(
             cfg,
-            "all" if not cfg.truncate_history_thinking else "tool_cycle",
+            implied_thinking_retention,
         )
 
         # Resolve the per-variant reasoning-effort hint appended to the last

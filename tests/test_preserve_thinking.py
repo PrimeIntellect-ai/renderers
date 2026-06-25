@@ -110,6 +110,36 @@ def test_create_renderer_records_flag_state(model_name, renderer_name, tokenizer
         assert btc_on.effective_thinking_retention == "tool_cycle"
 
 
+def test_no_thinking_knob_implies_all_bridge_policy(
+    model_name, renderer_name, tokenizer
+):
+    """No-thinking generation config means there is no thinking to evict."""
+    from renderers.default import DefaultRenderer
+
+    bare = _make(tokenizer, renderer_name)
+    if isinstance(bare, DefaultRenderer):
+        pytest.skip("DefaultRenderer has no typed no-thinking bridge policy")
+
+    cfg_cls = _config_class_for(renderer_name)
+    if "enable_thinking" in cfg_cls.model_fields:
+        no_thinking = {"enable_thinking": False}
+    elif "thinking" in cfg_cls.model_fields:
+        no_thinking = {"thinking": False}
+    else:
+        pytest.skip(f"{model_name}: no no-thinking generation knob")
+
+    all_on = _make(tokenizer, renderer_name, **no_thinking)
+    assert all_on.effective_thinking_retention == "all"
+
+    conservative = _make(
+        tokenizer,
+        renderer_name,
+        **no_thinking,
+        thinking_retention="tool_cycle",
+    )
+    assert conservative.effective_thinking_retention == "tool_cycle"
+
+
 def test_glm5_config_accepts_clear_thinking():
     """``clear_thinking`` is a GLM chat-template field, not a generic override."""
     from renderers import GLM5RendererConfig

@@ -57,7 +57,7 @@ class Qwen3Renderer:
         self.config = config or Qwen3RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
-            "tool_cycle",
+            "all" if not self.config.enable_thinking else "tool_cycle",
         )
 
         self._im_start = self._token_id("<|im_start|>")

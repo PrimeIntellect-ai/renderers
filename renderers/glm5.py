@@ -69,9 +69,15 @@ class GLM5Renderer:
     ):
         self._tokenizer = tokenizer
         self.config = config or type(self)._config_cls()
+        if not self.config.clear_thinking:
+            implied_thinking_retention = "all"
+        elif not self.config.enable_thinking:
+            implied_thinking_retention = "all"
+        else:
+            implied_thinking_retention = "tool_cycle"
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
-            "all" if not self.config.clear_thinking else "tool_cycle",
+            implied_thinking_retention,
         )
 
         self._gmask = self._token_id("[gMASK]")

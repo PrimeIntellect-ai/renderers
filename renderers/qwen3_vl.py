@@ -416,6 +416,16 @@ class Qwen3VLRenderer:
             return "".join(parts)
         raise TypeError(f"Unexpected content type: {type(content)}")
 
+    @staticmethod
+    def _is_user_query_message(msg: Message) -> bool:
+        if msg.get("role") != "user":
+            return False
+        content = Qwen3VLRenderer._render_text_content(msg.get("content")).strip()
+        return not (
+            content.startswith("<tool_response>")
+            and content.endswith("</tool_response>")
+        )
+
     def _process_image(self, part: dict[str, Any]):
         """Resolve, process, and characterize a single image part.
 
@@ -674,6 +684,7 @@ class Qwen3VLRenderer:
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
             new_messages,
+            is_user_query=self._is_user_query_message,
         ):
             return None
 

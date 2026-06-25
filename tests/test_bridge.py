@@ -294,7 +294,12 @@ def test_bridge_declines_across_user_turn_when_thinking_present(br_renderer, br_
         pytest.skip(f"{br_model}: no bridge thinking-guard")
 
     asst = [
-        {"role": "assistant", "reasoning_content": "Let me think.", "content": "Hello!"}
+        {
+            "role": "assistant",
+            "reasoning_content": "Let me think.",
+            "content": "",
+            "tool_calls": [{"function": {"name": "lookup", "arguments": {"q": "x"}}}],
+        }
     ]
     prev_prompt, prev_completion = _simulate_prior_turn(br_renderer, asst)
 

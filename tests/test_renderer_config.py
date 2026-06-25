@@ -11,8 +11,11 @@ from renderers import (
     AutoRendererConfig,
     DefaultRendererConfig,
     GLM5RendererConfig,
+    GptOssRendererConfig,
+    Nemotron3RendererConfig,
     Qwen3RendererConfig,
     Qwen35RendererConfig,
+    Qwen36RendererConfig,
     RendererConfig,
     base,
     create_renderer,
@@ -116,25 +119,101 @@ def test_create_renderer_default_argument_is_auto():
     assert renderer.__class__.__name__ == "DefaultRenderer"
 
 
-def test_thinking_retention_conflict_raises():
+@pytest.mark.parametrize(
+    "config_cls,kwargs",
+    [
+        (GLM5RendererConfig, {"thinking_retention": "template"}),
+        (
+            GLM5RendererConfig,
+            {"clear_thinking": False, "thinking_retention": "tool_cycle"},
+        ),
+        (GLM5RendererConfig, {"clear_thinking": True, "thinking_retention": "all"}),
+        (
+            Nemotron3RendererConfig,
+            {
+                "truncate_history_thinking": False,
+                "thinking_retention": "tool_cycle",
+            },
+        ),
+        (
+            Nemotron3RendererConfig,
+            {"truncate_history_thinking": True, "thinking_retention": "all"},
+        ),
+        (
+            Qwen36RendererConfig,
+            {"preserve_thinking": True, "thinking_retention": "tool_cycle"},
+        ),
+        (
+            Qwen36RendererConfig,
+            {"preserve_thinking": False, "thinking_retention": "all"},
+        ),
+        (
+            GptOssRendererConfig,
+            {"auto_drop_analysis": False, "thinking_retention": "tool_cycle"},
+        ),
+        (
+            GptOssRendererConfig,
+            {"auto_drop_analysis": True, "thinking_retention": "all"},
+        ),
+    ],
+)
+def test_thinking_retention_conflict_raises(config_cls, kwargs):
     """Explicit template and generic retention knobs must agree."""
-    from renderers import Nemotron3RendererConfig
+    with pytest.raises(ValidationError, match="thinking_retention"):
+        config_cls(**kwargs)
 
-    with pytest.raises(ValidationError, match="thinking_retention"):
-        GLM5RendererConfig(thinking_retention="template")
-    with pytest.raises(ValidationError, match="thinking_retention"):
-        GLM5RendererConfig(clear_thinking=False, thinking_retention="tool_cycle")
-    with pytest.raises(ValidationError, match="thinking_retention"):
-        GLM5RendererConfig(clear_thinking=True, thinking_retention="all")
-    with pytest.raises(ValidationError, match="thinking_retention"):
-        Nemotron3RendererConfig(
-            truncate_history_thinking=False, thinking_retention="tool_cycle"
-        )
 
-    # Consistent pairs and single-field configs are accepted.
-    GLM5RendererConfig(clear_thinking=False, thinking_retention="all")
-    GLM5RendererConfig(clear_thinking=False)
-    GLM5RendererConfig(thinking_retention="tool_cycle")
+@pytest.mark.parametrize(
+    "config_cls,kwargs",
+    [
+        (GLM5RendererConfig, {"clear_thinking": False, "thinking_retention": "all"}),
+        (
+            GLM5RendererConfig,
+            {"clear_thinking": True, "thinking_retention": "tool_cycle"},
+        ),
+        (GLM5RendererConfig, {"clear_thinking": False}),
+        (GLM5RendererConfig, {"thinking_retention": "tool_cycle"}),
+        (
+            Nemotron3RendererConfig,
+            {"truncate_history_thinking": False, "thinking_retention": "all"},
+        ),
+        (
+            Nemotron3RendererConfig,
+            {
+                "truncate_history_thinking": True,
+                "thinking_retention": "tool_cycle",
+            },
+        ),
+        (
+            Qwen36RendererConfig,
+            {"preserve_thinking": True, "thinking_retention": "all"},
+        ),
+        (
+            Qwen36RendererConfig,
+            {"preserve_thinking": False, "thinking_retention": "tool_cycle"},
+        ),
+        (
+            GptOssRendererConfig,
+            {"auto_drop_analysis": False, "thinking_retention": "all"},
+        ),
+        (
+            GptOssRendererConfig,
+            {"auto_drop_analysis": True, "thinking_retention": "tool_cycle"},
+        ),
+    ],
+)
+def test_thinking_retention_consistent_pairs_are_accepted(config_cls, kwargs):
+    config_cls(**kwargs)
+
+
+def test_default_renderer_rejects_explicit_retention():
+    """Opaque apply_chat_template fallback cannot implement bridge policy."""
+    tok = SimpleNamespace(name_or_path="")
+    create_renderer(tok, DefaultRendererConfig())
+
+    for retention in ("tool_cycle", "all"):
+        with pytest.raises(ValueError, match="DefaultRenderer"):
+            create_renderer(tok, DefaultRendererConfig(thinking_retention=retention))
 
 
 def test_default_renderer_config_rejects_legacy_preserve_flags():

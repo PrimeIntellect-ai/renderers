@@ -292,7 +292,9 @@ def _raw_uri_and_id(source: Any) -> tuple[str | None, str | None]:
     return path.as_uri(), path.name
 
 
-def describe_qwen_image_layout(renderer: Any, part: dict[str, Any]) -> QwenImageLayoutDescriptor:
+def describe_qwen_image_layout(
+    renderer: Any, part: dict[str, Any]
+) -> QwenImageLayoutDescriptor:
     """Return Qwen image layout metadata without invoking an image processor."""
     source = _image_source(part)
     height, width = _image_dimensions(source)
@@ -307,7 +309,9 @@ def describe_qwen_image_layout(renderer: Any, part: dict[str, Any]) -> QwenImage
     grid_t = 1
     grid_h = resized_h // layout.patch_size
     grid_w = resized_w // layout.patch_size
-    num_image_tokens = grid_t * grid_h * grid_w // (layout.merge_size * layout.merge_size)
+    num_image_tokens = (
+        grid_t * grid_h * grid_w // (layout.merge_size * layout.merge_size)
+    )
     fingerprint = image_layout_fingerprint(
         family="qwen_vl",
         patch_size=layout.patch_size,
@@ -327,7 +331,9 @@ def describe_qwen_image_layout(renderer: Any, part: dict[str, Any]) -> QwenImage
     )
 
 
-def qwen_image_item_for_render(renderer: Any, part: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
+def qwen_image_item_for_render(
+    renderer: Any, part: dict[str, Any]
+) -> tuple[int, str, dict[str, Any]]:
     desc = describe_qwen_image_layout(renderer, part)
     item = raw_mm_item(
         modality="image",
@@ -384,7 +390,9 @@ def _qwen_item_with_grid_and_ref(
             IMAGE_REF_PAYLOAD_KEY,
         }
     }
-    if new_item.get("family") == "qwen_vl" and isinstance(new_item.get("payload"), dict):
+    if new_item.get("family") == "qwen_vl" and isinstance(
+        new_item.get("payload"), dict
+    ):
         payload = dict(new_item["payload"])
         payload["image_grid_thw"] = image_grid_thw
         new_item["payload"] = payload
@@ -406,7 +414,9 @@ def _qwen_item_with_grid_and_ref(
     return new_item
 
 
-def materialize_image_refs(renderer: Any, mm_data: MultiModalData, messages: list[Message]) -> MultiModalData:
+def materialize_image_refs(
+    renderer: Any, mm_data: MultiModalData, messages: list[Message]
+) -> MultiModalData:
     """Attach run-image refs to every Qwen image descriptor that can be found."""
     image_items = mm_data.mm_items.get("image") or []
     if not image_items:

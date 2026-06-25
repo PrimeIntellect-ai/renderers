@@ -25,7 +25,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
@@ -438,7 +438,9 @@ def kimi_image_layout_config_for_renderer(renderer: Any) -> KimiImageLayoutConfi
         "patch_size": getattr(config, "image_patch_size", None),
         "merge_kernel_size": getattr(config, "image_merge_kernel_size", None),
         "in_patch_limit": getattr(config, "image_in_patch_limit", None),
-        "patch_limit_on_one_side": getattr(config, "image_patch_limit_on_one_side", None),
+        "patch_limit_on_one_side": getattr(
+            config, "image_patch_limit_on_one_side", None
+        ),
         "fixed_output_tokens": getattr(config, "image_fixed_output_tokens", None),
         "image_mean": getattr(config, "image_mean", None),
         "image_std": getattr(config, "image_std", None),
@@ -453,16 +455,20 @@ def kimi_image_layout_config_for_renderer(renderer: Any) -> KimiImageLayoutConfi
             "Kimi image layout must be declared on the renderer config; missing "
             + ", ".join(missing)
         )
+    image_mean = cast("tuple[float, ...] | list[float]", values["image_mean"])
+    image_std = cast("tuple[float, ...] | list[float]", values["image_std"])
     return KimiImageLayoutConfig(
         patch_size=int(values["patch_size"]),
         merge_kernel_size=int(values["merge_kernel_size"]),
         in_patch_limit=int(values["in_patch_limit"]),
         patch_limit_on_one_side=int(values["patch_limit_on_one_side"]),
         fixed_output_tokens=(
-            None if values["fixed_output_tokens"] is None else int(values["fixed_output_tokens"])
+            None
+            if values["fixed_output_tokens"] is None
+            else int(values["fixed_output_tokens"])
         ),
-        image_mean=tuple(float(v) for v in values["image_mean"]),
-        image_std=tuple(float(v) for v in values["image_std"]),
+        image_mean=tuple(float(v) for v in image_mean),
+        image_std=tuple(float(v) for v in image_std),
     )
 
 
@@ -470,7 +476,9 @@ def _ceil_to_factor(value: int, factor: int) -> int:
     return max(factor, math.ceil(value / factor) * factor)
 
 
-def _kimi_resize_config(width: int, height: int, layout: KimiImageLayoutConfig) -> tuple[int, int, int]:
+def _kimi_resize_config(
+    width: int, height: int, layout: KimiImageLayoutConfig
+) -> tuple[int, int, int]:
     """Kimi MoonViT/NavIT image resize layout without materializing pixels."""
     if height <= 0 or width <= 0:
         raise ValueError(f"image dimensions must be positive, got {height}x{width}")
@@ -478,10 +486,7 @@ def _kimi_resize_config(width: int, height: int, layout: KimiImageLayoutConfig) 
     patch_limit_pixels = layout.patch_limit_on_one_side * patch_size
     s1 = math.sqrt(
         layout.in_patch_limit
-        / (
-            max(1.0, width // patch_size)
-            * max(1.0, height // patch_size)
-        )
+        / (max(1.0, width // patch_size) * max(1.0, height // patch_size))
     )
     s2 = patch_limit_pixels / width
     s3 = patch_limit_pixels / height
@@ -499,7 +504,9 @@ def _kimi_resize_config(width: int, height: int, layout: KimiImageLayoutConfig) 
     return padded_w, padded_h, int(num_tokens)
 
 
-def describe_kimi_image_layout(renderer: Any, part: dict[str, Any]) -> KimiImageLayoutDescriptor:
+def describe_kimi_image_layout(
+    renderer: Any, part: dict[str, Any]
+) -> KimiImageLayoutDescriptor:
     source = _image_source(part)
     height, width = _image_dimensions(source)
     layout = kimi_image_layout_config_for_renderer(renderer)
@@ -526,7 +533,9 @@ def describe_kimi_image_layout(renderer: Any, part: dict[str, Any]) -> KimiImage
     )
 
 
-def kimi_image_item_for_render(renderer: Any, part: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
+def kimi_image_item_for_render(
+    renderer: Any, part: dict[str, Any]
+) -> tuple[int, str, dict[str, Any]]:
     desc = describe_kimi_image_layout(renderer, part)
     item = raw_mm_item(
         modality="image",
@@ -558,7 +567,9 @@ def _kimi_grids_equal(a: Any, b: Any) -> bool:
     return al == bl
 
 
-def materialize_kimi_image_refs(renderer: Any, mm_data: MultiModalData, messages: list[Message]) -> MultiModalData:
+def materialize_kimi_image_refs(
+    renderer: Any, mm_data: MultiModalData, messages: list[Message]
+) -> MultiModalData:
     """Attach run-image refs to every Kimi image descriptor that can be found."""
     from dataclasses import replace
 
@@ -596,7 +607,9 @@ def materialize_kimi_image_refs(renderer: Any, mm_data: MultiModalData, messages
     for i, item in enumerate(image_items):
         desc = resolved[hashes[i]]
         if desc.raw_uri is None or desc.raw_image_id is None:
-            raise ValueError("materialize_kimi_image_refs requires file-backed image URLs")
+            raise ValueError(
+                "materialize_kimi_image_refs requires file-backed image URLs"
+            )
         item_grid = _kimi_grid_from_item(item)
         if item_grid is not None and not _kimi_grids_equal(desc.grid_thws, item_grid):
             raise ValueError(

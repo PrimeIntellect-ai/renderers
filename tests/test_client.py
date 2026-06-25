@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from typing import Any
 
 import httpx
 import numpy as np
@@ -10,9 +11,12 @@ from renderers.base import (
     ParsedResponse,
     ParsedToolCall,
     RenderedTokens,
+    ToolSpec,
     ToolCallParseStatus,
 )
 from renderers.client import generate
+
+_OPENAI_TOOL: Any = {"type": "function", "function": {"name": "echo"}}
 
 
 class _FakeRenderer:
@@ -20,7 +24,7 @@ class _FakeRenderer:
 
     def render(self, messages, *, tools=None, add_generation_prompt=False):
         assert messages == [{"role": "user", "content": "hi"}]
-        assert tools == [{"type": "function", "function": {"name": "echo"}}]
+        assert tools == [_OPENAI_TOOL]
         assert add_generation_prompt is True
         # Populate the full attribution surface so the test can verify
         # ``generate`` threads it through to the result dict unchanged.
@@ -161,12 +165,15 @@ def test_qwen3_vl_render_emits_image_descriptor_without_processor(tmp_path):
         [
             {
                 "role": "user",
-                "content": [{"type": "image_url", "image_url": {"url": image_path.as_uri()}}],
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_path.as_uri()}}
+                ],
             }
         ],
         add_generation_prompt=True,
     )
 
+    assert rendered.multi_modal_data is not None
     item = rendered.multi_modal_data.mm_items["image"][0]
     assert "pixel_values" not in item
     assert item["family"] == "qwen_vl"
@@ -176,7 +183,9 @@ def test_qwen3_vl_render_emits_image_descriptor_without_processor(tmp_path):
     assert rendered.multi_modal_data.mm_placeholders["image"][0].length == 64
 
 
-def test_generate_materialize_all_image_refs_rehydrates_descriptor_slots(tmp_path, monkeypatch):
+def test_generate_materialize_all_image_refs_rehydrates_descriptor_slots(
+    tmp_path, monkeypatch
+):
     pytest.importorskip("PIL")
     from PIL import Image
 
@@ -190,7 +199,10 @@ def test_generate_materialize_all_image_refs_rehydrates_descriptor_slots(tmp_pat
         def get_stop_token_ids(self):
             return [99]
 
-        def parse_response(self, completion_ids, *, tools=None):
+        def parse_response(
+            self, token_ids: list[int], *, tools: list[ToolSpec] | None = None
+        ) -> ParsedResponse:
+            assert token_ids == [7, 8]
             return ParsedResponse(content="done")
 
     image_dir = tmp_path / "run_retry" / "assets" / "images"
@@ -216,7 +228,9 @@ def test_generate_materialize_all_image_refs_rehydrates_descriptor_slots(tmp_pat
             messages=[
                 {
                     "role": "user",
-                    "content": [{"type": "image_url", "image_url": {"url": image_path.as_uri()}}],
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_path.as_uri()}}
+                    ],
                 }
             ],
             model="qwen3-vl",
@@ -248,7 +262,7 @@ def test_generate_builds_request_body_and_parses_response():
             renderer=renderer,
             messages=[{"role": "user", "content": "hi"}],
             model="test-model",
-            tools=[{"type": "function", "function": {"name": "echo"}}],
+            tools=[_OPENAI_TOOL],
             sampling_params={"temperature": 0.3, "max_tokens": 7, "min_tokens": 2},
             cache_salt="ckpt-42",
         )
@@ -256,9 +270,7 @@ def test_generate_builds_request_body_and_parses_response():
 
     # The client must plumb `tools` through to parse_response so XML-style
     # parsers can preserve declared-string args verbatim.
-    assert renderer._last_parse_tools == [
-        {"type": "function", "function": {"name": "echo"}}
-    ]
+    assert renderer._last_parse_tools == [_OPENAI_TOOL]
 
     assert len(client.calls) == 1
     # /inference/v1/generate is mounted at the server root, so we post to
@@ -341,7 +353,7 @@ def test_generate_does_not_promote_finish_reason_for_malformed_tool_calls():
             renderer=_MalformedToolRenderer(),
             messages=[{"role": "user", "content": "hi"}],
             model="test-model",
-            tools=[{"type": "function", "function": {"name": "echo"}}],
+            tools=[_OPENAI_TOOL],
         )
     )
     assert result["finish_reason"] == "stop"
@@ -524,7 +536,14 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
     assert items[1] is None
     ref = split_raw_mm_ref(items[0])
     assert ref.payload == {"image_grid_thw": [[1, 2, 2]]}
-    assert (ref.run_id, ref.family, ref.fingerprint, ref.modality, ref.mm_hash, ref.raw_image_id) == (
+    assert (
+        ref.run_id,
+        ref.family,
+        ref.fingerprint,
+        ref.modality,
+        ref.mm_hash,
+        ref.raw_image_id,
+    ) == (
         "rawtest",
         "qwen_vl",
         fingerprint,

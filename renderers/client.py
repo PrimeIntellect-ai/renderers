@@ -252,7 +252,9 @@ async def generate(
         "sampling_params": sp,
     }
 
-    def _features_and_descriptor_mm() -> tuple[dict[str, Any] | None, MultiModalData | None]:
+    def _features_and_descriptor_mm() -> tuple[
+        dict[str, Any] | None, MultiModalData | None
+    ]:
         if mm_data is None or mm_data.is_empty():
             return None, mm_data
         build_mm = mm_data
@@ -263,10 +265,15 @@ async def generate(
                     f"{type(renderer).__name__} cannot materialize image refs for retry."
                 )
             build_mm = materialize(mm_data, messages)
-        return _build_vllm_mm_features(renderer, build_mm), _descriptor_only_mm_data(mm_data)
+        return _build_vllm_mm_features(renderer, build_mm), _descriptor_only_mm_data(
+            mm_data
+        )
 
     features, out_mm_data = await _maybe_offload(renderer, _features_and_descriptor_mm)
-    if prompt_attr is not None and getattr(prompt_attr, "multi_modal_data", None) is not None:
+    if (
+        prompt_attr is not None
+        and getattr(prompt_attr, "multi_modal_data", None) is not None
+    ):
         prompt_attr = replace(prompt_attr, multi_modal_data=out_mm_data)
     if features is not None:
         body["features"] = features
@@ -447,7 +454,9 @@ def _build_vllm_mm_features(
                 payload=item.get("payload") or {},
             )
 
-    if not any(item is not None for values in out["kwargs_data"].values() for item in values):
+    if not any(
+        item is not None for values in out["kwargs_data"].values() for item in values
+    ):
         out["kwargs_data"] = None
 
     return out

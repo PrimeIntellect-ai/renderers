@@ -138,7 +138,6 @@ class GptOssRenderer:
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
             "tool_cycle" if self.config.auto_drop_analysis else "all",
-            explicit_template_fields=("auto_drop_analysis",),
         )
         self._enc: HarmonyEncoding = load_harmony_encoding(
             HarmonyEncodingName.HARMONY_GPT_OSS

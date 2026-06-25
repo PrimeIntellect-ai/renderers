@@ -13,7 +13,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
-    Collection,
     Literal,
     Protocol,
     TypedDict,
@@ -1939,25 +1938,16 @@ def introduces_user_query(
 def resolve_thinking_retention(
     config: Any,
     implied: ResolvedThinkingRetention,
-    *,
-    explicit_template_fields: Collection[str] = (),
 ) -> ResolvedThinkingRetention:
     """Resolve the effective bridge policy for a renderer instance.
 
-    ``config.thinking_retention is None`` means "derive from template knobs".
-    If the user explicitly sets both the generic policy and a template knob
-    that maps to a different policy, fail instead of guessing.
+    ``config.thinking_retention is None`` means "derive from template knobs";
+    otherwise the explicit generic bridge policy wins. Conflicting explicit
+    template/generic knobs are rejected by the typed config validators.
     """
     requested = getattr(config, "thinking_retention", None)
     if requested is None:
         return implied
-    fields_set = getattr(config, "__pydantic_fields_set__", set())
-    conflicts = sorted(f for f in explicit_template_fields if f in fields_set)
-    if conflicts and requested != implied:
-        raise ValueError(
-            f"thinking_retention={requested!r} conflicts with explicit template "
-            f"field(s) {conflicts}, which imply {implied!r}."
-        )
     return requested
 
 

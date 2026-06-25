@@ -135,11 +135,6 @@ class Qwen35Renderer:
         self.effective_thinking_retention = resolve_thinking_retention(
             cfg,
             "all" if getattr(cfg, "preserve_thinking", False) else "tool_cycle",
-            explicit_template_fields=(
-                ("preserve_thinking",)
-                if "preserve_thinking" in type(cfg).model_fields
-                else ()
-            ),
         )
 
         # Look up special token IDs from the tokenizer (not hardcoded)

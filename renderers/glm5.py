@@ -72,7 +72,6 @@ class GLM5Renderer:
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
             "all" if not self.config.clear_thinking else "tool_cycle",
-            explicit_template_fields=("clear_thinking",),
         )
 
         self._gmask = self._token_id("[gMASK]")

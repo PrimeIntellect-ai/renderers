@@ -121,7 +121,6 @@ class Nemotron3Renderer:
         self.effective_thinking_retention = resolve_thinking_retention(
             cfg,
             "all" if not cfg.truncate_history_thinking else "tool_cycle",
-            explicit_template_fields=("truncate_history_thinking",),
         )
 
         # Resolve the per-variant reasoning-effort hint appended to the last

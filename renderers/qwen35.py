@@ -957,10 +957,9 @@ class Qwen35Renderer:
         # call tags (``<function=...>``, ``<parameter=...>``, etc.) are
         # part of the model's emitted output too — keep them
         # ``is_content=True`` per the assistant rule.
-        emit_thinking = (
-            self._should_render_thinking(msg_idx, last_query_index)
-            or getattr(self.config, "preserve_thinking", False)
-        )
+        emit_thinking = self._should_render_thinking(
+            msg_idx, last_query_index
+        ) or getattr(self.config, "preserve_thinking", False)
         if emit_thinking:
             # Include thinking block
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)

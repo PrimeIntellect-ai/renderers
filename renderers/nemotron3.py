@@ -436,8 +436,7 @@ class Nemotron3Renderer:
                 # Template: ``include_content = not (truncate_history_thinking
                 # and loop.index0 < last_user_idx)``.
                 include_content = (
-                    not self.config.truncate_history_thinking
-                    or i >= last_user_idx_norm
+                    not self.config.truncate_history_thinking or i >= last_user_idx_norm
                 )
                 self._render_assistant(
                     msg,

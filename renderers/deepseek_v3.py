@@ -65,7 +65,7 @@ class DeepSeekV3Renderer:
         self,
         tokenizer: PreTrainedTokenizer,
         config: DeepSeekV3RendererConfig | None = None,
-        ):
+    ):
         self._tokenizer = tokenizer
         self.config = config or type(self)._config_cls()
         self.effective_thinking_retention = resolve_thinking_retention(

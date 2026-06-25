@@ -512,8 +512,7 @@ class GLM5Renderer:
         # clear_thinking`` gate: a chat_template_kwarg surface for the
         # same behaviour, gated explicitly by the caller per render.
         include_thinking = (
-            msg_idx > last_user_index
-            or not self.config.clear_thinking
+            msg_idx > last_user_index or not self.config.clear_thinking
         ) and reasoning_content
 
         if include_thinking:

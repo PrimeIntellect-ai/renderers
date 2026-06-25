@@ -37,7 +37,9 @@ def _reject_thinking_retention_conflict(
     fields_set = config.__pydantic_fields_set__
     requested = getattr(config, "thinking_retention", None)
     if kwarg_name in fields_set and requested is not None:
-        implied = false_implies if getattr(config, kwarg_name) is False else true_implies
+        implied = (
+            false_implies if getattr(config, kwarg_name) is False else true_implies
+        )
         if requested == implied:
             return
         raise ValueError(

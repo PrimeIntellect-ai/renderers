@@ -31,6 +31,7 @@ class DeepSeekR1Renderer(DeepSeekV3Renderer):
     """Deterministic message → token renderer for DeepSeek-R1 models."""
 
     _config_cls: type = DeepSeekR1RendererConfig
+    _implied_thinking_retention = "template"
     _GEN_THINK_PREFILL: str = "<think>\n"
 
     def _prepare_assistant_content(self, msg: Message) -> str:

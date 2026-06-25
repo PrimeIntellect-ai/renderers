@@ -45,6 +45,8 @@ from renderers.base import (
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import Qwen3VLRendererConfig
@@ -302,9 +304,9 @@ class Qwen3VLRenderer:
             keyed off ``tokenizer.name_or_path`` the first time a
             multimodal part is seen.
 
-    ``thinking_retention`` on the config is a no-op here — the chat
-    template drops past ``<think>`` blocks unconditionally. Stored for
-    Protocol parity.
+    Qwen3-VL has no historical reasoning channel in this renderer. The
+    default bridge policy therefore resolves to ``"all"``; explicit
+    ``thinking_retention`` still controls whether the bridge is attempted.
     """
 
     def __init__(
@@ -317,6 +319,10 @@ class Qwen3VLRenderer:
         self._tokenizer = tokenizer
         self._processor = processor
         self.config = config or Qwen3VLRendererConfig()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            "all",
+        )
 
         self._im_start = self._token_id("<|im_start|>")
         self._im_end = self._token_id("<|im_end|>")
@@ -663,6 +669,11 @@ class Qwen3VLRenderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
+            new_messages,
         ):
             return None
 

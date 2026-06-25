@@ -38,8 +38,8 @@ from renderers.base import (
     ToolSpec,
     extract_message_tool_names,
     reject_assistant_in_extension,
-    reject_thinking_strip_in_extension,
-    should_preserve_past_thinking,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
@@ -600,6 +600,10 @@ class KimiK25Renderer:
         self._tokenizer = tokenizer
         self._processor = processor
         self.config = config or KimiK25RendererConfig()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            "tool_cycle" if self.config.thinking else "all",
+        )
 
         # Core structural tokens — all must be single special tokens in the vocab
         self._im_user = self._token_id("<|im_user|>")
@@ -886,16 +890,10 @@ class KimiK25Renderer:
             # Body
             if role == "assistant":
                 is_suffix = i > last_non_tc_assistant
-                preserve_thinking = should_preserve_past_thinking(
-                    messages,
-                    i,
-                    thinking_retention=self.config.thinking_retention,
-                )
                 self._render_assistant_body(
                     msg,
                     i,
                     is_suffix=is_suffix,
-                    preserve_thinking=preserve_thinking,
                     emit_special=emit_special,
                     emit_text=emit_text,
                 )
@@ -1036,17 +1034,9 @@ class KimiK25Renderer:
         ):
             return None
 
-        # Faithfulness across a user-query boundary: the template drops a past
-        # block's thinking once a new user turn arrives. ``</think>`` is
-        # multi-token here, so pass the full close subsequence (see
-        # reject_thinking_strip_in_extension).
-        if reject_thinking_strip_in_extension(
-            previous_prompt_ids,
-            previous_completion_ids,
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
             new_messages,
-            thinking_retention=self.config.thinking_retention,
-            thinking_marker_ids=self._think_close_ids,
-            enable_thinking=self.config.thinking,
         ):
             return None
 
@@ -1325,7 +1315,6 @@ class KimiK25Renderer:
         msg_idx: int,
         *,
         is_suffix: bool,
-        preserve_thinking: bool = False,
         emit_special,
         emit_text,
     ) -> None:
@@ -1380,7 +1369,7 @@ class KimiK25Renderer:
         # ``render`` (also is_sampled=True; it's the model's stop
         # signal). On assistant tokens ``is_content == sampled_mask`` by
         # construction.
-        if is_suffix or (preserve_thinking and reasoning_content):
+        if is_suffix:
             emit_text(
                 f"<think>{reasoning_content}</think>",
                 msg_idx,

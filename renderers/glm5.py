@@ -24,8 +24,8 @@ from renderers.base import (
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
-    reject_thinking_strip_in_extension,
-    should_preserve_past_thinking,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
 )
 from renderers.configs import GLM5RendererConfig, GLM51RendererConfig
 from renderers.parsing import parse_glm
@@ -69,6 +69,16 @@ class GLM5Renderer:
     ):
         self._tokenizer = tokenizer
         self.config = config or type(self)._config_cls()
+        if not self.config.clear_thinking:
+            implied_thinking_retention = "all"
+        elif not self.config.enable_thinking:
+            implied_thinking_retention = "all"
+        else:
+            implied_thinking_retention = "tool_cycle"
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            implied_thinking_retention,
+        )
 
         self._gmask = self._token_id("[gMASK]")
         self._sop = self._token_id("<sop>")
@@ -239,17 +249,11 @@ class GLM5Renderer:
                 emit_text(content, i, is_sampled=False, is_content=True)
 
             elif role == "assistant":
-                preserve_thinking = should_preserve_past_thinking(
-                    messages,
-                    i,
-                    thinking_retention=self.config.thinking_retention,
-                )
                 self._render_assistant(
                     msg,
                     i,
                     content,
                     last_ui,
-                    preserve_thinking=preserve_thinking,
                     emit_special=emit_special,
                     emit_text=emit_text,
                     emit_text_segments=emit_text_segments,
@@ -337,22 +341,9 @@ class GLM5Renderer:
         ):
             return None
 
-        # Faithfulness across a user-query boundary: the template drops a past
-        # block's thinking once a new user turn arrives (see
-        # reject_thinking_strip_in_extension). ``clear_thinking=False`` keeps
-        # all past thinking (≡ thinking_retention="all"), so the bridge stays
-        # faithful carrying it verbatim — fold it into the effective level so
-        # we don't over-decline and re-tokenize sampled thinking.
-        retention = (
-            "all" if not self.config.clear_thinking else self.config.thinking_retention
-        )
-        if reject_thinking_strip_in_extension(
-            previous_prompt_ids,
-            previous_completion_ids,
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
             new_messages,
-            thinking_retention=retention,
-            thinking_marker_ids=[self._think_end],
-            enable_thinking=self.config.enable_thinking,
         ):
             return None
 
@@ -487,7 +478,6 @@ class GLM5Renderer:
         content,
         last_user_index,
         *,
-        preserve_thinking: bool = False,
         emit_special,
         emit_text,
         emit_text_segments,
@@ -517,17 +507,12 @@ class GLM5Renderer:
 
         # Chat-template default: keep ``<think>`` only on the in-flight cycle
         # (post-last-user). Past-cycle assistants drop their reasoning.
-        # ``preserve_thinking`` is the override output of
-        # ``should_preserve_past_thinking`` — it adds historical assistants
-        # back when the renderer was constructed with
-        # ``thinking_retention="all"``. ``clear_thinking=False`` mirrors
+        # ``clear_thinking=False`` mirrors
         # the template's per-call ``clear_thinking is defined and not
         # clear_thinking`` gate: a chat_template_kwarg surface for the
         # same behaviour, gated explicitly by the caller per render.
         include_thinking = (
-            msg_idx > last_user_index
-            or preserve_thinking
-            or not self.config.clear_thinking
+            msg_idx > last_user_index or not self.config.clear_thinking
         ) and reasoning_content
 
         if include_thinking:

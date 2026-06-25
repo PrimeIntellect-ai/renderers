@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from renderers.configs import (
         AutoRendererConfig,
         RendererConfig,
-        ThinkingRetention,
+        ResolvedThinkingRetention,
     )
 
 logger = logging.getLogger("renderers.base")
@@ -670,14 +670,12 @@ class Renderer(Protocol):
         """Render messages to token IDs with per-token message attribution.
 
         Behaviour around historical ``reasoning_content`` is owned by the
-        renderer instance — the ``thinking_retention`` level is a
-        constructor kwarg, not a call-site kwarg. To render with a
-        different configuration, build a different renderer (or different
-        pool). The ``"template"`` default preserves byte-identity with
-        each model's chat template; raising the level at construction
-        restores ``reasoning_content`` the template would otherwise drop.
-        See ``should_preserve_past_thinking`` for the per-message
-        classification.
+        renderer instance — the ``thinking_retention`` level is resolved at
+        construction, not passed per call. To render with a different
+        configuration, build a different renderer (or different pool). When
+        ``thinking_retention`` is left unset, full renders follow the model's
+        chat template and bridge policy is derived from that template's own
+        history-retention knobs.
         """
         ...
 
@@ -772,14 +770,12 @@ class Renderer(Protocol):
         Return ``None`` whenever the renderer can't prove that contract
         holds — the caller falls back to a full re-render. In particular,
         bridges refuse assistant messages in ``new_messages`` (those would
-        re-tokenize model-sampled content), and a renderer whose template
-        drops a past block's thinking once a new user query arrives refuses
-        to span that boundary while carrying ``<think>`` verbatim would keep
-        it (it falls back to a re-render, which honours ``thinking_retention``
-        and drops the stale thinking — keeping the bridge faithful to the
-        template). ``thinking_retention="all"`` keeps thinking on every path,
-        so no decline is needed there. Hand-coded renderers know their
-        canonical close and synthesise it on truncated priors;
+        re-tokenize model-sampled content). They also follow the renderer's
+        resolved thinking-retention bridge policy: ``"template"`` always
+        re-renders, ``"tool_cycle"`` re-renders at a new user-query boundary,
+        and ``"all"`` allows extension when the rest of the structural bridge
+        checks pass. Hand-coded renderers know their canonical close and
+        synthesise it on truncated priors;
         DefaultRenderer always returns ``None`` because the template's
         close is unknown.
         """
@@ -1536,7 +1532,9 @@ def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
     model_name = getattr(tokenizer, "name_or_path", "")
     renderer_name = MODEL_RENDERER_MAP.get(model_name)
 
-    preserve_carry = {"thinking_retention": auto.thinking_retention}
+    preserve_carry = {}
+    if auto.thinking_retention is not None:
+        preserve_carry["thinking_retention"] = auto.thinking_retention
 
     if renderer_name is not None:
         cfg_cls = _config_class_for(renderer_name)
@@ -1561,7 +1559,7 @@ def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
     # Text-only fall back to default (apply_chat_template). For fine-tunes
     # with customized chat templates this is the *correct* choice, so we
     # don't warn. Note the pick at INFO and advertise the parser knobs.
-    if auto.thinking_retention != "template":
+    if auto.thinking_retention is not None:
         raise NotImplementedError(
             "Auto-resolved DefaultRenderer can't selectively re-emit "
             "dropped reasoning_content. Pass an explicit typed renderer "
@@ -1919,131 +1917,52 @@ def reject_assistant_in_extension(new_messages: list[Message]) -> bool:
     return any(m.get("role") == "assistant" for m in new_messages)
 
 
-def introduces_user_query(new_messages: list[Message]) -> bool:
-    """Return True if ``new_messages`` opens a new user-query turn.
-
-    A query boundary is a ``user`` message whose content isn't a
-    ``<tool_response>...</tool_response>`` wrapper — tool responses
-    (``role="tool"``, or folded into a wrapped user turn) continue the
-    in-flight cycle rather than starting a new query. This mirrors the
-    boundary chat templates use to decide when a past assistant block's
-    thinking becomes "older" and is dropped, so a bridge can tell whether
-    spanning ``new_messages`` would cross that boundary (cf.
-    ``should_preserve_past_thinking`` and per-renderer ``_last_query_index``).
-    """
-    for m in new_messages:
-        if m.get("role") != "user":
-            continue
-        content = m.get("content")
-        if (
-            isinstance(content, str)
-            and content.startswith("<tool_response>")
-            and content.endswith("</tool_response>")
-        ):
-            continue
-        return True
-    return False
+def _is_user_message(message: Message) -> bool:
+    return message.get("role") == "user"
 
 
-def _contains_subsequence(haystack: list[int], needle: list[int]) -> bool:
-    """True if ``needle`` appears as a contiguous run inside ``haystack``."""
-    n = len(needle)
-    if n == 0:
-        return False
-    if n == 1:
-        return needle[0] in haystack
-    first = needle[0]
-    for i in range(len(haystack) - n + 1):
-        if haystack[i] == first and haystack[i : i + n] == needle:
-            return True
-    return False
-
-
-def reject_thinking_strip_in_extension(
-    previous_prompt_ids: list[int],
-    previous_completion_ids: list[int],
+def introduces_user_query(
     new_messages: list[Message],
     *,
-    thinking_retention: ThinkingRetention,
-    thinking_marker_ids: list[int],
-    enable_thinking: bool = True,
+    is_user_query: Callable[[Message], bool] = _is_user_message,
 ) -> bool:
-    """Return True if a bridge must refuse to span ``new_messages``.
+    """Return True if ``new_messages`` opens a new user-query turn.
 
-    A renderer whose template drops a past block's thinking once a new user
-    query arrives can't span that boundary while keeping prior tokens
-    verbatim — the kept thinking would diverge from a faithful re-render
-    (which honours ``thinking_retention`` and drops the stale thinking).
-    Thinking renderers OR this into their bridge's reject check.
-
-    ``thinking_marker_ids`` is a token subsequence whose presence in the
-    prior tokens signals a sampled thinking block — a single-token close
-    like ``[</think>]`` (Qwen3, GLM, Nemotron), a multi-token close
-    (``Kimi-K2.5``), or a harmony analysis-channel header
-    (``[<|channel|>, …"analysis"…, <|message|>]`` for gpt-oss).
-    ``thinking_retention="all"`` keeps thinking on every path, so it never
-    declines.
-
-    Returns ``False`` (safe to bridge) when: ``thinking_retention="all"``;
-    thinking is disabled (no sampled thinking to strip — also avoids the
-    empty ``<think></think>`` generation-prompt scaffold a disabled model
-    leaves in ``previous_prompt_ids``); ``new_messages`` stays in the
-    in-flight cycle (no new user query); or the prior tokens carry no
-    thinking marker to strip.
+    The generic boundary is any ``role="user"`` message. Renderers whose
+    chat templates define a narrower notion of query boundary can pass their
+    own predicate, but the shared default stays role-based.
     """
-    if thinking_retention == "all" or not enable_thinking:
-        return False
-    if not introduces_user_query(new_messages):
-        return False
-    return _contains_subsequence(
-        previous_completion_ids, thinking_marker_ids
-    ) or _contains_subsequence(previous_prompt_ids, thinking_marker_ids)
+    return any(is_user_query(m) for m in new_messages)
 
 
-def should_preserve_past_thinking(
-    messages: list[Message],
-    msg_idx: int,
+def resolve_thinking_retention(
+    config: Any,
+    implied: ResolvedThinkingRetention,
+) -> ResolvedThinkingRetention:
+    """Resolve the effective bridge policy for a renderer instance.
+
+    ``config.thinking_retention is None`` means "derive from template knobs";
+    otherwise the explicit generic bridge policy wins. Conflicting explicit
+    template/generic knobs are rejected by the typed config validators.
+    """
+    requested = getattr(config, "thinking_retention", None)
+    if requested is None:
+        return implied
+    return requested
+
+
+def should_rerender_for_thinking_retention(
+    thinking_retention: ResolvedThinkingRetention,
+    new_messages: list[Message],
     *,
-    thinking_retention: ThinkingRetention,
+    is_user_query: Callable[[Message], bool] = _is_user_message,
 ) -> bool:
-    """Should ``messages[msg_idx]``'s ``reasoning_content`` be emitted as
-    thinking even when the chat template would drop it?
-
-    Returns ``True`` only as an override above the template default. Each
-    renderer ORs this into its own "render thinking?" condition; a result
-    of ``False`` means "follow the template" (drop or keep as the template
-    decides), not "force-drop". ``thinking_retention`` selects how far the
-    override reaches:
-
-    - ``"template"`` — no override; defer to the template (always ``False``).
-    - ``"all"`` — every past-asst's thinking is kept (always ``True``).
-    - ``"tool_cycle"`` — keeps thinking only inside the *current* tool
-      cycle: the contiguous A-T-...-A block after the most recent ``user``
-      message, and only if that block contains at least one ``tool``
-      response. As soon as a new ``user`` turn arrives, the previous block
-      becomes "older" and its thinking is dropped (template default),
-      matching how most chat templates handle multi-turn contexts. Use
-      ``"all"`` if you need thinking on older blocks to survive the
-      user-turn boundary too.
-    """
-    if thinking_retention == "all":
-        return True
+    """Return True when the resolved policy requires a full re-render."""
     if thinking_retention == "template":
+        return True
+    if thinking_retention == "all":
         return False
-    # thinking_retention == "tool_cycle"
-    # Most recent user message (or -1 if none).
-    last_user = -1
-    for j in range(len(messages) - 1, -1, -1):
-        if messages[j].get("role") == "user":
-            last_user = j
-            break
-    if msg_idx <= last_user:
-        return False
-    # The current segment must contain a tool response for it to count
-    # as an in-flight tool cycle.
-    return any(
-        messages[j].get("role") == "tool" for j in range(last_user + 1, len(messages))
-    )
+    return introduces_user_query(new_messages, is_user_query=is_user_query)
 
 
 def build_trajectory_step(

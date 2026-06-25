@@ -1450,6 +1450,7 @@ def create_renderer_pool(
     config: RendererConfig | None = None,
     *,
     size: int = 16,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
 ) -> RendererPool:
     """Create a RendererPool with *size* independent tokenizer copies.
 
@@ -1461,8 +1462,10 @@ def create_renderer_pool(
     :data:`renderers.RendererConfig`). Defaults to
     :class:`AutoRendererConfig`, which resolves to a concrete renderer
     via ``MODEL_RENDERER_MAP`` at construction time using the loaded
-    tokenizer's name. Every slot in the pool shares the same config; to
-    run a different config, build a different pool.
+    tokenizer's name. ``chat_template_kwargs`` are merged into the
+    resolved concrete config and validated before renderer construction.
+    Every slot in the pool shares the same config; to run a different
+    config, build a different pool.
 
     Tokenizers load via ``load_tokenizer`` — see its docstring for the
     ``trust_remote_code`` policy (default off; Moonshot Kimi-K2 family
@@ -1471,7 +1474,11 @@ def create_renderer_pool(
 
     def factory() -> Renderer:
         tokenizer = load_tokenizer(tokenizer_name_or_path)
-        return create_renderer(tokenizer, config)
+        return create_renderer(
+            tokenizer,
+            config,
+            chat_template_kwargs=chat_template_kwargs,
+        )
 
     return RendererPool(factory, size=size)
 
@@ -1479,6 +1486,8 @@ def create_renderer_pool(
 def create_renderer(
     tokenizer,
     config: RendererConfig | None = None,
+    *,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
 ) -> Renderer:
     """Create a Renderer from a typed config.
 
@@ -1494,33 +1503,77 @@ def create_renderer(
             template-control kwargs (e.g. ``enable_thinking``), pass
             the specific :class:`Qwen3RendererConfig`,
             :class:`GLM5RendererConfig` etc. and set those fields.
+        chat_template_kwargs: Optional per-run chat-template kwargs. When
+            ``config`` is auto/``None``, renderers first resolves the concrete
+            config from ``tokenizer.name_or_path`` and then validates these
+            kwargs against that config.
 
     Selecting the auto-renderer for a model without a registered
     renderer falls back to :class:`DefaultRenderer` for text-only models
     and raises for VLMs (where ``apply_chat_template`` would silently
     drop images).
     """
-    from renderers.configs import AutoRendererConfig
-
     _populate_registry()
+
+    config = _resolve_renderer_config(
+        tokenizer,
+        config,
+        chat_template_kwargs=chat_template_kwargs,
+    )
+    cls = RENDERER_REGISTRY.get(config.name)
+    if cls is None:
+        raise ValueError(
+            f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
+        )
+    return cls(tokenizer, config)
+
+
+def _merge_chat_template_kwargs(
+    config: RendererConfig,
+    chat_template_kwargs: Mapping[str, Any] | None,
+) -> RendererConfig:
+    if not chat_template_kwargs:
+        return config
+    if not isinstance(chat_template_kwargs, Mapping):
+        raise TypeError("chat_template_kwargs must be a mapping.")
+    data: dict[str, Any] = {"name": config.name}
+    for field_name in config.__pydantic_fields_set__:
+        data[field_name] = getattr(config, field_name)
+    data.update(getattr(config, "model_extra", None) or {})
+    data.update(dict(chat_template_kwargs))
+    return type(config).model_validate(data)
+
+
+def _resolve_renderer_config(
+    tokenizer,
+    config: RendererConfig | None,
+    *,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+) -> RendererConfig:
+    """Resolve auto/default config and merge chat-template kwargs."""
+    from renderers.configs import AutoRendererConfig
 
     if config is None:
         config = AutoRendererConfig()
 
-    if not isinstance(config, AutoRendererConfig):
-        cls = RENDERER_REGISTRY.get(config.name)
-        if cls is None:
-            raise ValueError(
-                f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
-            )
-        return cls(tokenizer, config)
+    if isinstance(config, AutoRendererConfig):
+        return _resolve_auto_config(
+            tokenizer,
+            config,
+            chat_template_kwargs=chat_template_kwargs,
+        )
 
-    return _resolve_auto(tokenizer, config)
+    return _merge_chat_template_kwargs(config, chat_template_kwargs)
 
 
-def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
+def _resolve_auto_config(
+    tokenizer,
+    auto: AutoRendererConfig,
+    *,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+) -> RendererConfig:
     """Map ``AutoRendererConfig`` → concrete typed config via the
-    tokenizer's ``name_or_path``, then instantiate the matching renderer.
+    tokenizer's ``name_or_path``.
 
     Fine-tunes and renamed checkpoints miss on purpose — their chat
     template may differ from the original even when the architecture
@@ -1538,7 +1591,18 @@ def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
 
     if renderer_name is not None:
         cfg_cls = _config_class_for(renderer_name)
-        return RENDERER_REGISTRY[renderer_name](tokenizer, cfg_cls(**preserve_carry))
+        return _merge_chat_template_kwargs(
+            cfg_cls(**preserve_carry),
+            chat_template_kwargs,
+        )
+
+    if chat_template_kwargs:
+        raise ValueError(
+            "AutoRendererConfig cannot apply chat_template_kwargs for unknown "
+            f"model {model_name!r}. Pass an explicit model-specific renderer "
+            "config, or use DefaultRendererConfig explicitly for opaque "
+            "apply_chat_template kwargs."
+        )
 
     # No match. For VLMs this must be fatal: DefaultRenderer only knows
     # ``apply_chat_template`` + text tokens, so it would silently drop
@@ -1572,7 +1636,7 @@ def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
         "reasoning_parser=...) to enable structured output parsing.",
         model_name or "<unnamed tokenizer>",
     )
-    return RENDERER_REGISTRY["default"](tokenizer, DefaultRendererConfig())
+    return DefaultRendererConfig()
 
 
 # ---------------------------------------------------------------------------

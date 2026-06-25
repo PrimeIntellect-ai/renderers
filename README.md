@@ -109,7 +109,7 @@ Each break fragments a rollout into multiple training samples — every fragment
 
 ## Typed renderer configs
 
-Each renderer accepts a typed pydantic config at construction. Some fields mirror chat-template kwargs; others configure renderer-only behavior such as image caching, parsers, or Harmony preamble construction. `create_renderer` and `create_renderer_pool` take one positional `config` argument:
+Each renderer accepts a typed pydantic config at construction. Some fields mirror chat-template kwargs; others configure renderer-only behavior such as image caching, parsers, or Harmony preamble construction. `create_renderer` and `create_renderer_pool` take one positional `config` argument and an optional keyword-only `chat_template_kwargs` mapping:
 
 ```python
 from renderers import (
@@ -120,10 +120,13 @@ from renderers import (
     DefaultRendererConfig,
 )
 
-# Auto-resolve renderer from the tokenizer's model name. Carries the
-# shared thinking_retention flag; template kwargs require an explicit choice.
+# Auto-resolve renderer from the tokenizer's model name.
 renderer = create_renderer(tokenizer)
 renderer = create_renderer(tokenizer, AutoRendererConfig(thinking_retention="all"))
+renderer = create_renderer(
+    tokenizer,
+    chat_template_kwargs={"enable_thinking": False},
+)
 
 # Explicit choice — use the renderer-specific fields it exposes.
 renderer = create_renderer(tokenizer, Qwen3RendererConfig(enable_thinking=False))
@@ -139,6 +142,8 @@ renderer = create_renderer(
 ```
 
 Discriminated union: every per-renderer config is a variant of `RendererConfig`, dispatched on the `name` field. Bogus combinations (e.g. `add_vision_id` under `name="qwen3"`) error at construction with a `pydantic.ValidationError`. Downstream pydantic configs (prime-rl orchestrator, verifiers `ClientConfig`) hold a single field typed as `RendererConfig` and inherit the same strict-per-variant validation.
+
+When `chat_template_kwargs` is passed with `config=None` / `AutoRendererConfig`, renderers first resolves the concrete renderer from the model name, then validates those kwargs against that renderer's config. `Auto + unknown model + chat_template_kwargs` fails loudly; use an explicit typed config or explicit `DefaultRendererConfig` for opaque fallback templates.
 
 One shared behaviour flag lives on typed renderer configs: `thinking_retention`, an optional bridge-policy override. Leave it unset to derive bridge behaviour from the chat template and its renderer-exposed kwargs.
 

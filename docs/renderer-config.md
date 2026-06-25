@@ -8,6 +8,7 @@ construction time.
 from renderers import create_renderer, Qwen35RendererConfig
 
 r = create_renderer(tokenizer, Qwen35RendererConfig(enable_thinking=False))
+r = create_renderer(tokenizer, chat_template_kwargs={"enable_thinking": False})
 ```
 
 `RendererConfig` is a pydantic discriminated union, one variant per renderer,
@@ -58,13 +59,31 @@ r = create_renderer(tokenizer, GLM5RendererConfig(clear_thinking=False))
 ```
 
 `AutoRendererConfig` carries only the shared `thinking_retention` override.
-Template kwargs require an explicit renderer config, because their meaning is
-model-specific.
+Callers that receive run-scoped chat-template kwargs can pass them separately:
+
+```python
+r = create_renderer(
+    tokenizer,
+    chat_template_kwargs={"enable_thinking": False},
+)
+pool = create_renderer_pool(
+    "Qwen/Qwen3-8B",
+    chat_template_kwargs={"enable_thinking": False},
+)
+```
+
+Renderers resolves auto configs before applying `chat_template_kwargs`, so the
+kwargs validate against the concrete renderer config. Unknown kwargs, or kwargs
+that conflict with an explicit `thinking_retention`, fail at construction.
 
 Auto-resolution fails loudly for VLMs without an exact registered renderer.
 Text-only unknown models fall back to `DefaultRenderer`, unless
 `AutoRendererConfig(thinking_retention=...)` was set. The default renderer
 cannot implement selective bridge retention, so that combination raises.
+`AutoRendererConfig` with `chat_template_kwargs` also raises for unknown models,
+because renderers cannot validate those kwargs without a concrete renderer.
+Use an explicit model-specific config, or `DefaultRendererConfig(...)` when you
+intentionally want opaque `apply_chat_template` kwargs.
 
 ## `thinking_retention`
 

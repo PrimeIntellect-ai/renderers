@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import contextlib
 import enum
-import io
 import logging
 import queue
 import threading
@@ -1163,29 +1161,6 @@ TOKENIZER_SOURCE_OVERRIDES: dict[str, str] = {
 }
 
 
-# Models for which ``fastokens`` is known to diverge from vanilla
-# ``transformers.AutoTokenizer`` and therefore must NOT be patched.
-# Empirical audit ran each entry of ``MODEL_RENDERER_MAP`` through both
-# backends. The entries below fail to load under fastokens (DeepSeek-V3
-# family — Metaspace pretokenizer not yet implemented).
-FASTOKENS_INCOMPATIBLE: frozenset[str] = frozenset(
-    {
-        # fastokens: ``ValueError: pre-tokenizer error: unsupported
-        # pre-tokenizer type: Metaspace`` — DeepSeek's tokenizer uses
-        # SentencePiece-style Metaspace pretokenization which fastokens
-        # doesn't yet implement.
-        "deepseek-ai/DeepSeek-V3",
-        "deepseek-ai/DeepSeek-V3-Base",
-        "deepseek-ai/DeepSeek-R1",
-        "deepseek-ai/DeepSeek-R1-0528",
-    }
-)
-
-
-_FASTOKENS_PATCH_LOCK = threading.Lock()
-_FASTOKENS_ANNOUNCED = False
-
-
 def _tokenizer_source_for(model_name_or_path: str) -> str:
     return TOKENIZER_SOURCE_OVERRIDES.get(model_name_or_path, model_name_or_path)
 
@@ -1220,48 +1195,6 @@ def _preserve_requested_tokenizer_name(
             "name_or_path for renderer auto-resolution."
         )
     return tokenizer
-
-
-def _patched_load(model_name_or_path: str, **kwargs):
-    """Run ``AutoTokenizer.from_pretrained`` with fastokens patched in
-    process-locally — patch around the load, unpatch right after.
-
-    fastokens captures the loaded backend on a per-tokenizer basis, so
-    after we unpatch the returned tokenizer object continues to use
-    fastokens for ``encode``/``decode`` while subsequent
-    ``AutoTokenizer.from_pretrained`` calls (outside our control) go
-    back to vanilla. This keeps the global side effect minimal.
-
-    fastokens itself prints ``[fastokens] patch_transformers: ...`` to
-    stdout on every patch/unpatch call. Building a pool of size N would
-    therefore emit ~N lines (more under thread contention, where some
-    threads see ``already patched``). We swallow those prints under a
-    lock — ``contextlib.redirect_stdout`` swaps ``sys.stdout``
-    process-wide, so the lock keeps unrelated stdout writes from other
-    threads from disappearing into our buffer. The patch/unpatch calls
-    are cheap; only the brief patch+unpatch is serialized, the actual
-    ``from_pretrained`` still runs concurrently across pool slots. A
-    single ``logger.info`` is emitted on the first patch so the fast
-    path is still discoverable in logs.
-    """
-    import fastokens
-
-    global _FASTOKENS_ANNOUNCED
-
-    with _FASTOKENS_PATCH_LOCK:
-        with contextlib.redirect_stdout(io.StringIO()):
-            fastokens.patch_transformers()
-        if not _FASTOKENS_ANNOUNCED:
-            logger.info(
-                "fastokens enabled — tokenizers load through the Rust BPE fast path (~10x encode speedup)."
-            )
-            _FASTOKENS_ANNOUNCED = True
-    try:
-        return _load_tokenizer_via_auto(model_name_or_path, **kwargs)
-    finally:
-        with _FASTOKENS_PATCH_LOCK:
-            with contextlib.redirect_stdout(io.StringIO()):
-                fastokens.unpatch_transformers()
 
 
 def _load_fast_tokenizer_directly(
@@ -1323,35 +1256,13 @@ def _load_tokenizer_via_auto(model_name_or_path: str, **kwargs) -> Any:
         return tok
 
 
-def load_tokenizer(
-    model_name_or_path: str,
-    *,
-    use_fastokens: bool = True,
-):
-    """Load a tokenizer with the renderers-package security + perf policy.
+def load_tokenizer(model_name_or_path: str):
+    """Load a tokenizer with the renderers-package security policy.
 
-    **Security** — default ``trust_remote_code=False``. Models listed in
+    Default ``trust_remote_code=False``. Models listed in
     ``TRUSTED_REVISIONS`` (Moonshot Kimi-K2 family) load with
     ``trust_remote_code=True`` AND a pinned ``revision=<sha>`` so
     transformers only executes the reviewed commit's tokenizer Python.
-
-    **Performance** — ``use_fastokens=True`` (default) routes the load
-    through ``fastokens.patch_transformers()`` so the resulting tokenizer
-    encodes ~10x faster than vanilla ``tokenizers``. The patch is
-    bracketed: it's applied before ``from_pretrained`` and removed
-    immediately after, so global ``AutoTokenizer.from_pretrained`` calls
-    elsewhere in the user's process are not affected.
-
-    Models in ``FASTOKENS_INCOMPATIBLE`` (DeepSeek-V3 family) skip the
-    patch — fastokens currently fails to load them. Pass
-    ``use_fastokens=False`` to force the vanilla backend for any other
-    model.
-
-    Unknown / fine-tuned model paths fall through to
-    ``trust_remote_code=False`` and the patched-load fast path. If
-    fastokens raises during the patched load (e.g. an unknown
-    pre-tokenizer type), we automatically retry with the vanilla
-    backend and emit an INFO log.
 
     ``AutoTokenizer.from_pretrained`` eagerly builds the model config to
     resolve the tokenizer class. If that construction raises on a
@@ -1367,28 +1278,7 @@ def load_tokenizer(
     """
     load_name_or_path = _tokenizer_source_for(model_name_or_path)
     kwargs = _tokenizer_load_kwargs(load_name_or_path)
-
-    if not use_fastokens or load_name_or_path in FASTOKENS_INCOMPATIBLE:
-        tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
-        return _preserve_requested_tokenizer_name(
-            tok,
-            requested_name_or_path=model_name_or_path,
-            loaded_name_or_path=load_name_or_path,
-        )
-
-    try:
-        tok = _patched_load(load_name_or_path, **kwargs)
-    except Exception as exc:
-        logger.info(
-            "fastokens could not load %r (%s: %s); falling back to vanilla "
-            "AutoTokenizer. Add this model to FASTOKENS_INCOMPATIBLE in "
-            "renderers.base to suppress the retry.",
-            load_name_or_path,
-            type(exc).__name__,
-            str(exc)[:160],
-        )
-        tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
-
+    tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
     return _preserve_requested_tokenizer_name(
         tok,
         requested_name_or_path=model_name_or_path,
@@ -1718,104 +1608,28 @@ def trim_to_turn_close(
     return previous_ids
 
 
-# Per-model offset-aware tokenizer cache. ``attribute_text_segments``
-# uses the fast HuggingFace tokenizer's ``offset_mapping`` to attribute
-# each token to its source text segment under one BPE pass. Fastokens
-# (the Rust BPE we patch in by default for ~10x faster encode) does not
-# track character offsets — the patched tokenizer's
-# ``return_offsets_mapping=True`` raises ``NotImplementedError``. So we
-# keep a parallel vanilla tokenizer per model purely for offset queries.
-# Memory cost is one extra tokenizer per *unique* model name across all
-# pools / renderers (the cache is process-global), independent of pool
-# size.
-_offset_tokenizers: dict[str, Any] = {}
-_offset_tokenizers_lock = threading.Lock()
-
-
 def _get_offset_tokenizer(tokenizer):
-    """Return a tokenizer that supports ``return_offsets_mapping=True``.
+    """Assert ``tokenizer`` supports ``return_offsets_mapping=True``.
 
-    If ``tokenizer`` itself supports offsets, returns it unchanged.
-    Otherwise loads a vanilla (non-fastokens) tokenizer from
-    ``tokenizer.name_or_path`` and caches it. Raises if the tokenizer
-    has no usable ``name_or_path`` — hand-coded renderers always pass
-    a tokenizer loaded via ``load_tokenizer`` which does set it.
+    Hand-coded renderers concatenate scaffold + body in one BPE pass to
+    preserve cross-boundary merges, then attribute each resulting token
+    back to its source segment via the fast tokenizer's
+    ``offset_mapping`` (see :func:`attribute_text_segments`). The
+    contract: every BYO tokenizer must be a fast tokenizer with offset
+    support. Tokenizers loaded via :func:`load_tokenizer` are
+    ``PreTrainedTokenizerFast`` instances that satisfy this trivially.
     """
-    # Cheap probe: does this tokenizer already provide offsets?
     try:
         tokenizer("a", add_special_tokens=False, return_offsets_mapping=True)
-        return tokenizer
-    except (NotImplementedError, ValueError, TypeError):
-        pass
-
-    name_or_path = getattr(tokenizer, "name_or_path", "")
-    if not name_or_path:
+    except (NotImplementedError, ValueError, TypeError) as exc:
         raise RuntimeError(
-            "Cannot construct an offset-aware tokenizer: the supplied "
-            "tokenizer has no ``name_or_path`` to fall back on. Pass a "
-            "tokenizer loaded via ``renderers.base.load_tokenizer``."
-        )
-
-    with _offset_tokenizers_lock:
-        cached = _offset_tokenizers.get(name_or_path)
-        if cached is not None:
-            return cached
-
-        load_name_or_path = _tokenizer_source_for(name_or_path)
-        kwargs = _tokenizer_load_kwargs(load_name_or_path)
-
-        def _has_offsets(tok) -> bool:
-            if not getattr(tok, "is_fast", False):
-                return False
-            try:
-                tok("a", add_special_tokens=False, return_offsets_mapping=True)
-                return True
-            except (NotImplementedError, ValueError, TypeError):
-                return False
-
-        # We want HF's Rust tokenizer with offset tracking, not the fastokens
-        # shim. The shim is installed by a *process-global* monkeypatch that
-        # ``load_tokenizer`` toggles per pool-slot load, so a plain reload here
-        # can race a concurrent slot's open patch window and silently pick up
-        # the offset-less shim (then get cached, poisoning the process). So:
-        # load, verify offsets, and if missing, reload with the patch forced
-        # off — serialized against pool patch/unpatch via ``_FASTOKENS_PATCH_LOCK``
-        # so no concurrent window can swap the shim back in mid-load — then
-        # restore the prior patch state. Never cache a non-offset tokenizer.
-        offset_tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
-        offset_tok = _preserve_requested_tokenizer_name(
-            offset_tok,
-            requested_name_or_path=name_or_path,
-            loaded_name_or_path=load_name_or_path,
-        )
-        if not _has_offsets(offset_tok):
-            import fastokens
-
-            with _FASTOKENS_PATCH_LOCK:
-                was_patched = bool(getattr(fastokens, "_patched", False))
-                if was_patched:
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        fastokens.unpatch_transformers()
-                try:
-                    offset_tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
-                    offset_tok = _preserve_requested_tokenizer_name(
-                        offset_tok,
-                        requested_name_or_path=name_or_path,
-                        loaded_name_or_path=load_name_or_path,
-                    )
-                finally:
-                    if was_patched:
-                        with contextlib.redirect_stdout(io.StringIO()):
-                            fastokens.patch_transformers()
-        if not _has_offsets(offset_tok):
-            raise RuntimeError(
-                f"Could not load an offset-capable tokenizer for {name_or_path!r}: "
-                "offset_mapping is unavailable even with the fastokens patch off. "
-                "Hand-coded renderers require a fast tokenizer for body/scaffold "
-                "attribution."
-            )
-        _offset_tokenizers[name_or_path] = offset_tok
-        return offset_tok
+            "Hand-coded renderers require a fast tokenizer with "
+            "``return_offsets_mapping=True`` support for body/scaffold "
+            "attribution. Pass a tokenizer loaded via "
+            "``renderers.base.load_tokenizer``, or any "
+            "``transformers.PreTrainedTokenizerFast`` instance."
+        ) from exc
+    return tokenizer
 
 
 def attribute_text_segments(
@@ -1839,14 +1653,13 @@ def attribute_text_segments(
     tokens (rare; usually pre-tokenizer artefacts) are attributed to
     the most recently entered segment.
 
-    Requires a HuggingFace fast tokenizer with offset tracking. The
-    ``fastokens`` patch ``load_tokenizer`` applies by default does
-    **not** track offsets — when that's the case we transparently load
-    a vanilla offset-capable tokenizer for the same model and cache it
-    (see :func:`_get_offset_tokenizer`). Hand-coded renderers are only
-    registered for model families that ship a fast tokenizer, so a
-    silent slow-tokenizer fallback isn't supported — BPE drift at the
-    wrap/body boundary would defeat the whole point.
+    Requires a HuggingFace fast tokenizer with offset tracking. Every
+    model in ``MODEL_RENDERER_MAP`` ships one, so the offset lookup
+    always succeeds for tokenizers obtained via :func:`load_tokenizer`.
+    BYO tokenizers must be a ``PreTrainedTokenizerFast`` (or anything
+    else exposing ``return_offsets_mapping=True``); slow tokenizers
+    aren't supported — BPE drift at the wrap/body boundary would
+    defeat the whole point.
 
     Empty input or empty joined text returns an empty list.
     """

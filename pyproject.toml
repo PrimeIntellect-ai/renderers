@@ -31,12 +31,6 @@ dependencies = [
     # against 0.0.8) and ``tests/test_gpt_oss_harmony_parity.py`` passes on it,
     # so the older harmony is safe.
     "openai-harmony>=0.0.4",
-    # Crusoe's Rust BPE tokenizer; ~10x faster encode vs HF's tokenizers.
-    # ``load_tokenizer`` patches it in by default for every supported model
-    # except a small denylist (DeepSeek-V3 family). The patch is bracketed
-    # around ``from_pretrained``, so subsequent ``AutoTokenizer`` calls
-    # outside the renderers package stay vanilla.
-    "fastokens>=0.2.0",
     # ``BaseRendererConfig`` inherits from ``pydantic_config.BaseConfig`` so
     # the typed-config surface stays uniform with prime-rl / verifiers config
     # bases. Transitively brings pydantic, which ``renderers.configs`` also
@@ -103,12 +97,6 @@ required-version = ">=0.11.1"
 exclude-newer = "7 days"
 
 [tool.uv.exclude-newer-package]
-# fastokens 0.2.0 was published on 2026-05-17 and contains the
-# ``unpatch_transformers`` fix (crusoecloud/fastokens#32) needed for
-# MiniMax-M2's slow→fast tokenizer conversion path. Exempting it from
-# the project-wide 7-day cutoff lets the lockfile pick it up immediately
-# while the rest of the dependency graph stays gated.
-fastokens = false
 # PrimeIntellect-published packages in this project's dependency closure —
 # fast-track so first-party releases can land same-day. Only packages that
 # appear in `uv tree` are listed.

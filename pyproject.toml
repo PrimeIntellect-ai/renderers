@@ -57,6 +57,22 @@ tag-pattern = '^renderers-v(?P<version>.+)$'
 # only fires when the resolver has nothing to go on.
 fallback-version = "0.0.0"
 
+[tool.hatch.version.raw-options]
+# Only stable ``renderers-v<MAJOR>.<MINOR>.<PATCH>`` tags participate in
+# version resolution; legacy per-commit ``.devN`` tags are excluded.
+# Untagged commits get a clean PEP 440 dev version derived from distance
+# to the latest stable tag (e.g. ``0.1.8.dev46``), with no ``+gHASH``
+# local segment so PyPI accepts the wheel directly. setuptools-scm
+# refuses to bump a pre-existing ``.devN`` tag, so matching only stable
+# tags also unblocks local ``uv lock`` / ``uv build`` on untagged
+# branches. Mirrors verifiers' setup.
+local_scheme = "no-local-version"
+git_describe_command = [
+    "git", "describe", "--tags", "--long",
+    "--match", "renderers-v[0-9]*.[0-9]*.[0-9]*",
+    "--exclude", "*dev*",
+]
+
 [tool.hatch.build.hooks.vcs]
 # Write the resolved version to a Python file so it can be inspected
 # at runtime via ``renderers.__version__`` without re-parsing the

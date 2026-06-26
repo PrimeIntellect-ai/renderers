@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-05-18T21:42:54.18041997Z"
+exclude-newer = "2026-06-19T02:55:59.889910839Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -1409,7 +1409,7 @@ requires-dist = [
     { name = "jinja2" },
     { name = "numpy" },
     { name = "openai", specifier = ">=1.108.1" },
-    { name = "openai-harmony", specifier = ">=0.0.8" },
+    { name = "openai-harmony", specifier = ">=0.0.4" },
     { name = "prime-pydantic-config", specifier = ">=0.3.0.dev83" },
     { name = "tiktoken" },
     { name = "transformers", specifier = ">=4.50.0" },

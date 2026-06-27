@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import hashlib
 import json
 from typing import Any
 
@@ -11,7 +10,6 @@ from renderers.base import (
     ParsedResponse,
     ParsedToolCall,
     RenderedTokens,
-    ToolSpec,
     ToolCallParseStatus,
 )
 from renderers.client import generate
@@ -375,8 +373,8 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
 ):
     """When the renderer emits ``MultiModalData``, ``generate`` translates
     it into vLLM's ``features`` payload (mm_hashes + mm_placeholders +
-    image-ref kwargs_data) and sticks it in the request body. Descriptor-only
-    images stay ``None`` so vLLM can resolve them from its cache."""
+    image-ref kwargs_data) and sticks it in the request body. Every image slot
+    carries a lightweight raw ref."""
     import importlib
 
     from renderers.base import (
@@ -406,6 +404,7 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
     image_dir = tmp_path / "run_rawtest" / "assets" / "images"
     image_dir.mkdir(parents=True)
     (image_dir / "image.png").write_bytes(b"image-bytes")
+    (image_dir / "image2.png").write_bytes(b"other-image-bytes")
     monkeypatch.setenv("VF_RENDERER_IMAGE_OFFLOAD_DIR", str(image_dir))
     monkeypatch.setenv("RUN_ID", "rawtest")
     fingerprint = image_layout_fingerprint(
@@ -440,6 +439,8 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
                     family="qwen_vl",
                     layout_fingerprint=fingerprint,
                     payload={"image_grid_thw": [[1, 2, 2]]},
+                    raw_uri=(image_dir / "image2.png").as_uri(),
+                    raw_image_id="image2.png",
                 ),
             ],
         },
@@ -466,7 +467,6 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
         "image": [{"offset": 5, "length": 1}, {"offset": 10, "length": 1}],
     }
     items = features["kwargs_data"]["image"]
-    assert items[1] is None
     ref = split_raw_mm_ref(items[0])
     assert ref.payload == {"image_grid_thw": [[1, 2, 2]]}
     assert (
@@ -484,7 +484,23 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
         "a" * 32,
         "image.png",
     )
-    assert "raw_image_id" not in result["multi_modal_data"].mm_items["image"][0]
+    ref2 = split_raw_mm_ref(items[1])
+    assert (
+        ref2.run_id,
+        ref2.family,
+        ref2.fingerprint,
+        ref2.modality,
+        ref2.mm_hash,
+        ref2.raw_image_id,
+    ) == (
+        "rawtest",
+        "qwen_vl",
+        fingerprint,
+        "image",
+        "b" * 32,
+        "image2.png",
+    )
+    assert result["multi_modal_data"] is mm_data
 
 
 # ---------------------------------------------------------------------------

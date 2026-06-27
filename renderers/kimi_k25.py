@@ -25,7 +25,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
@@ -44,15 +44,14 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
+from renderers.image_layout_specs import KIMI_K25_IMAGE_LAYOUT, KimiK25ImageLayoutSpec
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
 from renderers.qwen3_vl import (
     _image_content_hash,
     _image_dimensions,
-    _image_hash,
     _image_source,
     _is_image_part,
     _is_video_part,
-    _load_pil_image,
     _raw_uri_and_id,
 )
 from renderers.mm_store import image_layout_fingerprint, raw_mm_item
@@ -412,17 +411,6 @@ def _encode_tools_typescript(tools: list[ToolSpec]) -> str:
 
 
 @dataclass(frozen=True)
-class KimiImageLayoutConfig:
-    patch_size: int
-    merge_kernel_size: int
-    in_patch_limit: int
-    patch_limit_on_one_side: int
-    fixed_output_tokens: int | None
-    image_mean: tuple[float, ...]
-    image_std: tuple[float, ...]
-
-
-@dataclass(frozen=True)
 class KimiImageLayoutDescriptor:
     mm_hash: str
     grid_thws: list[list[int]]
@@ -432,52 +420,12 @@ class KimiImageLayoutDescriptor:
     raw_image_id: str | None = None
 
 
-def kimi_image_layout_config_for_renderer(renderer: Any) -> KimiImageLayoutConfig:
-    config = renderer.config
-    values = {
-        "patch_size": getattr(config, "image_patch_size", None),
-        "merge_kernel_size": getattr(config, "image_merge_kernel_size", None),
-        "in_patch_limit": getattr(config, "image_in_patch_limit", None),
-        "patch_limit_on_one_side": getattr(
-            config, "image_patch_limit_on_one_side", None
-        ),
-        "fixed_output_tokens": getattr(config, "image_fixed_output_tokens", None),
-        "image_mean": getattr(config, "image_mean", None),
-        "image_std": getattr(config, "image_std", None),
-    }
-    missing = [
-        name
-        for name, value in values.items()
-        if value is None and name != "fixed_output_tokens"
-    ]
-    if missing:
-        raise RuntimeError(
-            "Kimi image layout must be declared on the renderer config; missing "
-            + ", ".join(missing)
-        )
-    image_mean = cast("tuple[float, ...] | list[float]", values["image_mean"])
-    image_std = cast("tuple[float, ...] | list[float]", values["image_std"])
-    return KimiImageLayoutConfig(
-        patch_size=int(values["patch_size"]),
-        merge_kernel_size=int(values["merge_kernel_size"]),
-        in_patch_limit=int(values["in_patch_limit"]),
-        patch_limit_on_one_side=int(values["patch_limit_on_one_side"]),
-        fixed_output_tokens=(
-            None
-            if values["fixed_output_tokens"] is None
-            else int(values["fixed_output_tokens"])
-        ),
-        image_mean=tuple(float(v) for v in image_mean),
-        image_std=tuple(float(v) for v in image_std),
-    )
-
-
 def _ceil_to_factor(value: int, factor: int) -> int:
     return max(factor, math.ceil(value / factor) * factor)
 
 
 def _kimi_resize_config(
-    width: int, height: int, layout: KimiImageLayoutConfig
+    width: int, height: int, layout: KimiK25ImageLayoutSpec
 ) -> tuple[int, int, int]:
     """Kimi MoonViT/NavIT image resize layout without materializing pixels."""
     if height <= 0 or width <= 0:
@@ -504,12 +452,10 @@ def _kimi_resize_config(
     return padded_w, padded_h, int(num_tokens)
 
 
-def describe_kimi_image_layout(
-    renderer: Any, part: dict[str, Any]
-) -> KimiImageLayoutDescriptor:
+def describe_kimi_image_layout(part: dict[str, Any]) -> KimiImageLayoutDescriptor:
     source = _image_source(part)
     height, width = _image_dimensions(source)
-    layout = kimi_image_layout_config_for_renderer(renderer)
+    layout = KIMI_K25_IMAGE_LAYOUT
     padded_w, padded_h, num_media_tokens = _kimi_resize_config(width, height, layout)
     grid_thws = [[1, padded_h // layout.patch_size, padded_w // layout.patch_size]]
     fingerprint = image_layout_fingerprint(
@@ -533,10 +479,8 @@ def describe_kimi_image_layout(
     )
 
 
-def kimi_image_item_for_render(
-    renderer: Any, part: dict[str, Any]
-) -> tuple[int, str, dict[str, Any]]:
-    desc = describe_kimi_image_layout(renderer, part)
+def kimi_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
+    desc = describe_kimi_image_layout(part)
     item = raw_mm_item(
         modality="image",
         family=KIMI_K25_FAMILY,
@@ -550,23 +494,6 @@ def kimi_image_item_for_render(
         vllm_modality=KIMI_K25_VLLM_MODALITY,
     )
     return 1, desc.mm_hash, item
-
-
-def _kimi_grid_from_item(item: dict[str, Any]) -> Any:
-    payload = item.get("payload")
-    if isinstance(payload, dict) and payload.get("grid_thws") is not None:
-        return payload["grid_thws"]
-    return item.get("grid_thws")
-
-
-def _kimi_grids_equal(a: Any, b: Any) -> bool:
-    if a is None or b is None:
-        return False
-    al = a.tolist() if hasattr(a, "tolist") else a
-    bl = b.tolist() if hasattr(b, "tolist") else b
-    return al == bl
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -929,7 +856,7 @@ class KimiK25Renderer:
             ``<|media_content|>``, ``<|media_end|>``, the trailing
             ``\\n``) are template-injected scaffold.
             """
-            _placeholder_len, h, mm_item = kimi_image_item_for_render(self, part)
+            _placeholder_len, h, mm_item = kimi_image_item_for_render(part)
             emit_special(
                 self._media_begin, msg_idx, is_sampled=is_sampled, is_content=False
             )
@@ -1215,7 +1142,7 @@ class KimiK25Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            _placeholder_len, h, mm_item = kimi_image_item_for_render(self, part)
+            _placeholder_len, h, mm_item = kimi_image_item_for_render(part)
             emit_special(self._media_begin, msg_idx)
             emit_text("image", msg_idx)
             emit_special(self._media_content, msg_idx)

@@ -28,7 +28,7 @@ import hashlib
 import io
 import json
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -48,9 +48,8 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import Qwen3VLRendererConfig
+from renderers.image_layout_specs import QWEN_VL_IMAGE_LAYOUT
 from renderers.mm_store import (
-    IMAGE_REF_PAYLOAD_KEY,
-    IMAGE_REF_PAYLOAD_VALUE,
     image_layout_fingerprint,
     raw_mm_item,
 )
@@ -170,15 +169,6 @@ def _image_hash(pil_image) -> str:
 
 
 @dataclass(frozen=True)
-class QwenImageLayoutConfig:
-    patch_size: int
-    temporal_patch_size: int
-    merge_size: int
-    min_pixels: int
-    max_pixels: int
-
-
-@dataclass(frozen=True)
 class QwenImageLayoutDescriptor:
     mm_hash: str
     image_grid_thw: list[list[int]]
@@ -186,30 +176,6 @@ class QwenImageLayoutDescriptor:
     fingerprint: str
     raw_uri: str | None = None
     raw_image_id: str | None = None
-
-
-def qwen_image_layout_config_for_renderer(renderer: Any) -> QwenImageLayoutConfig:
-    config = renderer.config
-    values = {
-        "patch_size": getattr(config, "image_patch_size", None),
-        "temporal_patch_size": getattr(config, "image_temporal_patch_size", None),
-        "merge_size": getattr(config, "image_merge_size", None),
-        "min_pixels": getattr(config, "image_min_pixels", None),
-        "max_pixels": getattr(config, "image_max_pixels", None),
-    }
-    missing = [name for name, value in values.items() if value is None]
-    if missing:
-        raise RuntimeError(
-            "Qwen image layout must be declared on the renderer config; missing "
-            + ", ".join(missing)
-        )
-    return QwenImageLayoutConfig(
-        patch_size=int(values["patch_size"]),
-        temporal_patch_size=int(values["temporal_patch_size"]),
-        merge_size=int(values["merge_size"]),
-        min_pixels=int(values["min_pixels"]),
-        max_pixels=int(values["max_pixels"]),
-    )
 
 
 def _smart_resize(
@@ -292,13 +258,11 @@ def _raw_uri_and_id(source: Any) -> tuple[str | None, str | None]:
     return path.as_uri(), path.name
 
 
-def describe_qwen_image_layout(
-    renderer: Any, part: dict[str, Any]
-) -> QwenImageLayoutDescriptor:
+def describe_qwen_image_layout(part: dict[str, Any]) -> QwenImageLayoutDescriptor:
     """Return Qwen image layout metadata without invoking an image processor."""
     source = _image_source(part)
     height, width = _image_dimensions(source)
-    layout = qwen_image_layout_config_for_renderer(renderer)
+    layout = QWEN_VL_IMAGE_LAYOUT
     resized_h, resized_w = _smart_resize(
         height,
         width,
@@ -331,10 +295,8 @@ def describe_qwen_image_layout(
     )
 
 
-def qwen_image_item_for_render(
-    renderer: Any, part: dict[str, Any]
-) -> tuple[int, str, dict[str, Any]]:
-    desc = describe_qwen_image_layout(renderer, part)
+def qwen_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
+    desc = describe_qwen_image_layout(part)
     item = raw_mm_item(
         modality="image",
         family="qwen_vl",
@@ -344,76 +306,6 @@ def qwen_image_item_for_render(
         raw_image_id=desc.raw_image_id,
     )
     return desc.num_image_tokens, desc.mm_hash, item
-
-
-def _iter_image_parts(messages: list[Any]):
-    for msg in messages or []:
-        content = msg.get("content") if isinstance(msg, dict) else None
-        if not isinstance(content, list):
-            continue
-        for item in content:
-            if isinstance(item, dict) and _is_image_part(item):
-                yield item
-
-
-def _grids_equal(a: Any, b: Any) -> bool:
-    if a is None or b is None:
-        return False
-    al = a.tolist() if hasattr(a, "tolist") else list(a)
-    bl = b.tolist() if hasattr(b, "tolist") else list(b)
-    return al == bl
-
-
-def _qwen_grid_from_item(item: dict[str, Any]) -> Any:
-    payload = item.get("payload")
-    if isinstance(payload, dict) and payload.get("image_grid_thw") is not None:
-        return payload["image_grid_thw"]
-    return item.get("image_grid_thw")
-
-
-def _qwen_item_with_grid_and_ref(
-    item: dict[str, Any],
-    *,
-    image_grid_thw: Any,
-    fingerprint: str,
-    raw_uri: str,
-    raw_image_id: str,
-) -> dict[str, Any]:
-    new_item = {
-        k: v
-        for k, v in item.items()
-        if k
-        not in {
-            "raw_uri",
-            "raw_image_id",
-            "image_layout_fingerprint",
-            IMAGE_REF_PAYLOAD_KEY,
-        }
-    }
-    if new_item.get("family") == "qwen_vl" and isinstance(
-        new_item.get("payload"), dict
-    ):
-        payload = dict(new_item["payload"])
-        payload["image_grid_thw"] = image_grid_thw
-        new_item["payload"] = payload
-        new_item["layout_fingerprint"] = fingerprint
-    else:
-        new_item = raw_mm_item(
-            modality="image",
-            family="qwen_vl",
-            layout_fingerprint=fingerprint,
-            payload={"image_grid_thw": image_grid_thw},
-        )
-    new_item.update(
-        {
-            "raw_uri": raw_uri,
-            "raw_image_id": raw_image_id,
-            IMAGE_REF_PAYLOAD_KEY: IMAGE_REF_PAYLOAD_VALUE,
-        }
-    )
-    return new_item
-
-
 
 
 class _Emitter:
@@ -659,7 +551,7 @@ class Qwen3VLRenderer:
             # image data, so they ARE body content (is_content=True);
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # markers are renderer-emitted scaffold.
-            n, h, mm_item = qwen_image_item_for_render(self, part)
+            n, h, mm_item = qwen_image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 em.text(
@@ -920,7 +812,7 @@ class Qwen3VLRenderer:
         vision_counts = {"image": prev_image_count, "video": prev_video_count}
 
         def emit_image(part: dict[str, Any]) -> None:
-            n, h, mm_item = qwen_image_item_for_render(self, part)
+            n, h, mm_item = qwen_image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 em.text(

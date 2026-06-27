@@ -258,7 +258,7 @@ async def generate(
             return None, mm_data
         # Every image carries its raw ref (the pointer); persisted mm_data keeps it,
         # so prior-turn images carry their ref forward unchanged.
-        return _build_vllm_mm_features(renderer, mm_data), mm_data
+        return _build_vllm_mm_features(mm_data), mm_data
 
     features, out_mm_data = await _maybe_offload(renderer, _features_and_descriptor_mm)
     if (
@@ -349,22 +349,16 @@ async def generate(
 
 
 
-def _build_vllm_mm_features(
-    renderer: Renderer | RendererPool,
-    mm_data: MultiModalData,
-) -> dict[str, Any] | None:
+def _build_vllm_mm_features(mm_data: MultiModalData) -> dict[str, Any]:
     """Serialize ``MultiModalData`` to vLLM's ``/inference/v1/generate`` features payload.
 
-    vLLM's ``MultiModalFeatures`` carries three things: hashes (for cache
-    lookup), placeholder positions (so the engine knows where in the token
-    stream each item lives), and per-item payload selectors. Raw multimodal
-    descriptors use the common envelope emitted by renderers; family-specific
-    geometry stays inside the descriptor payload and is interpreted downstream
-    by prime-rl/vLLM adapters.
+    vLLM's ``MultiModalFeatures`` carries three things: hashes, placeholder
+    positions (so the engine knows where in the token stream each item lives),
+    and one raw ref per item. Raw multimodal descriptors use the common envelope
+    emitted by renderers; family-specific geometry stays inside the descriptor
+    payload and is interpreted downstream by prime-rl/vLLM adapters.
     """
     from renderers.mm_store import (
-        IMAGE_REF_PAYLOAD_KEY,
-        IMAGE_REF_PAYLOAD_VALUE,
         RAW_MM_ITEM_KIND,
         current_run_id,
         raw_mm_ref,
@@ -398,35 +392,34 @@ def _build_vllm_mm_features(
             feature_modality = item.get("vllm_modality") or source_modality
             if not isinstance(feature_modality, str) or not feature_modality:
                 raise ValueError("raw multimodal item has invalid vllm_modality")
-            out["mm_hashes"].setdefault(feature_modality, []).append(mm_hashes[idx])
-            out["mm_placeholders"].setdefault(feature_modality, []).append(
-                {"offset": placeholders[idx].offset, "length": placeholders[idx].length}
-            )
-            out["kwargs_data"].setdefault(feature_modality, []).append(None)
-            if item.get(IMAGE_REF_PAYLOAD_KEY) != IMAGE_REF_PAYLOAD_VALUE:
-                continue
+
             raw_image_id = item.get("raw_image_id")
             family = item.get("family")
             fingerprint = item.get("layout_fingerprint")
+            payload = item.get("payload")
             if not isinstance(raw_image_id, str) or not raw_image_id:
                 raise ValueError("raw multimodal item is missing raw_image_id")
             if not isinstance(family, str) or not family:
                 raise ValueError("raw multimodal item is missing family")
             if not isinstance(fingerprint, str) or not fingerprint:
                 raise ValueError("raw multimodal item is missing layout_fingerprint")
-            out["kwargs_data"][feature_modality][-1] = raw_mm_ref(
-                run_id=run_id,
-                family=family,
-                fingerprint=fingerprint,
-                modality=feature_modality,
-                mm_hash=mm_hashes[idx],
-                raw_image_id=raw_image_id,
-                payload=item.get("payload") or {},
-            )
+            if not isinstance(payload, dict):
+                raise ValueError("raw multimodal item payload must be a dict")
 
-    if not any(
-        item is not None for values in out["kwargs_data"].values() for item in values
-    ):
-        out["kwargs_data"] = None
+            out["mm_hashes"].setdefault(feature_modality, []).append(mm_hashes[idx])
+            out["mm_placeholders"].setdefault(feature_modality, []).append(
+                {"offset": placeholders[idx].offset, "length": placeholders[idx].length}
+            )
+            out["kwargs_data"].setdefault(feature_modality, []).append(
+                raw_mm_ref(
+                    run_id=run_id,
+                    family=family,
+                    fingerprint=fingerprint,
+                    modality=feature_modality,
+                    mm_hash=mm_hashes[idx],
+                    raw_image_id=raw_image_id,
+                    payload=payload,
+                )
+            )
 
     return out

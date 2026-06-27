@@ -7,8 +7,8 @@ Multimodal: the Qwen3.5 family is itself a VLM (HF tag ``image-text-to-text``;
 processor class ``Qwen3VLProcessor``). When a user/tool message carries an
 ``ImagePart``, the renderer emits the same ``<|vision_start|>``+N×``<|image_pad|>``
 +``<|vision_end|>`` expansion as the HF chat template (``N =
-image_grid_thw.prod() // merge_size**2``) using renderer-declared image layout
-metadata. It does not call the HF image processor; vLLM receives run image refs
+image_grid_thw.prod() // merge_size**2``) using the renderer's baked image
+layout spec. It does not call the HF image processor; vLLM receives run image refs
 for images it must process.
 """
 
@@ -316,7 +316,7 @@ class Qwen35Renderer:
             # image data, so they ARE body content (is_content=True);
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # specials are template scaffold.
-            n, h, mm_item = qwen_image_item_for_render(self, part)
+            n, h, mm_item = qwen_image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(
@@ -662,7 +662,7 @@ class Qwen35Renderer:
                 content_mask.append(is_content)
 
         def emit_image(part: dict[str, Any], msg_idx: int = -1) -> None:
-            n, h, mm_item = qwen_image_item_for_render(self, part)
+            n, h, mm_item = qwen_image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(f"Picture {vision_counts['image']}: ", msg_idx)

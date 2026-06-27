@@ -25,20 +25,6 @@ from typing import Annotated, ClassVar, Literal, Union
 from pydantic import ConfigDict, Field
 from pydantic_config import BaseConfig
 
-QWEN_VL_IMAGE_PATCH_SIZE = 16
-QWEN_VL_IMAGE_TEMPORAL_PATCH_SIZE = 2
-QWEN_VL_IMAGE_MERGE_SIZE = 2
-QWEN_VL_IMAGE_MIN_PIXELS = 65536
-QWEN_VL_IMAGE_MAX_PIXELS = 16777216
-
-KIMI_K25_IMAGE_PATCH_SIZE = 14
-KIMI_K25_IMAGE_MERGE_KERNEL_SIZE = 2
-KIMI_K25_IMAGE_IN_PATCH_LIMIT = 16384
-KIMI_K25_IMAGE_PATCH_LIMIT_ON_ONE_SIDE = 512
-KIMI_K25_IMAGE_FIXED_OUTPUT_TOKENS: int | None = None
-KIMI_K25_IMAGE_MEAN = (0.5, 0.5, 0.5)
-KIMI_K25_IMAGE_STD = (0.5, 0.5, 0.5)
-
 
 class BaseRendererConfig(BaseConfig):
     """Shared fields and config for every renderer config variant.
@@ -162,31 +148,6 @@ class Qwen35RendererConfig(BaseRendererConfig):
     running across the entire conversation. Mirrors the chat template's
     ``add_vision_id`` toggle."""
 
-    image_patch_size: int = QWEN_VL_IMAGE_PATCH_SIZE
-    """Qwen image patch size used to compute placeholder layout."""
-
-    image_temporal_patch_size: int = QWEN_VL_IMAGE_TEMPORAL_PATCH_SIZE
-    """Qwen temporal patch size used in the image layout fingerprint."""
-
-    image_merge_size: int = QWEN_VL_IMAGE_MERGE_SIZE
-    """Qwen spatial merge size used to compute image pad-token counts."""
-
-    image_min_pixels: int = QWEN_VL_IMAGE_MIN_PIXELS
-    """Minimum resized image area used by Qwen smart-resize layout math."""
-
-    image_max_pixels: int = QWEN_VL_IMAGE_MAX_PIXELS
-    """Maximum resized image area used by Qwen smart-resize layout math."""
-
-    _internal_fields = frozenset(
-        {
-            "image_patch_size",
-            "image_temporal_patch_size",
-            "image_merge_size",
-            "image_min_pixels",
-            "image_max_pixels",
-        }
-    )
-
 
 class Qwen36RendererConfig(BaseRendererConfig):
     """Qwen3.6 renderer config. Inherits Qwen3.5's template surface."""
@@ -199,31 +160,6 @@ class Qwen36RendererConfig(BaseRendererConfig):
     add_vision_id: bool = False
     """See :class:`Qwen35RendererConfig.add_vision_id`."""
 
-    image_patch_size: int = QWEN_VL_IMAGE_PATCH_SIZE
-    """See :class:`Qwen35RendererConfig.image_patch_size`."""
-
-    image_temporal_patch_size: int = QWEN_VL_IMAGE_TEMPORAL_PATCH_SIZE
-    """See :class:`Qwen35RendererConfig.image_temporal_patch_size`."""
-
-    image_merge_size: int = QWEN_VL_IMAGE_MERGE_SIZE
-    """See :class:`Qwen35RendererConfig.image_merge_size`."""
-
-    image_min_pixels: int = QWEN_VL_IMAGE_MIN_PIXELS
-    """See :class:`Qwen35RendererConfig.image_min_pixels`."""
-
-    image_max_pixels: int = QWEN_VL_IMAGE_MAX_PIXELS
-    """See :class:`Qwen35RendererConfig.image_max_pixels`."""
-
-    _internal_fields = frozenset(
-        {
-            "image_patch_size",
-            "image_temporal_patch_size",
-            "image_merge_size",
-            "image_min_pixels",
-            "image_max_pixels",
-        }
-    )
-
 
 class Qwen3VLRendererConfig(BaseRendererConfig):
     """Qwen3-VL renderer config."""
@@ -232,31 +168,6 @@ class Qwen3VLRendererConfig(BaseRendererConfig):
 
     add_vision_id: bool = False
     """See :class:`Qwen35RendererConfig.add_vision_id`."""
-
-    image_patch_size: int = QWEN_VL_IMAGE_PATCH_SIZE
-    """See :class:`Qwen35RendererConfig.image_patch_size`."""
-
-    image_temporal_patch_size: int = QWEN_VL_IMAGE_TEMPORAL_PATCH_SIZE
-    """See :class:`Qwen35RendererConfig.image_temporal_patch_size`."""
-
-    image_merge_size: int = QWEN_VL_IMAGE_MERGE_SIZE
-    """See :class:`Qwen35RendererConfig.image_merge_size`."""
-
-    image_min_pixels: int = QWEN_VL_IMAGE_MIN_PIXELS
-    """See :class:`Qwen35RendererConfig.image_min_pixels`."""
-
-    image_max_pixels: int = QWEN_VL_IMAGE_MAX_PIXELS
-    """See :class:`Qwen35RendererConfig.image_max_pixels`."""
-
-    _internal_fields = frozenset(
-        {
-            "image_patch_size",
-            "image_temporal_patch_size",
-            "image_merge_size",
-            "image_min_pixels",
-            "image_max_pixels",
-        }
-    )
 
 
 class GLM5RendererConfig(BaseRendererConfig):
@@ -366,39 +277,6 @@ class KimiK25RendererConfig(BaseRendererConfig):
     ``False`` it prefills ``<think></think>``. The kwarg is named
     ``thinking`` (not ``enable_thinking``) to match the upstream chat
     template's native variable name."""
-
-    image_patch_size: int = KIMI_K25_IMAGE_PATCH_SIZE
-    """Kimi MoonViT patch size used to compute raw image layout descriptors."""
-
-    image_merge_kernel_size: int = KIMI_K25_IMAGE_MERGE_KERNEL_SIZE
-    """Kimi spatial merge kernel used to compute output media-token layout."""
-
-    image_in_patch_limit: int = KIMI_K25_IMAGE_IN_PATCH_LIMIT
-    """Kimi NavIT input patch budget used by image resize layout math."""
-
-    image_patch_limit_on_one_side: int = KIMI_K25_IMAGE_PATCH_LIMIT_ON_ONE_SIDE
-    """Kimi per-side patch cap used by image resize layout math."""
-
-    image_fixed_output_tokens: int | None = KIMI_K25_IMAGE_FIXED_OUTPUT_TOKENS
-    """Optional fixed Kimi output token count. Current K2.5/K2.6 configs use ``None``."""
-
-    image_mean: tuple[float, float, float] = KIMI_K25_IMAGE_MEAN
-    """Kimi image normalization mean, included in processor fingerprints."""
-
-    image_std: tuple[float, float, float] = KIMI_K25_IMAGE_STD
-    """Kimi image normalization std, included in processor fingerprints."""
-
-    _internal_fields = frozenset(
-        {
-            "image_patch_size",
-            "image_merge_kernel_size",
-            "image_in_patch_limit",
-            "image_patch_limit_on_one_side",
-            "image_fixed_output_tokens",
-            "image_mean",
-            "image_std",
-        }
-    )
 
 
 class LagunaXS2RendererConfig(BaseRendererConfig):

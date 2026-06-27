@@ -30,13 +30,15 @@ IMAGE_REF_PAYLOAD_VALUE = "raw_image"
 RAW_MM_ITEM_KIND = "prime_raw_mm_item"
 RAW_MM_ITEM_VERSION = 1
 
-_SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_SAFE_FAMILY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_SAFE_MODALITY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_SAFE_FINGERPRINT_RE = re.compile(r"^[a-f0-9]{16,64}$")
-_SAFE_MM_HASH_RE = re.compile(r"^[a-f0-9]{16,128}$")
-_SAFE_IMAGE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_SAFE_REF_PAYLOAD_RE = re.compile(r"^[A-Za-z0-9_-]*$")
+_SAFE = {
+    "run id": re.compile(r"^[A-Za-z0-9_.-]+$"),
+    "multimodal family": re.compile(r"^[A-Za-z0-9_.-]+$"),
+    "raw multimodal modality": re.compile(r"^[A-Za-z0-9_.-]+$"),
+    "image layout fingerprint": re.compile(r"^[a-f0-9]{16,64}$"),
+    "image hash": re.compile(r"^[a-f0-9]{16,128}$"),
+    "raw image id": re.compile(r"^[A-Za-z0-9_.-]+$"),
+    "raw multimodal ref payload segment": re.compile(r"^[A-Za-z0-9_-]*$"),
+}
 
 _MEDIA_TYPE_EXT = {
     "jpeg": ".jpg",
@@ -47,14 +49,20 @@ _MEDIA_TYPE_EXT = {
 }
 
 
+def _ensure_safe(label: str, value: str) -> str:
+    if not _SAFE[label].fullmatch(value):
+        raise ValueError(f"Invalid {label}: {value!r}")
+    return value
+
+
 def normalize_run_id(run_id: str) -> str:
     """Return the canonical run id, without the directory's ``run_`` prefix."""
     value = run_id.strip()
     if value.startswith("run_"):
         value = value[len("run_") :]
-    if not value or not _SAFE_RUN_ID_RE.fullmatch(value):
+    if not value:
         raise ValueError(f"Invalid run id: {run_id!r}")
-    return value
+    return _ensure_safe("run id", value)
 
 
 def run_dir_name(run_id: str) -> str:
@@ -116,8 +124,6 @@ def run_image_dir(run_id: str | None = None) -> Path:
     return (run_dir(run_id) / IMAGE_ASSET_SUBDIR).resolve()
 
 
-
-
 def _media_type_ext(media_type: str) -> str:
     subtype = media_type.split("/", 1)[-1].split(";", 1)[0].strip().lower()
     return _MEDIA_TYPE_EXT.get(subtype, ".img")
@@ -160,8 +166,7 @@ def offload_image_to_run_assets(
 
 
 def raw_image_path(*, run_id: str, raw_image_id: str) -> Path:
-    if not _SAFE_IMAGE_ID_RE.fullmatch(raw_image_id):
-        raise ValueError(f"Invalid raw image id: {raw_image_id!r}")
+    _ensure_safe("raw image id", raw_image_id)
     root = run_image_dir(run_id)
     path = (root / raw_image_id).resolve()
     if not path.is_relative_to(root):
@@ -173,10 +178,27 @@ def _json_fingerprint_value(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _encode_ref_payload(payload: dict[str, object] | None) -> str:
+    raw = json.dumps(payload or {}, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_ref_payload(encoded: str) -> dict[str, object]:
+    _ensure_safe("raw multimodal ref payload segment", encoded)
+    padded = encoded + "=" * (-len(encoded) % 4)
+    payload = json.loads(
+        base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("Raw multimodal ref payload must decode to a dict")
+    return payload
+
+
 def image_layout_fingerprint(*, family: str, **values: object) -> str:
     """Stable adapter-owned fingerprint for raw multimodal layout contracts."""
-    if not _SAFE_FAMILY_RE.fullmatch(family):
-        raise ValueError(f"Invalid multimodal family: {family!r}")
+    _ensure_safe("multimodal family", family)
     encoded_values = ":".join(
         f"{key}={_json_fingerprint_value(values[key])}" for key in sorted(values)
     )
@@ -200,12 +222,9 @@ def raw_mm_item(
     ``family`` and validate the common envelope, but must not inspect adapter
     payload keys.
     """
-    if not _SAFE_FAMILY_RE.fullmatch(family):
-        raise ValueError(f"Invalid multimodal family: {family!r}")
-    if not _SAFE_MODALITY_RE.fullmatch(modality):
-        raise ValueError(f"Invalid raw multimodal modality: {modality!r}")
-    if not _SAFE_FINGERPRINT_RE.fullmatch(layout_fingerprint):
-        raise ValueError(f"Invalid image layout fingerprint: {layout_fingerprint!r}")
+    _ensure_safe("multimodal family", family)
+    _ensure_safe("raw multimodal modality", modality)
+    _ensure_safe("image layout fingerprint", layout_fingerprint)
     out: dict[str, object] = {
         "kind": RAW_MM_ITEM_KIND,
         "version": RAW_MM_ITEM_VERSION,
@@ -254,24 +273,12 @@ def raw_mm_ref(
     future families without baking shape names into the wire id.
     """
     run_id = normalize_run_id(run_id)
-    if not _SAFE_FAMILY_RE.fullmatch(family):
-        raise ValueError(f"Invalid multimodal family: {family!r}")
-    if not _SAFE_FINGERPRINT_RE.fullmatch(fingerprint):
-        raise ValueError(f"Invalid image layout fingerprint: {fingerprint!r}")
-    if not _SAFE_MODALITY_RE.fullmatch(modality):
-        raise ValueError(f"Invalid raw multimodal modality: {modality!r}")
-    if not _SAFE_MM_HASH_RE.fullmatch(mm_hash):
-        raise ValueError(f"Invalid image hash: {mm_hash!r}")
+    _ensure_safe("multimodal family", family)
+    _ensure_safe("image layout fingerprint", fingerprint)
+    _ensure_safe("raw multimodal modality", modality)
+    _ensure_safe("image hash", mm_hash)
     raw_image_path(run_id=run_id, raw_image_id=raw_image_id)
-    encoded_payload = (
-        base64.urlsafe_b64encode(
-            json.dumps(payload or {}, sort_keys=True, separators=(",", ":")).encode(
-                "utf-8"
-            )
-        )
-        .decode("ascii")
-        .rstrip("=")
-    )
+    encoded_payload = _encode_ref_payload(payload)
     return (
         f"{IMAGE_REF_PREFIX}:{run_id}:{family}:{fingerprint}:"
         f"{modality}:{mm_hash}:{raw_image_id}:{encoded_payload}"
@@ -285,21 +292,12 @@ def split_raw_mm_ref(ref: str) -> RawMMRef:
     run_id, family, fingerprint, modality, mm_hash, raw_image_id, encoded_payload = (
         parts[2:]
     )
-    if not _SAFE_REF_PAYLOAD_RE.fullmatch(encoded_payload):
-        raise ValueError("Invalid raw multimodal ref payload segment")
-    padded = encoded_payload + "=" * (-len(encoded_payload) % 4)
-    payload = json.loads(
-        base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
-    )
-    if not isinstance(payload, dict):
-        raise ValueError("Raw multimodal ref payload must decode to a dict")
     return RawMMRef(
         run_id=normalize_run_id(run_id),
-        family=family,
-        fingerprint=fingerprint,
-        modality=modality,
-        mm_hash=mm_hash,
-        raw_image_id=raw_image_id,
-        payload=payload,
+        family=_ensure_safe("multimodal family", family),
+        fingerprint=_ensure_safe("image layout fingerprint", fingerprint),
+        modality=_ensure_safe("raw multimodal modality", modality),
+        mm_hash=_ensure_safe("image hash", mm_hash),
+        raw_image_id=_ensure_safe("raw image id", raw_image_id),
+        payload=_decode_ref_payload(encoded_payload),
     )
-

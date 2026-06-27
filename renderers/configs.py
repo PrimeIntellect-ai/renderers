@@ -74,7 +74,7 @@ class BaseRendererConfig(BaseConfig):
 
     # Fields that are renderer-internal — not forwarded to (or mirrored
     # by) ``apply_chat_template``. Override in subclasses that hold
-    # non-template config (e.g. ``image_cache_max``, GptOss's
+    # non-template config (e.g. GptOss's
     # ``use_system_prompt`` / ``knowledge_cutoff`` / ``model_identity``,
     # or fields that exist as renderer conventions without a Jinja
     # analogue like DeepSeek V3 / Kimi K2 ``enable_thinking``).
@@ -367,9 +367,6 @@ class KimiK25RendererConfig(BaseRendererConfig):
     ``thinking`` (not ``enable_thinking``) to match the upstream chat
     template's native variable name."""
 
-    image_cache_max: int = 256
-    """FIFO bound on Kimi's per-renderer image processor cache."""
-
     image_patch_size: int = KIMI_K25_IMAGE_PATCH_SIZE
     """Kimi MoonViT patch size used to compute raw image layout descriptors."""
 
@@ -393,7 +390,6 @@ class KimiK25RendererConfig(BaseRendererConfig):
 
     _internal_fields = frozenset(
         {
-            "image_cache_max",
             "image_patch_size",
             "image_merge_kernel_size",
             "image_in_patch_limit",

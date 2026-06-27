@@ -567,73 +567,6 @@ def _kimi_grids_equal(a: Any, b: Any) -> bool:
     return al == bl
 
 
-def materialize_kimi_image_refs(
-    renderer: Any, mm_data: MultiModalData, messages: list[Message]
-) -> MultiModalData:
-    """Attach run-image refs to every Kimi image descriptor that can be found."""
-    from dataclasses import replace
-
-    image_items = mm_data.mm_items.get("image") or []
-    if not image_items:
-        return mm_data
-    hashes = mm_data.mm_hashes.get("image") or []
-    if len(hashes) != len(image_items):
-        raise ValueError(
-            "materialize_kimi_image_refs: mm_hashes/mm_items length mismatch "
-            f"({len(hashes)} vs {len(image_items)})"
-        )
-
-    missing = set(hashes)
-    resolved: dict[str, KimiImageLayoutDescriptor] = {}
-    for msg in messages or []:
-        content = msg.get("content") if isinstance(msg, dict) else None
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not missing:
-                break
-            if not (isinstance(part, dict) and _is_image_part(part)):
-                continue
-            desc = describe_kimi_image_layout(renderer, part)
-            if desc.mm_hash in missing:
-                resolved[desc.mm_hash] = desc
-                missing.discard(desc.mm_hash)
-    if missing:
-        raise ValueError(
-            f"materialize_kimi_image_refs: {len(missing)} image hash(es) not found in messages"
-        )
-
-    new_image_items: list[dict[str, Any]] = []
-    for i, item in enumerate(image_items):
-        desc = resolved[hashes[i]]
-        if desc.raw_uri is None or desc.raw_image_id is None:
-            raise ValueError(
-                "materialize_kimi_image_refs requires file-backed image URLs"
-            )
-        item_grid = _kimi_grid_from_item(item)
-        if item_grid is not None and not _kimi_grids_equal(desc.grid_thws, item_grid):
-            raise ValueError(
-                "materialize_kimi_image_refs: reconstructed grid_thws "
-                f"{desc.grid_thws!r} != descriptor {item_grid!r}"
-            )
-        new_image_items.append(
-            raw_mm_item(
-                modality="image",
-                family=KIMI_K25_FAMILY,
-                layout_fingerprint=desc.fingerprint,
-                payload={
-                    "grid_thws": item_grid if item_grid is not None else desc.grid_thws,
-                    "num_media_tokens": desc.num_media_tokens,
-                },
-                raw_uri=desc.raw_uri,
-                raw_image_id=desc.raw_image_id,
-                vllm_modality=KIMI_K25_VLLM_MODALITY,
-            )
-        )
-
-    new_items = dict(mm_data.mm_items)
-    new_items["image"] = new_image_items
-    return replace(mm_data, mm_items=new_items)
 
 
 # ---------------------------------------------------------------------------
@@ -882,10 +815,6 @@ class KimiK25Renderer:
         internally from ``pixel_values``."""
         return {self._media_pad: 1}
 
-    def materialize_image_refs(
-        self, mm_data: MultiModalData, messages: list[Message]
-    ) -> MultiModalData:
-        return materialize_kimi_image_refs(self, mm_data, messages)
 
     def _get_processor(self):
         if self._processor is not None:

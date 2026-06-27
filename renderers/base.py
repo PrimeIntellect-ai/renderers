@@ -966,9 +966,6 @@ class RendererPool:
         with self.checkout() as r:
             return r.bridge_to_next_turn(*args, **kwargs)
 
-    def materialize_image_refs(self, *args: Any, **kwargs: Any) -> "MultiModalData":
-        with self.checkout() as r:
-            return r.materialize_image_refs(*args, **kwargs)
 
     # ``mm_token_type_id_map`` (the MultimodalRenderer protocol attribute)
     # is set in ``__init__`` only for pools wrapping multimodal renderers;

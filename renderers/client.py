@@ -157,7 +157,6 @@ async def generate(
     priority: int | None = None,
     extra_headers: dict[str, str] | None = None,
     max_prompt_len: int | None = None,
-    materialize_all_image_refs: bool = False,
 ) -> dict[str, Any]:
     """Tokenize messages, call vLLM /inference/v1/generate, parse the response.
 
@@ -257,17 +256,9 @@ async def generate(
     ]:
         if mm_data is None or mm_data.is_empty():
             return None, mm_data
-        build_mm = mm_data
-        if materialize_all_image_refs:
-            materialize = getattr(renderer, "materialize_image_refs", None)
-            if materialize is None:
-                raise NotImplementedError(
-                    f"{type(renderer).__name__} cannot materialize image refs for retry."
-                )
-            build_mm = materialize(mm_data, messages)
-        return _build_vllm_mm_features(renderer, build_mm), _descriptor_only_mm_data(
-            mm_data
-        )
+        # Every image carries its raw ref (the pointer); persisted mm_data keeps it
+        # so prior-turn images carry forward without a cache-only/None path.
+        return _build_vllm_mm_features(renderer, mm_data), mm_data
 
     features, out_mm_data = await _maybe_offload(renderer, _features_and_descriptor_mm)
     if (
@@ -356,27 +347,6 @@ async def generate(
     }
 
 
-def _descriptor_only_mm_data(mm_data: MultiModalData) -> MultiModalData:
-    """Drop one-request image-ref fields before callers persist mm_data."""
-    from renderers.mm_store import IMAGE_REF_PAYLOAD_KEY
-
-    new_items: dict[str, list[dict[str, Any]]] = {}
-    for modality, items in mm_data.mm_items.items():
-        new_items[modality] = [
-            {
-                key: value
-                for key, value in item.items()
-                if key
-                not in {
-                    "pixel_values",
-                    "raw_uri",
-                    "raw_image_id",
-                    IMAGE_REF_PAYLOAD_KEY,
-                }
-            }
-            for item in items
-        ]
-    return replace(mm_data, mm_items=new_items)
 
 
 def _build_vllm_mm_features(

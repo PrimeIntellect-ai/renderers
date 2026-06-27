@@ -414,57 +414,6 @@ def _qwen_item_with_grid_and_ref(
     return new_item
 
 
-def materialize_image_refs(
-    renderer: Any, mm_data: MultiModalData, messages: list[Message]
-) -> MultiModalData:
-    """Attach run-image refs to every Qwen image descriptor that can be found."""
-    image_items = mm_data.mm_items.get("image") or []
-    if not image_items:
-        return mm_data
-    hashes = mm_data.mm_hashes.get("image") or []
-    if len(hashes) != len(image_items):
-        raise ValueError(
-            "materialize_image_refs: mm_hashes/mm_items length mismatch "
-            f"({len(hashes)} vs {len(image_items)})"
-        )
-
-    missing = set(hashes)
-    resolved: dict[str, QwenImageLayoutDescriptor] = {}
-    for part in _iter_image_parts(messages):
-        if not missing:
-            break
-        desc = describe_qwen_image_layout(renderer, part)
-        if desc.mm_hash in missing:
-            resolved[desc.mm_hash] = desc
-            missing.discard(desc.mm_hash)
-    if missing:
-        raise ValueError(
-            f"materialize_image_refs: {len(missing)} image hash(es) not found in messages"
-        )
-
-    new_image_items: list[dict[str, Any]] = []
-    for i, item in enumerate(image_items):
-        desc = resolved[hashes[i]]
-        if desc.raw_uri is None or desc.raw_image_id is None:
-            raise ValueError("materialize_image_refs requires file-backed image URLs")
-        item_grid = _qwen_grid_from_item(item)
-        if item_grid is not None and not _grids_equal(desc.image_grid_thw, item_grid):
-            raise ValueError(
-                "materialize_image_refs: reconstructed image_grid_thw "
-                f"{desc.image_grid_thw!r} != descriptor {item_grid!r}"
-            )
-        new_item = _qwen_item_with_grid_and_ref(
-            item,
-            image_grid_thw=item_grid if item_grid is not None else desc.image_grid_thw,
-            fingerprint=desc.fingerprint,
-            raw_uri=desc.raw_uri,
-            raw_image_id=desc.raw_image_id,
-        )
-        new_image_items.append(new_item)
-
-    new_items = dict(mm_data.mm_items)
-    new_items["image"] = new_image_items
-    return replace(mm_data, mm_items=new_items)
 
 
 class _Emitter:
@@ -686,10 +635,6 @@ class Qwen3VLRenderer:
             return "".join(parts)
         raise TypeError(f"Unexpected content type: {type(content)}")
 
-    def materialize_image_refs(
-        self, mm_data: MultiModalData, messages: list[Message]
-    ) -> MultiModalData:
-        return materialize_image_refs(self, mm_data, messages)
 
     def render(
         self,

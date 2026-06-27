@@ -37,7 +37,6 @@ from renderers.parsing import parse_qwen35
 from renderers.qwen3_vl import (
     _is_image_part,
     _is_video_part,
-    materialize_image_refs,
     qwen_image_item_for_render,
 )
 
@@ -155,10 +154,6 @@ class Qwen35Renderer:
         """
         return {self._image_pad: 1, self._video_pad: 2}
 
-    def materialize_image_refs(
-        self, mm_data: MultiModalData, messages: list[Message]
-    ) -> MultiModalData:
-        return materialize_image_refs(self, mm_data, messages)
 
     @staticmethod
     def _content_has_media(content: Any) -> bool:

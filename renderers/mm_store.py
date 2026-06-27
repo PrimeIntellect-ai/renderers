@@ -116,9 +116,6 @@ def run_image_dir(run_id: str | None = None) -> Path:
     return (run_dir(run_id) / IMAGE_ASSET_SUBDIR).resolve()
 
 
-def image_asset_dir(run_id: str | None = None) -> Path:
-    """Alias for callers that already use the assets terminology."""
-    return run_image_dir(run_id)
 
 
 def _media_type_ext(media_type: str) -> str:
@@ -306,10 +303,3 @@ def split_raw_mm_ref(ref: str) -> RawMMRef:
         payload=payload,
     )
 
-
-# Backwards-compatible names for consumers that already speak the mmraw wire format.
-MMRAW_PREFIX = IMAGE_REF_PREFIX
-MM_RAW_PAYLOAD_KEY = IMAGE_REF_PAYLOAD_KEY
-MM_RAW_PAYLOAD_VALUE = IMAGE_REF_PAYLOAD_VALUE
-mmraw_ref = raw_mm_ref
-split_mmraw_ref = split_raw_mm_ref

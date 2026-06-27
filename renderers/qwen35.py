@@ -115,11 +115,8 @@ class Qwen35Renderer:
         self,
         tokenizer: PreTrainedTokenizer,
         config: Qwen35RendererConfig | None = None,
-        *,
-        processor: Any = None,
     ):
         self._tokenizer = tokenizer
-        _ = processor
         cfg = config or type(self)._config_cls()
         # ``enable_thinking=None`` defers to the model's known default (see
         # ``_ENABLE_THINKING_DEFAULTS``). Materialise here so downstream reads

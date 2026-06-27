@@ -761,11 +761,8 @@ class KimiK25Renderer:
         self,
         tokenizer: PreTrainedTokenizer,
         config: KimiK25RendererConfig | None = None,
-        *,
-        processor: Any = None,
     ):
         self._tokenizer = tokenizer
-        self._processor = processor
         self.config = config or KimiK25RendererConfig()
 
         # Core structural tokens — all must be single special tokens in the vocab
@@ -801,12 +798,6 @@ class KimiK25Renderer:
         # The stop token for generation
         self._endoftext: int | None = self._try_token_id("<|endoftext|>")
 
-        # Per-instance image-processor cache (FIFO-bounded). Same shape as
-        # ``Qwen3VLRenderer._image_cache`` — keyed by content hash, value is
-        # ``(processor_out, num_patches)``. ``num_patches`` is informational
-        # for Kimi (we emit a single placeholder regardless), but kept for
-        # consistency / debugging.
-        self._image_cache: dict[str, tuple[Any, int]] = {}
 
     @property
     def mm_token_type_id_map(self) -> dict[int, int]:
@@ -816,53 +807,7 @@ class KimiK25Renderer:
         return {self._media_pad: 1}
 
 
-    def _get_processor(self):
-        if self._processor is not None:
-            return self._processor
-        from transformers import AutoProcessor
 
-        name = getattr(self._tokenizer, "name_or_path", None)
-        if not name:
-            raise RuntimeError(
-                "KimiK25Renderer needs a processor to render image content. "
-                "Pass `processor=AutoProcessor.from_pretrained(name, trust_remote_code=True, "
-                "revision=<pinned sha>)` to the constructor, or load the tokenizer with a "
-                "known name_or_path so the processor can be auto-loaded."
-            )
-        # Kimi's processor is custom Python in the model repo and requires
-        # trust_remote_code=True. Callers using ``create_renderer_pool`` go
-        # through ``load_tokenizer`` which already pins the revision; for
-        # auto-load here, we delegate to AutoProcessor with the same flag.
-        self._processor = AutoProcessor.from_pretrained(name, trust_remote_code=True)
-        return self._processor
-
-    def _process_image(self, part: dict[str, Any]):
-        """Resolve, process, and characterize a single image part for Kimi K2.5.
-
-        Returns ``(pil, processor_out, num_patches, image_hash)`` where
-        ``processor_out`` contains ``pixel_values`` and ``grid_thws``
-        (Kimi's keys; differ from Qwen-VL's ``image_grid_thw``). Single
-        ``<|media_pad|>`` per image in the token stream; the patch count
-        is informational only.
-        """
-        pil = _load_pil_image(part)
-        h = _image_hash(pil)
-        cached = self._image_cache.get(h)
-        if cached is not None:
-            out, num_patches = cached
-            return pil, out, num_patches, h
-        proc = self._get_processor()
-        img_proc = proc.image_processor
-        # Kimi's vision processor takes a media-dict shape, not raw PIL.
-        media_item = {"type": "image", "image": pil}
-        out = img_proc.preprocess([media_item], return_tensors="np")
-        # Patch count via the processor's own calculator (matches the
-        # model's per-patch attention count); kept for debugging.
-        num_patches = int(img_proc.media_tokens_calculator(media_item))
-        if len(self._image_cache) >= self.config.image_cache_max:
-            self._image_cache.pop(next(iter(self._image_cache)))
-        self._image_cache[h] = (out, num_patches)
-        return pil, out, num_patches, h
 
     # ------------------------------------------------------------------
     # Token helpers

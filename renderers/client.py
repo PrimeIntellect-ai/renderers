@@ -175,8 +175,8 @@ async def generate(
     through ``renderer.render(...)`` to recover the ``multi_modal_data``
     sidecar, then serializes it to vLLM's ``features`` schema (mm_hashes,
     mm_placeholders, kwargs_data) before POSTing. Raw image ``kwargs_data``
-    slots are either ``None`` (cache lookup for a prior image) or descriptor
-    refs (new/current images that vLLM should process).
+    slots always carry a descriptor ref — every image (current and prior
+    turns) is sent as a pointer that the inference endpoint materializes.
 
     ``max_prompt_len`` controls the pre-flight overflow check. When the
     rendered prompt is strictly longer than the cap, the request is never
@@ -256,8 +256,8 @@ async def generate(
     ]:
         if mm_data is None or mm_data.is_empty():
             return None, mm_data
-        # Every image carries its raw ref (the pointer); persisted mm_data keeps it
-        # so prior-turn images carry forward without a cache-only/None path.
+        # Every image carries its raw ref (the pointer); persisted mm_data keeps it,
+        # so prior-turn images carry their ref forward unchanged.
         return _build_vllm_mm_features(renderer, mm_data), mm_data
 
     features, out_mm_data = await _maybe_offload(renderer, _features_and_descriptor_mm)

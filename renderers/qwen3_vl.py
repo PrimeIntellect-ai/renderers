@@ -549,9 +549,6 @@ class Qwen3VLRenderer:
         config: Typed renderer config (see
             :class:`renderers.Qwen3VLRendererConfig`). Defaults to a
             blank config with template defaults.
-        processor: Deprecated and ignored. Image layout is declared by the
-            renderer config; the renderer never loads or calls an HF image
-            processor.
 
     ``preserve_all_thinking`` / ``preserve_thinking_between_tool_calls``
     on the config are no-ops here — the chat template drops past
@@ -562,11 +559,8 @@ class Qwen3VLRenderer:
         self,
         tokenizer: PreTrainedTokenizer,
         config: Qwen3VLRendererConfig | None = None,
-        *,
-        processor: Any = None,
     ):
         self._tokenizer = tokenizer
-        _ = processor
         self.config = config or Qwen3VLRendererConfig()
 
         self._im_start = self._token_id("<|im_start|>")

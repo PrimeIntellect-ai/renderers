@@ -37,12 +37,16 @@ from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
 from renderers.configs import _config_class_for
 
 
+def _config_for_model(model_name: str, **kwargs):
+    renderer_name = MODEL_RENDERER_MAP[model_name]
+    return _config_class_for(renderer_name)(**kwargs)
+
+
 def _config_with_add_vision_id(model_name: str, add_vision_id: bool):
     """Build the typed config for ``model_name`` (resolved via
     ``MODEL_RENDERER_MAP``) with ``add_vision_id`` set. The qwen_vl
     family — Qwen3.5 and Qwen3-VL — both expose this field."""
-    renderer_name = MODEL_RENDERER_MAP[model_name]
-    return _config_class_for(renderer_name)(add_vision_id=add_vision_id)
+    return _config_for_model(model_name, add_vision_id=add_vision_id)
 
 
 pytest.importorskip("PIL", reason="Pillow required for multimodal tests")
@@ -529,10 +533,9 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
 ):
     """Bridge-to-next-turn invariants for the multimodal case.
 
-    Asserts three properties that should hold for every renderer
-    regardless of thinking-mode quirks (the prior bridge-vs-full
-    invariant was too strong — see commit log for the divergence
-    rationale on thinking renderers):
+    The renderer is forced to ``thinking_retention="all"`` so this test
+    isolates multimodal bridge mechanics from thinking-retention policy.
+    Asserts three properties:
 
     1. **Verbatim prefix**: ``bridged.token_ids`` begins with
        ``previous_prompt_ids + previous_completion_ids``. Whatever the
@@ -552,7 +555,13 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
         pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
 
     kit = _modality_kit(modality, mm_model_name)
-    tokenizer, _, renderer = _load_processor_and_renderer(mm_model_name)
+    tokenizer, processor, _ = _load_processor_and_renderer(mm_model_name)
+    renderer = create_renderer(
+        tokenizer,
+        _config_for_model(mm_model_name, thinking_retention="all"),
+    )
+    if hasattr(renderer, "_processor") and renderer._processor is None:
+        renderer._processor = processor
 
     initial = [
         {
@@ -806,9 +815,15 @@ def test_bridge_refuses_when_add_vision_id_loses_prior_count(
 
     kit = _modality_kit(modality, mm_model_name)
     tokenizer, processor, _ = _load_processor_and_renderer(mm_model_name)
+    # Force bridge-allowed retention so this test isolates add_vision_id
+    # counter state from the user-turn retention gate.
     renderer = create_renderer(
         tokenizer,
-        _config_with_add_vision_id(mm_model_name, True),
+        _config_for_model(
+            mm_model_name,
+            add_vision_id=True,
+            thinking_retention="all",
+        ),
     )
     if hasattr(renderer, "_processor") and renderer._processor is None:
         renderer._processor = processor

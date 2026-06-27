@@ -12,6 +12,8 @@ import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from renderers import base
 from renderers.base import TOKENIZER_SOURCE_OVERRIDES, TRUSTED_REVISIONS, load_tokenizer
 
@@ -81,7 +83,7 @@ def test_meta_llama_loads_tokenizer_from_unsloth_mirror(mock_from_pretrained):
     mirror = "unsloth/Llama-3.2-1B-Instruct"
     mock_from_pretrained.return_value = SimpleNamespace(name_or_path=mirror)
 
-    tok = load_tokenizer(canonical, use_fastokens=False)
+    tok = load_tokenizer(canonical)
 
     args, kwargs = mock_from_pretrained.call_args
     assert args == (mirror,)
@@ -120,42 +122,22 @@ def test_tokenizer_source_overrides_are_exact_llama_mirrors():
     }
 
 
-def test_offset_tokenizer_uses_unsloth_mirror_for_meta_llama(monkeypatch):
-    """Offset-tokenizer reloads must use the same unrestricted source
-    override, otherwise Llama rendering can hit the gated Meta repo after
-    the initial tokenizer load succeeds."""
+def test_get_offset_tokenizer_rejects_offsetless_byo():
+    """BYO tokenizers without ``return_offsets_mapping`` support raise a
+    clear error. Hand-coded renderers concatenate scaffold + body in one
+    BPE pass and attribute tokens via the fast tokenizer's offset map;
+    no transparent reload-from-name_or_path fallback exists. The
+    contract is: pass a fast tokenizer or get a loud error at construct
+    time, not silent BPE drift at the wrap/body boundary."""
 
     class _NoOffsets:
-        name_or_path = "meta-llama/Llama-3.2-1B-Instruct"
+        name_or_path = "anywhere/anything"
 
         def __call__(self, *args, **kwargs):
-            raise NotImplementedError("fastokens shim has no offsets")
+            raise NotImplementedError("BYO tokenizer has no offsets")
 
-    class _OffsetTokenizer:
-        is_fast = True
-
-        def __init__(self, name_or_path: str):
-            self.name_or_path = name_or_path
-
-        def __call__(self, *args, **kwargs):
-            return {"offset_mapping": [(0, 1)]}
-
-    calls = []
-
-    def _fake_load(name_or_path, **kwargs):
-        calls.append((name_or_path, kwargs))
-        return _OffsetTokenizer(name_or_path)
-
-    base._offset_tokenizers.clear()
-    monkeypatch.setattr(base, "_load_tokenizer_via_auto", _fake_load)
-
-    try:
-        tok = base._get_offset_tokenizer(_NoOffsets())
-    finally:
-        base._offset_tokenizers.clear()
-
-    assert calls == [("unsloth/Llama-3.2-1B-Instruct", {"trust_remote_code": False})]
-    assert tok.name_or_path == "meta-llama/Llama-3.2-1B-Instruct"
+    with pytest.raises(RuntimeError, match="fast tokenizer.*offsets"):
+        base._get_offset_tokenizer(_NoOffsets())
 
 
 # ---------------------------------------------------------------------------

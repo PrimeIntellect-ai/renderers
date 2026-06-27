@@ -67,7 +67,25 @@ def br_renderer(br_model, br_renderer_name):
     return _load(br_model, br_renderer_name)[1]
 
 
-def _simulate_prior_turn(renderer):
+@pytest.fixture
+def br_renderer_all(br_model, br_renderer_name):
+    """Renderer forced to ``thinking_retention="all"``.
+
+    The verbatim-extension mechanic tests below cross a user-query
+    boundary. For thinking models the template drops a past block's
+    thinking there, so the faithful bridge declines (covered by
+    ``test_bridge_declines_across_user_query_when_template_drops_thinking``).
+    ``"all"`` keeps thinking on every path, isolating the pure extension
+    mechanic from the retention policy across all renderers.
+    """
+    from renderers import create_renderer
+
+    tok, base = _load(br_model, br_renderer_name)
+    cfg = base.config.model_copy(update={"thinking_retention": "all"})
+    return create_renderer(tok, cfg)
+
+
+def _simulate_prior_turn(renderer, assistant=None):
     """Build a (prev_prompt, prev_completion) pair that a real rollout
     would produce for a one-turn prior with a clean stop.
 
@@ -76,13 +94,15 @@ def _simulate_prior_turn(renderer):
     gen_prompt, and take the diff as prev_completion. We then trim
     prev_completion to the last close token so it matches what vLLM
     actually hands back (vLLM stops at the close token and excludes the
-    trailing template scaffolding).
+    trailing template scaffolding). Pass ``assistant`` to override the
+    default no-thinking turn (e.g. one carrying ``reasoning_content``).
     """
     prior = [
         {"role": "system", "content": "You are helpful."},
         {"role": "user", "content": "Hi."},
     ]
-    assistant = [{"role": "assistant", "content": "Hello!"}]
+    if assistant is None:
+        assistant = [{"role": "assistant", "content": "Hello!"}]
 
     prev_prompt = renderer.render_ids(prior, add_generation_prompt=True)
     full_with_assistant = renderer.render_ids(
@@ -105,11 +125,11 @@ def _simulate_prior_turn(renderer):
     return prev_prompt, prev_completion
 
 
-def test_bridge_extends_prev_verbatim_on_clean_stop(br_renderer, br_model):
-    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer)
+def test_bridge_extends_prev_verbatim_on_clean_stop(br_renderer_all, br_model):
+    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer_all)
     new_messages = [{"role": "user", "content": "What's 2+2?"}]
 
-    bridged = br_renderer.bridge_to_next_turn(
+    bridged = br_renderer_all.bridge_to_next_turn(
         prev_prompt, prev_completion, new_messages
     )
     assert bridged is not None, f"{br_model}: bridge returned None on clean stop"
@@ -148,8 +168,8 @@ def test_bridge_rejects_empty_prev_or_new(br_renderer):
     assert br_renderer.bridge_to_next_turn(prev_prompt, prev_completion, []) is None
 
 
-def test_bridge_synthesises_close_on_truncation(br_renderer, br_model):
-    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer)
+def test_bridge_synthesises_close_on_truncation(br_renderer_all, br_model):
+    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer_all)
     # Drop the final close token to simulate a max_tokens truncation.
     prev_completion_trunc = prev_completion[:-1] if prev_completion else prev_completion
     if len(prev_completion_trunc) == 0:
@@ -157,7 +177,7 @@ def test_bridge_synthesises_close_on_truncation(br_renderer, br_model):
             f"{br_model}: simulated prior had no completion tokens — can't truncate"
         )
 
-    bridged = br_renderer.bridge_to_next_turn(
+    bridged = br_renderer_all.bridge_to_next_turn(
         prev_prompt,
         prev_completion_trunc,
         [{"role": "user", "content": "What's 2+2?"}],
@@ -176,12 +196,12 @@ def test_bridge_synthesises_close_on_truncation(br_renderer, br_model):
 
 
 def test_bridge_extension_includes_new_message_text(
-    br_renderer, br_tokenizer, br_model
+    br_renderer_all, br_tokenizer, br_model
 ):
-    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer)
+    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer_all)
     new_messages = [{"role": "user", "content": "HELLO_SENTINEL_XYZ"}]
 
-    bridged = br_renderer.bridge_to_next_turn(
+    bridged = br_renderer_all.bridge_to_next_turn(
         prev_prompt, prev_completion, new_messages
     )
     assert bridged is not None
@@ -190,3 +210,135 @@ def test_bridge_extension_includes_new_message_text(
     assert "HELLO_SENTINEL_XYZ" in decoded, (
         f"{br_model}: new-message content missing from extension; got {decoded!r}"
     )
+
+
+def test_bridge_declines_across_user_query_when_template_drops_thinking():
+    """Qwen3's template drops a past block's thinking once a new user turn
+    arrives. The resolved ``tool_cycle`` bridge policy therefore treats a
+    new user query as a hard re-render boundary, independent of whether the
+    prior token stream happens to contain sampled thinking:
+
+      - new user query + retention="tool_cycle" -> decline,
+        and the fallback re-render equals ``apply_chat_template``.
+      - thinking_retention="all" keeps thinking on every path -> extend.
+      - a tool response (in-flight cycle, no new query) keeps thinking in
+        the template too -> extend.
+      - no prior thinking + new user query -> decline; no marker lookback.
+    """
+    from renderers import create_renderer
+    from renderers.base import load_tokenizer
+    from renderers.configs import Qwen3RendererConfig
+
+    tok = load_tokenizer("Qwen/Qwen3-8B")
+    im_end = tok.convert_tokens_to_ids("<|im_end|>")
+
+    u1 = {"role": "user", "content": "What is 2+2?"}
+    u2 = {"role": "user", "content": "Multiply that by 3."}
+    tool = {"role": "tool", "content": "ok"}
+    think = "<think>\n2 plus 2 is 4.\n</think>\n\n4"
+
+    def prior(r, asst_text):
+        p = r.render_ids([u1], add_generation_prompt=True)
+        completion = tok.encode(asst_text, add_special_tokens=False) + [im_end]
+        return p, completion
+
+    # new user query + prior thinking + default retention -> decline
+    r = create_renderer(tok, Qwen3RendererConfig())
+    p, comp = prior(r, think)
+    assert r.bridge_to_next_turn(p, comp, [u2]) is None
+    # ...and the caller's faithful re-render matches the chat template
+    hist = [u1, {"role": "assistant", "content": think}, u2]
+    rendered = tok.decode(r.render_ids(hist, add_generation_prompt=True))
+    assert rendered == tok.apply_chat_template(
+        hist, tokenize=False, add_generation_prompt=True
+    )
+
+    # thinking_retention="all" keeps thinking everywhere -> extend
+    r_all = create_renderer(tok, Qwen3RendererConfig(thinking_retention="all"))
+    p, comp = prior(r_all, think)
+    assert r_all.bridge_to_next_turn(p, comp, [u2]) is not None
+
+    # tool response continues the in-flight cycle (no new query) -> extend
+    p, comp = prior(r, think)
+    assert r.bridge_to_next_turn(p, comp, [tool]) is not None
+
+    # tool_cycle is a user-query-boundary policy; it does not scan prior tokens.
+    p, comp = prior(r, "4")
+    assert r.bridge_to_next_turn(p, comp, [u2]) is None
+
+
+# Renderers whose default/effective bridge policy declines at a new user-query
+# boundary. The exact query-boundary predicate can still be renderer-specific
+# (for example Qwen's folded ``<tool_response>`` user messages).
+# Non-thinking models (llama, deepseek-v3) are out of scope for this check.
+_GUARDED_THINKING_MODELS = {
+    "Qwen/Qwen3-8B",
+    "Qwen/Qwen3.5-9B",
+    "Qwen/Qwen3.6-35B-A3B",
+    "zai-org/GLM-5",
+    "zai-org/GLM-5.1",
+    "THUDM/GLM-4.5-Air",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "MiniMaxAI/MiniMax-M2.5",
+    "moonshotai/Kimi-K2.5",
+    "openai/gpt-oss-20b",
+}
+
+
+def test_bridge_declines_across_user_turn_when_thinking_present(br_renderer, br_model):
+    """Across every guarded thinking renderer: a prior turn carrying
+    ``reasoning_content`` makes the bridge decline a new *user* query (the
+    template would strip that thinking) but still extend a *tool* response
+    (in-flight cycle keeps it). Non-guarded models are skipped."""
+    if br_model not in _GUARDED_THINKING_MODELS:
+        pytest.skip(f"{br_model}: no bridge thinking-guard")
+
+    asst = [
+        {
+            "role": "assistant",
+            "reasoning_content": "Let me think.",
+            "content": "",
+            "tool_calls": [{"function": {"name": "lookup", "arguments": {"q": "x"}}}],
+        }
+    ]
+    prev_prompt, prev_completion = _simulate_prior_turn(br_renderer, asst)
+
+    declined = br_renderer.bridge_to_next_turn(
+        prev_prompt, prev_completion, [{"role": "user", "content": "next"}]
+    )
+    assert declined is None, f"{br_model}: expected faithful decline across a user turn"
+
+    extended = br_renderer.bridge_to_next_turn(
+        prev_prompt, prev_completion, [{"role": "tool", "content": "result"}]
+    )
+    assert extended is not None, f"{br_model}: should still bridge within a tool cycle"
+
+
+def test_bridge_keeps_thinking_when_history_kwarg_disables_truncation():
+    """GLM ``clear_thinking=False`` / Nemotron ``truncate_history_thinking=
+    False`` keep all past thinking (the template doesn't strip it), so the
+    bridge must NOT decline across a user turn — declining would re-render and
+    re-tokenize model-sampled thinking bytes."""
+    from renderers import create_renderer
+    from renderers.base import load_tokenizer
+    from renderers.configs import GLM5RendererConfig, Nemotron3RendererConfig
+
+    asst = [
+        {"role": "assistant", "reasoning_content": "Let me think.", "content": "Hi"}
+    ]
+    cases = [
+        ("zai-org/GLM-5", GLM5RendererConfig(clear_thinking=False)),
+        (
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            Nemotron3RendererConfig(truncate_history_thinking=False),
+        ),
+    ]
+    for model, cfg in cases:
+        r = create_renderer(load_tokenizer(model), cfg)
+        prev_prompt, prev_completion = _simulate_prior_turn(r, asst)
+        bridged = r.bridge_to_next_turn(
+            prev_prompt, prev_completion, [{"role": "user", "content": "next"}]
+        )
+        assert bridged is not None, (
+            f"{model}: bridge must keep verbatim when the template keeps all thinking"
+        )

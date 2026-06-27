@@ -109,6 +109,8 @@ _KWARG_VALUES: dict[str, list[Any]] = {
     # Qwen3.5 / Qwen3.6 / Qwen3-VL — when True, prefix each image /
     # video placeholder with ``Picture N: `` / ``Video N: ``.
     "add_vision_id": [True, False],
+    # Qwen3.6 — keep historical think blocks before the last real user query.
+    "preserve_thinking": [True, False],
     # gpt-oss — pin to a fixed date so the renderer's preamble matches
     # the harmony oracle built with the same date. The default
     # ``today's date`` is intentionally avoided here so the assertion

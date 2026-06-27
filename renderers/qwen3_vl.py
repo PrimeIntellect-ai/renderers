@@ -45,6 +45,8 @@ from renderers.base import (
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import Qwen3VLRendererConfig
@@ -442,9 +444,9 @@ class Qwen3VLRenderer:
             :class:`renderers.Qwen3VLRendererConfig`). Defaults to a
             blank config with template defaults.
 
-    ``preserve_all_thinking`` / ``preserve_thinking_between_tool_calls``
-    on the config are no-ops here — the chat template drops past
-    ``<think>`` blocks unconditionally. Stored for Protocol parity.
+    Qwen3-VL has no historical reasoning channel in this renderer. The
+    default bridge policy therefore resolves to ``"all"``; explicit
+    ``thinking_retention`` still controls whether the bridge is attempted.
     """
 
     def __init__(
@@ -454,6 +456,10 @@ class Qwen3VLRenderer:
     ):
         self._tokenizer = tokenizer
         self.config = config or Qwen3VLRendererConfig()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            "all",
+        )
 
         self._im_start = self._token_id("<|im_start|>")
         self._im_end = self._token_id("<|im_end|>")
@@ -521,6 +527,15 @@ class Qwen3VLRenderer:
             return "".join(parts)
         raise TypeError(f"Unexpected content type: {type(content)}")
 
+    @staticmethod
+    def _is_user_query_message(msg: Message) -> bool:
+        if msg.get("role") != "user":
+            return False
+        content = Qwen3VLRenderer._render_text_content(msg.get("content")).strip()
+        return not (
+            content.startswith("<tool_response>")
+            and content.endswith("</tool_response>")
+        )
 
     def render(
         self,
@@ -745,6 +760,12 @@ class Qwen3VLRenderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
+            new_messages,
+            is_user_query=self._is_user_query_message,
         ):
             return None
 

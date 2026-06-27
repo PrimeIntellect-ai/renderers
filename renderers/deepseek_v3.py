@@ -24,6 +24,8 @@ from renderers.base import (
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import DeepSeekV3RendererConfig
@@ -48,12 +50,13 @@ class DeepSeekV3Renderer:
     assistant content is emitted verbatim. The reasoning variant
     (``<think>``-prefilled prompt, history reasoning stripped) lives in
     :class:`renderers.deepseek_r1.DeepSeekR1Renderer`, which subclasses
-    this one. ``preserve_*`` flags are no-ops here (no reasoning channel),
+    this one. ``thinking_retention`` is a no-op here (no reasoning channel),
     stored for protocol uniformity.
     """
 
     #: Default typed config; the R1 subclass overrides this.
     _config_cls: type = DeepSeekV3RendererConfig
+    _implied_thinking_retention = "all"
     #: Generation-prompt reasoning prefill. Empty for V3 (bare
     #: ``<｜Assistant｜>``); the R1 subclass overrides to ``"<think>\n"``.
     _GEN_THINK_PREFILL: str = ""
@@ -65,6 +68,10 @@ class DeepSeekV3Renderer:
     ):
         self._tokenizer = tokenizer
         self.config = config or type(self)._config_cls()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            self._implied_thinking_retention,
+        )
 
         # ── BOS / EOS ────────────────────────────────────────────────
         self._bos = self._get_special_token(f"begin{_US}of{_US}sentence")
@@ -303,6 +310,11 @@ class DeepSeekV3Renderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
+            new_messages,
         ):
             return None
 

@@ -24,7 +24,8 @@ from renderers.base import (
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
-    should_preserve_past_thinking,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import MiniMaxM2RendererConfig
@@ -61,6 +62,10 @@ class MiniMaxM2Renderer:
     ):
         self._tokenizer = tokenizer
         self.config = config or MiniMaxM2RendererConfig()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            "tool_cycle",
+        )
 
         self._bos = self._token_id("]~!b[")
         self._role = self._token_id("]~b]")
@@ -237,18 +242,11 @@ class MiniMaxM2Renderer:
                 emit_text("\n", orig_idx, is_sampled=False, is_content=False)
 
             elif role == "assistant":
-                preserve_thinking = should_preserve_past_thinking(
-                    messages,
-                    orig_idx,
-                    preserve_all_thinking=self.config.preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
-                )
                 self._render_assistant(
                     msg,
                     orig_idx,
                     ci,
                     last_ui,
-                    preserve_thinking=preserve_thinking,
                     emit_special=emit_special,
                     emit_text=emit_text,
                     emit_text_segments=emit_text_segments,
@@ -327,6 +325,12 @@ class MiniMaxM2Renderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
+            new_messages,
         ):
             return None
 
@@ -471,7 +475,6 @@ class MiniMaxM2Renderer:
         conv_idx,
         last_user_index,
         *,
-        preserve_thinking: bool = False,
         emit_special,
         emit_text,
         emit_text_segments,
@@ -502,9 +505,7 @@ class MiniMaxM2Renderer:
         # ``is_content == sampled_mask`` holds — every sampled token is
         # body, every scaffold token isn't.
         tool_calls = msg.get("tool_calls") or []
-        emit_thinking = reasoning_content and (
-            conv_idx > last_user_index or preserve_thinking
-        )
+        emit_thinking = reasoning_content and conv_idx > last_user_index
 
         if emit_thinking:
             # The thinking branch has the ``<think>`` special token

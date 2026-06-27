@@ -40,7 +40,7 @@ next_prompt_ids = r.bridge_to_next_turn(
 )
 ```
 
-Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `glm-5`, `glm-5.1`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `kimi-k2`, `kimi-k2.5`, `nemotron-3`, `nemotron-3-ultra`, `gpt-oss`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper.
+Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `glm-5`, `glm-5.1`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `nemotron-3`, `nemotron-3-ultra`, `llama-3`, and `gpt-oss`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper.
 
 ## API
 
@@ -74,7 +74,7 @@ Each hand-coded bridge:
 r = create_renderer(tok)                # AutoRendererConfig is the implicit default
 ```
 
-Auto-detect matches `tokenizer.name_or_path` against `MODEL_RENDERER_MAP` by **exact match**. Prefix matching is intentionally off — same architecture can ship different chat templates (base vs instruct, fine-tune renames). Fine-tunes must pass an explicit typed config (e.g. `Qwen3RendererConfig()`); unknown names fall back to `DefaultRenderer`.
+Auto-detect matches `tokenizer.name_or_path` against `MODEL_RENDERER_MAP` by **exact match**. Prefix matching is intentionally off — same architecture can ship different chat templates (base vs instruct, fine-tune renames). Fine-tunes must pass an explicit typed config (e.g. `Qwen3RendererConfig()`). Unknown text-only names fall back to `DefaultRenderer`, unless `AutoRendererConfig(thinking_retention=...)` was set; the default renderer cannot implement that bridge policy.
 
 ### Pools
 
@@ -95,7 +95,6 @@ For RL the trainer must see the exact token ids the sampler saw. The standard al
 - **Boolean round-trip.** Engine emits `false`; client parses to Python `bool(False)`; `apply_chat_template` re-renders via `str(False)` → `"False"`. Capital F. Reproducible on Qwen3.5-35B-A3B + mini-swe-agent-plus at ~50% break rate per rollout.
 - **BPE retokenization drift.** The same substring tokenizes differently depending on neighbouring bytes. `json` + `p` + `enderer` (3 tokens) vs `jsonp` + `enderer` (2 tokens) when whitespace shifts by one character. Every subsequent token is shifted from there on.
 - **Tool-call XML drift.** The engine emits a no-arg call with a stylistic empty `</parameter>`; the Jinja re-render of the reconstructed dict drops it. Extension property broken at every such call.
-- **Thinking stripped from non-latest assistants.** Some templates strip `<think>…</think>` blocks from prior assistant turns when re-rendering. The recorded stream has the thinking; the next prompt does not.
 - **Max-seq-len truncation zeroing the anchor.** Client-side `max_seq_len` enforcement zeros `completion_ids` when `prompt_len > max_seq_len`. The bridge anchor is empty, falling back to full re-render — triggering every mode above.
 - **Scaffold-level history rewriting.** Some agent scaffolds (e.g. opencode's `experimental_repairToolCall`) rewrite tool calls before sending them back as history. The next turn's prompt contains a tool call the model never emitted. *A renderer cannot fix this — the drift happens before rendering.*
 
@@ -110,7 +109,7 @@ Each break fragments a rollout into multiple training samples — every fragment
 
 ## Typed renderer configs
 
-Each renderer accepts a typed pydantic config that pins its template-control kwargs at construction. `create_renderer` and `create_renderer_pool` take one positional `config` argument:
+Each renderer accepts a typed pydantic config at construction. Some fields mirror chat-template kwargs; others configure renderer-only behavior such as image caching, parsers, or Harmony preamble construction. `create_renderer` and `create_renderer_pool` take one positional `config` argument and an optional keyword-only `chat_template_kwargs` mapping:
 
 ```python
 from renderers import (
@@ -121,13 +120,15 @@ from renderers import (
     DefaultRendererConfig,
 )
 
-# Auto-resolve renderer from the tokenizer's model name. Carries the
-# shared preserve_* flags; template kwargs require an explicit choice.
+# Auto-resolve renderer from the tokenizer's model name.
 renderer = create_renderer(tokenizer)
-renderer = create_renderer(tokenizer, AutoRendererConfig(preserve_all_thinking=True))
+renderer = create_renderer(tokenizer, AutoRendererConfig(thinking_retention="all"))
+renderer = create_renderer(
+    tokenizer,
+    chat_template_kwargs={"enable_thinking": False},
+)
 
-# Explicit choice — the typed config exposes exactly the fields that
-# renderer's chat template honours.
+# Explicit choice — use the renderer-specific fields it exposes.
 renderer = create_renderer(tokenizer, Qwen3RendererConfig(enable_thinking=False))
 renderer = create_renderer(tokenizer, GLM5RendererConfig(clear_thinking=False))
 
@@ -142,21 +143,24 @@ renderer = create_renderer(
 
 Discriminated union: every per-renderer config is a variant of `RendererConfig`, dispatched on the `name` field. Bogus combinations (e.g. `add_vision_id` under `name="qwen3"`) error at construction with a `pydantic.ValidationError`. Downstream pydantic configs (prime-rl orchestrator, verifiers `ClientConfig`) hold a single field typed as `RendererConfig` and inherit the same strict-per-variant validation.
 
-Two shared behaviour flags live on every variant via `_BaseRendererConfig`:
+When `chat_template_kwargs` is passed with `config=None` / `AutoRendererConfig`, renderers first resolves the concrete renderer from the model name, then validates those kwargs against that renderer's config. `Auto + unknown model + chat_template_kwargs` fails loudly; use an explicit typed config or explicit `DefaultRendererConfig` for opaque fallback templates.
 
-- `preserve_all_thinking=True` — every past assistant's `reasoning_content` is kept, even when the chat template would drop it.
-- `preserve_thinking_between_tool_calls=True` — reasoning is kept on assistants in the in-flight tool cycle (post-last-user A-T-…-A block when it contains a tool response). A new user turn closes the block and drops its thinking.
+One shared behaviour flag lives on typed renderer configs: `thinking_retention`, an optional bridge-policy override. Leave it unset to derive bridge behaviour from the chat template and its renderer-exposed kwargs.
 
-These OR-compose with template-level toggles (e.g. GLM-5 `clear_thinking`, Nemotron-3 `truncate_history_thinking`): either flag saying "keep" wins. preserve_* can only ever *extend* retention — never override a template kwarg into a "drop" decision. The canonical use case is **compaction**: injecting a `user` turn like *"summarize the work so far"* puts every prior assistant in a past cycle, and `preserve_all_thinking=True` keeps reasoning visible end-to-end.
+- `thinking_retention=None` (default) — derive from the chat template / renderer kwargs.
+- `thinking_retention="tool_cycle"` — bridge within the in-flight tool cycle; a new user query falls back to a full re-render.
+- `thinking_retention="all"` — bridge across user-query boundaries when the bridge is otherwise structurally valid.
+
+Generic `thinking_retention` does **not** change full `render()` output: a full re-render always follows the Python chat-template implementation. Only real template knobs can change full-render thinking behaviour. GLM-5 `clear_thinking=False`, Nemotron-3 `truncate_history_thinking=False`, Qwen3.6 `preserve_thinking=True`, and GPT-OSS `auto_drop_analysis=False` all imply bridge policy `"all"`; no-thinking generation knobs also imply `"all"` when `thinking_retention` is unset. Setting a direct keep/drop template knob and a contradictory `thinking_retention` raises at config-load. The full per-renderer mapping lives in [`docs/renderer-config.md`](docs/renderer-config.md).
 
 ## `DefaultRenderer`
 
-Fallback for unsupported models. Wraps `apply_chat_template` and accepts `tool_parser` / `reasoning_parser` (vLLM convention) plus arbitrary Jinja kwargs via `DefaultRendererConfig`'s `extra="allow"`. `bridge_to_next_turn` returns `None` because the template's close is unknown, so multi-turn rollouts fall back to full re-render. Implementing a hand-coded renderer is a few hundred lines of Python (`render_ids` + `parse_response` + `bridge_to_next_turn`) and is the only path that closes the failure modes above by construction.
+Fallback for unsupported text-only models. Wraps `apply_chat_template` and accepts `tool_parser` / `reasoning_parser` (vLLM convention) plus arbitrary Jinja kwargs via `DefaultRendererConfig`'s `extra="allow"`. Explicit `thinking_retention` is rejected: `bridge_to_next_turn` returns `None` because the template's close is unknown, so multi-turn rollouts fall back to full re-render. Implementing a hand-coded renderer is a few hundred lines of Python (`render_ids` + `parse_response` + `bridge_to_next_turn`) and is the only path that closes the failure modes above by construction.
 
 ## Roadmap
 
-- **VLM support.** `ContentPart` is text-only today; `Qwen3VLRenderer` ships only because Qwen3-VL's text-only chat template differs from Qwen3's. Plan: add `ImagePart` / `VideoPart`, multimodal bridges, validate against a Qwen3-VL RL run.
-- **Patched chat templates.** Some shipped templates re-tokenize history, normalize JSON, or auto-strip thinking — each breaks the extension property. Plan: a `use_patched` opt-in per renderer that renders the same surface form while avoiding known-bad patterns.
+- **VLM expansion.** `ImagePart` support exists for Qwen3-VL and Qwen3.5-family multimodal templates. Remaining work: video support, broader VLM coverage, and more RL validation.
+- **Patched chat templates.** Some shipped templates re-tokenize history or normalize JSON in ways that break token identity. Plan: a `use_patched` opt-in per renderer that renders the same surface form while avoiding known-bad patterns. (Auto-stripping thinking from past turns is *not* one of these — that's intended template behaviour the renderer reproduces; use `thinking_retention` to override it.)
 
 ## Testing
 

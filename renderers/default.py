@@ -19,6 +19,7 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     extract_message_tool_names,
+    resolve_thinking_retention,
 )
 from renderers.configs import DefaultRendererConfig
 from renderers.parsers import (
@@ -95,12 +96,16 @@ class DefaultRenderer:
         config: DefaultRendererConfig | None = None,
     ):
         cfg = config or DefaultRendererConfig()
-        if cfg.preserve_all_thinking or cfg.preserve_thinking_between_tool_calls:
-            raise NotImplementedError(
-                "DefaultRenderer falls back to apply_chat_template and can't "
-                "selectively re-emit dropped reasoning_content. Configure a "
-                "model-specific renderer if you need preserve_*_thinking."
+        if cfg.thinking_retention is not None:
+            raise ValueError(
+                "DefaultRenderer cannot implement explicit thinking_retention "
+                "bridge policy because its template close/turn structure is "
+                "opaque. Use a typed renderer for this model."
             )
+        self.effective_thinking_retention = resolve_thinking_retention(
+            cfg,
+            "template",
+        )
         self._tokenizer = tokenizer
         self.config = cfg
         self._tool_parser = _resolve_parser(cfg.tool_parser, tokenizer, get_tool_parser)

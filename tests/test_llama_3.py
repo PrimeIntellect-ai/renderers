@@ -80,8 +80,8 @@ def test_default_date_matches_chat_template_strftime_fallback(llama_pair):
 
 
 def test_preserve_thinking_flags_are_noops(llama_pair):
-    """Llama-3 has no reasoning channel, so the ``preserve_*_thinking``
-    flags are accepted but never change the token stream — the same
+    """Llama-3 has no reasoning channel, so any ``thinking_retention``
+    level is accepted but never changes the token stream — the same
     never-preserves contract as Kimi-K2 / Qwen3-VL. (Cross-renderer
     coverage lives in tests/test_preserve_thinking.py.)"""
     _, _, tok, _ = llama_pair
@@ -94,10 +94,12 @@ def test_preserve_thinking_flags_are_noops(llama_pair):
         },
     ]
     base = Llama3Renderer(tok).render_ids(msgs)
-    for flag in ("preserve_all_thinking", "preserve_thinking_between_tool_calls"):
-        r = Llama3Renderer(tok, Llama3RendererConfig(**{flag: True}))
-        assert r.config.__getattribute__(flag) is True
-        assert r.render_ids(msgs) == base, f"{flag} must be a no-op for Llama-3"
+    for level in ("tool_cycle", "all"):
+        r = Llama3Renderer(tok, Llama3RendererConfig(thinking_retention=level))
+        assert r.config.thinking_retention == level
+        assert r.render_ids(msgs) == base, (
+            f"thinking_retention={level!r} must be a no-op for Llama-3"
+        )
 
 
 # ---------------------------------------------------------------------------

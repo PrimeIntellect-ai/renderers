@@ -27,7 +27,8 @@ from renderers.base import (
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
-    should_preserve_past_thinking,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import Nemotron3RendererConfig, Nemotron3UltraRendererConfig
@@ -117,6 +118,16 @@ class Nemotron3Renderer:
         self._tokenizer = tokenizer
         cfg = config or type(self)._config_cls()
         self.config = cfg
+        if not cfg.truncate_history_thinking:
+            implied_thinking_retention = "all"
+        elif not cfg.enable_thinking:
+            implied_thinking_retention = "all"
+        else:
+            implied_thinking_retention = "tool_cycle"
+        self.effective_thinking_retention = resolve_thinking_retention(
+            cfg,
+            implied_thinking_retention,
+        )
 
         # Resolve the per-variant reasoning-effort hint appended to the last
         # user message. Ultra honours ``medium_effort``; Super honours
@@ -423,20 +434,9 @@ class Nemotron3Renderer:
 
             elif role == "assistant":
                 # Template: ``include_content = not (truncate_history_thinking
-                # and loop.index0 < last_user_idx)``. The renderer-internal
-                # preserve_* overrides only ever *extend* retention, so OR them
-                # in (a preserved turn keeps its thinking even when the
-                # template default would drop it).
-                preserve_thinking = msg_orig_idx >= 0 and should_preserve_past_thinking(
-                    original_messages,
-                    msg_orig_idx,
-                    preserve_all_thinking=self.config.preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
-                )
+                # and loop.index0 < last_user_idx)``.
                 include_content = (
-                    not self.config.truncate_history_thinking
-                    or i >= last_user_idx_norm
-                    or preserve_thinking
+                    not self.config.truncate_history_thinking or i >= last_user_idx_norm
                 )
                 self._render_assistant(
                     msg,
@@ -539,6 +539,12 @@ class Nemotron3Renderer:
             # hint on the frozen previous prompt — the append-only bridge can't
             # rewrite it. Bail so the caller does a full, correct re-render.
             or self._effort_hint
+        ):
+            return None
+
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
+            new_messages,
         ):
             return None
 
@@ -704,8 +710,9 @@ class Nemotron3Renderer:
         """Assemble the assistant body string exactly as the chat template.
 
         ``include_content`` is the template's ``not (truncate_history_thinking
-        and loop.index0 < last_user_idx)`` (already OR-ed with the preserve_*
-        overrides by the caller): ``True`` keeps the full think+content block,
+        and loop.index0 < last_user_idx)`` (already OR-ed with the
+        ``thinking_retention`` override by the caller): ``True`` keeps the
+        full think+content block,
         ``False`` collapses historical thinking to an empty ``<think></think>``.
         """
         ultra = self._ultra

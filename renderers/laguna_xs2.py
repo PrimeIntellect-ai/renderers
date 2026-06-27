@@ -17,10 +17,8 @@ Main properties:
   a ``### Tools`` header with an ``<available_tools>`` listing and prose
   format instructions that vary on ``enable_thinking``).
 - Reasoning is rendered for every assistant message — no last-user-index
-  gating. ``preserve_all_thinking`` and
-  ``preserve_thinking_between_tool_calls`` are accepted for protocol
-  uniformity but are effectively no-ops since past reasoning is preserved
-  by default.
+  gating. ``thinking_retention`` is accepted for protocol uniformity but
+  is effectively a no-op since past reasoning is preserved by default.
 """
 
 from __future__ import annotations
@@ -38,6 +36,8 @@ from renderers.base import (
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
 )
 from renderers.configs import LagunaXS2RendererConfig
 from renderers.parsing import parse_laguna_xs2
@@ -85,6 +85,10 @@ class LagunaXS2Renderer:
     ):
         self._tokenizer = tokenizer
         self.config = config or LagunaXS2RendererConfig()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            "all",
+        )
 
         self._eos = self._token_id("〈|EOS|〉")
         self._think = self._token_id("<think>")
@@ -324,6 +328,11 @@ class LagunaXS2Renderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
+            new_messages,
         ):
             return None
 

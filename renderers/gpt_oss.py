@@ -58,7 +58,8 @@ from renderers.base import (
     ToolSpec,
     extract_message_tool_names,
     reject_assistant_in_extension,
-    should_preserve_past_thinking,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import GptOssRendererConfig
@@ -134,6 +135,10 @@ class GptOssRenderer:
         """
         self._tokenizer = tokenizer
         self.config = config or GptOssRendererConfig()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            "tool_cycle" if self.config.auto_drop_analysis else "all",
+        )
         self._enc: HarmonyEncoding = load_harmony_encoding(
             HarmonyEncodingName.HARMONY_GPT_OSS
         )
@@ -421,14 +426,7 @@ class GptOssRenderer:
             if i == first_system_idx:
                 continue  # already emitted as developer
             is_assistant = msg.get("role") == "assistant"
-            preserve_thinking = is_assistant and (
-                should_preserve_past_thinking(
-                    messages,
-                    i,
-                    preserve_all_thinking=self.config.preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
-                )
-            )
+            preserve_thinking = is_assistant and self._should_emit_analysis(messages, i)
             for hm in self._to_harmony_messages(
                 msg, preserve_thinking=preserve_thinking
             ):
@@ -524,6 +522,12 @@ class GptOssRenderer:
         ):
             return None
 
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
+            new_messages,
+        ):
+            return None
+
         previous_ids = trim_to_turn_close(
             previous_prompt_ids,
             previous_completion_ids,
@@ -601,6 +605,26 @@ class GptOssRenderer:
 
     # ── message conversion ───────────────────────────────────────────────────
 
+    def _should_emit_analysis(self, messages: list[Message], msg_idx: int) -> bool:
+        """Whether to render ``reasoning_content`` as a harmony analysis message."""
+        if not self.config.auto_drop_analysis:
+            return True
+
+        msg = messages[msg_idx]
+        if not msg.get("tool_calls"):
+            return False
+
+        # Harmony keeps analysis for an unfinished tool-call cycle, but once a
+        # later final assistant answer is present it drops the stale analysis.
+        for later in messages[msg_idx + 1 :]:
+            if later.get("role") != "assistant":
+                continue
+            if later.get("tool_calls"):
+                continue
+            if _content_text(later.get("content")):
+                return False
+        return True
+
     def _to_harmony_messages(
         self, msg: Message, *, preserve_thinking: bool = False
     ) -> list[HarmonyMessage]:
@@ -670,8 +694,9 @@ class GptOssRenderer:
         its analysis block is dropped from context.
 
         ``preserve_thinking=True``: prepend an analysis-channel message
-        carrying ``reasoning_content`` so callers that want the trace in
-        history (e.g. tool-call-chain training) see it surface.
+        carrying ``reasoning_content``. The render path sets this from
+        harmony's own ``auto_drop_analysis`` behaviour, not from generic
+        ``thinking_retention``.
         """
         out: list[HarmonyMessage] = []
 

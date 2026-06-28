@@ -141,8 +141,7 @@ def _load_pil_image(item: dict[str, Any]):
 
     if raw.startswith("data:"):
         # data:image/png;base64,XXXX
-        _, _, payload = raw.partition(",")
-        return Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
+        return Image.open(io.BytesIO(_data_image_bytes(raw))).convert("RGB")
 
     parsed = urlparse(raw)
     if parsed.scheme in ("http", "https"):
@@ -168,6 +167,16 @@ def _image_hash(pil_image) -> str:
     h.update(pil_image.tobytes())
     h.update(f"{pil_image.size}".encode())
     return h.hexdigest()[:32]
+
+
+def _data_image_bytes(source: str) -> bytes:
+    if not source.startswith("data:image/"):
+        raise ValueError(f"Expected data:image URI, got {source!r}")
+    marker = ";base64,"
+    if marker not in source:
+        raise ValueError("data:image URI must use base64 encoding")
+    _, b64 = source.split(marker, 1)
+    return base64.b64decode(b64)
 
 
 @dataclass(frozen=True)
@@ -250,10 +259,14 @@ def _image_content_hash(source: Any) -> str:
     path = _file_path_from_source(source)
     if path is not None:
         return hashlib.sha256(path.read_bytes()).hexdigest()[:32]
+    if isinstance(source, str) and source.startswith("data:image/"):
+        return hashlib.sha256(_data_image_bytes(source)).hexdigest()[:32]
     return _image_hash(_load_pil_image({"image": source}))
 
 
 def _raw_uri_and_id(source: Any) -> tuple[str | None, str | None]:
+    if isinstance(source, str) and source.startswith("data:image/"):
+        return source, None
     path = _file_path_from_source(source)
     if path is None:
         return None, None

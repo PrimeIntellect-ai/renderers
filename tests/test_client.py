@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import json
 from typing import Any
 
@@ -179,6 +180,36 @@ def test_qwen3_vl_render_emits_image_descriptor_without_processor(tmp_path):
     assert item["raw_image_id"] == "image.png"
     assert item[IMAGE_REF_PAYLOAD_KEY] == IMAGE_REF_PAYLOAD_VALUE
     assert rendered.multi_modal_data.mm_placeholders["image"][0].length == 64
+
+
+def test_qwen3_vl_render_preserves_inline_data_uri_raw_source(tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+    from renderers.qwen3_vl import Qwen3VLRenderer
+
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (32, 32), color=(0, 255, 0)).save(image_path)
+    raw = image_path.read_bytes()
+    data_uri = f"data:image/png;base64,{base64.b64encode(raw).decode('ascii')}"
+    renderer = Qwen3VLRenderer(_TinyQwenTokenizer())
+
+    rendered = renderer.render(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_uri}}
+                ],
+            }
+        ],
+        add_generation_prompt=True,
+    )
+
+    assert rendered.multi_modal_data is not None
+    item = rendered.multi_modal_data.mm_items["image"][0]
+    assert item["raw_uri"] == data_uri
+    assert "raw_image_id" not in item
+    assert rendered.multi_modal_data.mm_hashes["image"][0] == hashlib.sha256(raw).hexdigest()[:32]
 
 
 

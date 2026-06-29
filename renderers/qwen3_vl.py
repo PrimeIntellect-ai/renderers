@@ -119,7 +119,7 @@ class QwenImageLayoutDescriptor:
     image_grid_thw: list[list[int]]
     num_image_tokens: int
     fingerprint: str
-    raw_image_id: str
+    raw_image_uri: str
 
 
 def _smart_resize(
@@ -196,8 +196,8 @@ def _image_content_hash(source: Any) -> str:
     return hashlib.sha256(_offloaded_image_path(source).read_bytes()).hexdigest()[:32]
 
 
-def _raw_image_id(source: Any) -> str:
-    return _offloaded_image_path(source).name
+def _raw_image_uri(source: Any) -> str:
+    return _offloaded_image_path(source).as_uri()
 
 
 def describe_qwen_image_layout(part: dict[str, Any]) -> QwenImageLayoutDescriptor:
@@ -231,7 +231,7 @@ def describe_qwen_image_layout(part: dict[str, Any]) -> QwenImageLayoutDescripto
         image_grid_thw=[[grid_t, grid_h, grid_w]],
         num_image_tokens=num_image_tokens,
         fingerprint=fingerprint,
-        raw_image_id=_raw_image_id(source),
+        raw_image_uri=_raw_image_uri(source),
     )
 
 
@@ -242,7 +242,7 @@ def qwen_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str
         family="qwen_vl",
         layout_fingerprint=desc.fingerprint,
         payload={"image_grid_thw": desc.image_grid_thw},
-        raw_image_id=desc.raw_image_id,
+        raw_image_uri=desc.raw_image_uri,
     )
     return desc.num_image_tokens, desc.mm_hash, item
 

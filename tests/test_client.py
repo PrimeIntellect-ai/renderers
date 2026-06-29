@@ -310,7 +310,7 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
     ids=["default_image_modality", "kimi_vllm_modality"],
 )
 def test_generate_serializes_raw_mm_refs(
-    tmp_path, monkeypatch, family, payload, expected_modality, vllm_modality
+    tmp_path, family, payload, expected_modality, vllm_modality
 ):
     """``generate`` serializes raw multimodal envelopes to vLLM refs.
 
@@ -329,8 +329,9 @@ def test_generate_serializes_raw_mm_refs(
 
     image_dir = tmp_path / "run_rawtest" / "assets" / "images"
     image_dir.mkdir(parents=True)
-    (image_dir / "image.png").write_bytes(b"image-bytes")
-    monkeypatch.setenv("VF_RENDERER_IMAGE_OFFLOAD_DIR", str(image_dir))
+    image_path = image_dir / "image.png"
+    image_path.write_bytes(b"image-bytes")
+    image_uri = image_path.as_uri()
     fingerprint = image_layout_fingerprint(family=family, revision="test")
     mm_hash = "a" * 32
 
@@ -348,7 +349,7 @@ def test_generate_serializes_raw_mm_refs(
                     family=family,
                     layout_fingerprint=fingerprint,
                     payload=payload,
-                    raw_image_id="image.png",
+                    raw_image_uri=image_uri,
                     vllm_modality=vllm_modality,
                 ),
             ],
@@ -384,13 +385,13 @@ def test_generate_serializes_raw_mm_refs(
         ref.fingerprint,
         ref.modality,
         ref.mm_hash,
-        ref.raw_image_id,
+        ref.raw_image_uri,
     ) == (
         family,
         fingerprint,
         expected_modality,
         mm_hash,
-        "image.png",
+        image_uri,
     )
     assert result["multi_modal_data"] is mm_data
 

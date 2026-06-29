@@ -21,7 +21,6 @@ from pathlib import Path
 IMAGE_OFFLOAD_DIR_ENV = "VF_RENDERER_IMAGE_OFFLOAD_DIR"
 
 IMAGE_REF_PREFIX = "mmraw"
-IMAGE_REF_VERSION = "v3"
 RAW_MM_ITEM_KIND = "prime_raw_mm_item"
 RAW_MM_ITEM_VERSION = 1
 
@@ -30,7 +29,6 @@ _SAFE = {
     "raw multimodal modality": re.compile(r"^[A-Za-z0-9_.-]+$"),
     "image layout fingerprint": re.compile(r"^[a-f0-9]{16,64}$"),
     "image hash": re.compile(r"^[a-f0-9]{16,128}$"),
-    "raw image id": re.compile(r"^[A-Za-z0-9_.-]+$"),
     "raw multimodal ref payload segment": re.compile(r"^[A-Za-z0-9_-]*$"),
 }
 
@@ -100,15 +98,6 @@ def offload_image_to_run_assets(
     return path.as_uri()
 
 
-def raw_image_path(*, raw_image_id: str) -> Path:
-    _ensure_safe("raw image id", raw_image_id)
-    root = run_image_dir()
-    path = (root / raw_image_id).resolve()
-    if not path.is_relative_to(root):
-        raise ValueError(f"Raw image path escaped root: {path}")
-    return path
-
-
 def _json_fingerprint_value(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -147,7 +136,7 @@ def raw_mm_item(
     family: str,
     layout_fingerprint: str,
     payload: dict[str, object],
-    raw_image_id: str,
+    raw_image_uri: str,
     vllm_modality: str | None = None,
 ) -> dict[str, object]:
     """Build the JSON-safe raw multimodal descriptor envelope.
@@ -169,7 +158,7 @@ def raw_mm_item(
     }
     if vllm_modality is not None:
         out["vllm_modality"] = vllm_modality
-    out["raw_image_id"] = _ensure_safe("raw image id", raw_image_id)
+    out["raw_image_uri"] = raw_image_uri
     return out
 
 
@@ -180,7 +169,7 @@ class RawMMRef:
     modality: str
     mm_hash: str
     payload: dict[str, object]
-    raw_image_id: str
+    raw_image_uri: str
 
 
 def raw_mm_ref(
@@ -189,7 +178,7 @@ def raw_mm_ref(
     fingerprint: str,
     modality: str,
     mm_hash: str,
-    raw_image_id: str,
+    raw_image_uri: str,
     payload: dict[str, object] | None = None,
 ) -> str:
     """Generic raw multimodal asset ref.
@@ -201,7 +190,6 @@ def raw_mm_ref(
     _ensure_safe("image layout fingerprint", fingerprint)
     _ensure_safe("raw multimodal modality", modality)
     _ensure_safe("image hash", mm_hash)
-    raw_image_id = _ensure_safe("raw image id", raw_image_id)
 
     ref_payload: dict[str, object] = {
         "family": family,
@@ -209,23 +197,23 @@ def raw_mm_ref(
         "modality": modality,
         "mm_hash": mm_hash,
         "payload": payload or {},
-        "raw_image_id": raw_image_id,
+        "raw_image_uri": raw_image_uri,
     }
 
-    return f"{IMAGE_REF_PREFIX}:{IMAGE_REF_VERSION}:{_encode_ref_payload(ref_payload)}"
+    return f"{IMAGE_REF_PREFIX}:{_encode_ref_payload(ref_payload)}"
 
 
 def split_raw_mm_ref(ref: str) -> RawMMRef:
     parts = ref.split(":")
-    if parts[:2] != [IMAGE_REF_PREFIX, IMAGE_REF_VERSION] or len(parts) != 3:
+    if len(parts) != 2 or parts[0] != IMAGE_REF_PREFIX:
         raise ValueError(f"Invalid raw multimodal ref shape: {ref!r}")
 
-    payload = _decode_ref_payload(parts[2])
+    payload = _decode_ref_payload(parts[1])
     family = payload.get("family")
     fingerprint = payload.get("fingerprint")
     modality = payload.get("modality")
     mm_hash = payload.get("mm_hash")
-    raw_image_id = payload.get("raw_image_id")
+    raw_image_uri = payload.get("raw_image_uri")
     item_payload = payload.get("payload")
 
     if not isinstance(family, str):
@@ -236,8 +224,8 @@ def split_raw_mm_ref(ref: str) -> RawMMRef:
         raise ValueError("Raw multimodal ref is missing modality")
     if not isinstance(mm_hash, str):
         raise ValueError("Raw multimodal ref is missing mm_hash")
-    if not isinstance(raw_image_id, str):
-        raise ValueError("Raw multimodal ref is missing raw_image_id")
+    if not isinstance(raw_image_uri, str):
+        raise ValueError("Raw multimodal ref is missing raw_image_uri")
     if not isinstance(item_payload, dict):
         raise ValueError("Raw multimodal ref payload must be a dict")
 
@@ -247,11 +235,9 @@ def split_raw_mm_ref(ref: str) -> RawMMRef:
         modality=_ensure_safe("raw multimodal modality", modality),
         mm_hash=_ensure_safe("image hash", mm_hash),
         payload=item_payload,
-        raw_image_id=_ensure_safe("raw image id", raw_image_id),
+        raw_image_uri=raw_image_uri,
     )
 
 
 def is_raw_mm_ref(ref: object) -> bool:
-    return isinstance(ref, str) and ref.startswith(
-        f"{IMAGE_REF_PREFIX}:{IMAGE_REF_VERSION}:"
-    )
+    return isinstance(ref, str) and ref.startswith(f"{IMAGE_REF_PREFIX}:")

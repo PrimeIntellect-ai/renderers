@@ -45,6 +45,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
+from renderers.mm_store import image_layout_fingerprint, raw_mm_item
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
 from renderers.qwen3_vl import (
     _image_content_hash,
@@ -52,9 +53,8 @@ from renderers.qwen3_vl import (
     _image_source,
     _is_image_part,
     _is_video_part,
-    _raw_image_id,
+    _raw_image_uri,
 )
-from renderers.mm_store import image_layout_fingerprint, raw_mm_item
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -430,7 +430,7 @@ class KimiImageLayoutDescriptor:
     grid_thws: list[list[int]]
     num_media_tokens: int
     fingerprint: str
-    raw_image_id: str
+    raw_image_uri: str
 
 
 def _ceil_to_factor(value: int, factor: int) -> int:
@@ -486,7 +486,7 @@ def describe_kimi_image_layout(part: dict[str, Any]) -> KimiImageLayoutDescripto
         grid_thws=grid_thws,
         num_media_tokens=num_media_tokens,
         fingerprint=fingerprint,
-        raw_image_id=_raw_image_id(source),
+        raw_image_uri=_raw_image_uri(source),
     )
 
 
@@ -500,7 +500,7 @@ def kimi_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str
             "grid_thws": desc.grid_thws,
             "num_media_tokens": desc.num_media_tokens,
         },
-        raw_image_id=desc.raw_image_id,
+        raw_image_uri=desc.raw_image_uri,
         vllm_modality=KIMI_K25_VLLM_MODALITY,
     )
     return 1, desc.mm_hash, item

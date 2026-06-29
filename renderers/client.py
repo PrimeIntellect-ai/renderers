@@ -388,12 +388,12 @@ def _build_vllm_mm_features(mm_data: MultiModalData) -> dict[str, Any]:
             if not isinstance(feature_modality, str) or not feature_modality:
                 raise ValueError("raw multimodal item has invalid vllm_modality")
 
-            raw_image_id = item.get("raw_image_id")
+            raw_image_uri = item.get("raw_image_uri")
             family = item.get("family")
             fingerprint = item.get("layout_fingerprint")
             payload = item.get("payload")
-            if not isinstance(raw_image_id, str) or not raw_image_id:
-                raise ValueError("raw multimodal item is missing raw_image_id")
+            if not isinstance(raw_image_uri, str) or not raw_image_uri:
+                raise ValueError("raw multimodal item is missing raw_image_uri")
             if not isinstance(family, str) or not family:
                 raise ValueError("raw multimodal item is missing family")
             if not isinstance(fingerprint, str) or not fingerprint:
@@ -411,7 +411,7 @@ def _build_vllm_mm_features(mm_data: MultiModalData) -> dict[str, Any]:
                     fingerprint=fingerprint,
                     modality=feature_modality,
                     mm_hash=mm_hashes[idx],
-                    raw_image_id=raw_image_id,
+                    raw_image_uri=raw_image_uri,
                     payload=payload,
                 )
             )

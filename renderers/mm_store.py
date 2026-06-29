@@ -17,6 +17,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+# Contract: must match prime_rl.utils.run_assets.IMAGE_OFFLOAD_DIR_ENV.
 IMAGE_OFFLOAD_DIR_ENV = "VF_RENDERER_IMAGE_OFFLOAD_DIR"
 
 IMAGE_REF_PREFIX = "mmraw"
@@ -200,7 +201,7 @@ def raw_mm_ref(
     _ensure_safe("image layout fingerprint", fingerprint)
     _ensure_safe("raw multimodal modality", modality)
     _ensure_safe("image hash", mm_hash)
-    raw_image_path(raw_image_id=raw_image_id)
+    raw_image_id = _ensure_safe("raw image id", raw_image_id)
 
     ref_payload: dict[str, object] = {
         "family": family,

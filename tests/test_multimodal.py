@@ -476,7 +476,9 @@ def test_multimodal_byte_parity_vs_processor(
 
     renderer_cases = _build_cases(kit["make_part"], offloaded_tiny_image)
     processor_cases = _build_cases(kit["make_part"], tiny_image)
-    for renderer_case, processor_case in zip(renderer_cases, processor_cases, strict=True):
+    for renderer_case, processor_case in zip(
+        renderer_cases, processor_cases, strict=True
+    ):
         messages, add_gp = renderer_case.values
         processor_messages, processor_add_gp = processor_case.values
         assert add_gp == processor_add_gp
@@ -708,7 +710,9 @@ def test_tool_response_image_byte_parity(
 
     renderer_cases = _build_tool_image_cases(kit["make_part"], offloaded_tiny_image)
     processor_cases = _build_tool_image_cases(kit["make_part"], tiny_image)
-    for renderer_case, processor_case in zip(renderer_cases, processor_cases, strict=True):
+    for renderer_case, processor_case in zip(
+        renderer_cases, processor_cases, strict=True
+    ):
         messages, add_gp = renderer_case.values
         processor_messages, processor_add_gp = processor_case.values
         assert add_gp == processor_add_gp
@@ -799,7 +803,9 @@ def test_add_vision_id_parity_vs_processor(
 
     renderer_cases = _build_cases(kit["make_part"], offloaded_tiny_image)
     processor_cases = _build_cases(kit["make_part"], tiny_image)
-    for renderer_case, processor_case in zip(renderer_cases, processor_cases, strict=True):
+    for renderer_case, processor_case in zip(
+        renderer_cases, processor_cases, strict=True
+    ):
         messages, add_gp = renderer_case.values
         processor_messages, processor_add_gp = processor_case.values
         assert add_gp == processor_add_gp

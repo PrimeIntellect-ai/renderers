@@ -225,6 +225,7 @@ class Qwen36RendererConfig(BaseRendererConfig):
         )
         return self
 
+
 class Qwen3VLRendererConfig(BaseRendererConfig):
     """Qwen3-VL renderer config."""
 

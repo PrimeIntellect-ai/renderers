@@ -162,7 +162,6 @@ class Qwen35Renderer:
         """
         return {self._image_pad: 1, self._video_pad: 2}
 
-
     @staticmethod
     def _content_has_media(content: Any) -> bool:
         """True when ``content`` is a structured list containing image / video parts."""

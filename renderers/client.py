@@ -213,12 +213,14 @@ async def generate(
     def _prepare():
         if prompt_ids is not None:
             # Caller-supplied prompt; if they also gave us pre-computed
-            # attribution (e.g. the bridge path in verifiers), thread it
-            # through unchanged.
+            # attribution (e.g. the bridge path in verifiers), thread it through.
+            prompt_mm_data = multi_modal_data
+            if prompt_mm_data is None and prompt_attribution is not None:
+                prompt_mm_data = prompt_attribution.multi_modal_data
             return (
                 list(prompt_ids),
                 renderer.get_stop_token_ids(),
-                multi_modal_data,
+                prompt_mm_data,
                 prompt_attribution,
             )
         rendered = renderer.render(messages, tools=tools, add_generation_prompt=True)
@@ -261,10 +263,7 @@ async def generate(
         return _build_vllm_mm_features(mm_data), mm_data
 
     features, out_mm_data = await _maybe_offload(renderer, _features_and_descriptor_mm)
-    if (
-        prompt_attr is not None
-        and getattr(prompt_attr, "multi_modal_data", None) is not None
-    ):
+    if prompt_attr is not None and out_mm_data is not None:
         prompt_attr = replace(prompt_attr, multi_modal_data=out_mm_data)
     if features is not None:
         body["features"] = features

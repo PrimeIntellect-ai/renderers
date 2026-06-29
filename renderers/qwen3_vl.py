@@ -1,4 +1,4 @@
-"""Qwen3-VL renderer with multimodal (image + video) support.
+"""Qwen3-VL renderer with multimodal image support.
 
 Produces a token stream that matches ``Qwen3VLProcessor.apply_chat_template``
 byte-for-byte for text-only inputs and emits the same
@@ -19,13 +19,14 @@ output. The internal ``_Emitter`` buffers text and flushes on special
 tokens (``<|im_start|>``, ``<|im_end|>``, ``<tool_response>``,
 ``<|vision_start|>``…), which act as atomic boundaries the template
 also can't merge across.
+
+Video-shaped content parts are detected and rejected explicitly; video
+materialization is not implemented in this raw-image path yet.
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import io
 import json
 import math
 from dataclasses import dataclass
@@ -50,7 +51,6 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import Qwen3VLRendererConfig
-from renderers.image_layout_specs import QWEN_VL_IMAGE_LAYOUT
 from renderers.mm_store import (
     image_layout_fingerprint,
     raw_mm_item,
@@ -101,82 +101,16 @@ def _is_video_part(item: Any) -> bool:
     return bool(item.get("video")) or bool(item.get("video_url"))
 
 
-def _load_pil_image(item: dict[str, Any]):
-    """Resolve an ImagePart to a PIL Image.
-
-    Accepts pre-loaded PIL Images, raw bytes, filesystem paths,
-    ``file://``/``http(s)://`` URLs, and ``data:image/...;base64,...`` URIs.
-    """
-    try:
-        from PIL import Image
-    except ImportError as exc:
-        raise RuntimeError(
-            "Pillow is required for multimodal rendering. Install with "
-            "`pip install Pillow` (or `pip install renderers[multimodal]`)."
-        ) from exc
-
-    raw: Any
-    if "image" in item:
-        raw = item["image"]
-    elif "image_url" in item:
-        # OpenAI canonical shape is ``image_url: {"url": "..."}`` — but
-        # some VLM processors (Kimi K2.5 / K2.6) hand a raw PIL / str
-        # directly under ``image_url``. Accept both.
-        iu = item.get("image_url")
-        raw = iu.get("url") if isinstance(iu, dict) else iu
-    else:
-        raw = item.get("url") or item.get("path")
-
-    if isinstance(raw, Image.Image):
-        return raw.convert("RGB") if raw.mode != "RGB" else raw
-
-    if isinstance(raw, (bytes, bytearray)):
-        return Image.open(io.BytesIO(raw)).convert("RGB")
-
-    if not isinstance(raw, str):
-        raise TypeError(
-            f"Unsupported image source {type(raw).__name__!r}; expected PIL "
-            "Image, bytes, path, http(s):// URL, file:// URL, or data: URI."
-        )
-
-    if raw.startswith("data:"):
-        # data:image/png;base64,XXXX
-        return Image.open(io.BytesIO(_data_image_bytes(raw))).convert("RGB")
-
-    parsed = urlparse(raw)
-    if parsed.scheme in ("http", "https"):
-        import urllib.request
-
-        with urllib.request.urlopen(raw) as resp:  # noqa: S310 — user-supplied URL
-            return Image.open(io.BytesIO(resp.read())).convert("RGB")
-
-    if parsed.scheme == "file" or parsed.scheme == "":
-        path = parsed.path if parsed.scheme == "file" else raw
-        return Image.open(path).convert("RGB")
-
-    raise ValueError(f"Unsupported image URL scheme: {parsed.scheme!r} in {raw!r}")
+@dataclass(frozen=True)
+class QwenVLImageLayoutSpec:
+    patch_size: int = 16
+    temporal_patch_size: int = 2
+    merge_size: int = 2
+    min_pixels: int = 65536
+    max_pixels: int = 16777216
 
 
-def _image_hash(pil_image) -> str:
-    """Stable per-image identifier for cache lookup.
-
-    Uses the resolved RGB bytes so two ``ImagePart``\\s pointing at the
-    same logical image (path, in-memory, data URI) hash identically.
-    """
-    h = hashlib.sha256()
-    h.update(pil_image.tobytes())
-    h.update(f"{pil_image.size}".encode())
-    return h.hexdigest()[:32]
-
-
-def _data_image_bytes(source: str) -> bytes:
-    if not source.startswith("data:image/"):
-        raise ValueError(f"Expected data:image URI, got {source!r}")
-    marker = ";base64,"
-    if marker not in source:
-        raise ValueError("data:image URI must use base64 encoding")
-    _, b64 = source.split(marker, 1)
-    return base64.b64decode(b64)
+QWEN_VL_IMAGE_LAYOUT = QwenVLImageLayoutSpec()
 
 
 @dataclass(frozen=True)
@@ -185,8 +119,7 @@ class QwenImageLayoutDescriptor:
     image_grid_thw: list[list[int]]
     num_image_tokens: int
     fingerprint: str
-    raw_uri: str | None = None
-    raw_image_id: str | None = None
+    raw_image_id: str
 
 
 def _smart_resize(
@@ -238,6 +171,15 @@ def _file_path_from_source(source: Any) -> Path | None:
     return None
 
 
+def _offloaded_image_path(source: Any) -> Path:
+    path = _file_path_from_source(source)
+    if path is None:
+        raise ValueError(
+            "v1 multimodal image rendering requires offloaded file:// image assets"
+        )
+    return path
+
+
 def _image_dimensions(source: Any) -> tuple[int, int]:
     try:
         from PIL import Image
@@ -246,31 +188,16 @@ def _image_dimensions(source: Any) -> tuple[int, int]:
             "Pillow is required to read image dimensions for multimodal rendering."
         ) from exc
 
-    path = _file_path_from_source(source)
-    if path is not None:
-        with Image.open(path) as image:
-            return image.height, image.width
-
-    image = _load_pil_image({"image": source})
-    return image.height, image.width
+    with Image.open(_offloaded_image_path(source)) as image:
+        return image.height, image.width
 
 
 def _image_content_hash(source: Any) -> str:
-    path = _file_path_from_source(source)
-    if path is not None:
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:32]
-    if isinstance(source, str) and source.startswith("data:image/"):
-        return hashlib.sha256(_data_image_bytes(source)).hexdigest()[:32]
-    return _image_hash(_load_pil_image({"image": source}))
+    return hashlib.sha256(_offloaded_image_path(source).read_bytes()).hexdigest()[:32]
 
 
-def _raw_uri_and_id(source: Any) -> tuple[str | None, str | None]:
-    if isinstance(source, str) and source.startswith("data:image/"):
-        return source, None
-    path = _file_path_from_source(source)
-    if path is None:
-        return None, None
-    return path.as_uri(), path.name
+def _raw_image_id(source: Any) -> str:
+    return _offloaded_image_path(source).name
 
 
 def describe_qwen_image_layout(part: dict[str, Any]) -> QwenImageLayoutDescriptor:
@@ -299,14 +226,12 @@ def describe_qwen_image_layout(part: dict[str, Any]) -> QwenImageLayoutDescripto
         min_pixels=layout.min_pixels,
         max_pixels=layout.max_pixels,
     )
-    raw_uri, raw_image_id = _raw_uri_and_id(source)
     return QwenImageLayoutDescriptor(
         mm_hash=_image_content_hash(source),
         image_grid_thw=[[grid_t, grid_h, grid_w]],
         num_image_tokens=num_image_tokens,
         fingerprint=fingerprint,
-        raw_uri=raw_uri,
-        raw_image_id=raw_image_id,
+        raw_image_id=_raw_image_id(source),
     )
 
 
@@ -317,7 +242,6 @@ def qwen_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str
         family="qwen_vl",
         layout_fingerprint=desc.fingerprint,
         payload={"image_grid_thw": desc.image_grid_thw},
-        raw_uri=desc.raw_uri,
         raw_image_id=desc.raw_image_id,
     )
     return desc.num_image_tokens, desc.mm_hash, item

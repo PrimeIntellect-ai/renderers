@@ -2,7 +2,6 @@ import asyncio
 import base64
 import hashlib
 import json
-from typing import Any
 
 import httpx
 import numpy as np
@@ -15,7 +14,7 @@ from renderers.base import (
 )
 from renderers.client import generate
 
-_OPENAI_TOOL: Any = {"type": "function", "function": {"name": "echo"}}
+_OPENAI_TOOL = {"type": "function", "function": {"name": "echo"}}
 
 
 class _FakeRenderer:
@@ -105,113 +104,19 @@ class _FakeClient:
         )
 
 
-def test_run_image_dir_resolution_prefers_explicit_image_dir(tmp_path, monkeypatch):
-    from renderers.mm_store import run_image_dir
+def test_offload_image_to_run_assets_writes_content_addressed_file(tmp_path):
+    from renderers.mm_store import offload_image_to_run_assets
 
-    image_dir = tmp_path / "custom-images"
-    monkeypatch.setenv("VF_RENDERER_IMAGE_OFFLOAD_DIR", str(image_dir))
-    monkeypatch.setenv("PRIME_RL_RUN_DIR", str(tmp_path / "run_other"))
-    monkeypatch.setenv("RUN_ID", "other")
+    raw = b"png-ish bytes"
+    url = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
 
-    assert run_image_dir() == image_dir.resolve()
+    file_url = offload_image_to_run_assets(url, image_dir=tmp_path)
 
-
-def test_run_image_dir_resolution_owns_run_prefix(monkeypatch):
-    from renderers.mm_store import run_image_dir
-
-    monkeypatch.delenv("VF_RENDERER_IMAGE_OFFLOAD_DIR", raising=False)
-    monkeypatch.delenv("PRIME_RL_RUN_DIR", raising=False)
-    monkeypatch.setenv("RUN_ID", "run_abc")
-
-    assert run_image_dir().as_posix() == "/data/outputs/run_abc/assets/images"
-
-
-class _TinyQwenTokenizer:
-    unk_token_id = -1
-    _specials = {
-        "<|im_start|>": 1,
-        "<|im_end|>": 2,
-        "<|endoftext|>": 3,
-        "<tool_call>": 4,
-        "</tool_call>": 5,
-        "<tool_response>": 6,
-        "</tool_response>": 7,
-        "</think>": 8,
-        "<|vision_start|>": 9,
-        "<|vision_end|>": 10,
-        "<|image_pad|>": 11,
-        "<|video_pad|>": 12,
-    }
-
-    def convert_tokens_to_ids(self, token):
-        return self._specials.get(token, self.unk_token_id)
-
-    def encode(self, text, add_special_tokens=False):
-        return [100 + ord(ch) % 50 for ch in text]
-
-
-def test_qwen3_vl_render_emits_image_descriptor_without_processor(tmp_path):
-    pytest.importorskip("PIL")
-    from PIL import Image
-    from renderers.mm_store import IMAGE_REF_PAYLOAD_KEY, IMAGE_REF_PAYLOAD_VALUE
-    from renderers.qwen3_vl import Qwen3VLRenderer
-
-    image_path = tmp_path / "image.png"
-    Image.new("RGB", (32, 32), color=(255, 0, 0)).save(image_path)
-    renderer = Qwen3VLRenderer(_TinyQwenTokenizer())
-
-    rendered = renderer.render(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_path.as_uri()}}
-                ],
-            }
-        ],
-        add_generation_prompt=True,
-    )
-
-    assert rendered.multi_modal_data is not None
-    item = rendered.multi_modal_data.mm_items["image"][0]
-    assert "pixel_values" not in item
-    assert item["family"] == "qwen_vl"
-    assert item["payload"]["image_grid_thw"] == [[1, 16, 16]]
-    assert item["raw_image_id"] == "image.png"
-    assert item[IMAGE_REF_PAYLOAD_KEY] == IMAGE_REF_PAYLOAD_VALUE
-    assert rendered.multi_modal_data.mm_placeholders["image"][0].length == 64
-
-
-def test_qwen3_vl_render_preserves_inline_data_uri_raw_source(tmp_path):
-    pytest.importorskip("PIL")
-    from PIL import Image
-    from renderers.qwen3_vl import Qwen3VLRenderer
-
-    image_path = tmp_path / "image.png"
-    Image.new("RGB", (32, 32), color=(0, 255, 0)).save(image_path)
-    raw = image_path.read_bytes()
-    data_uri = f"data:image/png;base64,{base64.b64encode(raw).decode('ascii')}"
-    renderer = Qwen3VLRenderer(_TinyQwenTokenizer())
-
-    rendered = renderer.render(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": data_uri}}
-                ],
-            }
-        ],
-        add_generation_prompt=True,
-    )
-
-    assert rendered.multi_modal_data is not None
-    item = rendered.multi_modal_data.mm_items["image"][0]
-    assert item["raw_uri"] == data_uri
-    assert "raw_image_id" not in item
-    assert rendered.multi_modal_data.mm_hashes["image"][0] == hashlib.sha256(raw).hexdigest()[:32]
-
-
+    assert file_url is not None
+    assert file_url.startswith("file://")
+    path = tmp_path / file_url.rsplit("/", 1)[-1]
+    assert path.name == f"{hashlib.sha256(raw).hexdigest()[:16]}.png"
+    assert path.read_bytes() == raw
 
 
 def test_generate_builds_request_body_and_parses_response():
@@ -392,25 +297,28 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
 
 
 @pytest.mark.parametrize(
-    "renderer_class_path",
+    "family,payload,expected_modality,vllm_modality",
     [
-        "renderers.qwen3_vl:Qwen3VLRenderer",
-        "renderers.qwen35:Qwen35Renderer",
+        ("qwen_vl", {"image_grid_thw": [[1, 2, 2]]}, "image", None),
+        (
+            "kimi_k25",
+            {"grid_thws": [[1, 2, 2]], "num_media_tokens": 1},
+            "vision_chunk",
+            "vision_chunk",
+        ),
     ],
-    ids=["qwen3_vl", "qwen35"],
+    ids=["default_image_modality", "kimi_vllm_modality"],
 )
-def test_generate_serializes_image_refs_for_qwen_vl_family(
-    tmp_path, monkeypatch, renderer_class_path
+def test_generate_serializes_raw_mm_refs(
+    tmp_path, monkeypatch, family, payload, expected_modality, vllm_modality
 ):
-    """When the renderer emits ``MultiModalData``, ``generate`` translates
-    it into vLLM's ``features`` payload (mm_hashes + mm_placeholders +
-    image-ref kwargs_data) and sticks it in the request body. Every image slot
-    carries a lightweight raw ref."""
-    import importlib
+    """``generate`` serializes raw multimodal envelopes to vLLM refs.
 
+    The client owns only the generic wire shape: hashes, placeholder spans,
+    and one raw ref per item. Family-specific payload keys stay opaque here.
+    """
     from renderers.base import (
         MultiModalData,
-        ParsedResponse,
         PlaceholderRange,
     )
     from renderers.mm_store import (
@@ -419,59 +327,29 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
         split_raw_mm_ref,
     )
 
-    mod_name, cls_name = renderer_class_path.split(":")
-    renderer_cls = getattr(importlib.import_module(mod_name), cls_name)
-
-    class _BareRenderer(renderer_cls):
-        supports_tools = True
-
-        def get_stop_token_ids(self):
-            return [99]
-
-        def parse_response(self, completion_ids, *, tools=None):
-            return ParsedResponse(content="done")
-
-    renderer = _BareRenderer.__new__(_BareRenderer)
     image_dir = tmp_path / "run_rawtest" / "assets" / "images"
     image_dir.mkdir(parents=True)
     (image_dir / "image.png").write_bytes(b"image-bytes")
-    (image_dir / "image2.png").write_bytes(b"other-image-bytes")
     monkeypatch.setenv("VF_RENDERER_IMAGE_OFFLOAD_DIR", str(image_dir))
-    monkeypatch.setenv("RUN_ID", "rawtest")
-    fingerprint = image_layout_fingerprint(
-        family="qwen_vl",
-        patch_size=16,
-        merge_size=2,
-        temporal_patch_size=2,
-        min_pixels=65536,
-        max_pixels=16777216,
-    )
+    fingerprint = image_layout_fingerprint(family=family, revision="test")
+    mm_hash = "a" * 32
 
     mm_data = MultiModalData(
-        mm_hashes={"image": ["a" * 32, "b" * 32]},
+        mm_hashes={"image": [mm_hash]},
         mm_placeholders={
             "image": [
                 PlaceholderRange(offset=5, length=1),
-                PlaceholderRange(offset=10, length=1),
             ]
         },
         mm_items={
             "image": [
                 raw_mm_item(
                     modality="image",
-                    family="qwen_vl",
+                    family=family,
                     layout_fingerprint=fingerprint,
-                    payload={"image_grid_thw": [[1, 2, 2]]},
-                    raw_uri=(image_dir / "image.png").as_uri(),
+                    payload=payload,
                     raw_image_id="image.png",
-                ),
-                raw_mm_item(
-                    modality="image",
-                    family="qwen_vl",
-                    layout_fingerprint=fingerprint,
-                    payload={"image_grid_thw": [[1, 2, 2]]},
-                    raw_uri=(image_dir / "image2.png").as_uri(),
-                    raw_image_id="image2.png",
+                    vllm_modality=vllm_modality,
                 ),
             ],
         },
@@ -481,9 +359,9 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
     result = asyncio.run(
         generate(
             client=client,
-            renderer=renderer,
+            renderer=_NoRenderRenderer(),
             messages=[],
-            model="qwen3-vl",
+            model="test-model",
             prompt_ids=list(range(20)),
             multi_modal_data=mm_data,
             sampling_params={"max_tokens": 4},
@@ -493,43 +371,26 @@ def test_generate_serializes_image_refs_for_qwen_vl_family(
     body = client.calls[0]["body"]
     assert "features" in body, "multimodal call should attach features"
     features = body["features"]
-    assert features["mm_hashes"] == {"image": ["a" * 32, "b" * 32]}
+    assert features["mm_hashes"] == {expected_modality: [mm_hash]}
     assert features["mm_placeholders"] == {
-        "image": [{"offset": 5, "length": 1}, {"offset": 10, "length": 1}],
+        expected_modality: [{"offset": 5, "length": 1}],
     }
-    items = features["kwargs_data"]["image"]
-    ref = split_raw_mm_ref(items[0])
-    assert ref.payload == {"image_grid_thw": [[1, 2, 2]]}
+    refs = features["kwargs_data"][expected_modality]
+    assert len(refs) == 1
+    ref = split_raw_mm_ref(refs[0])
+    assert ref.payload == payload
     assert (
-        ref.run_id,
         ref.family,
         ref.fingerprint,
         ref.modality,
         ref.mm_hash,
         ref.raw_image_id,
     ) == (
-        "rawtest",
-        "qwen_vl",
+        family,
         fingerprint,
-        "image",
-        "a" * 32,
+        expected_modality,
+        mm_hash,
         "image.png",
-    )
-    ref2 = split_raw_mm_ref(items[1])
-    assert (
-        ref2.run_id,
-        ref2.family,
-        ref2.fingerprint,
-        ref2.modality,
-        ref2.mm_hash,
-        ref2.raw_image_id,
-    ) == (
-        "rawtest",
-        "qwen_vl",
-        fingerprint,
-        "image",
-        "b" * 32,
-        "image2.png",
     )
     assert result["multi_modal_data"] is mm_data
 

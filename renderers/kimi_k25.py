@@ -45,7 +45,6 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
-from renderers.image_layout_specs import KIMI_K25_IMAGE_LAYOUT, KimiK25ImageLayoutSpec
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
 from renderers.qwen3_vl import (
     _image_content_hash,
@@ -53,7 +52,7 @@ from renderers.qwen3_vl import (
     _image_source,
     _is_image_part,
     _is_video_part,
-    _raw_uri_and_id,
+    _raw_image_id,
 )
 from renderers.mm_store import image_layout_fingerprint, raw_mm_item
 
@@ -412,13 +411,26 @@ def _encode_tools_typescript(tools: list[ToolSpec]) -> str:
 
 
 @dataclass(frozen=True)
+class KimiK25ImageLayoutSpec:
+    patch_size: int = 14
+    merge_kernel_size: int = 2
+    in_patch_limit: int = 16384
+    patch_limit_on_one_side: int = 512
+    fixed_output_tokens: int | None = None
+    image_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)
+    image_std: tuple[float, float, float] = (0.5, 0.5, 0.5)
+
+
+KIMI_K25_IMAGE_LAYOUT = KimiK25ImageLayoutSpec()
+
+
+@dataclass(frozen=True)
 class KimiImageLayoutDescriptor:
     mm_hash: str
     grid_thws: list[list[int]]
     num_media_tokens: int
     fingerprint: str
-    raw_uri: str | None = None
-    raw_image_id: str | None = None
+    raw_image_id: str
 
 
 def _ceil_to_factor(value: int, factor: int) -> int:
@@ -469,14 +481,12 @@ def describe_kimi_image_layout(part: dict[str, Any]) -> KimiImageLayoutDescripto
         image_mean=list(layout.image_mean),
         image_std=list(layout.image_std),
     )
-    raw_uri, raw_image_id = _raw_uri_and_id(source)
     return KimiImageLayoutDescriptor(
         mm_hash=_image_content_hash(source),
         grid_thws=grid_thws,
         num_media_tokens=num_media_tokens,
         fingerprint=fingerprint,
-        raw_uri=raw_uri,
-        raw_image_id=raw_image_id,
+        raw_image_id=_raw_image_id(source),
     )
 
 
@@ -490,7 +500,6 @@ def kimi_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str
             "grid_thws": desc.grid_thws,
             "num_media_tokens": desc.num_media_tokens,
         },
-        raw_uri=desc.raw_uri,
         raw_image_id=desc.raw_image_id,
         vllm_modality=KIMI_K25_VLLM_MODALITY,
     )
@@ -730,16 +739,12 @@ class KimiK25Renderer:
         # The stop token for generation
         self._endoftext: int | None = self._try_token_id("<|endoftext|>")
 
-
     @property
     def mm_token_type_id_map(self) -> dict[int, int]:
         """Token-id → modality marker. For Kimi K2.5 only ``<|media_pad|>``
         carries an image marker (1); the model expands per-patch attention
         internally from ``pixel_values``."""
         return {self._media_pad: 1}
-
-
-
 
     # ------------------------------------------------------------------
     # Token helpers

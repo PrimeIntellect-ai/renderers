@@ -17,28 +17,14 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-RUN_OUTPUT_ROOT = Path("/data/outputs")
-
 IMAGE_OFFLOAD_DIR_ENV = "VF_RENDERER_IMAGE_OFFLOAD_DIR"
-IMAGE_STORAGE_ENV = "PRIME_RL_MM_IMAGE_STORAGE"
-RUN_DIR_ENV = "PRIME_RL_RUN_DIR"
-RUN_ID_ENV = "RUN_ID"
 
-IMAGE_STORAGE_OFFLOAD = "offload"
-IMAGE_STORAGE_INLINE = "inline"
-IMAGE_STORAGE_MODES = {IMAGE_STORAGE_OFFLOAD, IMAGE_STORAGE_INLINE}
-
-IMAGE_ASSET_SUBDIR = Path("assets/images")
 IMAGE_REF_PREFIX = "mmraw"
-IMAGE_REF_V2_PREFIX = "mmraw:v2"
 IMAGE_REF_VERSION = "v3"
-IMAGE_REF_PAYLOAD_KEY = "_prime_rl_image_ref"
-IMAGE_REF_PAYLOAD_VALUE = "raw_image"
 RAW_MM_ITEM_KIND = "prime_raw_mm_item"
 RAW_MM_ITEM_VERSION = 1
 
 _SAFE = {
-    "run id": re.compile(r"^[A-Za-z0-9_.-]+$"),
     "multimodal family": re.compile(r"^[A-Za-z0-9_.-]+$"),
     "raw multimodal modality": re.compile(r"^[A-Za-z0-9_.-]+$"),
     "image layout fingerprint": re.compile(r"^[a-f0-9]{16,64}$"),
@@ -62,85 +48,14 @@ def _ensure_safe(label: str, value: str) -> str:
     return value
 
 
-def image_storage_mode() -> str:
-    mode = os.getenv(IMAGE_STORAGE_ENV, IMAGE_STORAGE_OFFLOAD).strip().lower()
-    if mode not in IMAGE_STORAGE_MODES:
-        raise ValueError(
-            f"{IMAGE_STORAGE_ENV} must be one of {sorted(IMAGE_STORAGE_MODES)}, got {mode!r}"
-        )
-    return mode
-
-
-def normalize_run_id(run_id: str) -> str:
-    """Return the canonical run id, without the directory's ``run_`` prefix."""
-    value = run_id.strip()
-    if value.startswith("run_"):
-        value = value[len("run_") :]
-    if not value:
-        raise ValueError(f"Invalid run id: {run_id!r}")
-    return _ensure_safe("run id", value)
-
-
-def run_dir_name(run_id: str) -> str:
-    return f"run_{normalize_run_id(run_id)}"
-
-
-def current_run_id() -> str:
-    """Best-effort run id for refs emitted by this process."""
-    raw = os.getenv(RUN_ID_ENV, "").strip()
-    if raw:
-        return normalize_run_id(raw)
-
-    run_dir = os.getenv(RUN_DIR_ENV, "").strip()
-    if run_dir:
-        return normalize_run_id(Path(run_dir).name)
-
-    image_dir = os.getenv(IMAGE_OFFLOAD_DIR_ENV, "").strip()
-    if image_dir:
-        # Expected shape is <run_dir>/assets/images. If callers pass another
-        # explicit directory, the ref's run segment is only a stable label; the
-        # path resolver will use the explicit directory in every process.
-        path = Path(image_dir).resolve()
-        if path.name == "images" and path.parent.name == "assets":
-            try:
-                return normalize_run_id(path.parent.parent.name)
-            except ValueError:
-                pass
-        return "explicit"
-
-    if image_storage_mode() == IMAGE_STORAGE_INLINE:
-        return "inline"
-
-    raise RuntimeError(
-        f"Set {IMAGE_OFFLOAD_DIR_ENV}, {RUN_DIR_ENV}, or {RUN_ID_ENV} before emitting image refs."
-    )
-
-
-def run_dir(run_id: str | None = None) -> Path:
-    """Resolve the run output directory.
-
-    Resolution order:
-    1. ``PRIME_RL_RUN_DIR`` as an exact run directory.
-    2. ``RUN_ID`` or explicit ``run_id`` under ``/data/outputs/run_<id>``.
-    """
-    explicit = os.getenv(RUN_DIR_ENV, "").strip()
-    if explicit:
-        return Path(explicit).resolve()
-
-    value = run_id or os.getenv(RUN_ID_ENV, "").strip()
-    if not value:
-        raise RuntimeError(
-            f"Set {RUN_DIR_ENV} or {RUN_ID_ENV} before resolving a run directory."
-        )
-    return (RUN_OUTPUT_ROOT / run_dir_name(value)).resolve()
-
-
-def run_image_dir(run_id: str | None = None) -> Path:
+def run_image_dir() -> Path:
     """Resolve the directory for raw image assets for a run."""
     explicit = os.getenv(IMAGE_OFFLOAD_DIR_ENV, "").strip()
     if explicit:
         return Path(explicit).resolve()
-    return (run_dir(run_id) / IMAGE_ASSET_SUBDIR).resolve()
+    raise RuntimeError(
+        f"Set {IMAGE_OFFLOAD_DIR_ENV} before resolving raw image assets."
+    )
 
 
 def _media_type_ext(media_type: str) -> str:
@@ -150,11 +65,11 @@ def _media_type_ext(media_type: str) -> str:
 
 def offload_image_to_run_assets(
     url: object, image_dir: Path | None = None
-) -> tuple[str, int] | None:
+) -> str | None:
     """Decode a base64 data image into the run image assets directory.
 
-    Returns ``(file_url, byte_count)`` when ``url`` was rewritten and ``None``
-    for non-data-image values. Writes are content-addressed and atomic.
+    Returns a ``file://`` URL when ``url`` was rewritten and ``None`` for
+    non-data-image values. Writes are content-addressed and atomic.
     """
     if not isinstance(url, str) or not url.startswith("data:image/"):
         return None
@@ -181,12 +96,12 @@ def offload_image_to_run_assets(
             path.touch()
         except OSError:
             pass
-    return path.as_uri(), len(raw)
+    return path.as_uri()
 
 
-def raw_image_path(*, run_id: str, raw_image_id: str) -> Path:
+def raw_image_path(*, raw_image_id: str) -> Path:
     _ensure_safe("raw image id", raw_image_id)
-    root = run_image_dir(run_id)
+    root = run_image_dir()
     path = (root / raw_image_id).resolve()
     if not path.is_relative_to(root):
         raise ValueError(f"Raw image path escaped root: {path}")
@@ -231,8 +146,7 @@ def raw_mm_item(
     family: str,
     layout_fingerprint: str,
     payload: dict[str, object],
-    raw_uri: str | None = None,
-    raw_image_id: str | None = None,
+    raw_image_id: str,
     vllm_modality: str | None = None,
 ) -> dict[str, object]:
     """Build the JSON-safe raw multimodal descriptor envelope.
@@ -254,36 +168,27 @@ def raw_mm_item(
     }
     if vllm_modality is not None:
         out["vllm_modality"] = vllm_modality
-    if raw_uri is not None:
-        out["raw_uri"] = raw_uri
-        out[IMAGE_REF_PAYLOAD_KEY] = IMAGE_REF_PAYLOAD_VALUE
-    if raw_image_id is not None:
-        out["raw_image_id"] = raw_image_id
-        out[IMAGE_REF_PAYLOAD_KEY] = IMAGE_REF_PAYLOAD_VALUE
+    out["raw_image_id"] = _ensure_safe("raw image id", raw_image_id)
     return out
 
 
 @dataclass(frozen=True)
 class RawMMRef:
-    run_id: str
     family: str
     fingerprint: str
     modality: str
     mm_hash: str
     payload: dict[str, object]
-    raw_uri: str | None = None
-    raw_image_id: str | None = None
+    raw_image_id: str
 
 
 def raw_mm_ref(
     *,
-    run_id: str,
     family: str,
     fingerprint: str,
     modality: str,
     mm_hash: str,
-    raw_image_id: str | None = None,
-    raw_uri: str | None = None,
+    raw_image_id: str,
     payload: dict[str, object] | None = None,
 ) -> str:
     """Generic raw multimodal asset ref.
@@ -291,65 +196,37 @@ def raw_mm_ref(
     Adapter-owned details stay in the descriptor payload so refs can serve
     future families without baking shape names into the wire id.
     """
-    run_id = normalize_run_id(run_id)
     _ensure_safe("multimodal family", family)
     _ensure_safe("image layout fingerprint", fingerprint)
     _ensure_safe("raw multimodal modality", modality)
     _ensure_safe("image hash", mm_hash)
-    if raw_image_id is None and raw_uri is None:
-        raise ValueError("raw multimodal refs require raw_image_id or raw_uri")
-    if raw_image_id is not None:
-        raw_image_path(run_id=run_id, raw_image_id=raw_image_id)
-    if raw_uri is not None and not raw_uri:
-        raise ValueError("raw_uri must be non-empty when set")
+    raw_image_path(raw_image_id=raw_image_id)
 
     ref_payload: dict[str, object] = {
-        "run_id": run_id,
         "family": family,
         "fingerprint": fingerprint,
         "modality": modality,
         "mm_hash": mm_hash,
         "payload": payload or {},
+        "raw_image_id": raw_image_id,
     }
-    if raw_image_id is not None:
-        ref_payload["raw_image_id"] = raw_image_id
-    if raw_uri is not None:
-        ref_payload["raw_uri"] = raw_uri
 
     return f"{IMAGE_REF_PREFIX}:{IMAGE_REF_VERSION}:{_encode_ref_payload(ref_payload)}"
 
 
 def split_raw_mm_ref(ref: str) -> RawMMRef:
     parts = ref.split(":")
-    if parts[:2] == ["mmraw", "v2"] and len(parts) == 9:
-        run_id, family, fingerprint, modality, mm_hash, raw_image_id, encoded_payload = (
-            parts[2:]
-        )
-        return RawMMRef(
-            run_id=normalize_run_id(run_id),
-            family=_ensure_safe("multimodal family", family),
-            fingerprint=_ensure_safe("image layout fingerprint", fingerprint),
-            modality=_ensure_safe("raw multimodal modality", modality),
-            mm_hash=_ensure_safe("image hash", mm_hash),
-            payload=_decode_ref_payload(encoded_payload),
-            raw_image_id=_ensure_safe("raw image id", raw_image_id),
-        )
-
-    if parts[:2] != ["mmraw", IMAGE_REF_VERSION] or len(parts) != 3:
+    if parts[:2] != [IMAGE_REF_PREFIX, IMAGE_REF_VERSION] or len(parts) != 3:
         raise ValueError(f"Invalid raw multimodal ref shape: {ref!r}")
 
     payload = _decode_ref_payload(parts[2])
-    run_id = payload.get("run_id")
     family = payload.get("family")
     fingerprint = payload.get("fingerprint")
     modality = payload.get("modality")
     mm_hash = payload.get("mm_hash")
-    raw_uri = payload.get("raw_uri")
     raw_image_id = payload.get("raw_image_id")
     item_payload = payload.get("payload")
 
-    if not isinstance(run_id, str):
-        raise ValueError("Raw multimodal ref is missing run_id")
     if not isinstance(family, str):
         raise ValueError("Raw multimodal ref is missing family")
     if not isinstance(fingerprint, str):
@@ -358,26 +235,22 @@ def split_raw_mm_ref(ref: str) -> RawMMRef:
         raise ValueError("Raw multimodal ref is missing modality")
     if not isinstance(mm_hash, str):
         raise ValueError("Raw multimodal ref is missing mm_hash")
-    if raw_uri is not None and not isinstance(raw_uri, str):
-        raise ValueError("Raw multimodal ref raw_uri must be a string")
-    if raw_image_id is not None and not isinstance(raw_image_id, str):
-        raise ValueError("Raw multimodal ref raw_image_id must be a string")
-    if raw_uri is None and raw_image_id is None:
-        raise ValueError("Raw multimodal ref is missing an image source")
+    if not isinstance(raw_image_id, str):
+        raise ValueError("Raw multimodal ref is missing raw_image_id")
     if not isinstance(item_payload, dict):
         raise ValueError("Raw multimodal ref payload must be a dict")
 
     return RawMMRef(
-        run_id=normalize_run_id(run_id),
         family=_ensure_safe("multimodal family", family),
         fingerprint=_ensure_safe("image layout fingerprint", fingerprint),
         modality=_ensure_safe("raw multimodal modality", modality),
         mm_hash=_ensure_safe("image hash", mm_hash),
         payload=item_payload,
-        raw_uri=raw_uri,
-        raw_image_id=_ensure_safe("raw image id", raw_image_id) if raw_image_id is not None else None,
+        raw_image_id=_ensure_safe("raw image id", raw_image_id),
     )
 
 
 def is_raw_mm_ref(ref: object) -> bool:
-    return isinstance(ref, str) and ref.startswith(f"{IMAGE_REF_PREFIX}:")
+    return isinstance(ref, str) and ref.startswith(
+        f"{IMAGE_REF_PREFIX}:{IMAGE_REF_VERSION}:"
+    )

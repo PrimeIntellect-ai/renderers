@@ -22,7 +22,6 @@ IMAGE_OFFLOAD_DIR_ENV = "VF_RENDERER_IMAGE_OFFLOAD_DIR"
 
 IMAGE_REF_PREFIX = "mmraw"
 RAW_MM_ITEM_KIND = "prime_raw_mm_item"
-RAW_MM_ITEM_VERSION = 1
 
 _SAFE = {
     "multimodal family": re.compile(r"^[A-Za-z0-9_.-]+$"),
@@ -126,7 +125,7 @@ def image_layout_fingerprint(*, family: str, **values: object) -> str:
     encoded_values = ":".join(
         f"{key}={_json_fingerprint_value(values[key])}" for key in sorted(values)
     )
-    raw = f"image-layout:v1:{family}:{encoded_values}".encode("utf-8")
+    raw = f"image-layout:{family}:{encoded_values}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:32]
 
 
@@ -150,7 +149,6 @@ def raw_mm_item(
     _ensure_safe("image layout fingerprint", layout_fingerprint)
     out: dict[str, object] = {
         "kind": RAW_MM_ITEM_KIND,
-        "version": RAW_MM_ITEM_VERSION,
         "modality": modality,
         "family": family,
         "layout_fingerprint": layout_fingerprint,

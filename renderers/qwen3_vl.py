@@ -6,11 +6,10 @@ byte-for-byte for text-only inputs and emits the same
 for image inputs as the HF processor (``N = image_grid_thw.prod() //
 merge_size**2``).
 
-Image data is shipped to the inference engine via run image refs, not
-processed image-processor payloads. ``RenderedTokens.multi_modal_data``
-records placeholder spans, stable image hashes, and Qwen layout metadata
-(``image_grid_thw``) so vLLM can cache-match prior images and process new
-image refs itself.
+By default, image data is shipped to the inference engine via run image refs,
+not processed image-processor payloads. ``multimodal_output="processed"``
+instead emits processor payloads for SFT/training callers that need
+``pixel_values`` directly.
 
 BPE boundary discipline: text runs that the chat template emits
 contiguously (e.g. ``"user\\n" + content_text``) must be encoded as a
@@ -21,12 +20,14 @@ tokens (``<|im_start|>``, ``<|im_end|>``, ``<tool_response>``,
 also can't merge across.
 
 Video-shaped content parts are detected and rejected explicitly; video
-materialization is not implemented in this raw-image path yet.
+materialization is not implemented yet.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import json
 import math
 from dataclasses import dataclass
@@ -111,6 +112,7 @@ class QwenVLImageLayoutSpec:
 
 
 QWEN_VL_IMAGE_LAYOUT = QwenVLImageLayoutSpec()
+_PROCESSED_IMAGE_CACHE_MAX = 256
 
 
 @dataclass(frozen=True)
@@ -180,6 +182,47 @@ def _offloaded_image_path(source: Any) -> Path:
     return path
 
 
+def _load_pil_image(item: dict[str, Any]):
+    """Resolve an ImagePart to a PIL Image for processed multimodal output."""
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError(
+            "Processed multimodal rendering requires Pillow. Install "
+            "`renderers[vision]` or provide Pillow in the caller environment."
+        ) from exc
+
+    raw = _image_source(item)
+    if isinstance(raw, Image.Image):
+        return raw.convert("RGB") if raw.mode != "RGB" else raw
+
+    if isinstance(raw, (bytes, bytearray)):
+        return Image.open(io.BytesIO(raw)).convert("RGB")
+
+    if not isinstance(raw, str):
+        raise TypeError(
+            f"Unsupported image source {type(raw).__name__!r}; expected PIL "
+            "Image, bytes, path, http(s):// URL, file:// URL, or data: URI."
+        )
+
+    if raw.startswith("data:"):
+        _, _, payload = raw.partition(",")
+        return Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
+
+    parsed = urlparse(raw)
+    if parsed.scheme in ("http", "https"):
+        import urllib.request
+
+        with urllib.request.urlopen(raw) as resp:  # noqa: S310
+            return Image.open(io.BytesIO(resp.read())).convert("RGB")
+
+    if parsed.scheme in ("file", ""):
+        path = unquote(parsed.path) if parsed.scheme == "file" else raw
+        return Image.open(path).convert("RGB")
+
+    raise ValueError(f"Unsupported image URL scheme: {parsed.scheme!r} in {raw!r}")
+
+
 def _image_dimensions(source: Any) -> tuple[int, int]:
     try:
         from PIL import Image
@@ -194,6 +237,13 @@ def _image_dimensions(source: Any) -> tuple[int, int]:
 
 def _image_content_hash(source: Any) -> str:
     return hashlib.sha256(_offloaded_image_path(source).read_bytes()).hexdigest()[:32]
+
+
+def _pil_image_hash(pil_image) -> str:
+    h = hashlib.sha256()
+    h.update(pil_image.tobytes())
+    h.update(f"{pil_image.size}".encode())
+    return h.hexdigest()[:32]
 
 
 def _raw_image_uri(source: Any) -> str:
@@ -245,6 +295,51 @@ def qwen_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str
         raw_image_uri=desc.raw_image_uri,
     )
     return desc.num_image_tokens, desc.mm_hash, item
+
+
+def load_qwen_processor(tokenizer, renderer_name: str):
+    try:
+        from transformers import AutoProcessor
+    except ImportError as exc:
+        raise RuntimeError(
+            "Processed multimodal rendering requires transformers with "
+            "AutoProcessor support."
+        ) from exc
+
+    name = getattr(tokenizer, "name_or_path", None)
+    if not name:
+        raise RuntimeError(
+            f"{renderer_name} needs a processor for multimodal_output='processed'. "
+            "Inject `renderer._processor` or load the tokenizer with a known "
+            "name_or_path."
+        )
+    return AutoProcessor.from_pretrained(name)
+
+
+def qwen_processed_image_item_for_render(
+    part: dict[str, Any],
+    *,
+    processor: Any,
+    image_cache: dict[str, tuple[Any, int]],
+) -> tuple[int, str, dict[str, Any]]:
+    pil = _load_pil_image(part)
+    image_hash = _pil_image_hash(pil)
+    cached = image_cache.get(image_hash)
+    if cached is not None:
+        out, num_image_tokens = cached
+    else:
+        out = processor.image_processor(images=[pil], return_tensors="np")
+        grid_thw = out["image_grid_thw"][0]
+        merge_size = processor.image_processor.merge_size
+        num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)
+        if len(image_cache) >= _PROCESSED_IMAGE_CACHE_MAX:
+            image_cache.pop(next(iter(image_cache)))
+        image_cache[image_hash] = (out, num_image_tokens)
+    item = {
+        "pixel_values": out["pixel_values"],
+        "image_grid_thw": out["image_grid_thw"],
+    }
+    return num_image_tokens, image_hash, item
 
 
 class _Emitter:
@@ -392,6 +487,8 @@ class Qwen3VLRenderer:
         config: Qwen3VLRendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
+        self._processor: Any = None
+        self._image_cache: dict[str, tuple[Any, int]] = {}
         self.config = config or Qwen3VLRendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
@@ -435,6 +532,22 @@ class Qwen3VLRenderer:
         if not text:
             return []
         return self._tokenizer.encode(text, add_special_tokens=False)
+
+    def _get_processor(self):
+        if self._processor is None:
+            self._processor = load_qwen_processor(self._tokenizer, type(self).__name__)
+        return self._processor
+
+    def _image_item_for_render(
+        self, part: dict[str, Any]
+    ) -> tuple[int, str, dict[str, Any]]:
+        if self.config.multimodal_output == "processed":
+            return qwen_processed_image_item_for_render(
+                part,
+                processor=self._get_processor(),
+                image_cache=self._image_cache,
+            )
+        return qwen_image_item_for_render(part)
 
     @staticmethod
     def _render_text_content(content: Any) -> str:
@@ -503,7 +616,7 @@ class Qwen3VLRenderer:
             # image data, so they ARE body content (is_content=True);
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # markers are renderer-emitted scaffold.
-            n, h, mm_item = qwen_image_item_for_render(part)
+            n, h, mm_item = self._image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 em.text(
@@ -770,7 +883,7 @@ class Qwen3VLRenderer:
         vision_counts = {"image": prev_image_count, "video": prev_video_count}
 
         def emit_image(part: dict[str, Any]) -> None:
-            n, h, mm_item = qwen_image_item_for_render(part)
+            n, h, mm_item = self._image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 em.text(

@@ -53,6 +53,8 @@ from renderers.qwen3_vl import (
     _image_source,
     _is_image_part,
     _is_video_part,
+    _load_pil_image,
+    _pil_image_hash,
     _raw_image_uri,
 )
 
@@ -506,6 +508,58 @@ def kimi_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str
     return 1, desc.mm_hash, item
 
 
+def load_kimi_processor(tokenizer):
+    try:
+        from transformers import AutoProcessor
+    except ImportError as exc:
+        raise RuntimeError(
+            "Processed multimodal rendering requires transformers with "
+            "AutoProcessor support."
+        ) from exc
+
+    name = getattr(tokenizer, "name_or_path", None)
+    if not name:
+        raise RuntimeError(
+            "KimiK25Renderer needs a processor for multimodal_output='processed'. "
+            "Inject `renderer._processor` or load the tokenizer with a known "
+            "name_or_path."
+        )
+
+    from renderers.base import TRUSTED_REVISIONS
+
+    kwargs: dict[str, Any] = {"trust_remote_code": True}
+    revision = TRUSTED_REVISIONS.get(name)
+    if revision is not None:
+        kwargs["revision"] = revision
+    return AutoProcessor.from_pretrained(name, **kwargs)
+
+
+def kimi_processed_image_item_for_render(
+    part: dict[str, Any],
+    *,
+    processor: Any,
+    image_cache: dict[str, tuple[Any, int]],
+) -> tuple[int, str, dict[str, Any]]:
+    pil = _load_pil_image(part)
+    image_hash = _pil_image_hash(pil)
+    cached = image_cache.get(image_hash)
+    if cached is not None:
+        out, _num_patches = cached
+    else:
+        img_proc = processor.image_processor
+        media_item = {"type": "image", "image": pil}
+        out = img_proc.preprocess([media_item], return_tensors="np")
+        num_patches = int(img_proc.media_tokens_calculator(media_item))
+        if len(image_cache) >= 256:
+            image_cache.pop(next(iter(image_cache)))
+        image_cache[image_hash] = (out, num_patches)
+    item = {
+        "pixel_values": out["pixel_values"],
+        "grid_thws": out["grid_thws"],
+    }
+    return 1, image_hash, item
+
+
 # ---------------------------------------------------------------------------
 # Kimi K2.5 response parsing (mirrors K2 format, same token structure)
 # ---------------------------------------------------------------------------
@@ -700,6 +754,8 @@ class KimiK25Renderer:
         config: KimiK25RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
+        self._processor: Any = None
+        self._image_cache: dict[str, tuple[Any, int]] = {}
         self.config = config or KimiK25RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
@@ -768,6 +824,22 @@ class KimiK25Renderer:
         if not text:
             return []
         return self._tokenizer.encode(text, add_special_tokens=False)
+
+    def _get_processor(self):
+        if self._processor is None:
+            self._processor = load_kimi_processor(self._tokenizer)
+        return self._processor
+
+    def _image_item_for_render(
+        self, part: dict[str, Any]
+    ) -> tuple[int, str, dict[str, Any]]:
+        if self.config.multimodal_output == "processed":
+            return kimi_processed_image_item_for_render(
+                part,
+                processor=self._get_processor(),
+                image_cache=self._image_cache,
+            )
+        return kimi_image_item_for_render(part)
 
     # ------------------------------------------------------------------
     # Core render
@@ -866,7 +938,7 @@ class KimiK25Renderer:
             ``<|media_content|>``, ``<|media_end|>``, the trailing
             ``\\n``) are template-injected scaffold.
             """
-            _placeholder_len, h, mm_item = kimi_image_item_for_render(part)
+            _placeholder_len, h, mm_item = self._image_item_for_render(part)
             emit_special(
                 self._media_begin, msg_idx, is_sampled=is_sampled, is_content=False
             )
@@ -1151,7 +1223,7 @@ class KimiK25Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            _placeholder_len, h, mm_item = kimi_image_item_for_render(part)
+            _placeholder_len, h, mm_item = self._image_item_for_render(part)
             emit_special(self._media_begin, msg_idx)
             emit_text("image", msg_idx)
             emit_special(self._media_content, msg_idx)

@@ -205,11 +205,10 @@ class PlaceholderRange:
 class MultiModalData:
     """Multimodal sidecar produced alongside the token stream.
 
-    Renderer output is framework-agnostic: ``mm_items[modality][i]`` is a
-    plain raw descriptor envelope with a model-family key and an adapter-owned
-    payload. Translation to engine-specific wire formats — vLLM image refs,
-    SGLang payloads, etc. — happens in the inference glue layer (see
-    ``renderers.client``).
+    ``mm_items[modality][i]`` follows the renderer's configured
+    ``multimodal_output``. The default ``"raw"`` mode emits JSON-safe image
+    descriptor envelopes for inference paths. ``"processed"`` emits
+    image-processor payloads such as ``pixel_values`` for SFT/training paths.
     """
 
     mm_hashes: dict[str, list[str]] = field(default_factory=dict)
@@ -1474,7 +1473,7 @@ def _resolve_auto_config(
     model_name = getattr(tokenizer, "name_or_path", "")
     renderer_name = MODEL_RENDERER_MAP.get(model_name)
 
-    preserve_carry = {}
+    preserve_carry: dict[str, Any] = {"multimodal_output": auto.multimodal_output}
     if auto.thinking_retention is not None:
         preserve_carry["thinking_retention"] = auto.thinking_retention
 
@@ -1525,7 +1524,7 @@ def _resolve_auto_config(
         "reasoning_parser=...) to enable structured output parsing.",
         model_name or "<unnamed tokenizer>",
     )
-    return DefaultRendererConfig()
+    return DefaultRendererConfig(multimodal_output=auto.multimodal_output)
 
 
 # ---------------------------------------------------------------------------

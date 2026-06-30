@@ -381,7 +381,8 @@ def _build_vllm_mm_features(mm_data: MultiModalData) -> dict[str, Any]:
         for idx, item in enumerate(items):
             if item.get("kind") != RAW_MM_ITEM_KIND:
                 raise NotImplementedError(
-                    "Multimodal serialization requires raw descriptor envelopes; "
+                    "renderers.client.generate() requires raw multimodal "
+                    "descriptor envelopes (multimodal_output='raw'); "
                     f"got item keys {sorted(item)} for modality {source_modality!r}."
                 )
             feature_modality = item.get("vllm_modality") or source_modality

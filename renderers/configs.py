@@ -52,6 +52,9 @@ def _reject_thinking_retention_conflict(
 ThinkingRetention = Literal["tool_cycle", "all"]
 """User-facing historical thinking/analysis retention override."""
 
+MultimodalOutput = Literal["raw", "processed"]
+"""Renderer multimodal sidecar format."""
+
 ResolvedThinkingRetention = Literal["template", "tool_cycle", "all"]
 """Internal bridge policy after template kwargs have been resolved."""
 
@@ -87,6 +90,12 @@ class BaseRendererConfig(BaseConfig):
     to the Python chat-template implementation and its explicit template
     kwargs."""
 
+    multimodal_output: MultimodalOutput = "raw"
+    """Multimodal sidecar format:
+
+    - ``"raw"`` — emit JSON-safe image refs/descriptors for inference paths.
+    - ``"processed"`` — emit image-processor payloads for SFT/training paths."""
+
     # Fields that are renderer-internal — not forwarded to (or mirrored
     # by) ``apply_chat_template``. Override in subclasses that hold
     # non-template config (e.g. GptOss's
@@ -116,10 +125,9 @@ class BaseRendererConfig(BaseConfig):
 
 class AutoRendererConfig(BaseRendererConfig):
     """Resolve the renderer from ``tokenizer.name_or_path`` at construction
-    time via ``MODEL_RENDERER_MAP``. Carries only the shared
-    ``thinking_retention`` field when explicitly set; template kwargs require
-    an explicit renderer choice so template-dependent behaviour stays visible
-    at the call site."""
+    time via ``MODEL_RENDERER_MAP``. Carries the shared base fields into the
+    concrete renderer config; template kwargs require an explicit renderer
+    choice so template-dependent behaviour stays visible at the call site."""
 
     name: Literal["auto"] = "auto"
 
@@ -640,6 +648,7 @@ __all__ = [
     "LagunaXS2RendererConfig",
     "Llama3RendererConfig",
     "MiniMaxM2RendererConfig",
+    "MultimodalOutput",
     "Nemotron3RendererConfig",
     "Nemotron3UltraRendererConfig",
     "Qwen35RendererConfig",

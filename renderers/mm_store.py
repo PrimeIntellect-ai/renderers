@@ -1,9 +1,9 @@
 """Run-scoped image asset helpers for multimodal rendering.
 
-The renderer stack does not ship processed multimodal features. Images are
-written once into the run output tree and messages carry ``file://`` URLs to
-those files. Renderers then emit lightweight image refs for vLLM only when the
-engine needs to process an image.
+The default renderer multimodal mode does not ship processed image features.
+Images are written once into the run output tree and messages carry ``file://``
+URLs to those files. Renderers then emit lightweight image refs for vLLM only
+when the engine needs to process an image.
 """
 
 from __future__ import annotations

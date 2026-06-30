@@ -8,8 +8,9 @@ processor class ``Qwen3VLProcessor``). When a user/tool message carries an
 ``ImagePart``, the renderer emits the same ``<|vision_start|>``+N×``<|image_pad|>``
 +``<|vision_end|>`` expansion as the HF chat template (``N =
 image_grid_thw.prod() // merge_size**2``) using the renderer's baked image
-layout spec. It does not call the HF image processor; vLLM receives run image refs
-for images it must process.
+layout spec. By default, vLLM receives run image refs for images it must
+process; ``multimodal_output="processed"`` emits image-processor payloads for
+SFT/training callers.
 """
 
 from __future__ import annotations
@@ -38,7 +39,9 @@ from renderers.parsing import parse_qwen35
 from renderers.qwen3_vl import (
     _is_image_part,
     _is_video_part,
+    load_qwen_processor,
     qwen_image_item_for_render,
+    qwen_processed_image_item_for_render,
 )
 
 # ---------------------------------------------------------------------------
@@ -118,6 +121,8 @@ class Qwen35Renderer:
         config: Qwen35RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
+        self._processor: Any = None
+        self._image_cache: dict[str, tuple[Any, int]] = {}
         cfg = config or type(self)._config_cls()
         # ``enable_thinking=None`` defers to the model's known default (see
         # ``_ENABLE_THINKING_DEFAULTS``). Materialise here so downstream reads
@@ -183,6 +188,22 @@ class Qwen35Renderer:
         if not text:
             return []
         return self._tokenizer.encode(text, add_special_tokens=False)
+
+    def _get_processor(self):
+        if self._processor is None:
+            self._processor = load_qwen_processor(self._tokenizer, type(self).__name__)
+        return self._processor
+
+    def _image_item_for_render(
+        self, part: dict[str, Any]
+    ) -> tuple[int, str, dict[str, Any]]:
+        if self.config.multimodal_output == "processed":
+            return qwen_processed_image_item_for_render(
+                part,
+                processor=self._get_processor(),
+                image_cache=self._image_cache,
+            )
+        return qwen_image_item_for_render(part)
 
     # ------------------------------------------------------------------
     # Content rendering (mirrors the render_content Jinja macro)
@@ -329,7 +350,7 @@ class Qwen35Renderer:
             # image data, so they ARE body content (is_content=True);
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # specials are template scaffold.
-            n, h, mm_item = qwen_image_item_for_render(part)
+            n, h, mm_item = self._image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(
@@ -675,7 +696,7 @@ class Qwen35Renderer:
                 content_mask.append(is_content)
 
         def emit_image(part: dict[str, Any], msg_idx: int = -1) -> None:
-            n, h, mm_item = qwen_image_item_for_render(part)
+            n, h, mm_item = self._image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(f"Picture {vision_counts['image']}: ", msg_idx)

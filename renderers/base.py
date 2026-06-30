@@ -988,6 +988,7 @@ RENDERER_REGISTRY: dict[str, type] = {}
 MODEL_RENDERER_MAP: dict[str, str] = {
     # Qwen3 — base and Instruct variants share the same chat template.
     "Qwen/Qwen3-0.6B": "qwen3",
+    "PrimeIntellect/Qwen3-0.6B": "qwen3",
     "Qwen/Qwen3-1.7B": "qwen3",
     "Qwen/Qwen3-4B": "qwen3",
     "Qwen/Qwen3-4B-Instruct-2507": "qwen3",

@@ -4,6 +4,17 @@ Runs against every (model, renderer) pair.
 """
 
 from renderers import build_training_sample, build_trajectory_step
+from renderers.base import PlaceholderRange, _build_mm_token_type_ids
+
+
+def test_build_mm_token_type_ids_marks_ranges():
+    """Image runs → 1, video runs → 2, everything else → 0; clips at length."""
+    placeholders = {
+        "image": [PlaceholderRange(offset=2, length=3)],  # tokens 2,3,4
+        "video": [PlaceholderRange(offset=7, length=2)],  # tokens 7,8
+    }
+    ids = _build_mm_token_type_ids(placeholders, length=10)
+    assert ids == [0, 0, 1, 1, 1, 0, 0, 2, 2, 0]
 
 
 def _expected(tokenizer, messages, **kwargs):
@@ -29,10 +40,14 @@ def test_build_training_sample_ids_match(model_name, tokenizer, renderer):
         {"role": "user", "content": "Hi"},
         {"role": "assistant", "content": "Hello!"},
     ]
-    ids, mask = build_training_sample(
+    sample = build_training_sample(
         renderer, msgs, role_to_mask=lambda m: m["role"] == "assistant"
     )
+    ids = sample.token_ids
     assert ids == _expected(tokenizer, msgs)
+    # text-only sample carries no multimodal payload
+    assert sample.multi_modal_data is None
+    assert sample.mm_token_type_ids is None
 
 
 def test_build_training_sample_has_trainable_tokens(model_name, tokenizer, renderer):
@@ -41,9 +56,10 @@ def test_build_training_sample_has_trainable_tokens(model_name, tokenizer, rende
         {"role": "user", "content": "Hi"},
         {"role": "assistant", "content": "Hello!"},
     ]
-    ids, mask = build_training_sample(
+    sample = build_training_sample(
         renderer, msgs, role_to_mask=lambda m: m["role"] == "assistant"
     )
+    ids, mask = sample.token_ids, sample.loss_mask
     assert sum(mask) > 0
     assert len(mask) == len(ids)
 

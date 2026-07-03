@@ -1060,8 +1060,10 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # construction to pin a different date.
     "meta-llama/Llama-3.2-1B-Instruct": "llama-3",
     "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
-    # Poolside Laguna.
+    # Poolside Laguna. XS-2.1's template is byte-identical to XS.2's minus
+    # the default system message; the config name selects the variant.
     "poolside/Laguna-XS.2": "laguna-xs.2",
+    "poolside/Laguna-XS-2.1": "laguna-xs-2.1",
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
@@ -1327,6 +1329,7 @@ def _populate_registry():
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
             "laguna-xs.2": LagunaXS2Renderer,
+            "laguna-xs-2.1": LagunaXS2Renderer,
             "llama-3": Llama3Renderer,
             "nemotron-3": Nemotron3Renderer,
             "nemotron-3-ultra": Nemotron3UltraRenderer,

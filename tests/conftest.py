@@ -37,6 +37,9 @@ RENDERER_MODELS = [
     # name (auto → MODEL_RENDERER_MAP → nemotron-3-ultra).
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
+    # XS-2.1 resolves to the `laguna-xs-2.1` config variant (no default
+    # system message) via the model name.
+    ("poolside/Laguna-XS-2.1", "auto"),
     # DeepSeek-V3/R1 are intentionally NOT in this shared barrage: their
     # chat templates can't render the barrage's tool-call fixtures (the
     # templates require ``tool['type']`` and a string-serialized

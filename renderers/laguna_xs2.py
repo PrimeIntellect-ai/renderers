@@ -1,4 +1,4 @@
-"""Laguna-XS.2 Renderer.
+"""Laguna-XS.2 / XS-2.1 Renderer.
 
 Main properties:
 - Prefix is the single token ``〈|EOS|〉`` (also the EOS / stop token).
@@ -12,10 +12,13 @@ Main properties:
 - Tool calls: ``<tool_call>`` / ``</tool_call>`` ARE single tokens, but the
   inner ``<arg_key>`` / ``</arg_key>`` / ``<arg_value>`` / ``</arg_value>``
   markers are plain text — parsed via regex on the decoded inner block.
-- The template bakes in a default system prompt when ``messages[0]`` is not
-  a system message. The system block also contains the tools section (under
-  a ``### Tools`` header with an ``<available_tools>`` listing and prose
-  format instructions that vary on ``enable_thinking``).
+- XS.2's template bakes in a default system prompt when ``messages[0]`` is
+  not a system message; XS-2.1's (otherwise byte-identical) template
+  removed it, so no system message and no tools means no ``<system>``
+  block at all. The config's ``name`` selects the variant. The system
+  block also contains the tools section (under a ``### Tools`` header
+  with an ``<available_tools>`` listing and prose format instructions
+  that vary on ``enable_thinking``).
 - Reasoning is rendered for every assistant message — no last-user-index
   gating. ``thinking_retention`` is accepted for protocol uniformity but
   is effectively a no-op since past reasoning is preserved by default.
@@ -39,7 +42,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
 )
-from renderers.configs import LagunaXS2RendererConfig
+from renderers.configs import LagunaXS2RendererConfig, LagunaXS21RendererConfig
 from renderers.parsing import parse_laguna_xs2
 
 _DEFAULT_SYSTEM_MESSAGE = (
@@ -81,13 +84,18 @@ class LagunaXS2Renderer:
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        config: LagunaXS2RendererConfig | None = None,
+        config: LagunaXS2RendererConfig | LagunaXS21RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
         self.config = config or LagunaXS2RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
             "all",
+        )
+        # XS.2's template bakes in a default system prompt; XS-2.1's
+        # (otherwise byte-identical) template removed it.
+        self._default_system_message = (
+            _DEFAULT_SYSTEM_MESSAGE if self.config.name == "laguna-xs.2" else ""
         )
 
         self._eos = self._token_id("〈|EOS|〉")
@@ -184,7 +192,7 @@ class LagunaXS2Renderer:
         emit_special(self._eos, -1, is_sampled=False, is_content=False)
 
         # ── System header (absorbs messages[0] if it's a system message) ──
-        system_content = _DEFAULT_SYSTEM_MESSAGE
+        system_content = self._default_system_message
         system_msg_idx = -1
         caller_has_system = bool(messages and messages[0].get("role") == "system")
         if caller_has_system:
@@ -196,16 +204,12 @@ class LagunaXS2Renderer:
         # gate: when the caller passes an empty system message and no tools,
         # the whole ``<system>...</system>`` block is omitted.
         if has_sys_content or tools:
-            # The template emits ``<system>\n`` then conditionally a second
-            # ``\n``. Bundle those into one emit so BPE merges ``\n\n`` into
-            # its single-token form (rather than two ``\n`` atoms).
-            emit_text(
-                "<system>\n\n" if has_sys_content else "<system>\n",
-                -1,
-                is_sampled=False,
-                is_content=False,
-            )
             if has_sys_content:
+                # The template emits ``<system>\n`` then a second ``\n``
+                # before the system body. Bundle those into one emit so BPE
+                # merges ``\n\n`` into its single-token form (rather than
+                # two ``\n`` atoms).
+                emit_text("<system>\n\n", -1, is_sampled=False, is_content=False)
                 # If the caller provided system content, it's body bytes;
                 # otherwise this is the default system prompt (scaffold).
                 sys_is_content = caller_has_system
@@ -224,6 +228,11 @@ class LagunaXS2Renderer:
                     if self.config.enable_thinking
                     else _TOOLS_FOOTER_NO_THINKING
                 )
+                if not has_sys_content:
+                    # No system body: ``<system>\n`` runs straight into the
+                    # tools header's ``\n\n`` — encode them together so BPE
+                    # merges the ``\n\n\n`` seam as the template does.
+                    tool_text = "<system>\n" + tool_text
                 emit_text(tool_text, -1, is_sampled=False, is_content=False)
             emit_text("\n</system>\n", -1, is_sampled=False, is_content=False)
 

@@ -650,6 +650,13 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     hashes = bridged_mm.mm_hashes.get(modality, [])
     assert len(items) == 2 and len(hashes) == 2
 
+    # The merge must not mutate the caller's sidecar in place — bridge
+    # callers pass the persisted previous step's object.
+    prev_mm = initial_rendered.multi_modal_data
+    assert len(prev_mm.mm_placeholders.get(modality, [])) == 1
+    assert len(prev_mm.mm_items.get(modality, [])) == 1
+    assert len(prev_mm.mm_hashes.get(modality, [])) == 1
+
     # (3) Extension contains the new turn's pad run, and its
     # placeholder offset lands inside the extension region.
     pad_id = tokenizer.convert_tokens_to_ids(kit["placeholder_token"])
@@ -958,3 +965,48 @@ def test_is_image_part_treats_type_field_as_authoritative():
     assert not _is_image_part({"image_url": None})
     assert not _is_image_part({"image": None})
     assert not _is_video_part({"video_url": None})
+
+
+@pytest.mark.parametrize(
+    "mm_model_name", ["Qwen/Qwen3-VL-4B-Instruct", "moonshotai/Kimi-K2.5"]
+)
+def test_raw_layout_math_matches_image_processor(mm_model_name, tmp_path):
+    """Raw-mode layout predictions (grids and token counts, computed without
+    an image processor) must match what the real image processor produces.
+
+    Dimensions target the rounding boundaries where ported resize math tends
+    to diverge: below/at the pixel floor, odd sizes, and non-multiples of the
+    patch size.
+    """
+    if not _hf_snapshot_cached(mm_model_name):
+        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+
+    from renderers.kimi_k25 import describe_kimi_image_layout
+    from renderers.qwen3_vl import describe_qwen_image_layout
+
+    _, processor, _ = _load_processor_and_renderer(mm_model_name)
+    img_proc = processor.image_processor
+    family = _detect_family(mm_model_name)
+
+    for width, height in [(17, 31), (255, 257), (300, 200), (523, 480), (1023, 769)]:
+        pil = Image.new("RGB", (width, height), color=(10, 20, 30))
+        path = tmp_path / f"img-{width}x{height}.png"
+        pil.save(path)
+        part = {"type": "image", "image": path.as_uri()}
+        label = f"{mm_model_name}: {width}x{height}"
+
+        if family == "kimi_k25":
+            desc = describe_kimi_image_layout(part)
+            media_item = {"type": "image", "image": pil}
+            out = img_proc.preprocess([media_item], return_tensors="np")
+            assert desc.grid_thws == out["grid_thws"].reshape(-1, 3).tolist(), label
+            expected_tokens = int(img_proc.media_tokens_calculator(media_item))
+            assert desc.num_media_tokens == expected_tokens, label
+        else:
+            desc = describe_qwen_image_layout(part)
+            out = img_proc(images=[pil], return_tensors="np")
+            assert desc.image_grid_thw == out["image_grid_thw"].tolist(), label
+            grid = out["image_grid_thw"][0]
+            merge = img_proc.merge_size
+            expected_tokens = int(grid[0] * grid[1] * grid[2]) // (merge * merge)
+            assert desc.num_image_tokens == expected_tokens, label

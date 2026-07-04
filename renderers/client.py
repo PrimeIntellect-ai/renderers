@@ -253,20 +253,14 @@ async def generate(
         "sampling_params": sp,
     }
 
-    def _features_and_descriptor_mm() -> tuple[
-        dict[str, Any] | None, MultiModalData | None
-    ]:
-        if mm_data is None or mm_data.is_empty():
-            return None, mm_data
-        # Every image carries its raw ref (the pointer); persisted mm_data keeps it,
-        # so prior-turn images carry their ref forward unchanged.
-        return _build_vllm_mm_features(mm_data), mm_data
-
-    features, out_mm_data = await _maybe_offload(renderer, _features_and_descriptor_mm)
-    if prompt_attr is not None and out_mm_data is not None:
-        prompt_attr = replace(prompt_attr, multi_modal_data=out_mm_data)
-    if features is not None:
-        body["features"] = features
+    # Every image slot carries its raw ref (the pointer) — prior-turn images
+    # ride forward unchanged, and the inference endpoint materializes them.
+    if mm_data is not None and not mm_data.is_empty():
+        body["features"] = await _maybe_offload(
+            renderer, lambda: _build_vllm_mm_features(mm_data)
+        )
+        if prompt_attr is not None and prompt_attr.multi_modal_data is not mm_data:
+            prompt_attr = replace(prompt_attr, multi_modal_data=mm_data)
     if cache_salt is not None:
         body["cache_salt"] = cache_salt
     if priority is not None:
@@ -334,7 +328,7 @@ async def generate(
         # The mm sidecar consumed on the request side, surfaced back so
         # callers can persist it on the trajectory step for downstream
         # multi-turn bridging and training-sample construction.
-        "multi_modal_data": out_mm_data,
+        "multi_modal_data": mm_data,
         # The renderer's per-token attribution for the prompt — either
         # the RenderedTokens computed here via renderer.render(...) or
         # the one threaded in by the caller alongside prompt_ids (the

@@ -78,12 +78,14 @@ def offload_image_to_run_assets(
     header, b64 = url.split(marker, 1)
     try:
         raw = base64.b64decode(b64)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise ValueError(f"Undecodable base64 data in {header!r} image URL") from exc
 
     root = (image_dir or run_image_dir()).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(raw).hexdigest()[:16]
+    # Full digest: writes are content-addressed, so a truncated name would
+    # make a prefix collision silently serve another image's bytes.
+    digest = hashlib.sha256(raw).hexdigest()
     path = root / f"{digest}{_media_type_ext(header[len('data:') :])}"
     if not path.exists():
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")

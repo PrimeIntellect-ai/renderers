@@ -219,6 +219,42 @@ class MultiModalData:
         return not (self.mm_hashes or self.mm_placeholders or self.mm_items)
 
 
+def merge_multi_modal_data(
+    previous: "MultiModalData | None",
+    new_hashes: dict[str, list[str]],
+    new_placeholders: dict[str, list[PlaceholderRange]],
+    new_items: dict[str, list[dict[str, Any]]],
+) -> "MultiModalData | None":
+    """Concatenate a prior turn's sidecar with a bridge turn's new media.
+
+    Bridge callers pass the persisted previous step's sidecar as ``previous``;
+    inner lists are copied so that object is never mutated. Returns ``None``
+    when there is no media at all.
+    """
+    merged_hashes = (
+        {k: list(v) for k, v in previous.mm_hashes.items()} if previous else {}
+    )
+    merged_placeholders = (
+        {k: list(v) for k, v in previous.mm_placeholders.items()} if previous else {}
+    )
+    merged_items = (
+        {k: list(v) for k, v in previous.mm_items.items()} if previous else {}
+    )
+    for modality, hashes in new_hashes.items():
+        merged_hashes.setdefault(modality, []).extend(hashes)
+    for modality, placeholders in new_placeholders.items():
+        merged_placeholders.setdefault(modality, []).extend(placeholders)
+    for modality, items in new_items.items():
+        merged_items.setdefault(modality, []).extend(items)
+    if not (merged_hashes or merged_placeholders or merged_items):
+        return None
+    return MultiModalData(
+        mm_hashes=merged_hashes,
+        mm_placeholders=merged_placeholders,
+        mm_items=merged_items,
+    )
+
+
 @dataclass
 class RenderedTokens:
     """Result of rendering messages to tokens.

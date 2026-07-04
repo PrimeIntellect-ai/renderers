@@ -21,6 +21,7 @@ Generation prompt (thinking disabled):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -39,6 +40,7 @@ from renderers.base import (
     ToolCallParseStatus,
     ToolSpec,
     extract_message_tool_names,
+    merge_multi_modal_data,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
@@ -48,14 +50,13 @@ from renderers.configs import KimiK25RendererConfig
 from renderers.mm_store import image_layout_fingerprint, raw_mm_item
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
 from renderers.qwen3_vl import (
-    _image_content_hash,
+    _PROCESSED_IMAGE_CACHE_MAX,
     _image_dimensions,
-    _image_source,
     _is_image_part,
     _is_video_part,
+    _load_image_asset,
     _load_pil_image,
     _pil_image_hash,
-    _raw_image_uri,
 )
 
 # ---------------------------------------------------------------------------
@@ -468,8 +469,8 @@ def _kimi_resize_config(
 
 
 def describe_kimi_image_layout(part: dict[str, Any]) -> KimiImageLayoutDescriptor:
-    source = _image_source(part)
-    height, width = _image_dimensions(source)
+    path, raw = _load_image_asset(part)
+    height, width = _image_dimensions(raw)
     layout = KIMI_K25_IMAGE_LAYOUT
     padded_w, padded_h, num_media_tokens = _kimi_resize_config(width, height, layout)
     grid_thws = [[1, padded_h // layout.patch_size, padded_w // layout.patch_size]]
@@ -484,11 +485,11 @@ def describe_kimi_image_layout(part: dict[str, Any]) -> KimiImageLayoutDescripto
         image_std=list(layout.image_std),
     )
     return KimiImageLayoutDescriptor(
-        mm_hash=_image_content_hash(source),
+        mm_hash=hashlib.sha256(raw).hexdigest()[:32],
         grid_thws=grid_thws,
         num_media_tokens=num_media_tokens,
         fingerprint=fingerprint,
-        raw_image_uri=_raw_image_uri(source),
+        raw_image_uri=path.as_uri(),
     )
 
 
@@ -550,7 +551,7 @@ def kimi_processed_image_item_for_render(
         media_item = {"type": "image", "image": pil}
         out = img_proc.preprocess([media_item], return_tensors="np")
         num_patches = int(img_proc.media_tokens_calculator(media_item))
-        if len(image_cache) >= 256:
+        if len(image_cache) >= _PROCESSED_IMAGE_CACHE_MAX:
             image_cache.pop(next(iter(image_cache)))
         image_cache[image_hash] = (out, num_patches)
     item = {
@@ -1287,52 +1288,16 @@ class KimiK25Renderer:
             emit_text("<think></think>", -1)
 
         # Merge prev mm_data (earlier-turn images) with the new turn's items.
-        merged_hashes: dict[str, list[str]] = (
-            dict(previous_multi_modal_data.mm_hashes)
-            if previous_multi_modal_data
-            else {}
-        )
-        merged_placeholders: dict[str, list[PlaceholderRange]] = (
-            dict(previous_multi_modal_data.mm_placeholders)
-            if previous_multi_modal_data
-            else {}
-        )
-        merged_items: dict[str, list[dict[str, Any]]] = (
-            dict(previous_multi_modal_data.mm_items)
-            if previous_multi_modal_data
-            else {}
-        )
-        for modality, vals in new_hashes.items():
-            merged_hashes.setdefault(modality, []).extend(vals)
-        for modality, vals in new_placeholders.items():
-            merged_placeholders.setdefault(modality, []).extend(vals)
-        for modality, vals in new_items.items():
-            merged_items.setdefault(modality, []).extend(vals)
-
-        bridge_roles = [m.get("role") or "" for m in new_messages]
-        bridge_tool_names = extract_message_tool_names(new_messages)
-        if not (merged_hashes or merged_placeholders or merged_items):
-            return RenderedTokens(
-                token_ids=tokens,
-                message_indices=indices,
-                sampled_mask=sampled,
-                is_content=content_mask,
-                message_roles=bridge_roles,
-                message_tool_names=bridge_tool_names,
-            )
-
-        mm_data = MultiModalData(
-            mm_hashes=merged_hashes,
-            mm_placeholders=merged_placeholders,
-            mm_items=merged_items,
+        mm_data = merge_multi_modal_data(
+            previous_multi_modal_data, new_hashes, new_placeholders, new_items
         )
         return RenderedTokens(
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
             is_content=content_mask,
-            message_roles=bridge_roles,
-            message_tool_names=bridge_tool_names,
+            message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
             multi_modal_data=mm_data,
         )
 

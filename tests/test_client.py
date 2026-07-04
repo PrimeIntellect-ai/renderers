@@ -115,7 +115,7 @@ def test_offload_image_to_run_assets_writes_content_addressed_file(tmp_path):
     assert file_url is not None
     assert file_url.startswith("file://")
     path = tmp_path / file_url.rsplit("/", 1)[-1]
-    assert path.name == f"{hashlib.sha256(raw).hexdigest()[:16]}.png"
+    assert path.name == f"{hashlib.sha256(raw).hexdigest()}.png"
     assert path.read_bytes() == raw
 
 

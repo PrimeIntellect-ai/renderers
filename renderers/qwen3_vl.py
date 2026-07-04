@@ -29,13 +29,20 @@ import base64
 import hashlib
 import io
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
 from transformers.tokenization_utils import PreTrainedTokenizer
+
+# Qwen's own resize math — imported (not ported) so layout predictions can't
+# drift from the processor's actual behavior. The PIL-backend module is
+# torch-free; older transformers keep the same function in the classic module.
+try:
+    from transformers.models.qwen2_vl.image_processing_pil_qwen2_vl import smart_resize
+except ImportError:
+    from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
 from renderers.base import (
     Message,
@@ -46,6 +53,7 @@ from renderers.base import (
     ToolSpec,
     attribute_text_segments,
     extract_message_tool_names,
+    merge_multi_modal_data,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
@@ -124,35 +132,6 @@ class QwenImageLayoutDescriptor:
     raw_image_uri: str
 
 
-def _smart_resize(
-    height: int,
-    width: int,
-    *,
-    factor: int,
-    min_pixels: int,
-    max_pixels: int,
-) -> tuple[int, int]:
-    """Qwen image resize math without materializing resized pixels."""
-    if height <= 0 or width <= 0:
-        raise ValueError(f"image dimensions must be positive, got {height}x{width}")
-    if max(height, width) / min(height, width) > 200:
-        raise ValueError(
-            "absolute aspect ratio must be smaller than 200, got "
-            f"{max(height, width) / min(height, width)}"
-        )
-    h_bar = round(height / factor) * factor
-    w_bar = round(width / factor) * factor
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = max(factor, math.floor(height / beta / factor) * factor)
-        w_bar = max(factor, math.floor(width / beta / factor) * factor)
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = math.ceil(height * beta / factor) * factor
-        w_bar = math.ceil(width * beta / factor) * factor
-    return h_bar, w_bar
-
-
 def _image_source(item: dict[str, Any]) -> Any:
     if "image" in item:
         return item["image"]
@@ -223,7 +202,13 @@ def _load_pil_image(item: dict[str, Any]):
     raise ValueError(f"Unsupported image URL scheme: {parsed.scheme!r} in {raw!r}")
 
 
-def _image_dimensions(source: Any) -> tuple[int, int]:
+def _load_image_asset(part: dict[str, Any]) -> tuple[Path, bytes]:
+    """Resolve a part's offloaded image source and read it once."""
+    path = _offloaded_image_path(_image_source(part))
+    return path, path.read_bytes()
+
+
+def _image_dimensions(raw: bytes) -> tuple[int, int]:
     try:
         from PIL import Image
     except ImportError as exc:
@@ -231,12 +216,8 @@ def _image_dimensions(source: Any) -> tuple[int, int]:
             "Pillow is required to read image dimensions for multimodal rendering."
         ) from exc
 
-    with Image.open(_offloaded_image_path(source)) as image:
+    with Image.open(io.BytesIO(raw)) as image:
         return image.height, image.width
-
-
-def _image_content_hash(source: Any) -> str:
-    return hashlib.sha256(_offloaded_image_path(source).read_bytes()).hexdigest()[:32]
 
 
 def _pil_image_hash(pil_image) -> str:
@@ -246,16 +227,12 @@ def _pil_image_hash(pil_image) -> str:
     return h.hexdigest()[:32]
 
 
-def _raw_image_uri(source: Any) -> str:
-    return _offloaded_image_path(source).as_uri()
-
-
 def describe_qwen_image_layout(part: dict[str, Any]) -> QwenImageLayoutDescriptor:
     """Return Qwen image layout metadata without invoking an image processor."""
-    source = _image_source(part)
-    height, width = _image_dimensions(source)
+    path, raw = _load_image_asset(part)
+    height, width = _image_dimensions(raw)
     layout = QWEN_VL_IMAGE_LAYOUT
-    resized_h, resized_w = _smart_resize(
+    resized_h, resized_w = smart_resize(
         height,
         width,
         factor=layout.patch_size * layout.merge_size,
@@ -277,11 +254,11 @@ def describe_qwen_image_layout(part: dict[str, Any]) -> QwenImageLayoutDescripto
         max_pixels=layout.max_pixels,
     )
     return QwenImageLayoutDescriptor(
-        mm_hash=_image_content_hash(source),
+        mm_hash=hashlib.sha256(raw).hexdigest()[:32],
         image_grid_thw=[[grid_t, grid_h, grid_w]],
         num_image_tokens=num_image_tokens,
         fingerprint=fingerprint,
-        raw_image_uri=_raw_image_uri(source),
+        raw_image_uri=path.as_uri(),
     )
 
 
@@ -954,36 +931,9 @@ class Qwen3VLRenderer:
         em.text("assistant\n", is_sampled=False, is_content=False)
         em.finalize()
 
-        # Merge prev mm_data with the new turn's items.
-        merged_hashes = (
-            dict(previous_multi_modal_data.mm_hashes)
-            if previous_multi_modal_data
-            else {}
+        mm_data = merge_multi_modal_data(
+            previous_multi_modal_data, new_hashes, new_placeholders, new_items
         )
-        merged_placeholders = (
-            dict(previous_multi_modal_data.mm_placeholders)
-            if previous_multi_modal_data
-            else {}
-        )
-        merged_items = (
-            dict(previous_multi_modal_data.mm_items)
-            if previous_multi_modal_data
-            else {}
-        )
-        for modality, vals in new_hashes.items():
-            merged_hashes.setdefault(modality, []).extend(vals)
-        for modality, vals in new_placeholders.items():
-            merged_placeholders.setdefault(modality, []).extend(vals)
-        for modality, vals in new_items.items():
-            merged_items.setdefault(modality, []).extend(vals)
-
-        mm_data: MultiModalData | None = None
-        if merged_hashes or merged_placeholders or merged_items:
-            mm_data = MultiModalData(
-                mm_hashes=merged_hashes,
-                mm_placeholders=merged_placeholders,
-                mm_items=merged_items,
-            )
 
         return RenderedTokens(
             token_ids=em.token_ids,

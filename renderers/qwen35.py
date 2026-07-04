@@ -29,6 +29,7 @@ from renderers.base import (
     ToolSpec,
     attribute_text_segments,
     extract_message_tool_names,
+    merge_multi_modal_data,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
@@ -796,52 +797,16 @@ class Qwen35Renderer:
             emit_text("\n\n", -1)
 
         # Merge prev mm_data (images from earlier turns) with the new turn's.
-        merged_hashes: dict[str, list[str]] = (
-            dict(previous_multi_modal_data.mm_hashes)
-            if previous_multi_modal_data
-            else {}
-        )
-        merged_placeholders: dict[str, list[PlaceholderRange]] = (
-            dict(previous_multi_modal_data.mm_placeholders)
-            if previous_multi_modal_data
-            else {}
-        )
-        merged_items: dict[str, list[dict[str, Any]]] = (
-            dict(previous_multi_modal_data.mm_items)
-            if previous_multi_modal_data
-            else {}
-        )
-        for modality, vals in new_hashes.items():
-            merged_hashes.setdefault(modality, []).extend(vals)
-        for modality, vals in new_placeholders.items():
-            merged_placeholders.setdefault(modality, []).extend(vals)
-        for modality, vals in new_items.items():
-            merged_items.setdefault(modality, []).extend(vals)
-
-        bridge_roles = [m.get("role") or "" for m in new_messages]
-        bridge_tool_names = extract_message_tool_names(new_messages)
-        if not (merged_hashes or merged_placeholders or merged_items):
-            return RenderedTokens(
-                token_ids=tokens,
-                message_indices=indices,
-                sampled_mask=sampled,
-                is_content=content_mask,
-                message_roles=bridge_roles,
-                message_tool_names=bridge_tool_names,
-            )
-
-        mm_data = MultiModalData(
-            mm_hashes=merged_hashes,
-            mm_placeholders=merged_placeholders,
-            mm_items=merged_items,
+        mm_data = merge_multi_modal_data(
+            previous_multi_modal_data, new_hashes, new_placeholders, new_items
         )
         return RenderedTokens(
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
             is_content=content_mask,
-            message_roles=bridge_roles,
-            message_tool_names=bridge_tool_names,
+            message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
             multi_modal_data=mm_data,
         )
 

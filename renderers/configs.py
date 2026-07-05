@@ -409,6 +409,27 @@ class LagunaXS2RendererConfig(BaseRendererConfig):
     chat template's ``render_assistant_messages_raw`` gate."""
 
 
+class LagunaXS21RendererConfig(BaseRendererConfig):
+    """Laguna XS-2.1 renderer config — distinct discriminator so auto
+    resolution gives XS-2.1 checkpoints the no-default-system-message
+    template variant.
+
+    XS-2.1's chat template is byte-identical to XS.2's except it ships
+    no default system message: when the caller provides none (and no
+    tools), the ``<system>`` block is omitted entirely. Shares
+    :class:`renderers.laguna_xs2.LagunaXS2Renderer`, which selects the
+    variant from ``config.name``.
+    """
+
+    name: Literal["laguna-xs-2.1"] = "laguna-xs-2.1"
+
+    enable_thinking: bool = False
+    """See :class:`LagunaXS2RendererConfig.enable_thinking`."""
+
+    render_assistant_messages_raw: bool = False
+    """See :class:`LagunaXS2RendererConfig.render_assistant_messages_raw`."""
+
+
 class Llama3RendererConfig(BaseRendererConfig):
     """Llama-3.x Instruct renderer config.
 
@@ -563,6 +584,7 @@ RendererConfig = Annotated[
         KimiK2RendererConfig,
         KimiK25RendererConfig,
         LagunaXS2RendererConfig,
+        LagunaXS21RendererConfig,
         Llama3RendererConfig,
         MiniMaxM2RendererConfig,
         Nemotron3RendererConfig,
@@ -600,6 +622,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "kimi-k2": KimiK2RendererConfig,
     "kimi-k2.5": KimiK25RendererConfig,
     "laguna-xs.2": LagunaXS2RendererConfig,
+    "laguna-xs-2.1": LagunaXS21RendererConfig,
     "llama-3": Llama3RendererConfig,
     "minimax-m2": MiniMaxM2RendererConfig,
     "nemotron-3": Nemotron3RendererConfig,
@@ -646,6 +669,7 @@ __all__ = [
     "KimiK25RendererConfig",
     "KimiK2RendererConfig",
     "LagunaXS2RendererConfig",
+    "LagunaXS21RendererConfig",
     "Llama3RendererConfig",
     "MiniMaxM2RendererConfig",
     "MultimodalOutput",

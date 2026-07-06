@@ -1067,6 +1067,11 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
+    # Tencent Hunyuan Hy3 (295B-A21B MoE). Preview / FP8 checkpoints share the
+    # same tokenizer and chat template.
+    "tencent/Hy3": "hy3",
+    "tencent/Hy3-preview": "hy3",
+    "tencent/Hy3-FP8": "hy3",
 }
 
 
@@ -1302,6 +1307,7 @@ def _populate_registry():
     from renderers.glm5 import GLM5Renderer, GLM51Renderer
     from renderers.glm45 import GLM45Renderer
     from renderers.gpt_oss import GptOssRenderer
+    from renderers.hy3 import Hy3Renderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
     from renderers.laguna_xs2 import LagunaXS2Renderer
@@ -1326,6 +1332,7 @@ def _populate_registry():
             "minimax-m2": MiniMaxM2Renderer,
             "deepseek-v3": DeepSeekV3Renderer,
             "deepseek-r1": DeepSeekR1Renderer,
+            "hy3": Hy3Renderer,
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
             "laguna-xs.2": LagunaXS2Renderer,

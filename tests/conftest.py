@@ -55,6 +55,7 @@ RENDERER_MODELS = [
     # unsloth mirror so CI needs no Meta-gated HF token.
     ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
+    ("tencent/Hy3", "auto"),
     ("Qwen/Qwen2.5-0.5B-Instruct", "default"),
 ]
 

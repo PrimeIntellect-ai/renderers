@@ -556,6 +556,195 @@ def _parse_glm_tool_calls(
     return tool_calls
 
 
+# ── Hy3: <think>…</think> content <tool_calls> <tool_call>name<tool_sep> …
+#        <arg_key>k</arg_key> <arg_value>v</arg_value> … </tool_call> </tool_calls>
+# Same arg_key/arg_value token scheme as GLM, but each call names the function
+# between <tool_call> and <tool_sep>, and the calls are wrapped in an outer
+# <tool_calls></tool_calls> pair. All markers are single special tokens.
+
+
+def parse_hy3(
+    tokenizer,
+    token_ids: list[int],
+    *,
+    stop_ids: set[int],
+    assistant_id: int,
+    think_id: int,
+    think_end_id: int,
+    tool_calls_id: int,
+    tool_call_id: int,
+    tool_call_end_id: int,
+    tool_sep_id: int,
+    arg_key_id: int,
+    arg_key_end_id: int,
+    arg_value_id: int,
+    arg_value_end_id: int,
+    tools: list[ToolSpec] | None = None,
+) -> ParsedResponse:
+    """Parse Hy3 completion tokens.
+
+    Handles both the inference stream (``reasoning</think>content…`` in
+    ``low``/``high`` mode, or bare ``content…`` in ``no_think`` mode, since
+    the ``<think>`` opener lives in the generation prompt) and a round-trip
+    slice that still carries a leading ``<｜hy_Assistant｜>`` opener and a
+    full ``<think>…</think>`` block.
+    """
+    ids = _strip_stop_tokens(token_ids, stop_ids)
+
+    # A round-trip slice includes the assistant role marker; the live
+    # inference stream does not. Drop a single leading opener so both paths
+    # land on the same downstream logic.
+    if ids and ids[0] == assistant_id:
+        ids = ids[1:]
+
+    reasoning = None
+    think_end = _find(ids, think_end_id)
+    if think_end != -1:
+        reasoning_ids = [t for t in ids[:think_end] if t != think_id]
+        reasoning = _decode(tokenizer, reasoning_ids).strip()
+        ids = ids[think_end + 1 :]
+    elif think_id in set(ids):
+        # Reasoning opened but never closed (truncation): everything after
+        # the opener is reasoning; there is no committed content yet.
+        think_start = _find(ids, think_id)
+        reasoning = _decode(tokenizer, ids[think_start + 1 :]).strip()
+        return ParsedResponse(
+            content="", reasoning_content=reasoning or None, tool_calls=[]
+        )
+
+    # Content ends at the first tool marker — the outer <tool_calls> wrapper
+    # or, defensively, a bare <tool_call> the model emitted without it.
+    marker_positions = [
+        p for p in (_find(ids, tool_calls_id), _find(ids, tool_call_id)) if p != -1
+    ]
+    tool_calls: list[ParsedToolCall] = []
+    if marker_positions:
+        tool_start = min(marker_positions)
+        content_text = _decode(tokenizer, ids[:tool_start]).strip()
+        tool_calls = _parse_hy3_tool_calls(
+            tokenizer,
+            ids[tool_start:],
+            tool_call_id,
+            tool_call_end_id,
+            tool_sep_id,
+            arg_key_id,
+            arg_key_end_id,
+            arg_value_id,
+            arg_value_end_id,
+            param_index=_build_param_type_index(tools),
+        )
+    else:
+        content_text = _decode(tokenizer, ids).strip()
+
+    return ParsedResponse(
+        content=content_text,
+        reasoning_content=reasoning or None,
+        tool_calls=tool_calls,
+    )
+
+
+def _parse_hy3_tool_calls(
+    tokenizer,
+    ids,
+    tc_id,
+    tc_end_id,
+    sep_id,
+    ak_id,
+    ake_id,
+    av_id,
+    ave_id,
+    *,
+    param_index: dict[str, dict[str, dict[str, Any]]],
+) -> list[ParsedToolCall]:
+    """Parse Hy3-style tool calls: ``<tool_call>name<tool_sep>`` then
+    arg_key/arg_value pairs, all by token ID. The outer ``<tool_calls>``
+    wrapper and inter-block newlines are skipped by scanning for the
+    per-call ``<tool_call>`` opener."""
+    tool_calls: list[ParsedToolCall] = []
+    i = 0
+    while i < len(ids):
+        if ids[i] == tc_id:
+            end = _find(ids, tc_end_id, i + 1)
+            if end == -1:
+                raw = _decode(tokenizer, ids[i + 1 :])
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=raw,
+                        token_span=(i, len(ids)),
+                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                    )
+                )
+                break
+            block = ids[i + 1 : end]
+            block_text = _decode(tokenizer, block)
+            span = (i, end + 1)
+
+            # Name sits between <tool_call> and <tool_sep>. Fall back to the
+            # first <arg_key> boundary if the separator is missing.
+            sep = _find(block, sep_id)
+            if sep != -1:
+                name = _decode(tokenizer, block[:sep]).strip()
+                arg_ids = block[sep + 1 :]
+            else:
+                first_ak = _find(block, ak_id)
+                if first_ak == -1:
+                    name = _decode(tokenizer, block).strip()
+                    arg_ids = []
+                else:
+                    name = _decode(tokenizer, block[:first_ak]).strip()
+                    arg_ids = block[first_ak:]
+
+            params = param_index.get(name, {})
+            arguments: dict = {}
+            structure_broke = False
+            any_json_fallback = False
+            j = 0
+            while j < len(arg_ids):
+                if arg_ids[j] == ak_id:
+                    ake = _find(arg_ids, ake_id, j + 1)
+                    if ake == -1:
+                        structure_broke = True
+                        break
+                    key = _decode(tokenizer, arg_ids[j + 1 : ake]).strip()
+                    av = _find(arg_ids, av_id, ake + 1)
+                    if av == -1:
+                        structure_broke = True
+                        break
+                    ave = _find(arg_ids, ave_id, av + 1)
+                    if ave == -1:
+                        structure_broke = True
+                        break
+                    val_text = _decode(tokenizer, arg_ids[av + 1 : ave]).strip()
+                    value, used_fallback = _coerce_arg_value(val_text, params.get(key))
+                    arguments[key] = value
+                    any_json_fallback = any_json_fallback or used_fallback
+                    j = ave + 1
+                else:
+                    j += 1
+
+            if not name:
+                status = ToolCallParseStatus.MISSING_NAME
+            elif structure_broke:
+                status = ToolCallParseStatus.MALFORMED_STRUCTURE
+            elif any_json_fallback:
+                status = ToolCallParseStatus.INVALID_JSON
+            else:
+                status = ToolCallParseStatus.OK
+            tool_calls.append(
+                ParsedToolCall(
+                    raw=block_text,
+                    name=name or None,
+                    arguments=arguments,
+                    token_span=span,
+                    status=status,
+                )
+            )
+            i = end + 1
+        else:
+            i += 1
+    return tool_calls
+
+
 # ── Laguna-XS.2: <tool_call> name\n<arg_key>k</arg_key>\n<arg_value>v</arg_value> </tool_call>
 # Same outer skeleton as parse_glm, but <arg_key>/<arg_value> are plain text
 # (multi-token BPE), not single special tokens — so the inner block is decoded

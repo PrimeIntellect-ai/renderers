@@ -310,6 +310,69 @@ class GLM45RendererConfig(BaseRendererConfig):
     the chat template's ``enable_thinking`` kwarg."""
 
 
+class Hy3RendererConfig(BaseRendererConfig):
+    """Tencent Hunyuan Hy3 renderer config.
+
+    Hy3 reasons via a ``reasoning_effort`` gate rather than a boolean
+    ``enable_thinking``. ``"no_think"`` (the template default) prefills an
+    empty ``<think></think>`` at the generation prompt so the model answers
+    directly; ``"low"`` / ``"high"`` prefill only the ``<think>`` opener so
+    the model streams reasoning up to a ``</think>`` it emits itself.
+
+    ``preserved_thinking`` mirrors the template kwarg of the same name:
+    ``True`` keeps ``<think>{reasoning}</think>`` on every historical
+    assistant turn; ``False`` collapses past-cycle reasoning to
+    ``<think></think>``, keeping it only on the in-flight turn (after the
+    last user query). ``None`` (default) follows the template's own
+    default — ``True`` when ``tools`` are supplied at render time, ``False``
+    otherwise. ``preserved_thinking=True`` resolves bridge policy to
+    ``"all"``; otherwise it resolves to ``"tool_cycle"``.
+    """
+
+    name: Literal["hy3"] = "hy3"
+
+    reasoning_effort: Literal["no_think", "low", "high"] = "no_think"
+    """Reasoning gate. Mirrors the chat template's ``reasoning_effort`` kwarg.
+    ``"no_think"`` prefills ``<think></think>`` at the generation prompt;
+    ``"low"`` / ``"high"`` prefill just ``<think>``."""
+
+    preserved_thinking: bool | None = None
+    """Keep historical assistant reasoning. Mirrors the template's
+    ``preserved_thinking`` kwarg. ``None`` defers to the template default
+    (``True`` with tools, ``False`` without). ``True`` resolves bridge
+    policy to ``"all"``."""
+
+    is_training: bool = False
+    """Mirrors the template's ``is_training`` kwarg. ``True`` renders SFT
+    targets: reasoning is kept on every assistant turn (regardless of
+    ``preserved_thinking`` / position) and the final assistant is terminated
+    with ``<｜hy_eos｜>``. Leave ``False`` for inference-faithful renders;
+    the training loss mask is normally derived via ``build_training_sample``
+    rather than this flag."""
+
+    raw_last_assistant: bool = False
+    """Mirrors the template's ``raw_last_assistant`` kwarg. When ``True`` a
+    trailing non-tool assistant message is emitted as raw visible content —
+    no ``<think>`` wrap, no ``<｜hy_eos｜>`` — for prefill / continuation."""
+
+    fallback_strategy: Literal["reasoning_toolcall_retry"] | None = None
+    """Mirrors the template's ``fallback_strategy`` kwarg. The sole active
+    value, ``"reasoning_toolcall_retry"``, forces ``reasoning_effort="high"``
+    and suppresses the generation prompt (``add_generation_prompt=False``)."""
+
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        if self.preserved_thinking is not None and self.thinking_retention is not None:
+            implied = "all" if self.preserved_thinking else "tool_cycle"
+            if self.thinking_retention != implied:
+                raise ValueError(
+                    f"preserved_thinking={self.preserved_thinking!r} implies "
+                    f"thinking_retention={implied!r}, which conflicts with "
+                    f"explicit thinking_retention={self.thinking_retention!r}."
+                )
+        return self
+
+
 class GptOssRendererConfig(BaseRendererConfig):
     """OpenAI gpt-oss (harmony) renderer config.
 
@@ -594,6 +657,7 @@ RendererConfig = Annotated[
         GLM51RendererConfig,
         GLM45RendererConfig,
         GptOssRendererConfig,
+        Hy3RendererConfig,
         KimiK2RendererConfig,
         KimiK25RendererConfig,
         LagunaXS2RendererConfig,
@@ -632,6 +696,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "glm-5.1": GLM51RendererConfig,
     "glm-4.5": GLM45RendererConfig,
     "gpt-oss": GptOssRendererConfig,
+    "hy3": Hy3RendererConfig,
     "kimi-k2": KimiK2RendererConfig,
     "kimi-k2.5": KimiK25RendererConfig,
     "laguna-xs.2": LagunaXS2RendererConfig,
@@ -679,6 +744,7 @@ __all__ = [
     "GLM51RendererConfig",
     "GLM5RendererConfig",
     "GptOssRendererConfig",
+    "Hy3RendererConfig",
     "KimiK25RendererConfig",
     "KimiK2RendererConfig",
     "LagunaXS2RendererConfig",

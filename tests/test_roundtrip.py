@@ -47,6 +47,7 @@ _ROUNDTRIP_MODELS = [
     # (no separating newline) — the Ultra-specific glue stresses the round-trip.
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
+    ("tencent/Hy3", "auto"),
     ("unsloth/Llama-3.2-1B-Instruct", "llama-3"),
     ("openai/gpt-oss-20b", "gpt-oss"),
     ("Qwen/Qwen2.5-0.5B-Instruct", "default"),

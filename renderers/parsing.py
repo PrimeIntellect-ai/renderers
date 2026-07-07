@@ -591,11 +591,16 @@ def parse_hy3(
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
+    # ``token_span`` values are reported relative to this stop-stripped stream
+    # (the documented contract), so track every prefix we slice off below.
+    offset = 0
+
     # A round-trip slice includes the assistant role marker; the live
     # inference stream does not. Drop a single leading opener so both paths
     # land on the same downstream logic.
     if ids and ids[0] == assistant_id:
         ids = ids[1:]
+        offset += 1
 
     reasoning = None
     think_end = _find(ids, think_end_id)
@@ -603,6 +608,7 @@ def parse_hy3(
         reasoning_ids = [t for t in ids[:think_end] if t != think_id]
         reasoning = _decode(tokenizer, reasoning_ids).strip()
         ids = ids[think_end + 1 :]
+        offset += think_end + 1
     elif think_id in set(ids):
         # Reasoning opened but never closed (truncation): everything after
         # the opener is reasoning; there is no committed content yet.
@@ -631,6 +637,7 @@ def parse_hy3(
             arg_key_end_id,
             arg_value_id,
             arg_value_end_id,
+            section_offset=offset + tool_start,
             param_index=_build_param_type_index(tools),
         )
     else:
@@ -654,12 +661,15 @@ def _parse_hy3_tool_calls(
     av_id,
     ave_id,
     *,
+    section_offset: int,
     param_index: dict[str, dict[str, dict[str, Any]]],
 ) -> list[ParsedToolCall]:
     """Parse Hy3-style tool calls: ``<tool_call>name<tool_sep>`` then
     arg_key/arg_value pairs, all by token ID. The outer ``<tool_calls>``
     wrapper and inter-block newlines are skipped by scanning for the
-    per-call ``<tool_call>`` opener."""
+    per-call ``<tool_call>`` opener. ``section_offset`` shifts recorded
+    ``token_span`` values back into the stop-stripped completion stream
+    (``ids`` here is a suffix of it)."""
     tool_calls: list[ParsedToolCall] = []
     i = 0
     while i < len(ids):
@@ -670,14 +680,14 @@ def _parse_hy3_tool_calls(
                 tool_calls.append(
                     ParsedToolCall(
                         raw=raw,
-                        token_span=(i, len(ids)),
+                        token_span=(section_offset + i, section_offset + len(ids)),
                         status=ToolCallParseStatus.UNCLOSED_BLOCK,
                     )
                 )
                 break
             block = ids[i + 1 : end]
             block_text = _decode(tokenizer, block)
-            span = (i, end + 1)
+            span = (section_offset + i, section_offset + end + 1)
 
             # Name sits between <tool_call> and <tool_sep>. Fall back to the
             # first <arg_key> boundary if the separator is missing.

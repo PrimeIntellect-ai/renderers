@@ -657,11 +657,13 @@ class Hy3Renderer:
         if prev_is_tool:
             emit_special(self._tool_responses_end, -1)
 
-        # Generation prompt.
-        emit_special(self._assistant, -1)
-        emit_special(self._think, -1)
-        if self._reasoning_effort == "no_think":
-            emit_special(self._think_end, -1)
+        # Generation prompt — suppressed under the fallback retry strategy, so
+        # the extension matches a full render (which forces it off too).
+        if not self._force_no_gen_prompt:
+            emit_special(self._assistant, -1)
+            emit_special(self._think, -1)
+            if self._reasoning_effort == "no_think":
+                emit_special(self._think_end, -1)
 
         total_len = len(previous_ids) + len(ext)
         return RenderedTokens(

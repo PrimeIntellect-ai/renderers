@@ -263,3 +263,56 @@ def test_fallback_strategy_forces_high_and_no_gen_prompt():
     assert _REASONING_MODE + "reasoning_effort:high" in text
     assert not text.endswith(_ASSISTANT + _THINK)  # gen prompt suppressed
     assert not text.endswith(_ASSISTANT)
+
+
+def test_fallback_strategy_bridge_matches_full_render():
+    """The bridge must also suppress the generation prompt under the fallback
+    retry strategy, so it stays consistent with a fresh full render."""
+    r = _renderer(
+        fallback_strategy="reasoning_toolcall_retry", thinking_retention="all"
+    )
+    eos = _tok().convert_tokens_to_ids(_EOS)
+    prior = [{"role": "user", "content": "Hi."}]
+    pp = r.render_ids(prior, add_generation_prompt=True)
+    full = r.render_ids([*prior, {"role": "assistant", "content": "Hello!"}])
+    pc = list(full[len(pp) :])
+    if not pc or pc[-1] != eos:
+        pc = pc + [eos]
+
+    bridged = r.bridge_to_next_turn(pp, pc, [{"role": "tool", "content": "result"}])
+    assert bridged is not None
+    # No generation prompt appended (fallback forces add_generation_prompt=False).
+    assert bridged.token_ids[-1] != _tok().convert_tokens_to_ids(_ASSISTANT)
+    assert _ASSISTANT not in _decode(bridged.token_ids[len(pp) + len(pc) :])
+
+
+# ── tool-call token_span reporting ───────────────────────────────────────
+
+
+def test_tool_call_token_span_indexes_stripped_stream():
+    """``token_span`` must slice the stop-stripped completion back to the
+    <tool_call>…</tool_call> block, accounting for the reasoning + leading
+    content stripped before parsing."""
+    from renderers.parsing import _strip_stop_tokens
+
+    r = _renderer(reasoning_effort="low")
+    tok = _tok()
+    comp = tok.encode(
+        "Let me think." + _THINK_END + "Checking now."
+        "<tool_calls:opensource>\n<tool_call:opensource>get_weather<tool_sep:opensource>\n"
+        "<arg_key:opensource>city</arg_key:opensource>\n"
+        "<arg_value:opensource>Paris</arg_value:opensource>\n"
+        "</tool_call:opensource>\n</tool_calls:opensource>" + _EOS,
+        add_special_tokens=False,
+    )
+    parsed = r.parse_response(comp, tools=TOOLS)
+    tc = parsed.tool_calls[0]
+    assert tc.status is ToolCallParseStatus.OK
+    stripped = _strip_stop_tokens(comp, {tok.convert_tokens_to_ids(_EOS)})
+    s, e = tc.token_span
+    assert stripped[s] == tok.convert_tokens_to_ids("<tool_call:opensource>")
+    assert stripped[e - 1] == tok.convert_tokens_to_ids("</tool_call:opensource>")
+    # The reported block decodes to exactly this call, no reasoning/content leak.
+    block = tok.decode(stripped[s:e], skip_special_tokens=False)
+    assert block.startswith("<tool_call:opensource>get_weather")
+    assert "Let me think" not in block and "Checking now" not in block

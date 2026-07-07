@@ -316,3 +316,59 @@ def test_tool_call_token_span_indexes_stripped_stream():
     block = tok.decode(stripped[s:e], skip_special_tokens=False)
     assert block.startswith("<tool_call:opensource>get_weather")
     assert "Let me think" not in block and "Checking now" not in block
+
+
+# ── bridge close-token synthesis ─────────────────────────────────────────
+
+
+def test_bridge_tool_cycle_matches_full_render():
+    """A bridge over a clean assistant tool-call turn (completion ends in
+    <｜hy_eos｜>) must be byte-identical to a fresh full render — no spurious
+    close token wedged in."""
+    r = _renderer(thinking_retention="all")
+    eos = _tok().convert_tokens_to_ids(_EOS)
+    asst = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}
+        ],
+    }
+    prev = [{"role": "user", "content": "Weather?"}]
+    pp = r.render_ids(prev, add_generation_prompt=True)
+    pc = list(r.render_ids([*prev, asst])[len(pp) :])
+    assert pc[-1] == eos  # tool-call turn closes with eos
+
+    bridged = r.bridge_to_next_turn(pp, pc, [{"role": "tool", "content": '{"t": 20}'}])
+    fresh = r.render_ids(
+        [*prev, asst, {"role": "tool", "content": '{"t": 20}'}],
+        add_generation_prompt=True,
+    )
+    assert bridged is not None and bridged.token_ids == fresh
+
+
+def test_bridge_declines_on_empty_completion():
+    """With no sampled completion there is no assistant turn to extend — the
+    bridge declines (so a stream ending at a </tool_responses> tool-section
+    boundary never gets a spurious <｜hy_eos｜> wedged before the extension)."""
+    rf = _renderer(
+        fallback_strategy="reasoning_toolcall_retry", thinking_retention="all"
+    )
+    asst = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}
+        ],
+    }
+    base = [
+        {"role": "user", "content": "Weather?"},
+        asst,
+        {"role": "tool", "content": '{"t": 20}'},
+    ]
+    prompt = rf.render_ids(base, add_generation_prompt=True)  # fallback → no gen prompt
+    assert prompt[-1] == _tok().convert_tokens_to_ids("</tool_responses:opensource>")
+    assert (
+        rf.bridge_to_next_turn(prompt, [], [{"role": "tool", "content": "more"}])
+        is None
+    )

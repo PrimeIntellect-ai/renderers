@@ -591,14 +591,22 @@ class Hy3Renderer:
         ):
             return None
 
-        # Anchor on the canonical turn close (``<｜hy_eos｜>``). A clean stop
-        # already ends in it; a truncated prior turn does not, so synthesise
-        # it as non-loss prompt context.
+        # A bridge extends a *sampled* assistant turn; with no completion there
+        # is no turn to extend (and no way to tell a pending assistant turn from
+        # a closed tool section), so decline and let the caller re-render.
+        if not previous_completion_ids:
+            return None
+
+        # Anchor on the canonical turn close (``<｜hy_eos｜>``). The model only
+        # ever ends a turn on eos, so a completion that stops elsewhere was
+        # truncated mid-turn — synthesise the close as non-loss prompt context.
+        # Never synthesise after a boundary that is already a valid
+        # continuation point: eos (turn closed) or ``</tool_responses>`` (tool
+        # section closed, reachable when the prior prompt suppressed the
+        # generation prompt) — an unconditional eos there would wedge a
+        # spurious stop token before the extension.
         previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
-        if (
-            not previous_ids[len(previous_prompt_ids) :]
-            or previous_ids[-1] != self._eos
-        ):
+        if previous_ids[-1] not in (self._eos, self._tool_responses_end):
             previous_ids.append(self._eos)
         last_prev = previous_ids[-1]
 

@@ -1060,8 +1060,8 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # construction to pin a different date.
     "meta-llama/Llama-3.2-1B-Instruct": "llama-3",
     "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
-    # Poolside Laguna. XS-2.1's template is byte-identical to XS.2's minus
-    # the default system message; the config name selects the variant.
+    # Poolside Laguna. The two checkpoints ship different chat templates,
+    # each mirrored by its own renderer class.
     "poolside/Laguna-XS.2": "laguna-xs.2",
     "poolside/Laguna-XS-2.1": "laguna-xs-2.1",
     # GPT-OSS.
@@ -1311,7 +1311,7 @@ def _populate_registry():
     from renderers.hy3 import Hy3Renderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
-    from renderers.laguna_xs2 import LagunaXS2Renderer
+    from renderers.laguna_xs2 import LagunaXS2Renderer, LagunaXS21Renderer
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
     from renderers.nemotron3 import Nemotron3Renderer, Nemotron3UltraRenderer
@@ -1337,7 +1337,7 @@ def _populate_registry():
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
             "laguna-xs.2": LagunaXS2Renderer,
-            "laguna-xs-2.1": LagunaXS2Renderer,
+            "laguna-xs-2.1": LagunaXS21Renderer,
             "llama-3": Llama3Renderer,
             "nemotron-3": Nemotron3Renderer,
             "nemotron-3-ultra": Nemotron3UltraRenderer,
@@ -1772,6 +1772,8 @@ def _get_offset_tokenizer(tokenizer):
 def attribute_text_segments(
     tokenizer,
     segments: "list[tuple[str, bool]]",
+    *,
+    overlap_is_content: bool = False,
 ) -> "list[tuple[int, bool]]":
     """Tokenize concatenated segments as a single BPE pass and return
     ``(token_id, is_content)`` pairs.
@@ -1789,6 +1791,16 @@ def attribute_text_segments(
     that *starts* at that offset (the "later" segment). Zero-length
     tokens (rare; usually pre-tokenizer artefacts) are attributed to
     the most recently entered segment.
+
+    ``overlap_is_content=True`` widens the content bit: a token counts
+    as content when *any* of its source characters fall in a content
+    segment, not just its first. Templates whose wrap glues directly
+    onto the body with no whitespace (e.g. ``<user>{content}</user>``)
+    can merge wrap and body bytes into one token; under the first-char
+    policy such a token would land on the wrap side and the body would
+    no longer be recoverable from the content run. Over-inclusion keeps
+    every body byte inside the ``is_content=True`` run at the cost of a
+    few adjacent wrap bytes.
 
     Requires a HuggingFace fast tokenizer with offset tracking. Every
     model in ``MODEL_RENDERER_MAP`` ships one, so the offset lookup
@@ -1826,12 +1838,24 @@ def attribute_text_segments(
 
     out: list[tuple[int, bool]] = []
     last_is_content = spans[-1][2] if spans else False
-    for tok_id, (start, _end) in zip(token_ids, offsets):
+    for tok_id, (start, end) in zip(token_ids, offsets):
         if start >= total_len:
             # Token's character offset is past every segment (shouldn't
             # normally happen for add_special_tokens=False, but defensive
             # against tokenizer-specific edge cases).
             out.append((tok_id, last_is_content))
+            continue
+        if overlap_is_content and end > start:
+            out.append(
+                (
+                    tok_id,
+                    any(
+                        seg_is_content
+                        for seg_start, seg_end, seg_is_content in spans
+                        if seg_start < end and start < seg_end
+                    ),
+                )
+            )
             continue
         # Find the segment that contains `start`. Segments are
         # contiguous and ordered, so a linear scan is fine — the inner

@@ -771,32 +771,40 @@ def parse_laguna_xs2(
     tool_call_id: int,
     tool_call_end_id: int,
     tools: list[ToolSpec] | None = None,
+    strip_newlines: bool = True,
 ) -> ParsedResponse:
-    """Parse Laguna-XS.2 completion tokens.
+    """Parse Laguna-XS.2 / XS-2.1 completion tokens.
 
     Thinking uses single-token ``<think>`` / ``</think>`` (ids found by
     scan). Tool calls are delimited by single-token ``<tool_call>`` /
     ``</tool_call>``, but ``<arg_key>`` / ``<arg_value>`` inside are
     plain text — regex-extracted from the decoded inner block.
+
+    ``strip_newlines`` mirrors the template's whitespace around reasoning
+    and content. XS.2 wraps reasoning with ``\\n`` on both sides
+    (``<think>\\n{r}\\n</think>``) and brackets post-think content with
+    ``\\n`` too (``</think>\\n{c}\\n``) — strip exactly those newlines,
+    never a bare ``.strip()``, which would also eat whitespace the model
+    emitted intentionally. XS-2.1 renders both segments verbatim, so it
+    parses with ``strip_newlines=False``.
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
-    # The template wraps reasoning with ``\n`` on both sides
-    # (``<think>\n{r}\n</think>``) and brackets post-think content with ``\n``
-    # too (``</think>\n{c}\n``). Strip exactly those newlines from each
-    # decoded segment — never a bare ``.strip()``, which would also eat
-    # whitespace the model emitted intentionally.
+    def _segment(segment_ids: list[int]) -> str:
+        text = _decode(tokenizer, segment_ids)
+        return text.strip("\n") if strip_newlines else text
+
     reasoning = None
     parse_offset = 0
     think_end = _find(ids, think_end_id)
     if think_end != -1:
         reasoning_ids = ids[:think_end]
         reasoning_ids = [t for t in reasoning_ids if t != think_id]
-        reasoning = _decode(tokenizer, reasoning_ids).strip("\n")
+        reasoning = _segment(reasoning_ids)
         ids = ids[think_end + 1 :]
         parse_offset = think_end + 1
     elif (think_start := _find(ids, think_id)) != -1:
-        reasoning = _decode(tokenizer, ids[think_start + 1 :]).strip("\n")
+        reasoning = _segment(ids[think_start + 1 :])
         return ParsedResponse(
             content="", reasoning_content=reasoning or None, tool_calls=[]
         )
@@ -804,7 +812,7 @@ def parse_laguna_xs2(
     tc_start = _find(ids, tool_call_id)
     tool_calls: list[ParsedToolCall] = []
     if tc_start != -1:
-        content_text = _decode(tokenizer, ids[:tc_start]).strip("\n")
+        content_text = _segment(ids[:tc_start])
         tool_calls = _parse_laguna_xs2_tool_calls(
             tokenizer,
             ids[tc_start:],
@@ -814,7 +822,7 @@ def parse_laguna_xs2(
             param_index=_build_param_type_index(tools),
         )
     else:
-        content_text = _decode(tokenizer, ids).strip("\n")
+        content_text = _segment(ids)
 
     return ParsedResponse(
         content=content_text,
@@ -832,17 +840,20 @@ def _parse_laguna_xs2_tool_calls(
     section_offset: int,
     param_index: dict[str, dict[str, dict[str, Any]]],
 ) -> list[ParsedToolCall]:
-    """Parse Laguna-XS.2 tool calls.
+    """Parse Laguna-XS.2 / XS-2.1 tool calls.
 
     Inside each ``<tool_call>...</tool_call>`` block, the format is::
 
-        {name}\\n
-        <arg_key>{k1}</arg_key>\\n<arg_value>{v1}</arg_value>\\n
+        {name}
+        <arg_key>{k1}</arg_key><arg_value>{v1}</arg_value>
         ...
-        <arg_key>{kn}</arg_key>\\n<arg_value>{vn}</arg_value>\\n
+        <arg_key>{kn}</arg_key><arg_value>{vn}</arg_value>
 
-    The function name is everything before the first ``<arg_key>`` literal
-    in the decoded block.
+    XS.2 puts a ``\\n`` after the name and between the tag pairs; XS-2.1
+    packs everything tightly. The function name is everything before the
+    first ``<arg_key>`` literal in the decoded block (stripped), and the
+    key/value regex allows optional whitespace between the tags, so both
+    layouts parse identically.
     """
     import re
 

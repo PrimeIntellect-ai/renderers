@@ -36,6 +36,7 @@ chat-template kwargs. Those fields are covered by parity tests against
 | Kimi K2 | `KimiK2RendererConfig` | - | `enable_thinking` |
 | Kimi K2.5 / 2.6 | `KimiK25RendererConfig` | `thinking` | `image_cache_max` |
 | Laguna XS.2 | `LagunaXS2RendererConfig` | `enable_thinking`, `render_assistant_messages_raw` | - |
+| Laguna XS-2.1 | `LagunaXS21RendererConfig` | `enable_thinking` | - |
 | Llama 3 | `Llama3RendererConfig` | `date_string`, `tools_in_user_message` | - |
 | MiniMax M2 | `MiniMaxM2RendererConfig` | `model_identity` | - |
 | Nemotron-3 Nano / Super | `Nemotron3RendererConfig` | `enable_thinking`, `truncate_history_thinking`, `low_effort` | - |
@@ -134,7 +135,7 @@ the knobs its template actually exposes:
 | Nemotron-3 | `truncate_history_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | DeepSeek R1 | `template` |
 | MiniMax M2 | `tool_cycle` |
-| DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2, Llama 3 | `all` |
+| DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / XS-2.1, Llama 3 | `all` |
 
 Config construction raises when an explicit template knob directly contradicts
 an explicit generic bridge policy. For example:

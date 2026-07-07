@@ -1,5 +1,6 @@
 """Hy3 renderer — hard-coded Python mirroring the Tencent Hunyuan Hy3 Jinja
-chat template (``tencent/Hy3`` / ``Hy3-preview`` / ``Hy3-FP8``).
+chat template (``tencent/Hy3`` / ``Hy3-FP8``; ``Hy3-preview`` uses an older,
+incompatible template and is not supported).
 
 Shape of the Hy3 template, distinct from the GLM / Qwen families:
 
@@ -376,7 +377,11 @@ class Hy3Renderer:
                     emit_text=emit_text,
                 )
                 prev_is_tool = False
-                is_tool_first = True
+                # The template re-opens a <tool_responses> group only after an
+                # assistant that made tool calls; a plain assistant leaves the
+                # flag as it was.
+                if msg.get("tool_calls"):
+                    is_tool_first = True
 
             elif role == "tool":
                 if is_tool_first:
@@ -608,7 +613,6 @@ class Hy3Renderer:
         previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
         if previous_ids[-1] not in (self._eos, self._tool_responses_end):
             previous_ids.append(self._eos)
-        last_prev = previous_ids[-1]
 
         ext: list[int] = []
         ext_indices: list[int] = []
@@ -635,7 +639,16 @@ class Hy3Renderer:
                 ext_indices.append(msg_idx)
                 ext_content.append(is_content)
 
-        prev_is_tool = last_prev == self._tool_response_end
+        # The stream above ends on eos or </tool_responses> — never inside an
+        # open tool group. ``is_tool_first`` mirrors the template's state
+        # machine: it resets only on an assistant turn that made tool calls,
+        # and a tool extension always follows exactly such a turn (that is
+        # what produced the tool results), so it enters the extension True and
+        # is never reset again — assistants are rejected above. The first tool
+        # group opens <tool_responses>; a later group (after a user turn) does
+        # not, matching a full render byte-for-byte.
+        prev_is_tool = False
+        is_tool_first = True
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
             content = self._visible_text(msg.get("content"))
@@ -650,10 +663,10 @@ class Hy3Renderer:
                 # cannot rewrite without re-rendering the prior turn.
                 return None
             elif role == "tool":
-                first_in_group = not prev_is_tool
-                if first_in_group:
+                if is_tool_first:
                     emit_special(self._tool_responses, i)
                     emit_text("\n", i)
+                    is_tool_first = False
                 emit_special(self._tool_response, i)
                 emit_text_segments([("\n", False), (content, True), ("\n", False)], i)
                 emit_special(self._tool_response_end, i)

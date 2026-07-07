@@ -1067,10 +1067,11 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
-    # Tencent Hunyuan Hy3 (295B-A21B MoE). Preview / FP8 checkpoints share the
-    # same tokenizer and chat template.
+    # Tencent Hunyuan Hy3 (295B-A21B MoE). The FP8 checkpoint shares the same
+    # tokenizer and chat template. Hy3-preview is deliberately unmapped: it
+    # ships an older, incompatible template (un-suffixed special tokens,
+    # ``interleaved_thinking`` instead of ``preserved_thinking``).
     "tencent/Hy3": "hy3",
-    "tencent/Hy3-preview": "hy3",
     "tencent/Hy3-FP8": "hy3",
 }
 

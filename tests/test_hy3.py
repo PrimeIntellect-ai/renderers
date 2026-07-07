@@ -174,6 +174,39 @@ def test_parse_content_before_tool_call_preserved():
     assert parsed.tool_calls[0].name == "get_weather"
 
 
+# ── tool-group re-opening (is_tool_first state machine) ─────────────────
+
+
+def test_tool_group_not_reopened_after_plain_assistant():
+    """The template resets ``is_tool_first`` only on an assistant that made
+    tool calls; tool results arriving after a plain assistant continue the
+    earlier <tool_responses> group without re-opening it. Byte-parity check
+    on a shape the shared matrices never generate."""
+    convo = [
+        {"role": "user", "content": "Weather?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}
+            ],
+        },
+        {"role": "tool", "content": "sunny"},
+        {"role": "assistant", "content": "Checking again."},
+        {"role": "tool", "content": "rainy"},
+        {"role": "user", "content": "So?"},
+    ]
+    ours = _renderer().render_ids(convo, tools=TOOLS, add_generation_prompt=True)
+    theirs = _tok().apply_chat_template(
+        convo,
+        tools=TOOLS,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=False,
+    )
+    assert ours == list(theirs)
+
+
 # ── preserved_thinking history retention ─────────────────────────────────
 
 
@@ -344,6 +377,33 @@ def test_bridge_tool_cycle_matches_full_render():
         [*prev, asst, {"role": "tool", "content": '{"t": 20}'}],
         add_generation_prompt=True,
     )
+    assert bridged is not None and bridged.token_ids == fresh
+
+
+def test_bridge_tool_groups_across_user_turn_match_full_render():
+    """Within one extension, ``is_tool_first`` is consumed by the first tool
+    group and never resets (no assistant turns are allowed in extensions), so
+    a second group after a user turn must not re-open <tool_responses> —
+    exactly as a fresh full render tokenizes it."""
+    r = _renderer(preserved_thinking=True)
+    asst = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}
+        ],
+    }
+    prev = [{"role": "user", "content": "Weather?"}]
+    pp = r.render_ids(prev, tools=TOOLS, add_generation_prompt=True)
+    pc = list(r.render_ids([*prev, asst], tools=TOOLS)[len(pp) :])
+
+    ext = [
+        {"role": "tool", "content": "sunny"},
+        {"role": "user", "content": "And tomorrow?"},
+        {"role": "tool", "content": "rainy"},
+    ]
+    bridged = r.bridge_to_next_turn(pp, pc, ext, tools=TOOLS)
+    fresh = r.render_ids([*prev, asst, *ext], tools=TOOLS, add_generation_prompt=True)
     assert bridged is not None and bridged.token_ids == fresh
 
 

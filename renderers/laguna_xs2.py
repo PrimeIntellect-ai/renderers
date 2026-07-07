@@ -12,16 +12,30 @@ Main properties:
 - Tool calls: ``<tool_call>`` / ``</tool_call>`` ARE single tokens, but the
   inner ``<arg_key>`` / ``</arg_key>`` / ``<arg_value>`` / ``</arg_value>``
   markers are plain text — parsed via regex on the decoded inner block.
-- XS.2's template bakes in a default system prompt when ``messages[0]`` is
-  not a system message; XS-2.1's (otherwise byte-identical) template
-  removed it, so no system message and no tools means no ``<system>``
-  block at all. The config's ``name`` selects the variant. The system
-  block also contains the tools section (under a ``### Tools`` header
-  with an ``<available_tools>`` listing and prose format instructions
-  that vary on ``enable_thinking``).
+- Both templates bake in the same default Poolside system prompt when
+  ``messages[0]`` is not a system message; a caller-supplied system
+  message overrides it, and an *empty* one opts out of the ``<system>``
+  block entirely (absent tools). The system block also contains the
+  tools section (under a ``### Tools`` header with an
+  ``<available_tools>`` listing).
 - Reasoning is rendered for every assistant message — no last-user-index
   gating. ``thinking_retention`` is accepted for protocol uniformity but
   is effectively a no-op since past reasoning is preserved by default.
+
+XS-2.1's template (upstream rev ``575f0f28``) is served by the
+:class:`LagunaXS21Renderer` subclass below:
+
+- Role tags hug their content: ``<user>{content}</user>``, no inner
+  newlines.
+- Assistant reasoning is gated on ``enable_thinking``: on, the turn
+  opens ``<think>{reasoning}</think>`` verbatim (empty reasoning
+  included); off, it opens with a bare ``</think>`` and message
+  reasoning is not rendered. Content and tool-call args render verbatim.
+- Tool-call args pack tightly
+  (``<arg_key>k</arg_key><arg_value>v</arg_value>``) and the tools
+  section ends at ``</available_tools>``.
+- The ``<system>`` block is emitted whenever there is system content,
+  tools, or ``enable_thinking`` — even if that leaves it empty.
 """
 
 from __future__ import annotations
@@ -79,6 +93,15 @@ _TOOLS_FOOTER_NO_THINKING = (
     "</tool_call>"
 )
 
+# XS-2.1 tools section: this header, one tojson line per tool, then a
+# bare "</available_tools>" close.
+_TOOLS_HEADER_XS21 = (
+    "### Tools\n\n"
+    "You may call functions to assist with the user query.\n"
+    "All available function signatures are listed below:\n"
+    "<available_tools>\n"
+)
+
 
 class LagunaXS2Renderer:
     def __init__(
@@ -92,11 +115,10 @@ class LagunaXS2Renderer:
             self.config,
             "all",
         )
-        # XS.2's template bakes in a default system prompt; XS-2.1's
-        # (otherwise byte-identical) template removed it.
-        self._default_system_message = (
-            _DEFAULT_SYSTEM_MESSAGE if self.config.name == "laguna-xs.2" else ""
-        )
+        # Both templates bake in the same default Poolside system prompt;
+        # an empty caller-supplied system message opts out of the
+        # <system> block (each variant's render mirrors its own gate).
+        self._default_system_message = _DEFAULT_SYSTEM_MESSAGE
 
         self._eos = self._token_id("〈|EOS|〉")
         self._think = self._token_id("<think>")
@@ -459,7 +481,12 @@ class LagunaXS2Renderer:
         emit_text,
         emit_text_segments,
     ) -> None:
-        if self.config.render_assistant_messages_raw:
+        # Raw passthrough is an XS.2-only template gate; the XS-2.1
+        # config doesn't define it.
+        if (
+            isinstance(self.config, LagunaXS2RendererConfig)
+            and self.config.render_assistant_messages_raw
+        ):
             self._render_assistant_raw(
                 msg_idx,
                 content,
@@ -590,4 +617,348 @@ class LagunaXS2Renderer:
         if not (content.endswith("</assistant>\n") or content.endswith("</assistant>")):
             emit_text("\n", msg_idx, is_sampled=False, is_content=False)
             emit_special(self._assistant_end, msg_idx, is_sampled=True, is_content=True)
+        emit_text("\n", msg_idx, is_sampled=False, is_content=False)
+
+
+class LagunaXS21Renderer(LagunaXS2Renderer):
+    """Laguna-XS-2.1 — mirrors the ``poolside/Laguna-XS-2.1`` chat
+    template (upstream rev ``575f0f28``); see the module docstring for
+    its format.
+
+    Token wiring, stop tokens, and the parsing skeleton are shared with
+    :class:`LagunaXS2Renderer`; ``render``, ``bridge_to_next_turn``, and
+    the assistant emit implement this template's format.
+    """
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizer,
+        config: LagunaXS21RendererConfig | None = None,
+    ):
+        super().__init__(tokenizer, config or LagunaXS21RendererConfig())
+
+    def render(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
+    ) -> RenderedTokens:
+        if not messages:
+            raise ValueError("No messages provided.")
+
+        tokens: list[int] = []
+        indices: list[int] = []
+        sampled: list[bool] = []
+        content_mask: list[bool] = []
+
+        def emit_special(
+            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
+            tokens.append(token_id)
+            indices.append(msg_idx)
+            sampled.append(is_sampled)
+            content_mask.append(is_content)
+
+        def emit_text(
+            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
+        ) -> None:
+            ids = self._encode(text)
+            tokens.extend(ids)
+            indices.extend([msg_idx] * len(ids))
+            sampled.extend([is_sampled] * len(ids))
+            content_mask.extend([is_content] * len(ids))
+
+        def emit_text_segments(
+            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
+        ) -> None:
+            # Role tags hug the body with no whitespace, so a BPE merge
+            # can pull wrap bytes and body bytes into one token —
+            # overlap attribution keeps every body byte in the content
+            # run.
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments, overlap_is_content=True
+            ):
+                tokens.append(tok_id)
+                indices.append(msg_idx)
+                sampled.append(is_sampled)
+                content_mask.append(is_content)
+
+        emit_special(self._eos, -1, is_sampled=False, is_content=False)
+
+        # ── System header (absorbs messages[0] if it's a system message) ──
+        system_content = self._default_system_message
+        caller_has_system = bool(messages and messages[0].get("role") == "system")
+        if caller_has_system:
+            system_content = self._visible_text(messages[0].get("content"))
+
+        has_sys_content = bool(system_content and system_content.strip())
+        # The template's gate is ``has_sys or tools or enable_thinking`` —
+        # an empty caller system message opts out of the default, and with
+        # neither tools nor thinking the block vanishes entirely.
+        if has_sys_content or tools or self.config.enable_thinking:
+            # The whole header is one plain-text run — ``<system>`` glues
+            # straight onto the body with no newline — so it must be
+            # tokenized in a single BPE pass. In the header, content bytes
+            # exist exactly when the caller supplied the system message
+            # (the default prompt is scaffold), so the is_content bit also
+            # selects the message index: body → 0, everything else → -1.
+            header_segs: list[tuple[str, bool]] = [("<system>", False)]
+            if has_sys_content:
+                header_segs.append((system_content.rstrip(), caller_has_system))
+                if tools:
+                    header_segs.append(("\n\n", False))
+            if tools:
+                tool_text = _TOOLS_HEADER_XS21
+                for tool in tools:
+                    tool_text += json.dumps(tool, ensure_ascii=False) + "\n"
+                tool_text += "</available_tools>"
+                header_segs.append((tool_text, False))
+            header_segs.append(("</system>\n", False))
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, header_segs, overlap_is_content=True
+            ):
+                emit_special(
+                    tok_id,
+                    0 if is_content else -1,
+                    is_sampled=False,
+                    is_content=is_content,
+                )
+
+        # ── Per-message loop ──────────────────────────────────────────
+        for i, msg in enumerate(messages):
+            content = self._visible_text(msg.get("content"))
+
+            match msg["role"]:
+                case "system":
+                    # The template slices a leading system message off the
+                    # loop (it lives in the header); later ones render.
+                    if i == 0:
+                        continue
+                    sys_segs: list[tuple[str, bool]] = [("<system>", False)]
+                    if content:
+                        sys_segs.append((content, True))
+                    sys_segs.append(("</system>\n", False))
+                    emit_text_segments(sys_segs, i, is_sampled=False)
+                case "user":
+                    user_segs: list[tuple[str, bool]] = [("<user>", False)]
+                    if content:
+                        user_segs.append((content, True))
+                    user_segs.append(("</user>\n", False))
+                    emit_text_segments(user_segs, i, is_sampled=False)
+                case "assistant":
+                    self._render_assistant(
+                        msg,
+                        i,
+                        content,
+                        emit_special=emit_special,
+                        emit_text=emit_text,
+                        emit_text_segments=emit_text_segments,
+                    )
+                case "tool":
+                    tool_segs: list[tuple[str, bool]] = [("<tool_response>", False)]
+                    if content:
+                        tool_segs.append((content, True))
+                    tool_segs.append(("</tool_response>\n", False))
+                    emit_text_segments(tool_segs, i, is_sampled=False)
+
+        # ── Generation prompt (no newline after <assistant>) ──────────
+        if add_generation_prompt:
+            emit_special(self._assistant, -1, is_sampled=False, is_content=False)
+            if self.config.enable_thinking:
+                emit_special(self._think, -1, is_sampled=False, is_content=False)
+            else:
+                emit_special(self._think_end, -1, is_sampled=False, is_content=False)
+
+        return RenderedTokens(
+            token_ids=tokens,
+            message_indices=indices,
+            sampled_mask=sampled,
+            is_content=content_mask,
+            message_roles=[m.get("role") or "" for m in messages],
+            message_tool_names=extract_message_tool_names(messages),
+        )
+
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,
+    ) -> ParsedResponse:
+        # The XS-2.1 template renders reasoning and content verbatim (no
+        # newline wrapping), so the parse is verbatim too.
+        return parse_laguna_xs2(
+            self._tokenizer,
+            token_ids,
+            stop_ids={self._assistant_end, self._eos},
+            think_id=self._think,
+            think_end_id=self._think_end,
+            tool_call_id=self._tool_call,
+            tool_call_end_id=self._tool_call_end,
+            tools=tools,
+            strip_newlines=False,
+        )
+
+    def bridge_to_next_turn(
+        self,
+        previous_prompt_ids: list[int],
+        previous_completion_ids: list[int],
+        new_messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+    ) -> RenderedTokens | None:
+        if (
+            not previous_prompt_ids
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
+            new_messages,
+        ):
+            return None
+
+        # ``</assistant>`` is the canonical turn close; ``〈|EOS|〉`` also
+        # stops generation. Truncation (no stop token at the tail)
+        # synthesises the close. The inter-turn ``\n`` the template puts
+        # after ``</assistant>`` is prepended to the first extension
+        # message below so the seam encodes with the tag run.
+        previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
+        stop_ids = {self._assistant_end, self._eos}
+        if (
+            not previous_ids[len(previous_prompt_ids) :]
+            or previous_ids[-1] not in stop_ids
+        ):
+            previous_ids.append(self._assistant_end)
+
+        ext: list[int] = []
+        ext_indices: list[int] = []
+        ext_sampled: list[bool] = []
+        ext_content: list[bool] = []
+
+        def emit_special(
+            token_id: int,
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+            is_content: bool = False,
+        ) -> None:
+            ext.append(token_id)
+            ext_indices.append(msg_idx)
+            ext_sampled.append(is_sampled)
+            ext_content.append(is_content)
+
+        def emit_text_segments(
+            segments: list[tuple[str, bool]],
+            msg_idx: int = -1,
+            *,
+            is_sampled: bool = False,
+        ) -> None:
+            for tok_id, is_content in attribute_text_segments(
+                self._tokenizer, segments, overlap_is_content=True
+            ):
+                ext.append(tok_id)
+                ext_indices.append(msg_idx)
+                ext_sampled.append(is_sampled)
+                ext_content.append(is_content)
+
+        _OPEN = {"user": "<user>", "system": "<system>", "tool": "<tool_response>"}
+        _CLOSE = {
+            "user": "</user>\n",
+            "system": "</system>\n",
+            "tool": "</tool_response>\n",
+        }
+        for i, msg in enumerate(new_messages):
+            role = msg.get("role")
+            if role not in _OPEN:
+                return None
+            content = self._visible_text(msg.get("content"))
+            lead = "\n" if i == 0 else ""
+            segs: list[tuple[str, bool]] = [(lead + _OPEN[role], False)]
+            if content:
+                segs.append((content, True))
+            segs.append((_CLOSE[role], False))
+            emit_text_segments(segs, i)
+
+        emit_special(self._assistant, -1)
+        if self.config.enable_thinking:
+            emit_special(self._think, -1)
+        else:
+            emit_special(self._think_end, -1)
+
+        total_len = len(previous_ids) + len(ext)
+        return RenderedTokens(
+            token_ids=previous_ids + ext,
+            message_indices=[-1] * len(previous_ids) + ext_indices,
+            sampled_mask=[False] * total_len,
+            is_content=[False] * len(previous_ids) + ext_content,
+            message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
+        )
+
+    def _render_assistant(
+        self,
+        msg: Message,
+        msg_idx: int,
+        content: str,
+        *,
+        emit_special,
+        emit_text,
+        emit_text_segments,
+    ) -> None:
+        reasoning_content = ""
+        if isinstance(msg.get("reasoning_content"), str):
+            reasoning_content = msg["reasoning_content"]
+        else:
+            part_thinking = self._thinking_text(msg.get("content"))
+            if part_thinking:
+                reasoning_content = part_thinking
+
+        # ``<assistant>`` plus the think tag that follows are exactly the
+        # generation prompt for the active mode — template-injected
+        # scaffolding the model never samples.
+        emit_special(self._assistant, msg_idx, is_sampled=False, is_content=False)
+
+        if self.config.enable_thinking:
+            # ``<think>{reasoning}</think>`` renders verbatim, even when
+            # the reasoning is empty; the opener is the gen-prompt
+            # prefill, the rest the model sampled.
+            emit_special(self._think, msg_idx, is_sampled=False, is_content=False)
+            if reasoning_content:
+                emit_text(reasoning_content, msg_idx, is_sampled=True, is_content=True)
+            emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
+        else:
+            # Thinking off: any reasoning on the message is dropped and
+            # the turn opens with the prefilled ``</think>``.
+            emit_special(self._think_end, msg_idx, is_sampled=False, is_content=False)
+
+        if content:
+            emit_text(content, msg_idx, is_sampled=True, is_content=True)
+
+        tool_calls = msg.get("tool_calls") or []
+        for tc in tool_calls:
+            func = tc.get("function") or tc
+            name = func.get("name", "")
+            arguments = func.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+
+            emit_special(self._tool_call, msg_idx, is_sampled=True, is_content=True)
+            inner = name
+            if isinstance(arguments, dict):
+                for k, v in arguments.items():
+                    inner += "<arg_key>" + k + "</arg_key>"
+                    if isinstance(v, str):
+                        val_text = v
+                    else:
+                        val_text = json.dumps(v, ensure_ascii=False)
+                    inner += "<arg_value>" + val_text + "</arg_value>"
+            emit_text(inner, msg_idx, is_sampled=True, is_content=True)
+            emit_special(self._tool_call_end, msg_idx, is_sampled=True, is_content=True)
+
+        emit_special(self._assistant_end, msg_idx, is_sampled=True, is_content=True)
         emit_text("\n", msg_idx, is_sampled=False, is_content=False)

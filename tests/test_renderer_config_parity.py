@@ -64,6 +64,7 @@ _RENDERER_MODELS = [
     # name; parity asserted against the Ultra apply_chat_template (``medium_effort``).
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
+    ("poolside/Laguna-XS-2.1", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
 ]
 

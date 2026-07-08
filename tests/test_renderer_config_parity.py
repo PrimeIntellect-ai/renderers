@@ -65,6 +65,7 @@ _RENDERER_MODELS = [
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
     ("poolside/Laguna-XS-2.1", "auto"),
+    ("tencent/Hy3", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
 ]
 
@@ -81,7 +82,22 @@ _KWARG_VALUES: dict[str, list[Any]] = {
     # renderer's typed config (``KimiK25RendererConfig.thinking``)
     # mirrors that name so the field maps 1:1 onto the template gate.
     "thinking": [True, False],
-    "reasoning_effort": ["low", "medium", "high"],
+    # gpt-oss accepts low/medium/high; Hy3 accepts no_think/low/high. The
+    # union is listed here and the matrix builder drops values a given
+    # renderer's typed config rejects (see ``_value_valid_for``).
+    "reasoning_effort": ["no_think", "low", "medium", "high"],
+    # Hy3 — keep <think>{reasoning}</think> on historical assistant turns
+    # (True) vs collapse past-cycle reasoning to <think></think> (False).
+    "preserved_thinking": [True, False],
+    # Hy3 — SFT-target rendering (keep all thinking + close the final
+    # assistant with <｜hy_eos｜>).
+    "is_training": [True, False],
+    # Hy3 — raw passthrough of a trailing non-tool assistant (no <think>
+    # wrap, no eos) for prefill / continuation.
+    "raw_last_assistant": [True, False],
+    # Hy3 — sole active value forces reasoning_effort="high" +
+    # add_generation_prompt=False.
+    "fallback_strategy": ["reasoning_toolcall_retry"],
     # GLM-5 / GLM-5.1 — ``clear_thinking=False`` preserves the
     # ``<think>{reasoning}</think>`` wrap on historical assistants too
     # (default True collapses past-cycle reasoning to ``</think>``).
@@ -264,6 +280,19 @@ def _template_fields_for(model: str, renderer_name: str) -> frozenset[str]:
     return _config_class_for(resolved).template_field_names()
 
 
+def _value_valid_for(model: str, renderer_name: str, kwarg: str, value: Any) -> bool:
+    """Whether ``value`` is accepted by this renderer's typed config for
+    ``kwarg``. Lets renderers share a template-field name with different value
+    domains (e.g. ``reasoning_effort``: gpt-oss ``low/medium/high`` vs Hy3
+    ``no_think/low/high``) — the matrix keeps only the cells that construct."""
+    resolved = _resolve_renderer_name(model, renderer_name)
+    try:
+        _config_class_for(resolved)(**{kwarg: value})
+        return True
+    except Exception:
+        return False
+
+
 def _hf_parity_matrix() -> list[Any]:
     """Auto-derived ``(model, renderer_name, kwarg, value)`` matrix for
     every renderer with template fields, minus gpt-oss (handled
@@ -275,6 +304,8 @@ def _hf_parity_matrix() -> list[Any]:
             continue
         for kwarg in sorted(_template_fields_for(model, name)):
             for value in _KWARG_VALUES.get(kwarg, []):
+                if not _value_valid_for(model, name, kwarg, value):
+                    continue
                 out.append(
                     pytest.param(
                         model, name, kwarg, value, id=f"{model}-{kwarg}={value}"
@@ -293,6 +324,8 @@ def _harmony_parity_matrix() -> list[Any]:
             continue
         for kwarg in sorted(_template_fields_for(model, name)):
             for value in _KWARG_VALUES.get(kwarg, []):
+                if not _value_valid_for(model, name, kwarg, value):
+                    continue
                 out.append(
                     pytest.param(
                         model, name, kwarg, value, id=f"{model}-{kwarg}={value}"

@@ -40,7 +40,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
 )
-from renderers.configs import Hy3RendererConfig
+from renderers.configs import Hy3RendererConfig, ResolvedThinkingRetention
 from renderers.parsing import parse_hy3
 
 # Special-token strings, constructed exactly as the Jinja template does
@@ -95,14 +95,14 @@ class Hy3Renderer:
         # Only in low/high mode does the model itself emit the ``</think>``
         # that closes its reasoning.
         self._think_is_sampled = self._reasoning_effort in ("low", "high")
-        # Derived bridge policy: with ``preserved_thinking=True`` the template
-        # keeps reasoning on every historical turn (safe to extend across a
-        # user query → "all"); otherwise past-cycle reasoning is stripped once
-        # a new user query arrives, so the faithful default declines there.
-        implied = "all" if self.config.preserved_thinking is True else "tool_cycle"
-        self.effective_thinking_retention = resolve_thinking_retention(
-            self.config, implied
-        )
+        # Derived bridge policy: when the template keeps reasoning on every
+        # historical turn it is safe to extend across a user query ("all");
+        # otherwise past-cycle reasoning is stripped once a new user query
+        # arrives, so the faithful policy declines there ("tool_cycle").
+        # ``preserved_thinking=None`` follows the template's tools-dependent
+        # default, so the bridge resolves the policy per call; this attribute
+        # holds the no-tools resolution.
+        self.effective_thinking_retention = self._thinking_retention_for(None)
 
         self._bos = self._token_id(_BOS)
         self._eos = self._token_id(_EOS)
@@ -126,6 +126,19 @@ class Hy3Renderer:
         self._tool_response_end = self._token_id(_TOOL_RESPONSE_END)
 
     # ── helpers ──────────────────────────────────────────────────────
+
+    def _preserved_thinking_for(self, tools: list[ToolSpec] | None) -> bool:
+        """Mirror the template's ``preserved_thinking`` default: the kwarg
+        when set, else True iff tools are present."""
+        if self.config.preserved_thinking is None:
+            return bool(tools)
+        return self.config.preserved_thinking
+
+    def _thinking_retention_for(
+        self, tools: list[ToolSpec] | None
+    ) -> ResolvedThinkingRetention:
+        implied = "all" if self._preserved_thinking_for(tools) else "tool_cycle"
+        return resolve_thinking_retention(self.config, implied)
 
     def _token_id(self, token: str) -> int:
         tid = self._tokenizer.convert_tokens_to_ids(token)
@@ -309,11 +322,7 @@ class Hy3Renderer:
                 sampled.append(False)
                 content_mask.append(is_content)
 
-        # ``preserved_thinking`` defaults to True when tools are present, else
-        # False — matching the template's own default when the kwarg is unset.
-        preserved = self.config.preserved_thinking
-        if preserved is None:
-            preserved = bool(tools)
+        preserved = self._preserved_thinking_for(tools)
 
         # ── Header: bos + aggregated system + reasoning marker / tools ──
         emit_special(self._bos, -1, is_sampled=False, is_content=False)
@@ -591,7 +600,7 @@ class Hy3Renderer:
             return None
 
         if should_rerender_for_thinking_retention(
-            self.effective_thinking_retention,
+            self._thinking_retention_for(tools),
             new_messages,
         ):
             return None

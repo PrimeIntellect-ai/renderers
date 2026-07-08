@@ -258,6 +258,58 @@ def test_preserved_thinking_conflict_raises():
         Hy3RendererConfig(preserved_thinking=False, thinking_retention="all")
 
 
+_BRIDGE_ASST = {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+        {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}
+    ],
+}
+_BRIDGE_EXT = [
+    {"role": "tool", "content": "sunny"},
+    {"role": "user", "content": "And tomorrow?"},
+]
+
+
+def test_bridge_default_config_with_tools_extends_across_user_turn():
+    """With the default (None) config the bridge policy mirrors the template's
+    tools-dependent ``preserved_thinking``: a full render with tools keeps
+    historical reasoning across user turns, so declining the bridge there
+    would force a re-render that drops the verbatim sampled tokens for no
+    semantic gain. The bridge must extend, byte-identical to a fresh render."""
+    r = _renderer()
+    prev = [{"role": "user", "content": "Weather?"}]
+    pp = r.render_ids(prev, tools=TOOLS, add_generation_prompt=True)
+    pc = list(r.render_ids([*prev, _BRIDGE_ASST], tools=TOOLS)[len(pp) :])
+
+    bridged = r.bridge_to_next_turn(pp, pc, _BRIDGE_EXT, tools=TOOLS)
+    fresh = r.render_ids(
+        [*prev, _BRIDGE_ASST, *_BRIDGE_EXT], tools=TOOLS, add_generation_prompt=True
+    )
+    assert bridged is not None and bridged.token_ids == fresh
+
+
+def test_bridge_default_config_without_tools_declines_at_user_turn():
+    """Without tools the template default drops past-cycle reasoning once a
+    new user query arrives, so the faithful bridge declines there."""
+    r = _renderer()
+    prev = [{"role": "user", "content": "Q1"}]
+    pp = r.render_ids(prev, add_generation_prompt=True)
+    pc = list(r.render_ids([*prev, {"role": "assistant", "content": "A1"}])[len(pp) :])
+    assert r.bridge_to_next_turn(pp, pc, [{"role": "user", "content": "Q2"}]) is None
+
+
+def test_bridge_explicit_tool_cycle_declines_at_user_turn_despite_tools():
+    """An explicit ``thinking_retention="tool_cycle"`` wins over the
+    tools-dependent template default: the bridge still declines at a new
+    user turn even though tools are present."""
+    r = _renderer(thinking_retention="tool_cycle")
+    prev = [{"role": "user", "content": "Weather?"}]
+    pp = r.render_ids(prev, tools=TOOLS, add_generation_prompt=True)
+    pc = list(r.render_ids([*prev, _BRIDGE_ASST], tools=TOOLS)[len(pp) :])
+    assert r.bridge_to_next_turn(pp, pc, _BRIDGE_EXT, tools=TOOLS) is None
+
+
 # ── is_training / raw_last_assistant / fallback_strategy ─────────────────
 
 

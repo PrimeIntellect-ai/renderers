@@ -325,8 +325,9 @@ class Hy3RendererConfig(BaseRendererConfig):
     ``<think></think>``, keeping it only on the in-flight turn (after the
     last user query). ``None`` (default) follows the template's own
     default — ``True`` when ``tools`` are supplied at render time, ``False``
-    otherwise. ``preserved_thinking=True`` resolves bridge policy to
-    ``"all"``; otherwise it resolves to ``"tool_cycle"``.
+    otherwise. Bridge policy tracks the same resolution: ``"all"`` whenever
+    ``preserved_thinking`` resolves to ``True`` for the tools at hand,
+    ``"tool_cycle"`` otherwise.
     """
 
     name: Literal["hy3"] = "hy3"
@@ -339,8 +340,8 @@ class Hy3RendererConfig(BaseRendererConfig):
     preserved_thinking: bool | None = None
     """Keep historical assistant reasoning. Mirrors the template's
     ``preserved_thinking`` kwarg. ``None`` defers to the template default
-    (``True`` with tools, ``False`` without). ``True`` resolves bridge
-    policy to ``"all"``."""
+    (``True`` with tools, ``False`` without). Bridge policy is ``"all"``
+    whenever this resolves to ``True`` for the tools at hand."""
 
     is_training: bool = False
     """Mirrors the template's ``is_training`` kwarg. ``True`` renders SFT

@@ -68,6 +68,17 @@ class _FakeClient:
         self.calls = []
         self.base_url = "http://fake-host:8000/v1"
 
+    @staticmethod
+    def _as_response(payload, cast_to):
+        """Both transports request cast_to=httpx.Response; deliver the payload as
+        JSON bytes off the wire so the client exercises the zero-copy
+        routed_experts strip. Falls back to the raw dict otherwise."""
+        if cast_to is httpx.Response:
+            return httpx.Response(
+                200, content=json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            )
+        return payload
+
     async def post(self, path, *, cast_to=dict, body=None, options=None):
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
@@ -95,10 +106,13 @@ class _FakeClient:
                 }
             ],
         }
-        return httpx.Response(
-            200,
-            content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        )
+        # vLLM path requests cast_to=httpx.Response; Dynamo path uses cast_to=dict.
+        if cast_to is httpx.Response:
+            return httpx.Response(
+                200,
+                content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            )
+        return payload
 
 
 def test_generate_builds_request_body_and_parses_response():
@@ -273,6 +287,503 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
 
     # Exact passthrough — same object, no copy / no transform.
     assert result["prompt_attribution"] is supplied
+
+
+class _DynamoFakeClient(_FakeClient):
+    """Dynamo-shaped response: engine fields + routed_experts under nvext (not
+    choices[0]); used to prove routed_experts now surfaces on dynamo."""
+
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        self.calls.append(
+            {"path": path, "cast_to": cast_to, "body": body, "options": options}
+        )
+        return self._as_response(
+            {
+                "id": "gen-dyn",
+                "choices": [
+                    {
+                        "index": 0,
+                        "logprobs": {
+                            "content": [{"logprob": -0.1}, {"logprob": -0.2}]
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "nvext": {
+                    "engine_data": {"completion_token_ids": [7, 8]},
+                    "routed_experts": {
+                        # full-sequence routing (4 rows); worker can't trim
+                        "data": "AQIDBA==",
+                        "shape": [4, 1, 1],
+                        "start": 0,
+                        "dtype": "uint8",
+                    },
+                },
+            },
+            cast_to,
+        )
+
+
+def test_dynamo_transport_forwards_priority_and_detokenize():
+    client = _DynamoFakeClient()
+
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={
+                "temperature": 0.3,
+                "max_tokens": 7,
+                "detokenize": False,
+                "allowed_token_ids": [7, 8],
+                "bad_words_token_ids": [[1, 2]],
+            },
+            cache_salt="ckpt-42",
+            priority=17,
+            transport="dynamo",
+        )
+    )
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["path"] == "/chat/completions"
+    assert client.calls[0]["body"] == {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": ""}],
+        "stream": False,
+        "nvext": {
+            "token_data": [1, 2, 3],
+            "extra_fields": ["engine_data"],
+            "cache_salt": "ckpt-42",
+            "agent_hints": {"priority": 17},
+        },
+        # tools are NOT forwarded on the wire (baked into token_data instead).
+        "temperature": 0.3,
+        "max_completion_tokens": 7,
+        "logprobs": True,
+        "skip_special_tokens": False,
+        "stop_token_ids": [99],
+        "bad_words_token_ids": [[1, 2]],
+        "allowed_token_ids": [7, 8],
+        "detokenize": False,
+    }
+    assert result["completion_ids"] == [7, 8]
+    # routed_experts surfaces on dynamo as the {data, shape, start, dtype}
+    # contract. No routed_experts_prompt_start is set here (first-turn case), so
+    # the renderer does NOT trim — full-sequence routing passes through with
+    # start=0.
+    re = result["routed_experts"]
+    assert re["shape"] == [4, 1, 1] and re["start"] == 0 and re["dtype"] == "uint8"
+    # data rides as a zero-copy memoryview (not json-parsed), like vllm.
+    assert isinstance(re["data"], memoryview)
+    assert re["data"].tobytes() == b"AQIDBA=="
+
+
+class _NoCompletionIdsClient(_FakeClient):
+    """Dynamo response that carries no completion token IDs."""
+
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        self.calls.append(
+            {"path": path, "cast_to": cast_to, "body": body, "options": options}
+        )
+        return self._as_response(
+            {"request_id": "x", "choices": [{"index": 0, "finish_reason": "stop"}]},
+            cast_to,
+        )
+
+
+def test_dynamo_transport_raises_without_completion_ids():
+    with pytest.raises(RuntimeError, match="completion token IDs"):
+        asyncio.run(
+            generate(
+                client=_NoCompletionIdsClient(),
+                renderer=_FakeRenderer(),
+                messages=[{"role": "user", "content": "hi"}],
+                model="test-model",
+                tools=[{"type": "function", "function": {"name": "echo"}}],
+                sampling_params={"max_tokens": 7},
+                transport="dynamo",
+                max_prompt_len=10_000,
+            )
+        )
+
+
+class _EmptyCompletionClient(_FakeClient):
+    """Dynamo response with a present-but-empty completion_token_ids list."""
+
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        self.calls.append(
+            {"path": path, "cast_to": cast_to, "body": body, "options": options}
+        )
+        return self._as_response(
+            {
+                "request_id": "x",
+                "choices": [
+                    {"index": 0, "finish_reason": "stop", "logprobs": {"content": []}}
+                ],
+                "nvext": {"engine_data": {"completion_token_ids": []}},
+            },
+            cast_to,
+        )
+
+
+class _EmptyParseRenderer(_FakeRenderer):
+    def parse_response(self, completion_ids, *, tools=None) -> ParsedResponse:
+        assert completion_ids == []
+        return ParsedResponse(content="", reasoning_content=None, tool_calls=[])
+
+
+def test_dynamo_transport_allows_present_but_empty_completion():
+    """A present-but-empty completion_token_ids is a valid zero-token completion
+    and must NOT raise (only an absent field raises)."""
+    result = asyncio.run(
+        generate(
+            client=_EmptyCompletionClient(),
+            renderer=_EmptyParseRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={"max_tokens": 7},
+            transport="dynamo",
+            max_prompt_len=10_000,
+        )
+    )
+    assert result["completion_ids"] == []
+
+
+class _BoomClient(_FakeClient):
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        raise ValueError("boom")
+
+
+@pytest.mark.parametrize("transport", ["vllm", "dynamo"])
+def test_generate_propagates_post_errors_raw(transport):
+    # POST errors must propagate unchanged (no NameError from a stale handler).
+    with pytest.raises(ValueError, match="boom"):
+        asyncio.run(
+            generate(
+                client=_BoomClient(),
+                renderer=_FakeRenderer(),
+                messages=[{"role": "user", "content": "hi"}],
+                model="test-model",
+                tools=[{"type": "function", "function": {"name": "echo"}}],
+                sampling_params={"max_tokens": 7},
+                transport=transport,
+                max_prompt_len=10_000,
+            )
+        )
+
+
+def test_dynamo_transport_forwards_extra_sampling_fields_and_drops_denylist():
+    """F1: sampling fields outside the old allowlist (presence_penalty, stop,
+    guided_json) must reach the wire; vLLM-only/internal keys are dropped."""
+    client = _DynamoFakeClient()
+    asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={
+                "max_tokens": 7,
+                "presence_penalty": 0.5,
+                "frequency_penalty": 0.25,
+                "stop": ["</s>"],
+                "guided_json": {"type": "object"},
+                # denylisted — must NOT hit the wire
+                "return_token_ids": True,
+                # not a top-level field (Dynamo rejects unknown ones); routed
+                # into nvext.routed_experts_prompt_start so the worker trims
+                # routing engine-side
+                "routed_experts_prompt_start": 3,
+            },
+            transport="dynamo",
+            max_prompt_len=10_000,
+        )
+    )
+    body = client.calls[0]["body"]
+    assert body["presence_penalty"] == 0.5
+    assert body["frequency_penalty"] == 0.25
+    assert body["stop"] == ["</s>"]
+    assert body["guided_json"] == {"type": "object"}
+    assert "return_token_ids" not in body
+    # routed_experts_prompt_start is dropped from the top level (Dynamo rejects
+    # unknown top-level fields) but routed into nvext so the worker applies it to
+    # SamplingParams and trims routing engine-side.
+    assert "routed_experts_prompt_start" not in body
+    assert body["nvext"]["routed_experts_prompt_start"] == 3
+    assert "extra_args" not in body.get("nvext", {})
+
+
+def test_trim_dynamo_routed_experts():
+    """Client-side trim is a back-compat fallback: it trims ONLY when the worker
+    returned full routing (start=0) AND the caller supplied a positive
+    routed_experts_prompt_start. No-op when the worker already trimmed (start>0),
+    no offset is supplied (first turn), offset is 0, or routed_experts is absent."""
+    from renderers.client import _trim_dynamo_routed_experts
+
+    def _payload(channel):
+        re = {
+            "data": base64.b64encode(bytes([0, 1, 2, 3, 4])).decode(),
+            "shape": [5, 1, 1], "start": 0, "dtype": "uint8",
+        }
+        return {"nvext": {channel: {"routed_experts": re}} if channel == "engine_data"
+                else {"routed_experts": re}}
+
+    # explicit prompt_start=3 -> drop 3 rows, start=3 (engine_data channel)
+    resp = _payload("engine_data")
+    _trim_dynamo_routed_experts(resp, {"routed_experts_prompt_start": 3})
+    re = resp["nvext"]["engine_data"]["routed_experts"]
+    assert re["shape"] == [2, 1, 1] and re["start"] == 3
+    assert base64.b64decode(re["data"]) == bytes([3, 4])
+
+    # explicit prompt_start=3 (top-level routed_experts channel)
+    resp2 = _payload("routed_experts")
+    _trim_dynamo_routed_experts(resp2, {"routed_experts_prompt_start": 3})
+    re2 = resp2["nvext"]["routed_experts"]
+    assert re2["shape"] == [2, 1, 1] and re2["start"] == 3
+
+    # data as a zero-copy memoryview (the parse keeps the blob un-decoded) still
+    # trims on the back-compat path: b64decode accepts memoryview.
+    resp_mv = _payload("engine_data")
+    re_mv = resp_mv["nvext"]["engine_data"]["routed_experts"]
+    re_mv["data"] = memoryview(re_mv["data"].encode("ascii"))
+    _trim_dynamo_routed_experts(resp_mv, {"routed_experts_prompt_start": 3})
+    assert re_mv["shape"] == [2, 1, 1] and re_mv["start"] == 3
+    assert base64.b64decode(re_mv["data"]) == bytes([3, 4])
+
+    # worker already trimmed engine-side (start>0) -> no-op (don't double-trim)
+    resp_wt = {"nvext": {"engine_data": {"routed_experts": {
+        "data": base64.b64encode(bytes([3, 4])).decode(),
+        "shape": [2, 1, 1], "start": 3, "dtype": "uint8",
+    }}}}
+    _trim_dynamo_routed_experts(resp_wt, {"routed_experts_prompt_start": 3})
+    rewt = resp_wt["nvext"]["engine_data"]["routed_experts"]
+    assert rewt["shape"] == [2, 1, 1] and rewt["start"] == 3
+    assert base64.b64decode(rewt["data"]) == bytes([3, 4])
+
+    # absent start (first turn) -> NO trim, full-sequence with start=0
+    resp3 = _payload("engine_data")
+    _trim_dynamo_routed_experts(resp3, {})
+    re3 = resp3["nvext"]["engine_data"]["routed_experts"]
+    assert re3["shape"] == [5, 1, 1] and re3["start"] == 0
+
+    # offset 0 -> no-op
+    resp0 = _payload("engine_data")
+    _trim_dynamo_routed_experts(resp0, {"routed_experts_prompt_start": 0})
+    assert resp0["nvext"]["engine_data"]["routed_experts"]["shape"] == [5, 1, 1]
+
+    # absent routed_experts -> no-op
+    resp4 = {"nvext": {"engine_data": {}}}
+    _trim_dynamo_routed_experts(resp4, {"routed_experts_prompt_start": 3})
+    assert resp4 == {"nvext": {"engine_data": {}}}
+
+    # unknown dtype -> RuntimeError (hard fail, not silent itemsize=1 fallback)
+    resp_bad = {"nvext": {"engine_data": {"routed_experts": {
+        "data": base64.b64encode(bytes([0, 1, 2, 3, 4])).decode(),
+        "shape": [5, 1, 1], "start": 0, "dtype": "float16",
+    }}}}
+    with pytest.raises(RuntimeError, match="unknown routed_experts dtype"):
+        _trim_dynamo_routed_experts(resp_bad, {"routed_experts_prompt_start": 3})
+
+
+def test_dynamo_parse_present_empty_engine_logprobs_raises_for_nonempty_completion():
+    """A present-but-empty engine_data.completion_logprobs is authoritative for
+    source selection, but nonempty completions still require aligned logprobs."""
+    data = {
+        "choices": [
+            {
+                # chat-echo logprobs (would mismatch the engine ids)
+                "logprobs": {"content": [{"logprob": -9.9}, {"logprob": -8.8}]},
+                "finish_reason": "stop",
+            }
+        ],
+        "nvext": {
+            "engine_data": {
+                "completion_token_ids": [7, 8],
+                "completion_logprobs": [],
+            }
+        },
+    }
+    from renderers.client import _TRANSPORTS
+
+    with pytest.raises(RuntimeError, match="logprobs length"):
+        _TRANSPORTS["dynamo"].parse(data)
+
+
+def test_dynamo_parse_falls_back_to_engine_routed_experts_for_placeholder():
+    """A non-dict top-level routed_experts placeholder must not hide the valid
+    engine_data.routed_experts payload."""
+    data = {
+        "choices": [{"index": 0, "finish_reason": "stop"}],
+        "nvext": {
+            "routed_experts": "placeholder",
+            "engine_data": {
+                "completion_token_ids": [7, 8],
+                "completion_logprobs": [-0.1, -0.2],
+                "routed_experts": {
+                    "data": "AQI=",
+                    "shape": [2, 1, 1],
+                    "start": 3,
+                    "dtype": "uint8",
+                },
+            },
+        },
+    }
+    from renderers.client import _TRANSPORTS
+
+    result = _TRANSPORTS["dynamo"].parse(data)
+
+    assert result.routed_experts == {
+        "data": "AQI=",
+        "shape": [2, 1, 1],
+        "start": 3,
+        "dtype": "uint8",
+    }
+
+
+def test_dynamo_transport_merges_caller_nvext():
+    """F2: caller-supplied nvext is merged — extra_fields union with engine_data,
+    agent_hints merged with priority, unrelated caller keys preserved."""
+    client = _DynamoFakeClient()
+    asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={
+                "max_tokens": 7,
+                "nvext": {
+                    "extra_fields": ["timing"],
+                    "agent_hints": {"osl": 4},
+                    "annotations": ["trace"],
+                },
+            },
+            priority=9,
+            transport="dynamo",
+            max_prompt_len=10_000,
+        )
+    )
+    nvext = client.calls[0]["body"]["nvext"]
+    assert nvext["token_data"] == [1, 2, 3]
+    # extra_fields union preserves caller "timing" + our "engine_data"
+    assert nvext["extra_fields"] == ["timing", "engine_data"]
+    # agent_hints merged: caller osl kept, priority overlaid
+    assert nvext["agent_hints"] == {"osl": 4, "priority": 9}
+    # unrelated caller nvext keys survive
+    assert nvext["annotations"] == ["trace"]
+
+
+def test_dynamo_transport_routes_sampling_params_cache_salt_and_priority_to_nvext():
+    """cache_salt/priority supplied inside sampling_params (not the dedicated
+    kwargs) must still land in nvext, never as top-level chat fields."""
+    client = _DynamoFakeClient()
+    asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={"max_tokens": 7, "cache_salt": "ckpt-9", "priority": 5},
+            transport="dynamo",
+            max_prompt_len=10_000,
+        )
+    )
+    body = client.calls[0]["body"]
+    assert body["nvext"]["cache_salt"] == "ckpt-9"
+    assert body["nvext"]["agent_hints"] == {"priority": 5}
+    # neither leaks to a top-level chat field
+    assert "cache_salt" not in body
+    assert "priority" not in body
+
+
+class _BothTokenIdsClient(_FakeClient):
+    """Dynamo response carrying engine_data.completion_token_ids AND a divergent
+    choices[0].token_ids — the canonical engine channel must win (F3)."""
+
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        self.calls.append(
+            {"path": path, "cast_to": cast_to, "body": body, "options": options}
+        )
+        return self._as_response(
+            {
+                "id": "gen-dyn",
+                "choices": [
+                    {
+                        "index": 0,
+                        "token_ids": [99, 99],  # divergent echo — must be ignored
+                        "logprobs": {
+                            "content": [{"logprob": -0.1}, {"logprob": -0.2}]
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "nvext": {"engine_data": {"completion_token_ids": [7, 8]}},
+            },
+            cast_to,
+        )
+
+
+def test_dynamo_transport_prefers_engine_data_over_choices_token_ids():
+    client = _BothTokenIdsClient()
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={"max_tokens": 7},
+            transport="dynamo",
+            max_prompt_len=10_000,
+        )
+    )
+    assert result["completion_ids"] == [7, 8]
+
+
+class _MisalignedLogprobsClient(_FakeClient):
+    """Dynamo response whose logprobs length disagrees with completion_ids (F4)."""
+
+    async def post(self, path, *, cast_to=dict, body=None, options=None):
+        self.calls.append(
+            {"path": path, "cast_to": cast_to, "body": body, "options": options}
+        )
+        return self._as_response(
+            {
+                "id": "gen-dyn",
+                "choices": [
+                    {
+                        "index": 0,
+                        "logprobs": {"content": [{"logprob": -0.1}]},  # only 1 logprob
+                        "finish_reason": "stop",
+                    }
+                ],
+                "nvext": {"engine_data": {"completion_token_ids": [7, 8]}},  # 2 tokens
+            },
+            cast_to,
+        )
+
+
+def test_dynamo_transport_raises_on_logprob_length_mismatch():
+    with pytest.raises(RuntimeError, match="logprobs length"):
+        asyncio.run(
+            generate(
+                client=_MisalignedLogprobsClient(),
+                renderer=_FakeRenderer(),
+                messages=[{"role": "user", "content": "hi"}],
+                model="test-model",
+                tools=[{"type": "function", "function": {"name": "echo"}}],
+                sampling_params={"max_tokens": 7},
+                transport="dynamo",
+                max_prompt_len=10_000,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

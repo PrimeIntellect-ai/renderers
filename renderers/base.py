@@ -1594,6 +1594,7 @@ def build_training_sample(
     role_to_mask: Callable[[Message], bool] | None = None,
     tools: list[ToolSpec] | None = None,
     content_sft_roles: "set[str] | frozenset[str] | None" = None,
+    ensure_final_stop: bool = False,
 ) -> RenderedTrainingSample:
     """Build a :class:`RenderedTrainingSample` for supervised training.
 
@@ -1649,6 +1650,17 @@ def build_training_sample(
     or hand-coded renderers that haven't been wired up yet) ignore
     ``content_sft_roles`` silently — falling back to the original
     ``role_to_mask`` + ``sampled_mask`` behaviour.
+
+    ``ensure_final_stop`` appends the renderer's canonical stop token
+    when the sample ends with an assistant message that the template
+    leaves unterminated. Some templates close an assistant turn only
+    via the *next* message's role marker (e.g. GLM's ``<|user|>`` /
+    ``<|observation|>``), so a final assistant message renders with no
+    stop token at all. No-op when the template already closes the turn
+    in-message (ChatML ``<|im_end|>``, Llama ``<|eot_id|>``); where it
+    fires, the output intentionally diverges from ``apply_chat_template``.
+    Ignored for renderers without ``sampled_mask`` (``DefaultRenderer``) —
+    the close of an opaque template can't be located reliably.
     """
     rendered = renderer.render(messages, tools=tools)
     has_sampled_info = len(rendered.sampled_mask) == len(rendered.token_ids)
@@ -1689,6 +1701,25 @@ def build_training_sample(
         else:
             loss_mask.append(role_to_mask(msg))
 
+    token_ids = list(rendered.token_ids)
+    # Requires sampled_mask (opaque templates hide the assistant close)
+    # and a final assistant message the role filter trains.
+    if (
+        ensure_final_stop
+        and has_sampled_info
+        and messages[-1].get("role") == "assistant"
+        and (role_to_mask is None or role_to_mask(messages[-1]))
+    ):
+        stop_ids = set(renderer.get_stop_token_ids())
+        last_trainable = next(
+            (k for k in range(len(loss_mask) - 1, -1, -1) if loss_mask[k]), None
+        )
+        if last_trainable is None or token_ids[last_trainable] not in stop_ids:
+            token_ids.append(renderer.get_stop_token_ids()[0])
+            # loss_mask=True marks the token as trainable — the appended
+            # stop is a training target, like any sampled token.
+            loss_mask.append(True)
+
     # Surface the multimodal payload for VLM renderers. ``None`` for text
     # renderers and for text-only samples (empty media) so downstream
     # ``multi_modal_data is not None`` is a reliable "has media" check.
@@ -1696,12 +1727,12 @@ def build_training_sample(
     if mm is not None and mm.is_empty():
         mm = None
     mm_token_type_ids = (
-        _build_mm_token_type_ids(mm.mm_placeholders, len(rendered.token_ids))
+        _build_mm_token_type_ids(mm.mm_placeholders, len(token_ids))
         if mm is not None and mm.mm_placeholders
         else None
     )
     return RenderedTrainingSample(
-        token_ids=rendered.token_ids,
+        token_ids=token_ids,
         loss_mask=loss_mask,
         multi_modal_data=mm,
         mm_token_type_ids=mm_token_type_ids,

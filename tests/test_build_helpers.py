@@ -64,6 +64,34 @@ def test_build_training_sample_has_trainable_tokens(model_name, tokenizer, rende
     assert len(mask) == len(ids)
 
 
+def test_build_training_sample_ensures_final_stop(model_name, tokenizer, renderer):
+    """The final assistant turn ends at a trainable renderer stop token.
+
+    Templates whose assistant close is part of the message (ChatML, Llama)
+    already satisfy this, so the sample stays byte-identical; templates
+    that terminate turns with the next message's role marker (GLM) get the
+    canonical stop appended as the training target.
+    """
+    if not renderer.render([{"role": "user", "content": "x"}]).sampled_mask:
+        return  # DefaultRenderer: no sampled_mask, role-only masking
+    msgs = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
+    sample = build_training_sample(renderer, msgs, ensure_final_stop=True)
+    stop_ids = set(renderer.get_stop_token_ids())
+    last_trainable = max(k for k, m in enumerate(sample.loss_mask) if m)
+    assert sample.token_ids[last_trainable] in stop_ids
+
+    baseline = build_training_sample(renderer, msgs)
+    if (
+        baseline.token_ids[max(k for k, m in enumerate(baseline.loss_mask) if m)]
+        in stop_ids
+    ):
+        # In-message close: ensure_final_stop must not change the bytes.
+        assert sample.token_ids == baseline.token_ids
+
+
 def test_build_trajectory_step_reconstructs_full(model_name, tokenizer, renderer):
     """prompt_ids + completion_ids must equal the full rendered sequence."""
     prompt = [

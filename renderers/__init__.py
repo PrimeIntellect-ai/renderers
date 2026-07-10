@@ -7,10 +7,10 @@ except ImportError:
     __version__ = "0+unknown"
 
 from renderers.base import (
-    MULTIMODAL_MODELS,
     Content,
     ContentPart,
     ImagePart,
+    MULTIMODAL_MODELS,
     Message,
     MultiModalData,
     MultimodalRenderer,
@@ -43,16 +43,17 @@ from renderers.client import OverlongPromptError
 from renderers.configs import (
     AutoRendererConfig,
     BaseRendererConfig,
+    config_from_name,
+    DefaultRendererConfig,
     DeepSeekR1RendererConfig,
     DeepSeekV3RendererConfig,
-    DefaultRendererConfig,
-    GLM5RendererConfig,
     GLM45RendererConfig,
     GLM51RendererConfig,
+    GLM5RendererConfig,
     GptOssRendererConfig,
     Hy3RendererConfig,
-    KimiK2RendererConfig,
     KimiK25RendererConfig,
+    KimiK2RendererConfig,
     LagunaXS2RendererConfig,
     LagunaXS21RendererConfig,
     Llama3RendererConfig,
@@ -60,12 +61,11 @@ from renderers.configs import (
     Nemotron3RendererConfig,
     Nemotron3UltraRendererConfig,
     PrimeQwen3RendererConfig,
-    Qwen3RendererConfig,
-    Qwen3VLRendererConfig,
     Qwen35RendererConfig,
     Qwen36RendererConfig,
+    Qwen3RendererConfig,
+    Qwen3VLRendererConfig,
     RendererConfig,
-    config_from_name,
 )
 
 # Concrete renderer classes are lazy-loaded so that consumers needing

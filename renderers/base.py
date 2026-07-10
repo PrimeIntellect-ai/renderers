@@ -1718,7 +1718,7 @@ def build_training_sample(
     if mm is not None and mm.is_empty():
         mm = None
     mm_token_type_ids = (
-        _build_mm_token_type_ids(mm.mm_placeholders, len(rendered.token_ids))
+        _build_mm_token_type_ids(mm.mm_placeholders, len(token_ids))
         if mm is not None and mm.mm_placeholders
         else None
     )

@@ -221,7 +221,9 @@ class PrimeQwen3Renderer:
 
     @staticmethod
     def _content(message: Message) -> str:
-        content = message.get("content", "")
+        content = message.get("content")
+        if content is None:
+            return ""
         if not isinstance(content, str):
             raise TypeError("PrimeQwen3Renderer only supports string message content.")
         return content
@@ -456,10 +458,15 @@ class PrimeQwen3Renderer:
             call_text = "\n<function=" + str(raw_call.get("name", "")) + ">\n"
             if "arguments" in raw_call:
                 arguments = raw_call["arguments"]
+                # OpenAI canonical form serializes arguments as a JSON string;
+                # degrade malformed payloads to no parameters like Qwen3.5.
                 if isinstance(arguments, str):
-                    arguments = json.loads(arguments)
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}
                 if not isinstance(arguments, Mapping):
-                    raise TypeError("Prime Qwen3 tool-call arguments must be mappings.")
+                    arguments = {}
                 for argument_name, argument_value in arguments.items():
                     value_text = (
                         json.dumps(argument_value, ensure_ascii=False)

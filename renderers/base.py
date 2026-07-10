@@ -1651,16 +1651,14 @@ def build_training_sample(
     ``content_sft_roles`` silently — falling back to the original
     ``role_to_mask`` + ``sampled_mask`` behaviour.
 
-    ``ensure_final_stop`` appends the renderer's canonical stop token as
-    a trainable target when the sample ends with an assistant message
-    whose last trainable token is not already a stop. Some templates
-    (e.g. GLM) terminate an assistant turn with the *next* message's
-    role marker — or, at inference, a sampled ``<|endoftext|>`` that the
-    template never renders back into history — so a final assistant
-    turn otherwise carries no stop supervision at all. This breaks byte
-    identity with ``apply_chat_template`` on such templates by design;
-    it is a no-op for templates whose assistant close is part of the
-    message (ChatML ``<|im_end|>``, Llama ``<|eot_id|>``).
+    ``ensure_final_stop`` appends the renderer's canonical stop token
+    when the sample ends with an assistant message that the template
+    leaves unterminated. Some templates close an assistant turn only
+    via the *next* message's role marker (e.g. GLM's ``<|user|>`` /
+    ``<|observation|>``), so a final assistant message renders with no
+    stop token at all. No-op when the template already closes the turn
+    in-message (ChatML ``<|im_end|>``, Llama ``<|eot_id|>``); where it
+    fires, the output intentionally diverges from ``apply_chat_template``.
     """
     rendered = renderer.render(messages, tools=tools)
     has_sampled_info = len(rendered.sampled_mask) == len(rendered.token_ids)

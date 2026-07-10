@@ -1702,12 +1702,13 @@ def build_training_sample(
             loss_mask.append(role_to_mask(msg))
 
     token_ids = list(rendered.token_ids)
-    # Requires sampled_mask — opaque templates (DefaultRenderer) give no
-    # reliable way to locate the assistant close.
+    # Requires sampled_mask (opaque templates hide the assistant close)
+    # and a final assistant message the role filter trains.
     if (
         ensure_final_stop
         and has_sampled_info
         and messages[-1].get("role") == "assistant"
+        and (role_to_mask is None or role_to_mask(messages[-1]))
     ):
         stop_ids = set(renderer.get_stop_token_ids())
         last_trainable = next(

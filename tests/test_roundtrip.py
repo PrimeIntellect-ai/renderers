@@ -25,11 +25,11 @@ from typing import Any
 
 import pytest
 
-
 # (HuggingFace model name, renderer name or "auto"). These are the
 # renderers we actively rely on; expand as new ones get hand-coded.
 _ROUNDTRIP_MODELS = [
     ("Qwen/Qwen3-8B", "auto"),
+    ("PrimeIntellect/Qwen3-0.6B", "auto"),
     ("Qwen/Qwen3.5-9B", "auto"),
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
     ("Qwen/Qwen3-VL-4B-Instruct", "auto"),

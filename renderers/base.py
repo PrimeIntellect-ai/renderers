@@ -999,6 +999,10 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3-30B-A3B-Instruct-2507": "qwen3",
     "Qwen/Qwen3-30B-A3B-Thinking-2507": "qwen3",
     "Qwen/Qwen3-235B-A22B": "qwen3",
+    # PrimeIntellect Qwen3 — both sizes share the same Qwen3-Coder-style
+    # template with XML tool definitions and calls.
+    "PrimeIntellect/Qwen3-0.6B": "prime-qwen3",
+    "PrimeIntellect/Qwen3-1.7B": "prime-qwen3",
     # Qwen3.5. All seven sizes share the same renderer. The 4B / 9B /
     # 35B-A3B / 122B-A10B / 397B-A17B chat template defaults
     # ``enable_thinking=true`` (open ``<think>\n`` at the gen prompt);
@@ -1315,6 +1319,7 @@ def _populate_registry():
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
     from renderers.nemotron3 import Nemotron3Renderer, Nemotron3UltraRenderer
+    from renderers.prime_qwen3 import PrimeQwen3Renderer
     from renderers.qwen3 import Qwen3Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
     from renderers.qwen35 import Qwen35Renderer
@@ -1324,6 +1329,7 @@ def _populate_registry():
         {
             "default": DefaultRenderer,
             "qwen3": Qwen3Renderer,
+            "prime-qwen3": PrimeQwen3Renderer,
             "qwen3-vl": Qwen3VLRenderer,
             "qwen3.5": Qwen35Renderer,
             "qwen3.6": Qwen36Renderer,

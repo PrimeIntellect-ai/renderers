@@ -20,10 +20,10 @@ from functools import lru_cache
 
 import pytest
 
-
 # (HF model name, renderer name) — one representative per renderer class.
 _BRIDGE_MODELS = [
     ("Qwen/Qwen3-8B", "auto"),
+    ("PrimeIntellect/Qwen3-0.6B", "auto"),
     ("Qwen/Qwen3.5-9B", "auto"),
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
     ("zai-org/GLM-5", "auto"),

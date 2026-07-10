@@ -61,7 +61,10 @@ def _render_extra_keys(
         item_text = (
             json.dumps(item, ensure_ascii=False)
             if isinstance(item, Mapping)
-            or (isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)))
+            or (
+                isinstance(item, Sequence)
+                and not isinstance(item, (str, bytes, bytearray))
+            )
             else str(item)
         )
         rendered.append(f"\n<{key}>{item_text}</{key}>")
@@ -77,7 +80,9 @@ def _tool_definition(tool: ToolSpec) -> str:
 
     rendered = "\n<function>\n<name>" + str(raw_tool.get("name", "")) + "</name>"
     if "description" in raw_tool:
-        rendered += "\n<description>" + str(raw_tool["description"]).strip() + "</description>"
+        rendered += (
+            "\n<description>" + str(raw_tool["description"]).strip() + "</description>"
+        )
     rendered += "\n<parameters>"
 
     parameters = raw_tool.get("parameters")
@@ -90,7 +95,11 @@ def _tool_definition(tool: ToolSpec) -> str:
                     if "type" in param_fields:
                         rendered += "\n<type>" + str(param_fields["type"]) + "</type>"
                     if "description" in param_fields:
-                        rendered += "\n<description>" + str(param_fields["description"]).strip() + "</description>"
+                        rendered += (
+                            "\n<description>"
+                            + str(param_fields["description"]).strip()
+                            + "</description>"
+                        )
                     rendered += _render_extra_keys(
                         param_fields,
                         frozenset({"name", "type", "description"}),
@@ -281,9 +290,13 @@ class PrimeQwen3Renderer:
                 else:
                     self._render_assistant(message, message_index, builder)
             elif role == "tool":
-                opens_group = loop_index > 0 and loop_messages[loop_index - 1].get("role") != "tool"
+                opens_group = (
+                    loop_index > 0
+                    and loop_messages[loop_index - 1].get("role") != "tool"
+                )
                 closes_group = (
-                    loop_index == len(loop_messages) - 1 or loop_messages[loop_index + 1].get("role") != "tool"
+                    loop_index == len(loop_messages) - 1
+                    or loop_messages[loop_index + 1].get("role") != "tool"
                 )
                 self._render_tool(
                     message,
@@ -427,7 +440,9 @@ class PrimeQwen3Renderer:
         tool_calls = message.get("tool_calls") or []
         for tool_call_index, tool_call in enumerate(tool_calls):
             raw_call: Any = tool_call
-            if isinstance(raw_call, Mapping) and isinstance(raw_call.get("function"), Mapping):
+            if isinstance(raw_call, Mapping) and isinstance(
+                raw_call.get("function"), Mapping
+            ):
                 raw_call = raw_call["function"]
             if not isinstance(raw_call, Mapping):
                 raise TypeError("Tool calls must be mappings.")
@@ -455,7 +470,13 @@ class PrimeQwen3Renderer:
                         )
                         else str(argument_value)
                     )
-                    call_text += "<parameter=" + str(argument_name) + ">\n" + value_text + "\n</parameter>\n"
+                    call_text += (
+                        "<parameter="
+                        + str(argument_name)
+                        + ">\n"
+                        + value_text
+                        + "\n</parameter>\n"
+                    )
             call_text += "</function>\n"
             builder.emit_text(
                 call_text,
@@ -606,7 +627,11 @@ class PrimeQwen3Renderer:
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002
     ) -> RenderedTokens | None:
-        if not previous_prompt_ids or not new_messages or reject_assistant_in_extension(new_messages):
+        if (
+            not previous_prompt_ids
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
             return None
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
@@ -630,9 +655,13 @@ class PrimeQwen3Renderer:
         for message_index, message in enumerate(new_messages):
             role = message.get("role", "")
             if role == "tool":
-                opens_group = message_index == 0 or new_messages[message_index - 1].get("role") != "tool"
+                opens_group = (
+                    message_index == 0
+                    or new_messages[message_index - 1].get("role") != "tool"
+                )
                 closes_group = (
-                    message_index == len(new_messages) - 1 or new_messages[message_index + 1].get("role") != "tool"
+                    message_index == len(new_messages) - 1
+                    or new_messages[message_index + 1].get("role") != "tool"
                 )
                 self._render_tool(
                     message,

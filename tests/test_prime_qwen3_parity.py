@@ -189,4 +189,8 @@ def test_prime_qwen3_populates_assistant_masks(model):
     assert not any(rendered.sampled_mask[: len(generation_prompt)])
     assert any(rendered.sampled_mask[len(generation_prompt) :])
     assert rendered.sampled_mask[-1] is False
-    assert len(rendered.sampled_mask) == len(rendered.is_content) == len(rendered.token_ids)
+    assert (
+        len(rendered.sampled_mask)
+        == len(rendered.is_content)
+        == len(rendered.token_ids)
+    )

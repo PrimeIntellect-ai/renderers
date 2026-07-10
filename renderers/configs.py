@@ -181,6 +181,12 @@ class Qwen3RendererConfig(BaseRendererConfig):
     ``enable_thinking`` kwarg."""
 
 
+class PrimeQwen3RendererConfig(BaseRendererConfig):
+    """PrimeIntellect Qwen3 renderer config."""
+
+    name: Literal["prime-qwen3"] = "prime-qwen3"
+
+
 class Qwen35RendererConfig(BaseRendererConfig):
     """Qwen3.5 renderer config."""
 
@@ -649,6 +655,7 @@ RendererConfig = Annotated[
         AutoRendererConfig,
         DefaultRendererConfig,
         Qwen3RendererConfig,
+        PrimeQwen3RendererConfig,
         Qwen35RendererConfig,
         Qwen36RendererConfig,
         Qwen3VLRendererConfig,
@@ -688,6 +695,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "auto": AutoRendererConfig,
     "default": DefaultRendererConfig,
     "qwen3": Qwen3RendererConfig,
+    "prime-qwen3": PrimeQwen3RendererConfig,
     "qwen3.5": Qwen35RendererConfig,
     "qwen3.6": Qwen36RendererConfig,
     "qwen3-vl": Qwen3VLRendererConfig,
@@ -752,6 +760,7 @@ __all__ = [
     "MiniMaxM2RendererConfig",
     "Nemotron3RendererConfig",
     "Nemotron3UltraRendererConfig",
+    "PrimeQwen3RendererConfig",
     "Qwen35RendererConfig",
     "Qwen36RendererConfig",
     "Qwen3RendererConfig",

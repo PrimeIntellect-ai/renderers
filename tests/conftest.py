@@ -7,7 +7,6 @@ The same barrage of tests runs against every pair.
 import os
 
 import pytest
-
 from renderers import create_renderer
 from renderers.base import load_tokenizer
 from renderers.configs import config_from_name
@@ -20,6 +19,7 @@ from renderers.configs import config_from_name
 # own parametrization in the test file.
 RENDERER_MODELS = [
     ("Qwen/Qwen3-8B", "auto"),
+    ("PrimeIntellect/Qwen3-0.6B", "auto"),
     ("Qwen/Qwen3.5-9B", "auto"),
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
     ("Qwen/Qwen3-VL-4B-Instruct", "auto"),

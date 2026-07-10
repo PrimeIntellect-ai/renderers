@@ -32,6 +32,7 @@ _MODELS = [
     ("Qwen/Qwen3-8B", "auto"),  # hermes JSON  — control
     ("moonshotai/Kimi-K2-Instruct", "auto"),  # section JSON — control
     ("Qwen/Qwen3.5-9B", "auto"),  # XML
+    ("PrimeIntellect/Qwen3-0.6B", "auto"),  # XML
     ("zai-org/GLM-5", "auto"),  # XML
     ("MiniMaxAI/MiniMax-M2.5", "auto"),  # XML
     ("poolside/Laguna-XS.2", "auto"),  # XML

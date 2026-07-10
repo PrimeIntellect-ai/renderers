@@ -26,6 +26,7 @@ chat-template kwargs. Those fields are covered by parity tests against
 | Renderer | Config class | Template fields | Renderer-only fields |
 | --- | --- | --- | --- |
 | Qwen3 | `Qwen3RendererConfig` | `enable_thinking` | - |
+| PrimeIntellect Qwen3 | `PrimeQwen3RendererConfig` | - | - |
 | Qwen3.5 | `Qwen35RendererConfig` | `enable_thinking`, `add_vision_id` | `image_cache_max` |
 | Qwen3.6 | `Qwen36RendererConfig` | `enable_thinking`, `add_vision_id`, `preserve_thinking` | `image_cache_max` |
 | Qwen3-VL | `Qwen3VLRendererConfig` | `add_vision_id` | `image_cache_max` |
@@ -136,6 +137,7 @@ the knobs its template actually exposes:
 | DeepSeek R1 | `template` |
 | MiniMax M2 | `tool_cycle` |
 | DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / XS-2.1, Llama 3 | `all` |
+| PrimeIntellect Qwen3 | `all` |
 
 Config construction raises when an explicit template knob directly contradicts
 an explicit generic bridge policy. For example:

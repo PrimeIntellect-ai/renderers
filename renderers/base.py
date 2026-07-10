@@ -1659,6 +1659,8 @@ def build_training_sample(
     stop token at all. No-op when the template already closes the turn
     in-message (ChatML ``<|im_end|>``, Llama ``<|eot_id|>``); where it
     fires, the output intentionally diverges from ``apply_chat_template``.
+    Ignored for renderers without ``sampled_mask`` (``DefaultRenderer``) —
+    the close of an opaque template can't be located reliably.
     """
     rendered = renderer.render(messages, tools=tools)
     has_sampled_info = len(rendered.sampled_mask) == len(rendered.token_ids)
@@ -1700,7 +1702,13 @@ def build_training_sample(
             loss_mask.append(role_to_mask(msg))
 
     token_ids = list(rendered.token_ids)
-    if ensure_final_stop and messages[-1].get("role") == "assistant":
+    # Requires sampled_mask — opaque templates (DefaultRenderer) give no
+    # reliable way to locate the assistant close.
+    if (
+        ensure_final_stop
+        and has_sampled_info
+        and messages[-1].get("role") == "assistant"
+    ):
         stop_ids = set(renderer.get_stop_token_ids())
         last_trainable = next(
             (k for k in range(len(loss_mask) - 1, -1, -1) if loss_mask[k]), None

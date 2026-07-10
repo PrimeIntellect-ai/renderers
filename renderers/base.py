@@ -1707,6 +1707,8 @@ def build_training_sample(
         )
         if last_trainable is None or token_ids[last_trainable] not in stop_ids:
             token_ids.append(renderer.get_stop_token_ids()[0])
+            # loss_mask=True marks the token as trainable — the appended
+            # stop is a training target, like any sampled token.
             loss_mask.append(True)
 
     # Surface the multimodal payload for VLM renderers. ``None`` for text

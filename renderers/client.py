@@ -139,12 +139,8 @@ def _strip_base64_field(raw: bytes, prefix: bytes) -> tuple[bytes, memoryview | 
     return stripped, data
 
 
-def strip_routed_experts_data(raw: bytes) -> tuple[bytes, memoryview | None]:
-    return _strip_base64_field(raw, ROUTED_EXPERTS_DATA_PREFIX)
-
-
 def parse_generate_response(raw: bytes) -> dict[str, Any]:
-    stripped, routed_data = strip_routed_experts_data(raw)
+    stripped, routed_data = _strip_base64_field(raw, ROUTED_EXPERTS_DATA_PREFIX)
     stripped, kept_ids_data = _strip_base64_field(stripped, KEPT_TOKENS_IDS_PREFIX)
     payload: dict[str, Any] = json.loads(stripped)
     if routed_data is not None:

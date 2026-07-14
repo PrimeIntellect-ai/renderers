@@ -835,17 +835,17 @@ class Qwen35Renderer:
 
         # Merge prev mm_data (images from earlier turns) with the new turn's.
         merged_hashes: dict[str, list[str]] = (
-            dict(previous_multi_modal_data.mm_hashes)
+            {modality: list(vals) for modality, vals in previous_multi_modal_data.mm_hashes.items()}
             if previous_multi_modal_data
             else {}
         )
         merged_placeholders: dict[str, list[PlaceholderRange]] = (
-            dict(previous_multi_modal_data.mm_placeholders)
+            {modality: list(vals) for modality, vals in previous_multi_modal_data.mm_placeholders.items()}
             if previous_multi_modal_data
             else {}
         )
         merged_items: dict[str, list[dict[str, Any]]] = (
-            dict(previous_multi_modal_data.mm_items)
+            {modality: list(vals) for modality, vals in previous_multi_modal_data.mm_items.items()}
             if previous_multi_modal_data
             else {}
         )

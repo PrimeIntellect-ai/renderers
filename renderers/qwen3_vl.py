@@ -830,17 +830,17 @@ class Qwen3VLRenderer:
 
         # Merge prev mm_data with the new turn's items.
         merged_hashes = (
-            dict(previous_multi_modal_data.mm_hashes)
+            {modality: list(vals) for modality, vals in previous_multi_modal_data.mm_hashes.items()}
             if previous_multi_modal_data
             else {}
         )
         merged_placeholders = (
-            dict(previous_multi_modal_data.mm_placeholders)
+            {modality: list(vals) for modality, vals in previous_multi_modal_data.mm_placeholders.items()}
             if previous_multi_modal_data
             else {}
         )
         merged_items = (
-            dict(previous_multi_modal_data.mm_items)
+            {modality: list(vals) for modality, vals in previous_multi_modal_data.mm_items.items()}
             if previous_multi_modal_data
             else {}
         )

@@ -20,6 +20,7 @@ import re
 from typing import Protocol, runtime_checkable
 
 from renderers.base import ParsedToolCall, ToolCallParseStatus
+from renderers.parsing import _parse_xml_function_blocks
 
 
 # ── Shared helpers ───────────────────────────────────────────────────
@@ -156,7 +157,22 @@ class Qwen3ToolParser:
 
 
 class Qwen35ToolParser:
-    """XML-style tool calls: ``<tool_call><function=N><parameter=K>V</parameter>...</function></tool_call>``."""
+    """XML-style tool calls: ``<tool_call><function=N><parameter=K>V</parameter>...</function></tool_call>``.
+
+    Mirrors vLLM's ``Qwen3CoderToolParser`` extraction logic — see
+    ``renderers.parsing`` for the full ladder and the rationale behind
+    picking ``qwen3_coder`` over ``qwen3_xml``. This parser drives
+    ``DefaultRenderer`` when callers wire it up with
+    ``tool_parser="qwen3.5"``; ``Qwen35Renderer.parse_response``
+    routes through the same shared helpers via ``parse_qwen35``.
+
+    Schema-aware coercion is intentionally inert here: ``ToolParser``'s
+    ``extract`` API does not receive the tool list (callers consume
+    the parsed values as opaque dicts), so ``param_index`` is empty
+    and every parameter goes through the no-schema branch of
+    ``_coerce_arg_value`` — vLLM-equivalent verbatim strings after the
+    case-insensitive ``null`` short-circuit.
+    """
 
     def __init__(self, tokenizer):
         self._tokenizer = tokenizer
@@ -169,69 +185,57 @@ class Qwen35ToolParser:
         tc_start = _find(ids, self._tc_id)
         if tc_start == -1:
             return ids, []
+
         tool_calls: list[ParsedToolCall] = []
         i = tc_start
+        param_index: dict = {}
         while i < len(ids):
-            if ids[i] == self._tc_id:
-                end = (
-                    _find(ids, self._tc_end_id, i + 1)
-                    if self._tc_end_id is not None
-                    else -1
-                )
-                if end == -1:
-                    raw = _decode(self._tokenizer, ids[i + 1 :])
-                    tool_calls.append(
-                        ParsedToolCall(
-                            raw=raw,
-                            token_span=(i, len(ids)),
-                            status=ToolCallParseStatus.UNCLOSED_BLOCK,
-                        )
-                    )
-                    break
+            if ids[i] != self._tc_id:
+                i += 1
+                continue
+
+            end = (
+                _find(ids, self._tc_end_id, i + 1)
+                if self._tc_end_id is not None
+                else -1
+            )
+            if end == -1:
+                block_text = _decode(self._tokenizer, ids[i + 1 :])
+                span = (i, len(ids))
+                wrapper_unclosed = True
+            else:
                 block_text = _decode(self._tokenizer, ids[i + 1 : end])
                 span = (i, end + 1)
-                name_match = re.search(r"<function=([^>]+)>", block_text)
-                if not name_match:
-                    tool_calls.append(
-                        ParsedToolCall(
-                            raw=block_text,
-                            token_span=span,
-                            status=ToolCallParseStatus.MALFORMED_STRUCTURE,
-                        )
-                    )
-                    i = end + 1
-                    continue
-                name = name_match.group(1)
-                arguments: dict = {}
-                any_json_fallback = False
-                for pm in re.finditer(
-                    r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>",
-                    block_text,
-                    re.DOTALL,
-                ):
-                    arg_name = pm.group(1)
-                    arg_value = pm.group(2).strip()
-                    try:
-                        arguments[arg_name] = json.loads(arg_value)
-                    except (json.JSONDecodeError, ValueError):
-                        arguments[arg_name] = arg_value
-                        any_json_fallback = True
+                wrapper_unclosed = False
+
+            block_calls = _parse_xml_function_blocks(
+                block_text,
+                param_index=param_index,
+                token_span=span,
+                wrapper_unclosed=wrapper_unclosed,
+            )
+            if block_calls:
+                tool_calls.extend(block_calls)
+            elif wrapper_unclosed:
                 tool_calls.append(
                     ParsedToolCall(
                         raw=block_text,
-                        name=name,
-                        arguments=arguments,
                         token_span=span,
-                        status=(
-                            ToolCallParseStatus.INVALID_JSON
-                            if any_json_fallback
-                            else ToolCallParseStatus.OK
-                        ),
+                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
                     )
                 )
-                i = end + 1
             else:
-                i += 1
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=block_text,
+                        token_span=span,
+                        status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+                    )
+                )
+
+            if wrapper_unclosed:
+                break
+            i = end + 1
         return ids[:tc_start], tool_calls
 
 

@@ -71,7 +71,12 @@ PROMPT = [
 
 # Each case: a single ``x`` argument whose value is a STRING that
 # happens to be valid JSON of another type. With a schema declaring
-# ``x: string``, the parser must return the string verbatim.
+# ``x: string``, the parser must return the string verbatim across all
+# renderers — including the ``string-null`` case, which now rides
+# vLLM's priority-ordered ladder where ``string`` is the always-
+# succeeding terminal and ``null`` is only coerced when ``"null"`` is
+# in the type set (``Optional[str]`` declares it; pure ``str`` does
+# not). See ``vllm/tool_parsers/utils.py:coerce_to_schema_type``.
 JSON_LOOKING_STRING_ARGS = [
     pytest.param({"x": "true"}, id="string-bool"),
     pytest.param({"x": "42"}, id="string-int"),
@@ -120,7 +125,16 @@ def _extract_assistant_tokens(renderer, prompt, assistant_msg, *, tools=None):
 @pytest.mark.parametrize("args", JSON_LOOKING_STRING_ARGS)
 def test_string_arg_preserves_type(model, renderer_name, renderer, args):
     """Tool-call args of declared type ``str`` must round-trip as ``str``,
-    not get re-parsed as bool/int/null/list/dict by the parser."""
+    not get re-parsed as bool/int/null/list/dict by the parser.
+
+    Under vLLM ``coerce_to_schema_type`` parity, a string-typed param
+    whose wire bytes happen to spell ``null`` stays a string — null
+    coercion only fires when ``"null"`` is declared in the schema
+    (typically via ``Optional[X]`` ⇒ ``anyOf [X, null]`` or
+    ``type: ["X", "null"]``). The string branch is the always-
+    succeeding terminal of the priority ladder, so it absorbs every
+    bare wire value without flagging.
+    """
     msg = {
         "role": "assistant",
         "content": "",
@@ -136,6 +150,7 @@ def test_string_arg_preserves_type(model, renderer_name, renderer, args):
 
     assert parsed.tool_calls, f"{model}: parser returned no tool_calls"
     got = _normalize_args(parsed.tool_calls[0].arguments)
+
     assert got == args, (
         f"{model}: tool-arg type drift — sent {args!r}, parser returned {got!r}"
     )

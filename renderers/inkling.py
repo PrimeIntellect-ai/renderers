@@ -131,8 +131,13 @@ def _load_audio(part: Any) -> tuple[np.ndarray, int]:
     return np.asarray(data, dtype=np.float32), sampling_rate
 
 
-def _audio_hash(wav: np.ndarray) -> str:
-    return hashlib.sha256(np.ascontiguousarray(wav).tobytes()).hexdigest()
+def _audio_hash(wav: np.ndarray, sampling_rate: int) -> str:
+    # Sampling rate is part of the identity: identical samples at different
+    # rates yield different mel frames / sidecar tensors, so they must not
+    # share an ``mm_hashes`` entry (media IDs must be unique).
+    h = hashlib.sha256(str(sampling_rate).encode())
+    h.update(np.ascontiguousarray(wav).tobytes())
+    return h.hexdigest()
 
 
 class InklingRenderer:
@@ -263,7 +268,7 @@ class InklingRenderer:
         """Return the processor's ``{audio_input_ids, audio_input_ids_mask}``
         for one clip (cached). The number of ``<|unused_200053|>`` placeholders
         is ``audio_input_ids_mask[0].sum()`` (one per valid mel frame)."""
-        key = f"{sampling_rate}:{_audio_hash(wav)}"
+        key = _audio_hash(wav, sampling_rate)
         cached = self._audio_cache.get(key)
         if cached is not None:
             return cached
@@ -386,7 +391,7 @@ class InklingRenderer:
                 is_sampled=is_sampled,
                 is_content=marker_is_content,
             )
-            mm_hashes.setdefault("audio", []).append(_audio_hash(wav))
+            mm_hashes.setdefault("audio", []).append(_audio_hash(wav, sr))
             mm_placeholders.setdefault("audio", []).append(
                 PlaceholderRange(offset=offset, length=n_frames)
             )
@@ -875,7 +880,7 @@ class InklingRenderer:
                 is_sampled=is_sampled,
                 is_content=marker_is_content,
             )
-            new_hashes.setdefault("audio", []).append(_audio_hash(wav))
+            new_hashes.setdefault("audio", []).append(_audio_hash(wav, sr))
             new_placeholders.setdefault("audio", []).append(
                 PlaceholderRange(offset=offset, length=n_frames)
             )
@@ -916,18 +921,20 @@ class InklingRenderer:
         emit_special(self._message_model, -1, is_sampled=False, is_content=False)
 
         # Merge carried-forward mm_data (prior turns) with this turn's items.
+        # Copy the per-modality lists (not just the outer dict) so appending
+        # this turn's items never mutates the caller's previous_multi_modal_data.
         merged_hashes = (
-            dict(previous_multi_modal_data.mm_hashes)
+            {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
             if previous_multi_modal_data
             else {}
         )
         merged_placeholders = (
-            dict(previous_multi_modal_data.mm_placeholders)
+            {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
             if previous_multi_modal_data
             else {}
         )
         merged_items = (
-            dict(previous_multi_modal_data.mm_items)
+            {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
             if previous_multi_modal_data
             else {}
         )

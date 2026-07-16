@@ -818,6 +818,56 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     )
 
 
+def test_inkling_bridge_does_not_mutate_prior_mm_data(tiny_image):
+    """Bridging must not mutate the caller's ``previous_multi_modal_data`` —
+    the merge copies the per-modality lists, not just the outer dict, so a
+    carried-forward image doesn't grow the prior turn's list in place."""
+    model = "thinkingmachines/Inkling"
+    if not _hf_snapshot_cached(model):
+        pytest.skip(f"{model}: HF snapshot not cached locally")
+
+    _, processor, renderer = _load_processor_and_renderer(model)
+    initial = [
+        {
+            "role": "user",
+            "content": [
+                _image_content_part(tiny_image),
+                {"type": "text", "text": "Turn one."},
+            ],
+        }
+    ]
+    rendered = renderer.render(initial, add_generation_prompt=True)
+    prior = rendered.multi_modal_data
+    assert prior is not None and len(prior.mm_placeholders["image"]) == 1
+
+    close_id = renderer.get_stop_token_ids()[0]
+    completion_ids = processor.tokenizer.encode("Saw it.", add_special_tokens=False) + [
+        close_id
+    ]
+    new = [
+        {
+            "role": "user",
+            "content": [
+                _image_content_part(tiny_image),
+                {"type": "text", "text": "Turn two."},
+            ],
+        }
+    ]
+    bridged = renderer.bridge_to_next_turn(
+        rendered.token_ids,
+        completion_ids,
+        new,
+        previous_multi_modal_data=prior,
+    )
+    assert bridged is not None
+
+    # The prior sidecar is unchanged; the bridged one carries both images.
+    assert len(prior.mm_placeholders["image"]) == 1
+    assert len(prior.mm_hashes["image"]) == 1
+    assert len(prior.mm_items["image"]) == 1
+    assert len(bridged.multi_modal_data.mm_placeholders["image"]) == 2
+
+
 def test_modality_registry_models_route_to_renderer():
     """Every model in ``MULTIMODAL_MODELS`` resolves to a concrete renderer
     via ``create_renderer(renderer='auto')``. Guards against drift between

@@ -583,6 +583,12 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     ]
 
     initial_rendered = renderer.render(initial, add_generation_prompt=True)
+    prior_mm = initial_rendered.multi_modal_data
+    prior_counts = (
+        len(prior_mm.mm_placeholders.get(modality, [])),
+        len(prior_mm.mm_items.get(modality, [])),
+        len(prior_mm.mm_hashes.get(modality, [])),
+    )
     # ``previous_completion_ids`` mirrors what a sampler would emit
     # starting AFTER the prompt's assistant role opener — i.e. the
     # response text followed by ``<|im_end|>``.
@@ -631,6 +637,19 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     items = bridged_mm.mm_items.get(modality, [])
     hashes = bridged_mm.mm_hashes.get(modality, [])
     assert len(items) == 2 and len(hashes) == 2
+
+    # (2b) The prior turn's sidecar is unchanged — the bridge copies the
+    # per-modality lists, so the carried-forward item doesn't grow the
+    # caller's previous_multi_modal_data in place.
+    assert (
+        (
+            len(prior_mm.mm_placeholders.get(modality, [])),
+            len(prior_mm.mm_items.get(modality, [])),
+            len(prior_mm.mm_hashes.get(modality, [])),
+        )
+        == prior_counts
+        == (1, 1, 1)
+    ), f"{mm_model_name} / {modality}: bridge mutated previous_multi_modal_data"
 
     # (3) Extension contains the new turn's pad run, and its
     # placeholder offset lands inside the extension region.

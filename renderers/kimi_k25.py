@@ -1183,18 +1183,20 @@ class KimiK25Renderer:
             emit_text("<think></think>", -1)
 
         # Merge prev mm_data (earlier-turn images) with the new turn's items.
+        # Copy the per-modality lists (not just the outer dict) so appending
+        # below never mutates the caller's previous_multi_modal_data.
         merged_hashes: dict[str, list[str]] = (
-            dict(previous_multi_modal_data.mm_hashes)
+            {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
             if previous_multi_modal_data
             else {}
         )
         merged_placeholders: dict[str, list[PlaceholderRange]] = (
-            dict(previous_multi_modal_data.mm_placeholders)
+            {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
             if previous_multi_modal_data
             else {}
         )
         merged_items: dict[str, list[dict[str, Any]]] = (
-            dict(previous_multi_modal_data.mm_items)
+            {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
             if previous_multi_modal_data
             else {}
         )

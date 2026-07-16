@@ -72,6 +72,10 @@ _RENDERER_MODELS = [
     ("poolside/Laguna-XS-2.1", "auto"),
     ("poolside/Laguna-S-2.1", "auto"),
     ("tencent/Hy3", "auto"),
+    # Inkling — exercises its ``reasoning_effort`` template field (the
+    # matrix keeps the label values that construct: low/medium/high; the
+    # config validator drops ``no_think``).
+    ("thinkingmachines/Inkling", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
 ]
 

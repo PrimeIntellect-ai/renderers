@@ -1667,3 +1667,135 @@ def parse_llama_3(
     # "malformed attempt" against, so it falls through to content rather
     # than producing a non-OK ParsedToolCall.
     return ParsedResponse(content=text, reasoning_content=None)
+
+
+def parse_inkling(
+    tokenizer,
+    token_ids: list[int],
+    *,
+    stop_ids: set[int],
+    message_model_id: int,
+    content_text_id: int,
+    content_thinking_id: int,
+    invoke_json_id: int,
+    invoke_text_id: int,
+    end_message_id: int,
+) -> ParsedResponse:
+    """Parse Inkling completion tokens.
+
+    Inkling's assistant turn is a sequence of ``<|end_message|>``-terminated
+    segments; the model re-emits ``<|message_model|>`` before each segment
+    after the first (the first's opener is the generation prompt). Each
+    segment is classified by its leading content marker:
+
+    - ``<|content_thinking|>{reasoning}`` → reasoning
+    - ``<|content_text|>{content}`` → visible content
+    - ``{name}<|content_invoke_tool_json|>{"name":…,"args":…}`` → tool call
+
+    Content and reasoning are decoded verbatim (the template renders them
+    without whitespace normalisation). Tool-call arguments arrive as native
+    JSON (the template ``tojson``-encodes them), so types are preserved
+    without the schema-driven coercion the XML formats need — ``tools`` is
+    accepted for signature uniformity but unused.
+
+    ``token_span`` on each ``ParsedToolCall`` is the half-open slice of the
+    stop-stripped stream covering that tool-call segment (from its leading
+    ``<|message_model|>`` through the terminating ``<|end_message|>``).
+    """
+    ids = _strip_stop_tokens(token_ids, stop_ids)
+
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
+    tool_calls: list[ParsedToolCall] = []
+
+    pos = 0
+    n = len(ids)
+    while pos < n:
+        em = _find(ids, end_message_id, pos)
+        terminated = em != -1
+        seg_end = em if terminated else n
+        seg = ids[pos:seg_end]
+        # A non-first segment re-opens with <|message_model|>; drop it so the
+        # content marker is at the head. (The first segment's opener lives in
+        # the prompt, so it is usually already absent.)
+        s = 1 if seg and seg[0] == message_model_id else 0
+        body = seg[s:]
+
+        if not body:
+            pass
+        elif body[0] == content_thinking_id:
+            reasoning_parts.append(_decode(tokenizer, body[1:]))
+        elif body[0] == content_text_id:
+            content_parts.append(_decode(tokenizer, body[1:]))
+        else:
+            marker = _find_any(body, {invoke_json_id, invoke_text_id})
+            if marker != -1:
+                name = _decode(tokenizer, body[:marker]).strip()
+                payload = _decode(tokenizer, body[marker + 1 :])
+                tool_calls.append(
+                    _build_inkling_tool_call(
+                        name=name,
+                        payload=payload,
+                        token_span=(pos, seg_end + 1 if terminated else n),
+                        terminated=terminated,
+                    )
+                )
+            else:
+                # No content marker and no invoke marker — treat the decoded
+                # bytes as content rather than dropping them.
+                content_parts.append(_decode(tokenizer, body))
+
+        if not terminated:
+            break
+        pos = em + 1
+
+    return ParsedResponse(
+        content="".join(content_parts),
+        reasoning_content="".join(reasoning_parts) or None,
+        tool_calls=tool_calls,
+    )
+
+
+def _build_inkling_tool_call(
+    *, name: str, payload: str, token_span: tuple[int, int], terminated: bool
+) -> ParsedToolCall:
+    """Build a ``ParsedToolCall`` from an Inkling ``<|content_invoke_tool_json|>``
+    payload — ``{"name": …, "args": …}`` (native JSON, types preserved).
+
+    The function name inside the JSON is authoritative; the pre-marker text
+    (rendered as ``<|message_model|>{name}<|content_invoke_tool_json|>``) is a
+    fallback for a truncated / malformed payload.
+    """
+    parsed: Any = None
+    invalid_json = False
+    try:
+        parsed = json.loads(payload)
+    except (json.JSONDecodeError, ValueError):
+        invalid_json = True
+
+    fn_name: str | None = None
+    arguments: dict[str, Any] | str | None = None
+    if isinstance(parsed, dict):
+        raw_name = parsed.get("name")
+        fn_name = raw_name if isinstance(raw_name, str) and raw_name else (name or None)
+        arguments = parsed.get("args", {})
+    else:
+        fn_name = name or None
+        arguments = payload
+
+    if not terminated:
+        status = ToolCallParseStatus.UNCLOSED_BLOCK
+    elif invalid_json:
+        status = ToolCallParseStatus.INVALID_JSON
+    elif fn_name is None:
+        status = ToolCallParseStatus.MISSING_NAME
+    else:
+        status = ToolCallParseStatus.OK
+
+    return ParsedToolCall(
+        raw=payload,
+        name=fn_name,
+        arguments=arguments,
+        token_span=token_span,
+        status=status,
+    )

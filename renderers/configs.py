@@ -420,6 +420,68 @@ class Hy3RendererConfig(BaseRendererConfig):
         return self
 
 
+# Inkling's chat template accepts ``reasoning_effort`` as either a string
+# label or a raw float. The label→float map is the template's own
+# ``effort_map`` (see ``thinkingmachines/Inkling`` chat_template.jinja);
+# ``InklingRenderer`` imports this to render the effort line, and the
+# config validator uses the keys to reject unknown labels at construction.
+INKLING_EFFORT_MAP: dict[str, float] = {
+    "none": 0.0,
+    "minimal": 0.1,
+    "low": 0.2,
+    "medium": 0.7,
+    "high": 0.9,
+    "max": 0.99,
+}
+
+
+class InklingRendererConfig(BaseRendererConfig):
+    """Inkling renderer config (``thinkingmachines/Inkling``).
+
+    Inkling gates reasoning depth via a ``reasoning_effort`` knob rather
+    than a boolean ``enable_thinking``. It accepts either a string label
+    from :data:`INKLING_EFFORT_MAP` (``none`` … ``max``) or a raw float in
+    ``[0.0, 0.99]``; the renderer emits ``Thinking effort level: {N}`` in a
+    leading system message exactly as the chat template does (label mapped
+    to its float, ``0.0`` printed as ``"0"``). The template default —
+    applied when no ``reasoning_effort`` is passed — is ``0.9``, which this
+    config mirrors.
+
+    Reasoning is preserved on every historical assistant turn (the template
+    has no history-dropping knob), so the effective bridge policy is
+    ``"all"``.
+    """
+
+    name: Literal["inkling"] = "inkling"
+
+    reasoning_effort: str | float = 0.9
+    """Reasoning-effort gate. Mirrors the chat template's ``reasoning_effort``
+    kwarg: a label in :data:`INKLING_EFFORT_MAP` or a float in ``[0.0, 0.99]``.
+    Default ``0.9`` matches the template's own default (equivalent to
+    ``"high"``)."""
+
+    image_cache_max: int = 256
+    """FIFO bound on the per-renderer image-processor cache. Renderer-
+    internal — not a Jinja chat-template kwarg."""
+
+    _internal_fields = frozenset({"image_cache_max"})
+
+    @model_validator(mode="after")
+    def _check_reasoning_effort(self):
+        eff = self.reasoning_effort
+        if isinstance(eff, str):
+            if eff.strip() not in INKLING_EFFORT_MAP:
+                raise ValueError(
+                    f"reasoning_effort={eff!r} is not a known label. "
+                    f"Use one of {sorted(INKLING_EFFORT_MAP)} or a float in [0.0, 0.99]."
+                )
+        else:
+            num = float(eff)
+            if num < 0.0 or num > 0.99:
+                raise ValueError(f"reasoning_effort={eff!r} must be in [0.0, 0.99].")
+        return self
+
+
 class GptOssRendererConfig(BaseRendererConfig):
     """OpenAI gpt-oss (harmony) renderer config.
 
@@ -789,6 +851,7 @@ RendererConfig = Annotated[
         GLM45RendererConfig,
         GptOssRendererConfig,
         Hy3RendererConfig,
+        InklingRendererConfig,
         KimiK2RendererConfig,
         KimiK25RendererConfig,
         LagunaXS2RendererConfig,
@@ -833,6 +896,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "glm-4.5": GLM45RendererConfig,
     "gpt-oss": GptOssRendererConfig,
     "hy3": Hy3RendererConfig,
+    "inkling": InklingRendererConfig,
     "kimi-k2": KimiK2RendererConfig,
     "kimi-k2.5": KimiK25RendererConfig,
     "laguna-xs.2": LagunaXS2RendererConfig,
@@ -885,6 +949,8 @@ __all__ = [
     "Gemma4RendererConfig",
     "GptOssRendererConfig",
     "Hy3RendererConfig",
+    "INKLING_EFFORT_MAP",
+    "InklingRendererConfig",
     "KimiK25RendererConfig",
     "KimiK2RendererConfig",
     "LagunaM1RendererConfig",

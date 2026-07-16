@@ -37,6 +37,7 @@ chat-template kwargs. Those fields are covered by parity tests against
 | Hy3 | `Hy3RendererConfig` | `reasoning_effort`, `preserved_thinking`, `is_training`, `raw_last_assistant`, `fallback_strategy` | - |
 | Kimi K2 | `KimiK2RendererConfig` | - | `enable_thinking` |
 | Kimi K2.5 / 2.6 | `KimiK25RendererConfig` | `thinking` | `image_cache_max` |
+| Inkling | `InklingRendererConfig` | `reasoning_effort` | `image_cache_max` |
 | Laguna XS.2 | `LagunaXS2RendererConfig` | `enable_thinking`, `render_assistant_messages_raw` | - |
 | Laguna M.1 | `LagunaM1RendererConfig` | `enable_thinking`, `render_assistant_messages_raw` | - |
 | Laguna XS-2.1 | `LagunaXS21RendererConfig` | `enable_thinking` | - |
@@ -141,7 +142,7 @@ the knobs its template actually exposes:
 | Nemotron-3 / 3.5 | `truncate_history_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | DeepSeek R1 | `template` |
 | MiniMax M2 | `tool_cycle` |
-| DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / M.1 / XS-2.1 / S-2.1, Llama 3 | `all` |
+| DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / M.1 / XS-2.1 / S-2.1, Llama 3, Inkling | `all` |
 | PrimeIntellect Qwen3 | `all` |
 
 Config construction raises when an explicit template knob directly contradicts

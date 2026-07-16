@@ -828,19 +828,21 @@ class Qwen3VLRenderer:
         em.text("assistant\n", is_sampled=False, is_content=False)
         em.finalize()
 
-        # Merge prev mm_data with the new turn's items.
+        # Merge prev mm_data with the new turn's items. Copy the per-modality
+        # lists (not just the outer dict) so appending below never mutates the
+        # caller's previous_multi_modal_data.
         merged_hashes = (
-            dict(previous_multi_modal_data.mm_hashes)
+            {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
             if previous_multi_modal_data
             else {}
         )
         merged_placeholders = (
-            dict(previous_multi_modal_data.mm_placeholders)
+            {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
             if previous_multi_modal_data
             else {}
         )
         merged_items = (
-            dict(previous_multi_modal_data.mm_items)
+            {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
             if previous_multi_modal_data
             else {}
         )

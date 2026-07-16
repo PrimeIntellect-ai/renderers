@@ -19,9 +19,7 @@ dependencies = [
     "openai>=1.108.1",
     "tiktoken",
     "jinja2",
-    # Floor is >=5.14.0: that is the first release shipping native Inkling
-    # support (InklingProcessor / image + audio processors), which
-    # ``InklingRenderer`` loads without trust_remote_code.
+    # >=5.14.0: first release with native Inkling processor support.
     "transformers>=5.14.0",
     # Used by GptOssRenderer to render and parse harmony tokens. Vendoring
     # OpenAI's reference implementation keeps us byte-identical with vLLM
@@ -104,6 +102,7 @@ exclude-newer = "7 days"
 # fast-track so first-party releases can land same-day. Only packages that
 # appear in `uv tree` are listed.
 prime-pydantic-config = false
+
 [tool.ty.environment]
 python-version = "3.13"
 

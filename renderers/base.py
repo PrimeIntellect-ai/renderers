@@ -1093,9 +1093,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
-    # Thinking Machines Inkling (vision + audio MoE). Native transformers
-    # support (>= 5.14) ships the processor, so the tokenizer + processor load
-    # without trust_remote_code.
+    # Thinking Machines Inkling (vision + audio; native processor in transformers >= 5.14).
     "thinkingmachines/Inkling": "inkling",
     # Tencent Hunyuan Hy3 (295B-A21B MoE). The FP8 checkpoint shares the same
     # tokenizer and chat template. Hy3-preview is deliberately unmapped: it
@@ -1145,10 +1143,6 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     # ``grid_thws``.
     "moonshotai/Kimi-K2.5": {"image"},
     "moonshotai/Kimi-K2.6": {"image"},
-    # Inkling is a unified vision + audio model. Its processor expands the
-    # single template placeholder per item into ``num_patches`` image
-    # placeholders / one audio placeholder per mel frame; ``InklingRenderer``
-    # mirrors that and ships ``pixel_values`` / ``audio_input_ids``.
     "thinkingmachines/Inkling": {"image", "audio"},
 }
 

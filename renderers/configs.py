@@ -420,11 +420,7 @@ class Hy3RendererConfig(BaseRendererConfig):
         return self
 
 
-# Inkling's chat template accepts ``reasoning_effort`` as either a string
-# label or a raw float. The label→float map is the template's own
-# ``effort_map`` (see ``thinkingmachines/Inkling`` chat_template.jinja);
-# ``InklingRenderer`` imports this to render the effort line, and the
-# config validator uses the keys to reject unknown labels at construction.
+# Inkling ``reasoning_effort`` label → float (the template's own effort_map).
 INKLING_EFFORT_MAP: dict[str, float] = {
     "none": 0.0,
     "minimal": 0.1,

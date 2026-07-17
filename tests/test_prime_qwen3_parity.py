@@ -194,3 +194,61 @@ def test_prime_qwen3_populates_assistant_masks(model):
         == len(rendered.is_content)
         == len(rendered.token_ids)
     )
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_prime_qwen3_empty_think_roundtrip(model):
+    """A sampled empty ``<think></think>`` block round-trips
+    parse → message → re-render byte-identically with the bridged sampled
+    stream. ``parse_qwen35`` used to collapse the empty-but-present block
+    to ``reasoning_content=None``; the renderer's key-presence check then
+    dropped the block on re-render, forking every later re-render of the
+    rollout (the template keeps reasoning on ALL historical turns, and
+    renders ``reasoning_content=""`` as ``<think></think>``)."""
+    tokenizer, renderer = _load(model)
+    stop = renderer.get_stop_token_ids()[0]
+
+    prompt = [{"role": "user", "content": "Reverse abc"}]
+    prompt_ids = renderer.render_ids(prompt, add_generation_prompt=True)
+    # Tokenize the sampled turn in context so the completion carries the
+    # exact BPE merges the model would produce continuing the stream.
+    sampled = "<think></think>\ncba"
+    full = tokenizer.encode(
+        tokenizer.decode(prompt_ids) + sampled, add_special_tokens=False
+    )
+    assert full[: len(prompt_ids)] == prompt_ids
+    completion_ids = full[len(prompt_ids) :] + [stop]
+
+    parsed = renderer.parse_response(completion_ids)
+    assert parsed.reasoning_content == ""  # present-but-empty, not None
+    assert parsed.content == "cba"
+
+    assistant = {"role": "assistant", "content": parsed.content}
+    if parsed.reasoning_content is not None:
+        assistant["reasoning_content"] = parsed.reasoning_content
+    reminder = {"role": "user", "content": "Now reverse def"}
+
+    bridged = renderer.bridge_to_next_turn(prompt_ids, completion_ids, [reminder])
+    assert bridged is not None
+    rerender = renderer.render_ids(
+        [*prompt, assistant, reminder], add_generation_prompt=True
+    )
+    assert bridged.token_ids == rerender, (
+        f"{model}: bridged sampled stream and re-render disagree:\n"
+        f"bridge:   {tokenizer.decode(bridged.token_ids)!r}\n"
+        f"rerender: {tokenizer.decode(rerender)!r}"
+    )
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_prime_qwen3_no_think_parses_to_none(model):
+    """Guard: a completion with no think block at all keeps
+    ``reasoning_content=None``, so the key stays absent from stored
+    messages and no ``<think></think>`` is invented on re-render."""
+    tokenizer, renderer = _load(model)
+    stop = renderer.get_stop_token_ids()[0]
+
+    completion_ids = tokenizer.encode("cba", add_special_tokens=False) + [stop]
+    parsed = renderer.parse_response(completion_ids)
+    assert parsed.reasoning_content is None
+    assert parsed.content == "cba"

@@ -418,6 +418,31 @@ def test_chat_template_kwarg_parity_hf(
     # config subclass that drops the field.
     assert kwarg in type(renderer.config).template_field_names()
 
+    # Documented deviation: with ``enable_thinking=False`` the Qwen family
+    # re-emits the empty ``<think>\n\n</think>\n\n`` wrapper on historical
+    # assistant turns without reasoning_content, where the Jinja template
+    # strips it. The generation prompt prefills the wrapper, so stripping
+    # it on re-render would make the sampled stream and the re-render of
+    # the same conversation disagree at the token level. ``multi_turn`` is
+    # the only shape with such a turn — except on qwen3, whose template
+    # window additionally requires ``is_last or reasoning_content``, so its
+    # non-last tool-call turn in ``tool_cycle`` is stripped too. Stability
+    # is pinned in ``test_disabled_thinking_stability.py``.
+    resolved = _resolve_renderer_name(model, renderer_name)
+    deviating_shapes = (
+        ("multi_turn", "tool_cycle") if resolved == "qwen3" else ("multi_turn",)
+    )
+    if (
+        resolved in ("qwen3", "qwen3.5", "qwen3.6")
+        and kwarg == "enable_thinking"
+        and value is False
+        and shape_id in deviating_shapes
+    ):
+        pytest.skip(
+            "deliberate template deviation: empty think wrapper kept on "
+            "historical turns for sampled-token stability"
+        )
+
     try:
         expected = _expected_hf(
             tokenizer, messages, kwarg=kwarg, value=value, **render_kwargs

@@ -437,6 +437,20 @@ def _build_tool_image_cases(make_part, image):
 # ---------------------------------------------------------------------------
 
 
+def _skip_for_disabled_thinking_deviation(renderer, case_id) -> bool:
+    """With ``enable_thinking=False`` (the resolved default on the small
+    Qwen3.5 sizes) the Qwen family re-emits the empty think wrapper on
+    historical assistant turns without reasoning — a documented deviation
+    from the template for sampled-token stability (see
+    ``test_disabled_thinking_stability.py``). Cases with an assistant turn
+    before the last user query therefore diverge from the processor oracle
+    by exactly those wrapper tokens; skip them for parity purposes."""
+    return getattr(renderer.config, "enable_thinking", True) is False and case_id in (
+        "multi_turn_two_images",
+        "multi_turn_tool_response_images",
+    )
+
+
 def _supports_tool_message_images(renderer) -> bool:
     """True iff this renderer emits image placeholders inside tool-response
     content. Renderers without the feature silently drop image parts in tool
@@ -466,6 +480,8 @@ def test_multimodal_byte_parity_vs_processor(mm_model_name, modality, tiny_image
 
     for case in _build_cases(kit["make_part"], tiny_image):
         messages, add_gp = case.values
+        if _skip_for_disabled_thinking_deviation(renderer, case.id):
+            continue
 
         # Ours.
         ours = renderer.render_ids(messages, add_generation_prompt=add_gp)
@@ -709,6 +725,8 @@ def test_tool_response_image_byte_parity(mm_model_name, modality, tiny_image):
 
     for case in _build_tool_image_cases(kit["make_part"], tiny_image):
         messages, add_gp = case.values
+        if _skip_for_disabled_thinking_deviation(renderer, case.id):
+            continue
         ours = renderer.render_ids(messages, add_generation_prompt=add_gp)
         theirs = kit["processor_input_ids"](processor, messages, add_gp)
         assert ours == theirs, (
@@ -796,6 +814,8 @@ def test_add_vision_id_parity_vs_processor(
 
     for case in _build_cases(kit["make_part"], tiny_image):
         messages, add_gp = case.values
+        if _skip_for_disabled_thinking_deviation(renderer, case.id):
+            continue
         ours = renderer.render_ids(messages, add_generation_prompt=add_gp)
         theirs = _qwen_vl_processor_input_ids_with_kwargs(
             processor, messages, add_gp, add_vision_id=add_vision_id

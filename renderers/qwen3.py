@@ -5,6 +5,15 @@ Key differences from Qwen3.5:
 - Tool calls use JSON format: {"name": "...", "arguments": ...}
 - Thinking blocks only inserted when loop.last OR reasoning_content present
 - Generation prompt does NOT add <think> by default
+
+One documented deviation from the Jinja template: with
+``enable_thinking=False`` the empty ``<think>\n\n</think>\n\n`` wrapper is
+re-emitted on historical assistant turns without ``reasoning_content`` (the
+template strips it from turns at or before the last user query). The
+generation prompt prefills that wrapper, so every turn sampled with thinking
+disabled contains it — stripping it on re-render would make the same
+conversation produce different tokens depending on when it is rendered.
+See ``tests/test_disabled_thinking_stability.py``.
 """
 
 from __future__ import annotations
@@ -477,7 +486,17 @@ class Qwen3Renderer:
         emit_in_template_window = msg_idx > last_query_index and (
             is_last or reasoning_content
         )
-        if emit_in_template_window:
+        # With thinking disabled, the generation prompt prefilled the empty
+        # ``<think>\n\n</think>\n\n`` wrapper, so it is part of every sampled
+        # turn's token stream. Re-emit it on historical turns — deviating
+        # from the Jinja template, which strips it from turns at or before
+        # the last user query — so re-renders stay token-stable with what
+        # the model actually sampled. Turns that carry reasoning_content
+        # were not sampled under this config; those stay template-faithful.
+        emit_thinking = emit_in_template_window or (
+            not self.config.enable_thinking and not reasoning_content
+        )
+        if emit_thinking:
             body = (
                 "<think>\n"
                 + reasoning_content.strip("\n")

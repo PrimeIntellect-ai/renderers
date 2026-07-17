@@ -445,10 +445,9 @@ def _skip_for_disabled_thinking_deviation(renderer, case_id) -> bool:
     ``test_disabled_thinking_stability.py``). Cases with an assistant turn
     before the last user query therefore diverge from the processor oracle
     by exactly those wrapper tokens; skip them for parity purposes."""
-    return (
-        getattr(renderer.config, "enable_thinking", True) is False
-        and case_id
-        in ("multi_turn_two_images", "multi_turn_tool_response_images")
+    return getattr(renderer.config, "enable_thinking", True) is False and case_id in (
+        "multi_turn_two_images",
+        "multi_turn_tool_response_images",
     )
 
 

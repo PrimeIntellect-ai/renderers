@@ -24,7 +24,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-import pytest
 
 from renderers import create_renderer
 from renderers.base import load_tokenizer
@@ -52,9 +51,7 @@ def _load(model_name: str):
 
 def pytest_generate_tests(metafunc):
     if "dt_model" in metafunc.fixturenames:
-        metafunc.parametrize(
-            "dt_model,dt_config", _MODELS, ids=[m for m, _ in _MODELS]
-        )
+        metafunc.parametrize("dt_model,dt_config", _MODELS, ids=[m for m, _ in _MODELS])
 
 
 def test_sampled_stream_is_prefix_of_rerender(dt_model, dt_config):
@@ -104,11 +101,7 @@ def test_wrapper_reemitted_on_historical_turn(dt_model, dt_config):
             {"role": "user", "content": "Now 3+3?"},
         ]
     )
-    turn = [
-        t
-        for t, i in zip(rendered.token_ids, rendered.message_indices)
-        if i == 1
-    ]
+    turn = [t for t, i in zip(rendered.token_ids, rendered.message_indices) if i == 1]
     text = tok.decode(turn)
     assert _EMPTY_WRAPPER in text, (
         f"{dt_model}: historical assistant turn rendered without the "

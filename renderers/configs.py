@@ -178,7 +178,13 @@ class Qwen3RendererConfig(BaseRendererConfig):
     enable_thinking: bool = True
     """When ``True``, the generation prompt includes ``<think>`` so the
     model continues into a thinking block. Mirrors the chat template's
-    ``enable_thinking`` kwarg."""
+    ``enable_thinking`` kwarg.
+
+    When ``False``, the renderer deliberately deviates from the template
+    on historical assistant turns without ``reasoning_content``: the empty
+    ``<think>\\n\\n</think>\\n\\n`` wrapper the generation prompt prefilled
+    is re-emitted instead of stripped, keeping re-renders token-stable with
+    the sampled stream (see ``renderers/qwen3.py`` module docstring)."""
 
 
 class PrimeQwen3RendererConfig(BaseRendererConfig):
@@ -196,7 +202,14 @@ class Qwen35RendererConfig(BaseRendererConfig):
     """When ``True``, the generation prompt includes ``<think>``. ``None``
     auto-detects from the tokenizer's chat-template default — Instruct
     checkpoints default off, Thinking checkpoints default on. Mirrors
-    the chat template's ``enable_thinking`` kwarg."""
+    the chat template's ``enable_thinking`` kwarg.
+
+    When resolved ``False``, the renderer deliberately deviates from the
+    template on historical assistant turns without ``reasoning_content``:
+    the empty ``<think>\\n\\n</think>\\n\\n`` wrapper the generation prompt
+    prefilled is re-emitted instead of stripped, keeping re-renders
+    token-stable with the sampled stream (see ``renderers/qwen35.py``
+    module docstring)."""
 
     add_vision_id: bool = False
     """When ``True``, prefix each ``<|vision_start|>`` placeholder with

@@ -663,6 +663,29 @@ class DeepSeekR1RendererConfig(BaseRendererConfig):
     name: Literal["deepseek-r1"] = "deepseek-r1"
 
 
+class RlmRendererConfig(BaseRendererConfig):
+    """RLM chat format (``PrimeIntellect/RLM-Chat-Template``) — minimal
+    role-tag-only format for the rlm harness.
+
+    One message, one tag block: ``<system> <user> <assistant> <output>``
+    plus the single inline tool call ``<ipython>...</ipython>``. Thinking is
+    structurally never dropped, so ``thinking_retention`` may only be left
+    unset or ``"all"``. Tool schemas are never rendered; ``tools=`` is
+    validation-only (exactly ``[ipython]`` is accepted).
+    """
+
+    name: Literal["rlm"] = "rlm"
+
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        if self.thinking_retention not in (None, "all"):
+            raise ValueError(
+                "rlm never drops thinking; thinking_retention must be unset "
+                f"or 'all', got {self.thinking_retention!r}"
+            )
+        return self
+
+
 RendererConfig = Annotated[
     Union[
         AutoRendererConfig,
@@ -687,6 +710,7 @@ RendererConfig = Annotated[
         Nemotron3UltraRendererConfig,
         DeepSeekV3RendererConfig,
         DeepSeekR1RendererConfig,
+        RlmRendererConfig,
     ],
     Field(discriminator="name"),
 ]
@@ -727,6 +751,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "nemotron-3-ultra": Nemotron3UltraRendererConfig,
     "deepseek-v3": DeepSeekV3RendererConfig,
     "deepseek-r1": DeepSeekR1RendererConfig,
+    "rlm": RlmRendererConfig,
 }
 
 

@@ -131,18 +131,34 @@ class RlmRenderer:
             return content
         if len(tool_calls) != 1:
             raise ValueError("rlm allows exactly one ipython call per assistant turn")
-        fn = tool_calls[0].get("function") or {}
-        if fn.get("name") != "ipython":
-            raise ValueError(f"unknown tool: {fn.get('name')!r} (only ipython exists)")
-        arguments = fn.get("arguments")
-        if isinstance(arguments, str):
-            arguments = json.loads(arguments)
+        name, arguments = self._normalize_tool_call(tool_calls[0])
+        if name != "ipython":
+            raise ValueError(f"unknown tool: {name!r} (only ipython exists)")
         if not isinstance(arguments, dict) or "code" not in arguments:
             raise ValueError("ipython arguments must carry a 'code' key")
         code = arguments["code"]
         if not isinstance(code, str):
             raise ValueError("ipython 'code' must be a string")
         return content + "<ipython>" + code + "</ipython>"
+
+    @staticmethod
+    def _normalize_tool_call(tc: Any) -> tuple[Any, Any]:
+        """Return ``(name, arguments)`` from any of the shapes rlm data carries.
+
+        Accepted: the OpenAI shape (``{"function": {"name", "arguments"}}``),
+        the verifiers trace shape (flat ``{"name", "arguments"}``), and either
+        as a JSON string (HF datasets store trace tool_calls as strings).
+        ``arguments`` may itself be a JSON string; it is parsed here.
+        """
+        if isinstance(tc, str):
+            tc = json.loads(tc)
+        if not isinstance(tc, dict):
+            raise ValueError(f"unparseable tool call: {tc!r}")
+        fn = tc.get("function") if isinstance(tc.get("function"), dict) else tc
+        arguments = fn.get("arguments")
+        if isinstance(arguments, str):
+            arguments = json.loads(arguments)
+        return fn.get("name"), arguments
 
     # The <ipython>/<\ipython> markers are single added tokens, so encoding the
     # assembled body yields the same ids as the chat template (which encodes a
@@ -175,8 +191,8 @@ class RlmRenderer:
             content = self._render_content(msg.get("content"))
 
             if role == "system":
-                if i != 0:
-                    raise ValueError("System message must be at the beginning.")
+                # Any position: the chat template renders <system> wherever it
+                # appears, and rlm compaction traces carry mid-list systems.
                 emit([self._system], i, is_sampled=False, is_content=False)
                 emit(self._encode(content), i, is_sampled=False, is_content=True)
                 emit([self._system_end], i, is_sampled=False, is_content=False)

@@ -179,6 +179,20 @@ def test_render_rejects_bad_tool_calls(renderer):
         renderer.render_ids([{"role": "user", "content": "u"}, {**base, "tool_calls": [tc, tc]}])
 
 
+def test_render_accepts_trace_shape_tool_calls(renderer, rlm_tokenizer):
+    # HF datasets store verifiers-trace tool calls as flat JSON strings.
+    msgs = [
+        {"role": "user", "content": "u"},
+        {
+            "role": "assistant",
+            "content": "c",
+            "tool_calls": ['{"id": "t1", "name": "ipython", "arguments": "{\\"code\\": \\"print(1)\\"}"}'],
+        },
+    ]
+    text = rlm_tokenizer.decode(renderer.render_ids(msgs))
+    assert "<ipython>print(1)</ipython>" in text
+
+
 def test_parse_response_roundtrip(renderer, rlm_tokenizer):
     body = "<think>plan</think>text<ipython>print(1)</ipython>"
     ids = rlm_tokenizer.encode(body, add_special_tokens=False) + [23]

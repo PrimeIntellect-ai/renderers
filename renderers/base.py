@@ -1319,6 +1319,7 @@ def _populate_registry():
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
     from renderers.nemotron3 import Nemotron3Renderer, Nemotron3UltraRenderer
+    from renderers.nemotron_vl import NemotronVLRenderer
     from renderers.prime_qwen3 import PrimeQwen3Renderer
     from renderers.qwen3 import Qwen3Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
@@ -1347,6 +1348,7 @@ def _populate_registry():
             "llama-3": Llama3Renderer,
             "nemotron-3": Nemotron3Renderer,
             "nemotron-3-ultra": Nemotron3UltraRenderer,
+            "nemotron-vl": NemotronVLRenderer,
             "gpt-oss": GptOssRenderer,
         }
     )

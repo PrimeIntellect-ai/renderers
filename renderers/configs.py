@@ -588,6 +588,41 @@ class Nemotron3RendererConfig(BaseRendererConfig):
     ``renderers.nemotron3._is_super``)."""
 
 
+class NemotronVLRendererConfig(Nemotron3RendererConfig):
+    """Nemotron-VL renderer config — Nemotron-3 Nano/Super chat template plus
+    Nano-Omni-style dynamic-resolution image inputs (single tile per image,
+    ``<img>`` + N×``<image>`` + ``</img>`` expansion, patchified pixel_values).
+
+    Image-preprocessing fields default to Nano Omni's ``preprocessor_config.json``.
+    """
+
+    name: Literal["nemotron-vl"] = "nemotron-vl"  # type: ignore[assignment]
+
+    patch_size: int = 16
+    """ViT patch size (pixels). RADIO ViT-H/16."""
+
+    min_num_patches: int = 1024
+    """Lower bound for a tile's pre-shuffle 16px patch grid (1024 -> 256 tokens)."""
+
+    max_num_patches: int = 13312
+    """Upper bound for a tile's pre-shuffle patch grid (13312 -> 3328 tokens)."""
+
+    max_model_len: int = 16384
+    """Context budget the Omni processor derives its per-image cap from
+    (``(max_model_len - 4) * 4`` pre-shuffle patches, clamped to
+    ``[min_num_patches, max_num_patches]``)."""
+
+    norm_mean: tuple[float, float, float] = (0.48145466, 0.4578275, 0.40821073)
+    """CLIP normalization mean (per channel, applied after /255)."""
+
+    norm_std: tuple[float, float, float] = (0.26862954, 0.26130258, 0.27577711)
+    """CLIP normalization std (per channel)."""
+
+    image_cache_max: int = 8
+    """Per-renderer FIFO cache of preprocessed images (patchified tensors are
+    up to ~40 MB each, so keep this small)."""
+
+
 class Nemotron3UltraRendererConfig(BaseRendererConfig):
     """Nemotron-3 **Ultra** renderer config — distinct discriminator so the
     registry routes Ultra checkpoints to the Ultra template variant.
@@ -672,6 +707,7 @@ RendererConfig = Annotated[
         MiniMaxM2RendererConfig,
         Nemotron3RendererConfig,
         Nemotron3UltraRendererConfig,
+        NemotronVLRendererConfig,
         DeepSeekV3RendererConfig,
         DeepSeekR1RendererConfig,
     ],
@@ -712,6 +748,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "minimax-m2": MiniMaxM2RendererConfig,
     "nemotron-3": Nemotron3RendererConfig,
     "nemotron-3-ultra": Nemotron3UltraRendererConfig,
+    "nemotron-vl": NemotronVLRendererConfig,
     "deepseek-v3": DeepSeekV3RendererConfig,
     "deepseek-r1": DeepSeekR1RendererConfig,
 }

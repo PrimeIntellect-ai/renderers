@@ -39,7 +39,7 @@ from renderers.base import (
     extract_message_tool_names,
 )
 from renderers.configs import NemotronVLRendererConfig
-from renderers.nemotron3 import Nemotron3Renderer
+from renderers.nemotron3 import _TOOLS_FOOTER, _TOOLS_HEADER, _TOOLS_INSTRUCTIONS, Nemotron3Renderer
 from renderers.qwen3_vl import _image_hash, _is_image_part, _is_video_part, _load_pil_image
 
 
@@ -161,8 +161,6 @@ class NemotronVLRenderer(Nemotron3Renderer):
             raise ValueError("No messages provided.")
         if not _messages_have_images(messages):
             return super().render(messages, tools=tools, add_generation_prompt=add_generation_prompt)
-        if tools:
-            raise NotImplementedError("NemotronVLRenderer does not support tools together with images yet.")
 
         original_messages = list(messages)
         messages, auto_system_injected = self._normalize_messages(messages)
@@ -254,16 +252,35 @@ class NemotronVLRenderer(Nemotron3Renderer):
                 segments.append((tail, False))
             flush()
 
-        # ── 1. System message (tools rejected above) ─────────────────
+        # ── 1. System message + optional tools (Nemotron-3: system text, then tools block) ──
         first_is_system = messages[0].get("role") == "system"
-        if first_is_system:
-            sys_idx = orig_idx(0)
-            sys_content = self._render_content(messages[0].get("content"))
+        if tools:
+            sys_idx = orig_idx(0) if first_is_system else -1
+            sys_content = self._render_content(messages[0].get("content")) if first_is_system else ""
+            tools_block = (
+                _TOOLS_HEADER
+                + "\n"
+                + "\n".join(self._format_tool_declaration(t) for t in tools)
+                + _TOOLS_FOOTER
+                + _TOOLS_INSTRUCTIONS
+            )
             emit_special(self._im_start, sys_idx, is_sampled=False, is_content=False)
             sys_segments: list[tuple[str, bool]] = [("system\n", False)]
             if sys_content:
                 sys_segments.append((sys_content, True))
+                sys_segments.append(("\n\n", False))
+            sys_segments.append((tools_block, False))
             emit_text_segments(sys_segments, sys_idx, is_sampled=False)
+            emit_special(self._im_end, sys_idx, is_sampled=False, is_content=False)
+            emit_text("\n", sys_idx, is_sampled=False, is_content=False)
+        elif first_is_system:
+            sys_idx = orig_idx(0)
+            sys_content = self._render_content(messages[0].get("content"))
+            emit_special(self._im_start, sys_idx, is_sampled=False, is_content=False)
+            sys_segments2: list[tuple[str, bool]] = [("system\n", False)]
+            if sys_content:
+                sys_segments2.append((sys_content, True))
+            emit_text_segments(sys_segments2, sys_idx, is_sampled=False)
             emit_special(self._im_end, sys_idx, is_sampled=False, is_content=False)
             emit_text("\n", sys_idx, is_sampled=False, is_content=False)
 
@@ -302,19 +319,21 @@ class NemotronVLRenderer(Nemotron3Renderer):
                 )
 
             elif role == "tool":
-                content = msg.get("content")
-                if isinstance(content, list) and any(_is_image_part(item) for item in content):
-                    raise NotImplementedError("Images in tool messages are not supported by NemotronVLRenderer.")
-                self._render_tool(
-                    messages,
-                    i,
-                    self._render_content(content),
-                    msg_orig_idx=msg_orig_idx,
-                    auto_system_injected=auto_system_injected,
-                    emit_special=emit_special,
-                    emit_text=emit_text,
-                    emit_text_segments=emit_text_segments,
-                )
+                # Same wrap as the base `_render_tool`, with media-aware content: the
+                # single-segment text path produces byte-identical BPE (one joined pass),
+                # and image markers act as atomic flush boundaries.
+                prev_is_tool = i > 0 and messages[i - 1]["role"] == "tool"
+                next_is_tool = i + 1 < len(messages) and messages[i + 1]["role"] == "tool"
+                if not prev_is_tool:
+                    emit_special(self._im_start, msg_orig_idx, is_sampled=False, is_content=False)
+                    emit_text("user\n", msg_orig_idx, is_sampled=False, is_content=False)
+                emit_special(self._tool_response, msg_orig_idx, is_sampled=False, is_content=False)
+                emit_media_content(msg.get("content"), msg_orig_idx, [("\n", False)], "\n")
+                emit_special(self._tool_response_end, msg_orig_idx, is_sampled=False, is_content=False)
+                emit_text("\n", msg_orig_idx, is_sampled=False, is_content=False)
+                if not next_is_tool:
+                    emit_special(self._im_end, msg_orig_idx, is_sampled=False, is_content=False)
+                    emit_text("\n", msg_orig_idx, is_sampled=False, is_content=False)
 
             else:
                 raise ValueError(f"Unexpected message role: {role}")

@@ -63,6 +63,10 @@ class OverlongPromptError(Exception):
         )
 
 
+class MalformedGenerateResponseError(ValueError):
+    """The generate endpoint returned unusable sampled-token evidence."""
+
+
 # Per-process cache of resolved engine context-length caps, keyed by
 # ``(base_url, model)``. ``None`` is the "we asked the engine and it didn't
 # tell us" sentinel — distinct from "key missing" (haven't asked yet). The
@@ -155,47 +159,57 @@ def parse_generate_response(raw: bytes) -> dict[str, Any]:
 
 
 def _parse_completion_logprobs(
-    choice: Mapping[str, Any], completion_token_count: int
+    choice: Mapping[str, Any], completion_ids: list[int]
 ) -> list[float]:
     raw_logprobs = choice.get("logprobs")
     if not isinstance(raw_logprobs, Mapping):
-        raise ValueError("Engine response choice.logprobs must be an object.")
+        raise MalformedGenerateResponseError(
+            "Engine response choice.logprobs must be an object."
+        )
 
     content = raw_logprobs.get("content")
     if not isinstance(content, list):
-        raise ValueError("Engine response choice.logprobs.content must be a list.")
-    if len(content) != completion_token_count:
-        raise ValueError(
+        raise MalformedGenerateResponseError(
+            "Engine response choice.logprobs.content must be a list."
+        )
+    if len(content) != len(completion_ids):
+        raise MalformedGenerateResponseError(
             "Engine response completion token count "
-            f"({completion_token_count}) does not match logprob count ({len(content)})."
+            f"({len(completion_ids)}) does not match logprob count ({len(content)})."
         )
 
     completion_logprobs: list[float] = []
     for index, entry in enumerate(content):
         if not isinstance(entry, Mapping):
-            raise ValueError(
+            raise MalformedGenerateResponseError(
                 f"Engine response choice.logprobs.content[{index}] must be an object."
+            )
+        expected_token = f"token_id:{completion_ids[index]}"
+        if entry.get("token") != expected_token:
+            raise MalformedGenerateResponseError(
+                "Engine response "
+                f"choice.logprobs.content[{index}].token must be {expected_token!r}."
             )
         raw_logprob = entry.get("logprob")
         if isinstance(raw_logprob, bool) or not isinstance(raw_logprob, (int, float)):
-            raise ValueError(
+            raise MalformedGenerateResponseError(
                 "Engine response "
                 f"choice.logprobs.content[{index}].logprob must be a number."
             )
         try:
             logprob = float(raw_logprob)
         except OverflowError as exc:
-            raise ValueError(
+            raise MalformedGenerateResponseError(
                 "Engine response "
                 f"choice.logprobs.content[{index}].logprob must be finite."
             ) from exc
         if not math.isfinite(logprob):
-            raise ValueError(
+            raise MalformedGenerateResponseError(
                 "Engine response "
                 f"choice.logprobs.content[{index}].logprob must be finite."
             )
         if logprob == VLLM_LOGPROB_SENTINEL:
-            raise ValueError(
+            raise MalformedGenerateResponseError(
                 "Engine response "
                 f"choice.logprobs.content[{index}].logprob does not contain "
                 "sampling evidence."
@@ -346,7 +360,7 @@ async def generate(
     choice = (data.get("choices") or [{}])[0]
     completion_ids = choice.get("token_ids") or []
 
-    completion_logprobs = _parse_completion_logprobs(choice, len(completion_ids))
+    completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
 
     parsed = await _maybe_offload(
         renderer, lambda: renderer.parse_response(completion_ids, tools=tools)

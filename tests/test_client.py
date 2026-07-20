@@ -5,6 +5,7 @@ import json
 import httpx
 import numpy as np
 import pytest
+from renderers import MalformedGenerateResponseError
 from renderers.base import (
     ParsedResponse,
     ParsedToolCall,
@@ -186,7 +187,10 @@ def test_generate_rejects_missing_completion_logprobs_before_parsing():
     client.choice.pop("logprobs")
     renderer = _FakeRenderer()
 
-    with pytest.raises(ValueError, match=r"choice\.logprobs must be an object"):
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"choice\.logprobs must be an object",
+    ):
         _run_generate(client, renderer)
 
     assert not hasattr(renderer, "_last_parse_tools")
@@ -194,14 +198,22 @@ def test_generate_rejects_missing_completion_logprobs_before_parsing():
 
 @pytest.mark.parametrize(
     "entry",
-    [{}, {"logprob": None}, {"logprob": "-0.1"}, {"logprob": True}],
+    [
+        {"token": "token_id:7"},
+        {"token": "token_id:7", "logprob": None},
+        {"token": "token_id:7", "logprob": "-0.1"},
+        {"token": "token_id:7", "logprob": True},
+    ],
     ids=["missing", "null", "string", "boolean"],
 )
 def test_generate_rejects_non_numeric_completion_logprobs(entry):
     client = _FakeClient()
     client.choice["logprobs"]["content"][0] = entry
 
-    with pytest.raises(ValueError, match=r"content\[0\]\.logprob must be a number"):
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"content\[0\]\.logprob must be a number",
+    ):
         _run_generate(client)
 
 
@@ -210,7 +222,7 @@ def test_generate_rejects_completion_logprob_count_mismatch():
     client.choice["logprobs"]["content"] = [{"token": "token_id:7", "logprob": -0.1}]
 
     with pytest.raises(
-        ValueError,
+        MalformedGenerateResponseError,
         match=r"completion token count \(2\) does not match logprob count \(1\)",
     ):
         _run_generate(client)
@@ -221,7 +233,10 @@ def test_generate_rejects_non_finite_completion_logprobs(logprob):
     client = _FakeClient()
     client.choice["logprobs"]["content"][0]["logprob"] = logprob
 
-    with pytest.raises(ValueError, match=r"content\[0\]\.logprob must be finite"):
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"content\[0\]\.logprob must be finite",
+    ):
         _run_generate(client)
 
 
@@ -229,7 +244,21 @@ def test_generate_rejects_vllm_missing_logprob_sentinel():
     client = _FakeClient()
     client.choice["logprobs"]["content"][0]["logprob"] = -9999.0
 
-    with pytest.raises(ValueError, match=r"does not contain sampling evidence"):
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"does not contain sampling evidence",
+    ):
+        _run_generate(client)
+
+
+def test_generate_rejects_logprob_token_id_mismatch():
+    client = _FakeClient()
+    client.choice["logprobs"]["content"][0]["token"] = "token_id:8"
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"content\[0\]\.token must be 'token_id:7'",
+    ):
         _run_generate(client)
 
 

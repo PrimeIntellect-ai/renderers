@@ -39,7 +39,7 @@ from renderers.base import (
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
-from renderers.client import OverlongPromptError
+from renderers.client import MalformedGenerateResponseError, OverlongPromptError
 from renderers.configs import (
     AutoRendererConfig,
     BaseRendererConfig,
@@ -152,6 +152,7 @@ __all__ = [
     "Llama3Renderer",
     "Llama3RendererConfig",
     "MULTIMODAL_MODELS",
+    "MalformedGenerateResponseError",
     "Message",
     "MiniMaxM2Renderer",
     "MiniMaxM2RendererConfig",

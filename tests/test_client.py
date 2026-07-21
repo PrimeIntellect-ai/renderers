@@ -5,6 +5,7 @@ import json
 import httpx
 import numpy as np
 import pytest
+from renderers import MalformedGenerateResponseError
 from renderers.base import (
     ParsedResponse,
     ParsedToolCall,
@@ -67,38 +68,47 @@ class _FakeClient:
     def __init__(self):
         self.calls = []
         self.base_url = "http://fake-host:8000/v1"
+        routed_experts = np.array([[[1]], [[2]]], dtype=np.uint8)
+        self.choice = {
+            "index": 0,
+            "token_ids": [7, 8],
+            "logprobs": {
+                "content": [
+                    {"token": "token_id:7", "logprob": -0.1},
+                    {"token": "token_id:8", "logprob": -0.2},
+                ]
+            },
+            "finish_reason": "stop",
+            "routed_experts": {
+                "data": base64.b64encode(routed_experts.tobytes()).decode("ascii"),
+                "shape": list(routed_experts.shape),
+            },
+        }
 
     async def post(self, path, *, cast_to=dict, body=None, options=None):
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
         )
-        routed_experts = np.array([[[1]], [[2]]], dtype=np.uint8)
         payload = {
             "request_id": "gen-test",
-            "choices": [
-                {
-                    "index": 0,
-                    "token_ids": [7, 8],
-                    "logprobs": {
-                        "content": [
-                            {"token": "token_id:7", "logprob": -0.1},
-                            {"token": "token_id:8", "logprob": -0.2},
-                        ]
-                    },
-                    "finish_reason": "stop",
-                    "routed_experts": {
-                        "data": base64.b64encode(routed_experts.tobytes()).decode(
-                            "ascii"
-                        ),
-                        "shape": list(routed_experts.shape),
-                    },
-                }
-            ],
+            "choices": [self.choice],
         }
         return httpx.Response(
             200,
             content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         )
+
+
+def _run_generate(client, renderer=None):
+    return asyncio.run(
+        generate(
+            client=client,
+            renderer=renderer or _FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+        )
+    )
 
 
 def test_generate_builds_request_body_and_parses_response():
@@ -170,6 +180,95 @@ def test_generate_builds_request_body_and_parses_response():
     assert tc.name == "echo"
     assert tc.arguments == {"text": "hello"}
     assert tc.status == ToolCallParseStatus.OK
+
+
+def test_generate_rejects_missing_completion_logprobs_before_parsing():
+    client = _FakeClient()
+    client.choice.pop("logprobs")
+    renderer = _FakeRenderer()
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"choice\.logprobs must be an object",
+    ):
+        _run_generate(client, renderer)
+
+    assert not hasattr(renderer, "_last_parse_tools")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"token": "token_id:7"},
+        {"token": "token_id:7", "logprob": None},
+        {"token": "token_id:7", "logprob": "-0.1"},
+        {"token": "token_id:7", "logprob": True},
+    ],
+    ids=["missing", "null", "string", "boolean"],
+)
+def test_generate_rejects_non_numeric_completion_logprobs(entry):
+    client = _FakeClient()
+    client.choice["logprobs"]["content"][0] = entry
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"content\[0\]\.logprob must be a number",
+    ):
+        _run_generate(client)
+
+
+def test_generate_rejects_completion_logprob_count_mismatch():
+    client = _FakeClient()
+    client.choice["logprobs"]["content"] = [{"token": "token_id:7", "logprob": -0.1}]
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"completion token count \(2\) does not match logprob count \(1\)",
+    ):
+        _run_generate(client)
+
+
+@pytest.mark.parametrize("logprob", [float("nan"), float("inf"), float("-inf")])
+def test_generate_rejects_non_finite_completion_logprobs(logprob):
+    client = _FakeClient()
+    client.choice["logprobs"]["content"][0]["logprob"] = logprob
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"content\[0\]\.logprob must be finite",
+    ):
+        _run_generate(client)
+
+
+def test_generate_rejects_vllm_missing_logprob_sentinel():
+    client = _FakeClient()
+    client.choice["logprobs"]["content"][0]["logprob"] = -9999.0
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"does not contain sampling evidence",
+    ):
+        _run_generate(client)
+
+
+def test_generate_rejects_logprob_token_id_mismatch():
+    client = _FakeClient()
+    client.choice["logprobs"]["content"][0]["token"] = "token_id:8"
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"content\[0\]\.token must be 'token_id:7'",
+    ):
+        _run_generate(client)
+
+
+def test_generate_preserves_zero_completion_logprob():
+    client = _FakeClient()
+    client.choice["logprobs"]["content"][0]["logprob"] = 0.0
+
+    result = _run_generate(client)
+
+    assert result["completion_logprobs"] == [0.0, -0.2]
 
 
 class _MalformedToolRenderer(_FakeRenderer):

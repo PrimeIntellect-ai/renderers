@@ -40,6 +40,9 @@ RENDERER_MODELS = [
     # XS-2.1 resolves to `LagunaXS21Renderer` via the model name — its
     # chat template differs from XS.2's (see renderers/laguna_xs2.py).
     ("poolside/Laguna-XS-2.1", "auto"),
+    # S-2.1 is a larger sibling of XS-2.1 with a byte-identical chat template
+    # and tokenizer, so it reuses the XS-2.1 renderer.
+    ("poolside/Laguna-S-2.1", "auto"),
     # DeepSeek-V3/R1 are intentionally NOT in this shared barrage: their
     # chat templates can't render the barrage's tool-call fixtures (the
     # templates require ``tool['type']`` and a string-serialized

@@ -218,6 +218,34 @@ def _parse_completion_logprobs(
     return completion_logprobs
 
 
+def _parse_prompt_logprobs(
+    payload: Mapping[str, Any], prompt_ids: list[int]
+) -> list[float | None] | None:
+    raw = payload.get("prompt_logprobs")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or len(raw) != len(prompt_ids):
+        raise MalformedGenerateResponseError(
+            "Engine response prompt_logprobs must align with prompt token ids."
+        )
+    logprobs: list[float | None] = []
+    for index, value in enumerate(raw):
+        if value is None:
+            logprobs.append(None)
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise MalformedGenerateResponseError(
+                f"Engine response prompt_logprobs[{index}] must be a number or null."
+            )
+        logprob = float(value)
+        if not math.isfinite(logprob):
+            raise MalformedGenerateResponseError(
+                f"Engine response prompt_logprobs[{index}] must be finite."
+            )
+        logprobs.append(logprob)
+    return logprobs
+
+
 async def generate(
     *,
     client: AsyncOpenAI,
@@ -263,7 +291,7 @@ async def generate(
     that still slip through propagate raw — converting them into a domain
     error is the calling client's job (its error shape is engine-specific).
 
-    Returns a dict with: request_id, prompt_ids, completion_ids,
+    Returns a dict with: request_id, prompt_ids, prompt_logprobs, completion_ids,
     completion_logprobs, content, reasoning_content, tool_calls,
     finish_reason, routed_experts, multi_modal_data, prompt_attribution.
 
@@ -361,11 +389,11 @@ async def generate(
     completion_ids = choice.get("token_ids") or []
 
     completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
+    prompt_logprobs = _parse_prompt_logprobs(data, prompt_ids)
 
     parsed = await _maybe_offload(
         renderer, lambda: renderer.parse_response(completion_ids, tools=tools)
     )
-
     routed_experts = choice.get("routed_experts")
     kept_tokens = choice.get("kept_tokens")
 
@@ -387,6 +415,7 @@ async def generate(
     return {
         "request_id": data.get("request_id") or "",
         "prompt_ids": list(prompt_ids),
+        "prompt_logprobs": prompt_logprobs,
         "completion_ids": list(completion_ids),
         "completion_logprobs": completion_logprobs,
         "content": parsed.content,

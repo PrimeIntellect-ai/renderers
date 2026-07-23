@@ -89,8 +89,13 @@ class _FakeClient:
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
         )
+        prompt_ids = body["token_ids"]
         payload = {
             "request_id": "gen-test",
+            "prompt_logprobs": [
+                None,
+                *[-0.4 - 0.1 * index for index in range(len(prompt_ids) - 1)],
+            ],
             "choices": [self.choice],
         }
         return httpx.Response(
@@ -157,6 +162,7 @@ def test_generate_builds_request_body_and_parses_response():
     assert result["content"] == "done"
     assert result["reasoning_content"] == "think"
     assert result["prompt_ids"] == [1, 2, 3]
+    assert result["prompt_logprobs"] == [None, -0.4, -0.5]
     assert result["completion_ids"] == [7, 8]
     assert result["completion_logprobs"] == [-0.1, -0.2]
     assert result["routed_experts"]["shape"] == [2, 1, 1]

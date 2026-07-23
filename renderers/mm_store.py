@@ -1,9 +1,9 @@
-"""Run-scoped image asset helpers for multimodal rendering.
+"""Inline image helpers for multimodal rendering.
 
 The default renderer multimodal mode does not ship processed image features.
-Images are written once into the run output tree and messages carry ``file://``
-URLs to those files. Renderers then emit lightweight image refs for vLLM only
-when the engine needs to process an image.
+Messages carry ``data:image/...;base64`` URLs inline, and renderers emit
+lightweight image refs that embed the inline source, so the inference engine
+(and later the trainer) can materialize pixels wherever they are consumed.
 """
 
 from __future__ import annotations
@@ -11,14 +11,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import re
-import threading
 from dataclasses import dataclass
-from pathlib import Path
-
-# Contract: must match prime_rl.utils.run_assets.IMAGE_OFFLOAD_DIR_ENV.
-IMAGE_OFFLOAD_DIR_ENV = "VF_RENDERER_IMAGE_OFFLOAD_DIR"
 
 IMAGE_REF_PREFIX = "mmraw"
 RAW_MM_ITEM_KIND = "prime_raw_mm_item"
@@ -31,72 +25,31 @@ _SAFE = {
     "raw multimodal ref payload segment": re.compile(r"^[A-Za-z0-9_-]*$"),
 }
 
-_MEDIA_TYPE_EXT = {
-    "jpeg": ".jpg",
-    "jpg": ".jpg",
-    "png": ".png",
-    "webp": ".webp",
-    "gif": ".gif",
-}
-
-
 def _ensure_safe(label: str, value: str) -> str:
     if not _SAFE[label].fullmatch(value):
         raise ValueError(f"Invalid {label}: {value!r}")
     return value
 
 
-def run_image_dir() -> Path:
-    """Resolve the directory for raw image assets for a run."""
-    explicit = os.getenv(IMAGE_OFFLOAD_DIR_ENV, "").strip()
-    if explicit:
-        return Path(explicit).resolve()
-    raise RuntimeError(
-        f"Set {IMAGE_OFFLOAD_DIR_ENV} before resolving raw image assets."
-    )
+def decode_data_image_url(url: object) -> bytes:
+    """Decode a ``data:image/...;base64`` URL to raw image bytes.
 
-
-def _media_type_ext(media_type: str) -> str:
-    subtype = media_type.split("/", 1)[-1].split(";", 1)[0].strip().lower()
-    return _MEDIA_TYPE_EXT.get(subtype, ".img")
-
-
-def offload_image_to_run_assets(
-    url: object, image_dir: Path | None = None
-) -> str | None:
-    """Decode a base64 data image into the run image assets directory.
-
-    Returns a ``file://`` URL when ``url`` was rewritten and ``None`` for
-    non-data-image values. Writes are content-addressed and atomic.
+    Raises for anything that isn't a base64 data-image URL — inline raw
+    multimodal rendering has no other supported image source.
     """
     if not isinstance(url, str) or not url.startswith("data:image/"):
-        return None
+        raise ValueError(
+            "inline raw multimodal rendering requires data:image/...;base64 sources, "
+            f"got {type(url).__name__ if not isinstance(url, str) else url[:64]!r}"
+        )
     marker = ";base64,"
     if marker not in url:
-        return None
-
+        raise ValueError("data image URL must be base64-encoded (missing ';base64,')")
     header, b64 = url.split(marker, 1)
     try:
-        raw = base64.b64decode(b64)
+        return base64.b64decode(b64)
     except Exception as exc:
         raise ValueError(f"Undecodable base64 data in {header!r} image URL") from exc
-
-    root = (image_dir or run_image_dir()).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    # Full digest: writes are content-addressed, so a truncated name would
-    # make a prefix collision silently serve another image's bytes.
-    digest = hashlib.sha256(raw).hexdigest()
-    path = root / f"{digest}{_media_type_ext(header[len('data:') :])}"
-    if not path.exists():
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_bytes(raw)
-        os.replace(tmp, path)
-    else:
-        try:
-            path.touch()
-        except OSError:
-            pass
-    return path.as_uri()
 
 
 def _json_fingerprint_value(value: object) -> str:
@@ -137,7 +90,7 @@ def raw_mm_item(
     family: str,
     layout_fingerprint: str,
     payload: dict[str, object],
-    raw_image_uri: str,
+    raw_image_data: str,
     vllm_modality: str | None = None,
 ) -> dict[str, object]:
     """Build the JSON-safe raw multimodal descriptor envelope.
@@ -158,7 +111,7 @@ def raw_mm_item(
     }
     if vllm_modality is not None:
         out["vllm_modality"] = vllm_modality
-    out["raw_image_uri"] = raw_image_uri
+    out["raw_image_data"] = raw_image_data
     return out
 
 
@@ -169,7 +122,7 @@ class RawMMRef:
     modality: str
     mm_hash: str
     payload: dict[str, object]
-    raw_image_uri: str
+    raw_image_data: str
 
 
 def raw_mm_ref(
@@ -178,7 +131,7 @@ def raw_mm_ref(
     fingerprint: str,
     modality: str,
     mm_hash: str,
-    raw_image_uri: str,
+    raw_image_data: str,
     payload: dict[str, object] | None = None,
 ) -> str:
     """Generic raw multimodal asset ref.
@@ -197,7 +150,7 @@ def raw_mm_ref(
         "modality": modality,
         "mm_hash": mm_hash,
         "payload": payload or {},
-        "raw_image_uri": raw_image_uri,
+        "raw_image_data": raw_image_data,
     }
 
     return f"{IMAGE_REF_PREFIX}:{_encode_ref_payload(ref_payload)}"
@@ -213,7 +166,7 @@ def split_raw_mm_ref(ref: str) -> RawMMRef:
     fingerprint = payload.get("fingerprint")
     modality = payload.get("modality")
     mm_hash = payload.get("mm_hash")
-    raw_image_uri = payload.get("raw_image_uri")
+    raw_image_data = payload.get("raw_image_data")
     item_payload = payload.get("payload")
 
     if not isinstance(family, str):
@@ -224,8 +177,8 @@ def split_raw_mm_ref(ref: str) -> RawMMRef:
         raise ValueError("Raw multimodal ref is missing modality")
     if not isinstance(mm_hash, str):
         raise ValueError("Raw multimodal ref is missing mm_hash")
-    if not isinstance(raw_image_uri, str):
-        raise ValueError("Raw multimodal ref is missing raw_image_uri")
+    if not isinstance(raw_image_data, str):
+        raise ValueError("Raw multimodal ref is missing raw_image_data")
     if not isinstance(item_payload, dict):
         raise ValueError("Raw multimodal ref payload must be a dict")
 
@@ -235,7 +188,7 @@ def split_raw_mm_ref(ref: str) -> RawMMRef:
         modality=_ensure_safe("raw multimodal modality", modality),
         mm_hash=_ensure_safe("image hash", mm_hash),
         payload=item_payload,
-        raw_image_uri=raw_image_uri,
+        raw_image_data=raw_image_data,
     )
 
 

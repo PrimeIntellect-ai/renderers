@@ -52,9 +52,9 @@ from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
 from renderers.qwen3_vl import (
     _PROCESSED_IMAGE_CACHE_MAX,
     _image_dimensions,
+    _inline_image_source,
     _is_image_part,
     _is_video_part,
-    _load_image_asset,
     _load_pil_image,
     _pil_image_hash,
 )
@@ -433,7 +433,7 @@ class KimiImageLayoutDescriptor:
     grid_thws: list[list[int]]
     num_media_tokens: int
     fingerprint: str
-    raw_image_uri: str
+    raw_image_data: str
 
 
 def _ceil_to_factor(value: int, factor: int) -> int:
@@ -469,7 +469,7 @@ def _kimi_resize_config(
 
 
 def describe_kimi_image_layout(part: dict[str, Any]) -> KimiImageLayoutDescriptor:
-    path, raw = _load_image_asset(part)
+    source, raw = _inline_image_source(part)
     height, width = _image_dimensions(raw)
     layout = KIMI_K25_IMAGE_LAYOUT
     padded_w, padded_h, num_media_tokens = _kimi_resize_config(width, height, layout)
@@ -489,7 +489,7 @@ def describe_kimi_image_layout(part: dict[str, Any]) -> KimiImageLayoutDescripto
         grid_thws=grid_thws,
         num_media_tokens=num_media_tokens,
         fingerprint=fingerprint,
-        raw_image_uri=path.as_uri(),
+        raw_image_data=source,
     )
 
 
@@ -503,7 +503,7 @@ def kimi_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str
             "grid_thws": desc.grid_thws,
             "num_media_tokens": desc.num_media_tokens,
         },
-        raw_image_uri=desc.raw_image_uri,
+        raw_image_data=desc.raw_image_data,
         vllm_modality=KIMI_K25_VLLM_MODALITY,
     )
     return 1, desc.mm_hash, item

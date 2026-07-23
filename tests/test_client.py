@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import hashlib
 import json
 
 import httpx
@@ -102,19 +101,19 @@ class _FakeClient:
         )
 
 
-def test_offload_image_to_run_assets_writes_content_addressed_file(tmp_path):
-    from renderers.mm_store import offload_image_to_run_assets
+def test_decode_data_image_url_round_trips_and_rejects_non_inline():
+    import pytest
+
+    from renderers.mm_store import decode_data_image_url
 
     raw = b"png-ish bytes"
     url = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+    assert decode_data_image_url(url) == raw
 
-    file_url = offload_image_to_run_assets(url, image_dir=tmp_path)
-
-    assert file_url is not None
-    assert file_url.startswith("file://")
-    path = tmp_path / file_url.rsplit("/", 1)[-1]
-    assert path.name == f"{hashlib.sha256(raw).hexdigest()}.png"
-    assert path.read_bytes() == raw
+    with pytest.raises(ValueError, match="requires data:image"):
+        decode_data_image_url("file:///tmp/image.png")
+    with pytest.raises(ValueError, match="base64"):
+        decode_data_image_url("data:image/png;utf8,not-base64")
 
 
 def _run_generate(client, renderer=None):
@@ -408,9 +407,7 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
     ],
     ids=["default_image_modality", "kimi_vllm_modality"],
 )
-def test_generate_serializes_raw_mm_refs(
-    tmp_path, family, payload, expected_modality, vllm_modality
-):
+def test_generate_serializes_raw_mm_refs(family, payload, expected_modality, vllm_modality):
     """``generate`` serializes raw multimodal envelopes to vLLM refs.
 
     The client owns only the generic wire shape: hashes, placeholder spans,
@@ -426,11 +423,7 @@ def test_generate_serializes_raw_mm_refs(
         split_raw_mm_ref,
     )
 
-    image_dir = tmp_path / "run_rawtest" / "assets" / "images"
-    image_dir.mkdir(parents=True)
-    image_path = image_dir / "image.png"
-    image_path.write_bytes(b"image-bytes")
-    image_uri = image_path.as_uri()
+    image_data = "data:image/png;base64," + base64.b64encode(b"image-bytes").decode("ascii")
     fingerprint = image_layout_fingerprint(family=family, revision="test")
     mm_hash = "a" * 32
 
@@ -448,7 +441,7 @@ def test_generate_serializes_raw_mm_refs(
                     family=family,
                     layout_fingerprint=fingerprint,
                     payload=payload,
-                    raw_image_uri=image_uri,
+                    raw_image_data=image_data,
                     vllm_modality=vllm_modality,
                 ),
             ],
@@ -484,13 +477,13 @@ def test_generate_serializes_raw_mm_refs(
         ref.fingerprint,
         ref.modality,
         ref.mm_hash,
-        ref.raw_image_uri,
+        ref.raw_image_data,
     ) == (
         family,
         fingerprint,
         expected_modality,
         mm_hash,
-        image_uri,
+        image_data,
     )
     assert result["multi_modal_data"] is mm_data
 

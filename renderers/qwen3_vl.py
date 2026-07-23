@@ -30,7 +30,6 @@ import hashlib
 import io
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -61,6 +60,7 @@ from renderers.base import (
 )
 from renderers.configs import Qwen3VLRendererConfig
 from renderers.mm_store import (
+    decode_data_image_url,
     image_layout_fingerprint,
     raw_mm_item,
 )
@@ -129,7 +129,7 @@ class QwenImageLayoutDescriptor:
     image_grid_thw: list[list[int]]
     num_image_tokens: int
     fingerprint: str
-    raw_image_uri: str
+    raw_image_data: str
 
 
 def _image_source(item: dict[str, Any]) -> Any:
@@ -141,24 +141,10 @@ def _image_source(item: dict[str, Any]) -> Any:
     return item.get("url") or item.get("path")
 
 
-def _file_path_from_source(source: Any) -> Path | None:
-    if not isinstance(source, str):
-        return None
-    parsed = urlparse(source)
-    if parsed.scheme == "file":
-        return Path(unquote(parsed.path)).resolve()
-    if parsed.scheme == "":
-        return Path(source).resolve()
-    return None
-
-
-def _offloaded_image_path(source: Any) -> Path:
-    path = _file_path_from_source(source)
-    if path is None:
-        raise ValueError(
-            "v1 multimodal image rendering requires offloaded file:// image assets"
-        )
-    return path
+def _inline_image_source(part: dict[str, Any]) -> tuple[str, bytes]:
+    """Resolve a part's inline data-image source and decode it once."""
+    source = _image_source(part)
+    return source, decode_data_image_url(source)
 
 
 def _load_pil_image(item: dict[str, Any]):
@@ -202,12 +188,6 @@ def _load_pil_image(item: dict[str, Any]):
     raise ValueError(f"Unsupported image URL scheme: {parsed.scheme!r} in {raw!r}")
 
 
-def _load_image_asset(part: dict[str, Any]) -> tuple[Path, bytes]:
-    """Resolve a part's offloaded image source and read it once."""
-    path = _offloaded_image_path(_image_source(part))
-    return path, path.read_bytes()
-
-
 def _image_dimensions(raw: bytes) -> tuple[int, int]:
     try:
         from PIL import Image
@@ -229,7 +209,7 @@ def _pil_image_hash(pil_image) -> str:
 
 def describe_qwen_image_layout(part: dict[str, Any]) -> QwenImageLayoutDescriptor:
     """Return Qwen image layout metadata without invoking an image processor."""
-    path, raw = _load_image_asset(part)
+    source, raw = _inline_image_source(part)
     height, width = _image_dimensions(raw)
     layout = QWEN_VL_IMAGE_LAYOUT
     resized_h, resized_w = smart_resize(
@@ -258,7 +238,7 @@ def describe_qwen_image_layout(part: dict[str, Any]) -> QwenImageLayoutDescripto
         image_grid_thw=[[grid_t, grid_h, grid_w]],
         num_image_tokens=num_image_tokens,
         fingerprint=fingerprint,
-        raw_image_uri=path.as_uri(),
+        raw_image_data=source,
     )
 
 
@@ -269,7 +249,7 @@ def qwen_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str
         family="qwen_vl",
         layout_fingerprint=desc.fingerprint,
         payload={"image_grid_thw": desc.image_grid_thw},
-        raw_image_uri=desc.raw_image_uri,
+        raw_image_data=desc.raw_image_data,
     )
     return desc.num_image_tokens, desc.mm_hash, item
 

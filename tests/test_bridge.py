@@ -20,10 +20,10 @@ from functools import lru_cache
 
 import pytest
 
-
 # (HF model name, renderer name) — one representative per renderer class.
 _BRIDGE_MODELS = [
     ("Qwen/Qwen3-8B", "auto"),
+    ("PrimeIntellect/Qwen3-0.6B", "auto"),
     ("Qwen/Qwen3.5-9B", "auto"),
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
     ("zai-org/GLM-5", "auto"),
@@ -33,6 +33,7 @@ _BRIDGE_MODELS = [
     ("moonshotai/Kimi-K2-Instruct", "auto"),
     ("moonshotai/Kimi-K2.5", "auto"),
     ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
+    ("tencent/Hy3", "auto"),
     ("unsloth/Llama-3.2-1B-Instruct", "llama-3"),
     ("openai/gpt-oss-20b", "gpt-oss"),
 ]
@@ -282,6 +283,7 @@ _GUARDED_THINKING_MODELS = {
     "MiniMaxAI/MiniMax-M2.5",
     "moonshotai/Kimi-K2.5",
     "openai/gpt-oss-20b",
+    "tencent/Hy3",
 }
 
 

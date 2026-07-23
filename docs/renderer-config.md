@@ -26,15 +26,18 @@ chat-template kwargs. Those fields are covered by parity tests against
 | Renderer | Config class | Template fields | Renderer-only fields |
 | --- | --- | --- | --- |
 | Qwen3 | `Qwen3RendererConfig` | `enable_thinking` | - |
+| PrimeIntellect Qwen3 | `PrimeQwen3RendererConfig` | - | - |
 | Qwen3.5 | `Qwen35RendererConfig` | `enable_thinking`, `add_vision_id` | `image_cache_max` |
 | Qwen3.6 | `Qwen36RendererConfig` | `enable_thinking`, `add_vision_id`, `preserve_thinking` | `image_cache_max` |
 | Qwen3-VL | `Qwen3VLRendererConfig` | `add_vision_id` | `image_cache_max` |
 | GLM-5 / 5.1 | `GLM5RendererConfig` / `GLM51RendererConfig` | `enable_thinking`, `clear_thinking` | - |
 | GLM-4.5 | `GLM45RendererConfig` | `enable_thinking` | - |
 | gpt-oss | `GptOssRendererConfig` | `reasoning_effort`, `conversation_start_date` | `use_system_prompt`, `knowledge_cutoff`, `model_identity`, `auto_drop_analysis` |
+| Hy3 | `Hy3RendererConfig` | `reasoning_effort`, `preserved_thinking`, `is_training`, `raw_last_assistant`, `fallback_strategy` | - |
 | Kimi K2 | `KimiK2RendererConfig` | - | `enable_thinking` |
 | Kimi K2.5 / 2.6 | `KimiK25RendererConfig` | `thinking` | `image_cache_max` |
 | Laguna XS.2 | `LagunaXS2RendererConfig` | `enable_thinking`, `render_assistant_messages_raw` | - |
+| Laguna XS-2.1 | `LagunaXS21RendererConfig` | `enable_thinking` | - |
 | Llama 3 | `Llama3RendererConfig` | `date_string`, `tools_in_user_message` | - |
 | MiniMax M2 | `MiniMaxM2RendererConfig` | `model_identity` | - |
 | Nemotron-3 Nano / Super | `Nemotron3RendererConfig` | `enable_thinking`, `truncate_history_thinking`, `low_effort` | - |
@@ -128,11 +131,13 @@ the knobs its template actually exposes:
 | GLM-5 / 5.1 | `clear_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | GLM-4.5 | `enable_thinking=False -> all`, else `tool_cycle` |
 | gpt-oss | `auto_drop_analysis=False -> all`, else `tool_cycle` |
+| Hy3 | `preserved_thinking=True -> all`, else `tool_cycle` |
 | Kimi K2.5 / 2.6 | `thinking=False -> all`, else `tool_cycle` |
 | Nemotron-3 | `truncate_history_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | DeepSeek R1 | `template` |
 | MiniMax M2 | `tool_cycle` |
-| DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2, Llama 3 | `all` |
+| DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / XS-2.1, Llama 3 | `all` |
+| PrimeIntellect Qwen3 | `all` |
 
 Config construction raises when an explicit template knob directly contradicts
 an explicit generic bridge policy. For example:

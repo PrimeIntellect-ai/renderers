@@ -64,6 +64,8 @@ _RENDERER_MODELS = [
     # name; parity asserted against the Ultra apply_chat_template (``medium_effort``).
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
+    ("poolside/Laguna-XS-2.1", "auto"),
+    ("tencent/Hy3", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
 ]
 
@@ -80,7 +82,22 @@ _KWARG_VALUES: dict[str, list[Any]] = {
     # renderer's typed config (``KimiK25RendererConfig.thinking``)
     # mirrors that name so the field maps 1:1 onto the template gate.
     "thinking": [True, False],
-    "reasoning_effort": ["low", "medium", "high"],
+    # gpt-oss accepts low/medium/high; Hy3 accepts no_think/low/high. The
+    # union is listed here and the matrix builder drops values a given
+    # renderer's typed config rejects (see ``_value_valid_for``).
+    "reasoning_effort": ["no_think", "low", "medium", "high"],
+    # Hy3 — keep <think>{reasoning}</think> on historical assistant turns
+    # (True) vs collapse past-cycle reasoning to <think></think> (False).
+    "preserved_thinking": [True, False],
+    # Hy3 — SFT-target rendering (keep all thinking + close the final
+    # assistant with <｜hy_eos｜>).
+    "is_training": [True, False],
+    # Hy3 — raw passthrough of a trailing non-tool assistant (no <think>
+    # wrap, no eos) for prefill / continuation.
+    "raw_last_assistant": [True, False],
+    # Hy3 — sole active value forces reasoning_effort="high" +
+    # add_generation_prompt=False.
+    "fallback_strategy": ["reasoning_toolcall_retry"],
     # GLM-5 / GLM-5.1 — ``clear_thinking=False`` preserves the
     # ``<think>{reasoning}</think>`` wrap on historical assistants too
     # (default True collapses past-cycle reasoning to ``</think>``).
@@ -263,6 +280,19 @@ def _template_fields_for(model: str, renderer_name: str) -> frozenset[str]:
     return _config_class_for(resolved).template_field_names()
 
 
+def _value_valid_for(model: str, renderer_name: str, kwarg: str, value: Any) -> bool:
+    """Whether ``value`` is accepted by this renderer's typed config for
+    ``kwarg``. Lets renderers share a template-field name with different value
+    domains (e.g. ``reasoning_effort``: gpt-oss ``low/medium/high`` vs Hy3
+    ``no_think/low/high``) — the matrix keeps only the cells that construct."""
+    resolved = _resolve_renderer_name(model, renderer_name)
+    try:
+        _config_class_for(resolved)(**{kwarg: value})
+        return True
+    except Exception:
+        return False
+
+
 def _hf_parity_matrix() -> list[Any]:
     """Auto-derived ``(model, renderer_name, kwarg, value)`` matrix for
     every renderer with template fields, minus gpt-oss (handled
@@ -274,6 +304,8 @@ def _hf_parity_matrix() -> list[Any]:
             continue
         for kwarg in sorted(_template_fields_for(model, name)):
             for value in _KWARG_VALUES.get(kwarg, []):
+                if not _value_valid_for(model, name, kwarg, value):
+                    continue
                 out.append(
                     pytest.param(
                         model, name, kwarg, value, id=f"{model}-{kwarg}={value}"
@@ -292,6 +324,8 @@ def _harmony_parity_matrix() -> list[Any]:
             continue
         for kwarg in sorted(_template_fields_for(model, name)):
             for value in _KWARG_VALUES.get(kwarg, []):
+                if not _value_valid_for(model, name, kwarg, value):
+                    continue
                 out.append(
                     pytest.param(
                         model, name, kwarg, value, id=f"{model}-{kwarg}={value}"
@@ -383,6 +417,31 @@ def test_chat_template_kwarg_parity_hf(
     # at construction; asserting here gives a louder failure on a future
     # config subclass that drops the field.
     assert kwarg in type(renderer.config).template_field_names()
+
+    # Documented deviation: with ``enable_thinking=False`` the Qwen family
+    # re-emits the empty ``<think>\n\n</think>\n\n`` wrapper on historical
+    # assistant turns without reasoning_content, where the Jinja template
+    # strips it. The generation prompt prefills the wrapper, so stripping
+    # it on re-render would make the sampled stream and the re-render of
+    # the same conversation disagree at the token level. ``multi_turn`` is
+    # the only shape with such a turn — except on qwen3, whose template
+    # window additionally requires ``is_last or reasoning_content``, so its
+    # non-last tool-call turn in ``tool_cycle`` is stripped too. Stability
+    # is pinned in ``test_disabled_thinking_stability.py``.
+    resolved = _resolve_renderer_name(model, renderer_name)
+    deviating_shapes = (
+        ("multi_turn", "tool_cycle") if resolved == "qwen3" else ("multi_turn",)
+    )
+    if (
+        resolved in ("qwen3", "qwen3.5", "qwen3.6")
+        and kwarg == "enable_thinking"
+        and value is False
+        and shape_id in deviating_shapes
+    ):
+        pytest.skip(
+            "deliberate template deviation: empty think wrapper kept on "
+            "historical turns for sampled-token stability"
+        )
 
     try:
         expected = _expected_hf(

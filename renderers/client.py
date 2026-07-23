@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any, cast
@@ -33,6 +34,10 @@ from renderers.base import (
 
 _request_logger = logging.getLogger("renderers.client")
 ROUTED_EXPERTS_DATA_PREFIX = b'"routed_experts":{"data":"'
+KEPT_TOKENS_IDS_PREFIX = b'"kept_tokens":{"ids":"'
+# vLLM uses this value both when sampled-token evidence is missing and as a
+# lower-bound clamp, so receiving it cannot prove the real logprob was returned.
+VLLM_LOGPROB_SENTINEL = -9999.0
 
 
 class OverlongPromptError(Exception):
@@ -57,6 +62,10 @@ class OverlongPromptError(Exception):
             f"Prompt length ({prompt_len}) exceeds maximum "
             f"context length ({max_prompt_len})."
         )
+
+
+class MalformedGenerateResponseError(ValueError):
+    """The generate endpoint returned unusable sampled-token evidence."""
 
 
 # Per-process cache of resolved engine context-length caps, keyed by
@@ -122,24 +131,92 @@ async def _maybe_offload(renderer: Renderer | RendererPool, fn):
     return fn()
 
 
-def strip_routed_experts_data(raw: bytes) -> tuple[bytes, memoryview | None]:
-    data_start = raw.find(ROUTED_EXPERTS_DATA_PREFIX)
+def _strip_base64_field(raw: bytes, prefix: bytes) -> tuple[bytes, memoryview | None]:
+    """Splice a large base64 string field out of raw JSON bytes.
+
+    Avoids json-decoding megabytes of base64; the returned memoryview
+    references ``raw`` and is re-inserted into the parsed payload.
+    """
+    data_start = raw.find(prefix)
     if data_start < 0:
         return raw, None
 
-    data_start += len(ROUTED_EXPERTS_DATA_PREFIX)
+    data_start += len(prefix)
     data_end = raw.index(b'"', data_start)
-    routed_data = memoryview(raw)[data_start:data_end]
+    data = memoryview(raw)[data_start:data_end]
     stripped = raw[:data_start] + raw[data_end:]
-    return stripped, routed_data
+    return stripped, data
 
 
 def parse_generate_response(raw: bytes) -> dict[str, Any]:
-    stripped, routed_data = strip_routed_experts_data(raw)
+    stripped, routed_data = _strip_base64_field(raw, ROUTED_EXPERTS_DATA_PREFIX)
+    stripped, kept_ids_data = _strip_base64_field(stripped, KEPT_TOKENS_IDS_PREFIX)
     payload: dict[str, Any] = json.loads(stripped)
     if routed_data is not None:
         payload["choices"][0]["routed_experts"]["data"] = routed_data
+    if kept_ids_data is not None:
+        payload["choices"][0]["kept_tokens"]["ids"] = kept_ids_data
     return payload
+
+
+def _parse_completion_logprobs(
+    choice: Mapping[str, Any], completion_ids: list[int]
+) -> list[float]:
+    raw_logprobs = choice.get("logprobs")
+    if not isinstance(raw_logprobs, Mapping):
+        raise MalformedGenerateResponseError(
+            "Engine response choice.logprobs must be an object."
+        )
+
+    content = raw_logprobs.get("content")
+    if not isinstance(content, list):
+        raise MalformedGenerateResponseError(
+            "Engine response choice.logprobs.content must be a list."
+        )
+    if len(content) != len(completion_ids):
+        raise MalformedGenerateResponseError(
+            "Engine response completion token count "
+            f"({len(completion_ids)}) does not match logprob count ({len(content)})."
+        )
+
+    completion_logprobs: list[float] = []
+    for index, entry in enumerate(content):
+        if not isinstance(entry, Mapping):
+            raise MalformedGenerateResponseError(
+                f"Engine response choice.logprobs.content[{index}] must be an object."
+            )
+        expected_token = f"token_id:{completion_ids[index]}"
+        if entry.get("token") != expected_token:
+            raise MalformedGenerateResponseError(
+                "Engine response "
+                f"choice.logprobs.content[{index}].token must be {expected_token!r}."
+            )
+        raw_logprob = entry.get("logprob")
+        if isinstance(raw_logprob, bool) or not isinstance(raw_logprob, (int, float)):
+            raise MalformedGenerateResponseError(
+                "Engine response "
+                f"choice.logprobs.content[{index}].logprob must be a number."
+            )
+        try:
+            logprob = float(raw_logprob)
+        except OverflowError as exc:
+            raise MalformedGenerateResponseError(
+                "Engine response "
+                f"choice.logprobs.content[{index}].logprob must be finite."
+            ) from exc
+        if not math.isfinite(logprob):
+            raise MalformedGenerateResponseError(
+                "Engine response "
+                f"choice.logprobs.content[{index}].logprob must be finite."
+            )
+        if logprob == VLLM_LOGPROB_SENTINEL:
+            raise MalformedGenerateResponseError(
+                "Engine response "
+                f"choice.logprobs.content[{index}].logprob does not contain "
+                "sampling evidence."
+            )
+        completion_logprobs.append(logprob)
+    return completion_logprobs
 
 
 async def generate(
@@ -289,16 +366,14 @@ async def generate(
     choice = (data.get("choices") or [{}])[0]
     completion_ids = choice.get("token_ids") or []
 
+    completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
+
     parsed = await _maybe_offload(
         renderer, lambda: renderer.parse_response(completion_ids, tools=tools)
     )
 
-    # ChatCompletionLogProbs flatten: {"content": [{"logprob": ...}, ...]}
-    raw_logprobs = choice.get("logprobs") or {}
-    content_lp = raw_logprobs.get("content") if isinstance(raw_logprobs, dict) else None
-    completion_logprobs = [float(c.get("logprob") or 0.0) for c in content_lp or []]
-
     routed_experts = choice.get("routed_experts")
+    kept_tokens = choice.get("kept_tokens")
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
@@ -325,6 +400,7 @@ async def generate(
         "tool_calls": parsed.tool_calls,
         "finish_reason": finish_reason,
         "routed_experts": routed_experts,
+        "kept_tokens": kept_tokens,
         # The mm sidecar consumed on the request side, surfaced back so
         # callers can persist it on the trajectory step for downstream
         # multi-turn bridging and training-sample construction.

@@ -1033,6 +1033,10 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3-30B-A3B-Instruct-2507": "qwen3",
     "Qwen/Qwen3-30B-A3B-Thinking-2507": "qwen3",
     "Qwen/Qwen3-235B-A22B": "qwen3",
+    # PrimeIntellect Qwen3 — both sizes share the same Qwen3-Coder-style
+    # template with XML tool definitions and calls.
+    "PrimeIntellect/Qwen3-0.6B": "prime-qwen3",
+    "PrimeIntellect/Qwen3-1.7B": "prime-qwen3",
     # Qwen3.5. All seven sizes share the same renderer. The 4B / 9B /
     # 35B-A3B / 122B-A10B / 397B-A17B chat template defaults
     # ``enable_thinking=true`` (open ``<think>\n`` at the gen prompt);
@@ -1094,13 +1098,19 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # construction to pin a different date.
     "meta-llama/Llama-3.2-1B-Instruct": "llama-3",
     "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
-    # Poolside Laguna. XS-2.1's template is byte-identical to XS.2's minus
-    # the default system message; the config name selects the variant.
+    # Poolside Laguna. The two checkpoints ship different chat templates,
+    # each mirrored by its own renderer class.
     "poolside/Laguna-XS.2": "laguna-xs.2",
     "poolside/Laguna-XS-2.1": "laguna-xs-2.1",
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
+    # Tencent Hunyuan Hy3 (295B-A21B MoE). The FP8 checkpoint shares the same
+    # tokenizer and chat template. Hy3-preview is deliberately unmapped: it
+    # ships an older, incompatible template (un-suffixed special tokens,
+    # ``interleaved_thinking`` instead of ``preserved_thinking``).
+    "tencent/Hy3": "hy3",
+    "tencent/Hy3-FP8": "hy3",
 }
 
 
@@ -1336,12 +1346,14 @@ def _populate_registry():
     from renderers.glm5 import GLM5Renderer, GLM51Renderer
     from renderers.glm45 import GLM45Renderer
     from renderers.gpt_oss import GptOssRenderer
+    from renderers.hy3 import Hy3Renderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
-    from renderers.laguna_xs2 import LagunaXS2Renderer
+    from renderers.laguna_xs2 import LagunaXS2Renderer, LagunaXS21Renderer
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
     from renderers.nemotron3 import Nemotron3Renderer, Nemotron3UltraRenderer
+    from renderers.prime_qwen3 import PrimeQwen3Renderer
     from renderers.qwen3 import Qwen3Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
     from renderers.qwen35 import Qwen35Renderer
@@ -1351,6 +1363,7 @@ def _populate_registry():
         {
             "default": DefaultRenderer,
             "qwen3": Qwen3Renderer,
+            "prime-qwen3": PrimeQwen3Renderer,
             "qwen3-vl": Qwen3VLRenderer,
             "qwen3.5": Qwen35Renderer,
             "qwen3.6": Qwen36Renderer,
@@ -1360,10 +1373,11 @@ def _populate_registry():
             "minimax-m2": MiniMaxM2Renderer,
             "deepseek-v3": DeepSeekV3Renderer,
             "deepseek-r1": DeepSeekR1Renderer,
+            "hy3": Hy3Renderer,
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
             "laguna-xs.2": LagunaXS2Renderer,
-            "laguna-xs-2.1": LagunaXS2Renderer,
+            "laguna-xs-2.1": LagunaXS21Renderer,
             "llama-3": Llama3Renderer,
             "nemotron-3": Nemotron3Renderer,
             "nemotron-3-ultra": Nemotron3UltraRenderer,
@@ -1614,6 +1628,7 @@ def build_training_sample(
     role_to_mask: Callable[[Message], bool] | None = None,
     tools: list[ToolSpec] | None = None,
     content_sft_roles: "set[str] | frozenset[str] | None" = None,
+    ensure_final_stop: bool = False,
 ) -> RenderedTrainingSample:
     """Build a :class:`RenderedTrainingSample` for supervised training.
 
@@ -1669,6 +1684,17 @@ def build_training_sample(
     or hand-coded renderers that haven't been wired up yet) ignore
     ``content_sft_roles`` silently — falling back to the original
     ``role_to_mask`` + ``sampled_mask`` behaviour.
+
+    ``ensure_final_stop`` appends the renderer's canonical stop token
+    when the sample ends with an assistant message that the template
+    leaves unterminated. Some templates close an assistant turn only
+    via the *next* message's role marker (e.g. GLM's ``<|user|>`` /
+    ``<|observation|>``), so a final assistant message renders with no
+    stop token at all. No-op when the template already closes the turn
+    in-message (ChatML ``<|im_end|>``, Llama ``<|eot_id|>``); where it
+    fires, the output intentionally diverges from ``apply_chat_template``.
+    Ignored for renderers without ``sampled_mask`` (``DefaultRenderer``) —
+    the close of an opaque template can't be located reliably.
     """
     rendered = renderer.render(messages, tools=tools)
     has_sampled_info = len(rendered.sampled_mask) == len(rendered.token_ids)
@@ -1709,6 +1735,25 @@ def build_training_sample(
         else:
             loss_mask.append(role_to_mask(msg))
 
+    token_ids = list(rendered.token_ids)
+    # Requires sampled_mask (opaque templates hide the assistant close)
+    # and a final assistant message the role filter trains.
+    if (
+        ensure_final_stop
+        and has_sampled_info
+        and messages[-1].get("role") == "assistant"
+        and (role_to_mask is None or role_to_mask(messages[-1]))
+    ):
+        stop_ids = set(renderer.get_stop_token_ids())
+        last_trainable = next(
+            (k for k in range(len(loss_mask) - 1, -1, -1) if loss_mask[k]), None
+        )
+        if last_trainable is None or token_ids[last_trainable] not in stop_ids:
+            token_ids.append(renderer.get_stop_token_ids()[0])
+            # loss_mask=True marks the token as trainable — the appended
+            # stop is a training target, like any sampled token.
+            loss_mask.append(True)
+
     # Surface the multimodal payload for VLM renderers. ``None`` for text
     # renderers and for text-only samples (empty media) so downstream
     # ``multi_modal_data is not None`` is a reliable "has media" check.
@@ -1716,12 +1761,12 @@ def build_training_sample(
     if mm is not None and mm.is_empty():
         mm = None
     mm_token_type_ids = (
-        _build_mm_token_type_ids(mm.mm_placeholders, len(rendered.token_ids))
+        _build_mm_token_type_ids(mm.mm_placeholders, len(token_ids))
         if mm is not None and mm.mm_placeholders
         else None
     )
     return RenderedTrainingSample(
-        token_ids=rendered.token_ids,
+        token_ids=token_ids,
         loss_mask=loss_mask,
         multi_modal_data=mm,
         mm_token_type_ids=mm_token_type_ids,
@@ -1798,6 +1843,8 @@ def _get_offset_tokenizer(tokenizer):
 def attribute_text_segments(
     tokenizer,
     segments: "list[tuple[str, bool]]",
+    *,
+    overlap_is_content: bool = False,
 ) -> "list[tuple[int, bool]]":
     """Tokenize concatenated segments as a single BPE pass and return
     ``(token_id, is_content)`` pairs.
@@ -1815,6 +1862,16 @@ def attribute_text_segments(
     that *starts* at that offset (the "later" segment). Zero-length
     tokens (rare; usually pre-tokenizer artefacts) are attributed to
     the most recently entered segment.
+
+    ``overlap_is_content=True`` widens the content bit: a token counts
+    as content when *any* of its source characters fall in a content
+    segment, not just its first. Templates whose wrap glues directly
+    onto the body with no whitespace (e.g. ``<user>{content}</user>``)
+    can merge wrap and body bytes into one token; under the first-char
+    policy such a token would land on the wrap side and the body would
+    no longer be recoverable from the content run. Over-inclusion keeps
+    every body byte inside the ``is_content=True`` run at the cost of a
+    few adjacent wrap bytes.
 
     Requires a HuggingFace fast tokenizer with offset tracking. Every
     model in ``MODEL_RENDERER_MAP`` ships one, so the offset lookup
@@ -1852,12 +1909,24 @@ def attribute_text_segments(
 
     out: list[tuple[int, bool]] = []
     last_is_content = spans[-1][2] if spans else False
-    for tok_id, (start, _end) in zip(token_ids, offsets):
+    for tok_id, (start, end) in zip(token_ids, offsets):
         if start >= total_len:
             # Token's character offset is past every segment (shouldn't
             # normally happen for add_special_tokens=False, but defensive
             # against tokenizer-specific edge cases).
             out.append((tok_id, last_is_content))
+            continue
+        if overlap_is_content and end > start:
+            out.append(
+                (
+                    tok_id,
+                    any(
+                        seg_is_content
+                        for seg_start, seg_end, seg_is_content in spans
+                        if seg_start < end and start < seg_end
+                    ),
+                )
+            )
             continue
         # Find the segment that contains `start`. Segments are
         # contiguous and ordered, so a linear scan is fine — the inner
@@ -1971,6 +2040,7 @@ def build_trajectory_step(
         "completion_mask": [True] * len(completion_ids),
         "completion_logprobs": [0.0] * len(completion_ids),
         "routed_experts": None,
+        "kept_tokens": None,
     }
     if (
         full_rendered.multi_modal_data is not None

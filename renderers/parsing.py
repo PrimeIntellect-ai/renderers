@@ -286,7 +286,15 @@ def parse_qwen35(
     tool_call_end_id: int,
     tools: list[ToolSpec] | None = None,
 ) -> ParsedResponse:
-    """Parse Qwen3.5 completion tokens. XML-style tool calls, token-level thinking."""
+    """Parse Qwen3.5 completion tokens. XML-style tool calls, token-level thinking.
+
+    ``reasoning_content`` contract: ``None`` means the completion carried no
+    think block at all; a string (possibly empty) means a think block was
+    present. The distinction matters for renderers with key-presence
+    semantics (PrimeQwen3Renderer): a sampled ``<think></think>`` must
+    round-trip parse → message → render back to the same tokens, so an
+    empty-but-present block is ``""``, never ``None``.
+    """
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
     # Thinking: find </think> by token ID
@@ -300,12 +308,12 @@ def parse_qwen35(
         ids = ids[think_end + 1 :]
         parse_offset = think_end + 1
     elif think_id in set(ids):
-        # <think> present but no </think> — truncated reasoning
+        # <think> present but no </think> — truncated reasoning. Block
+        # present ⇒ string (see docstring), even when nothing follows the
+        # opening tag.
         think_start = _find(ids, think_id)
         reasoning = _decode(tokenizer, ids[think_start + 1 :]).strip()
-        return ParsedResponse(
-            content="", reasoning_content=reasoning or None, tool_calls=[]
-        )
+        return ParsedResponse(content="", reasoning_content=reasoning, tool_calls=[])
 
     tc_start = _find(ids, tool_call_id)
     tool_calls: list[ParsedToolCall] = []
@@ -322,9 +330,14 @@ def parse_qwen35(
     else:
         content_text = _decode(tokenizer, ids).strip()
 
+    # ``reasoning`` is None only when no think block was found; keep ""
+    # (empty-but-present block) intact so ``<think></think>`` samples
+    # round-trip — collapsing it to None made PrimeQwen3Renderer drop the
+    # block on re-render, forking the token stream for the rest of the
+    # rollout.
     return ParsedResponse(
         content=content_text,
-        reasoning_content=reasoning or None,
+        reasoning_content=reasoning,
         tool_calls=tool_calls,
     )
 
@@ -556,6 +569,205 @@ def _parse_glm_tool_calls(
     return tool_calls
 
 
+# ── Hy3: <think>…</think> content <tool_calls> <tool_call>name<tool_sep> …
+#        <arg_key>k</arg_key> <arg_value>v</arg_value> … </tool_call> </tool_calls>
+# Same arg_key/arg_value token scheme as GLM, but each call names the function
+# between <tool_call> and <tool_sep>, and the calls are wrapped in an outer
+# <tool_calls></tool_calls> pair. All markers are single special tokens.
+
+
+def parse_hy3(
+    tokenizer,
+    token_ids: list[int],
+    *,
+    stop_ids: set[int],
+    assistant_id: int,
+    think_id: int,
+    think_end_id: int,
+    tool_calls_id: int,
+    tool_call_id: int,
+    tool_call_end_id: int,
+    tool_sep_id: int,
+    arg_key_id: int,
+    arg_key_end_id: int,
+    arg_value_id: int,
+    arg_value_end_id: int,
+    tools: list[ToolSpec] | None = None,
+) -> ParsedResponse:
+    """Parse Hy3 completion tokens.
+
+    Handles both the inference stream (``reasoning</think>content…`` in
+    ``low``/``high`` mode, or bare ``content…`` in ``no_think`` mode, since
+    the ``<think>`` opener lives in the generation prompt) and a round-trip
+    slice that still carries a leading ``<｜hy_Assistant｜>`` opener and a
+    full ``<think>…</think>`` block.
+    """
+    ids = _strip_stop_tokens(token_ids, stop_ids)
+
+    # ``token_span`` values are reported relative to this stop-stripped stream
+    # (the documented contract), so track every prefix we slice off below.
+    offset = 0
+
+    # A round-trip slice includes the assistant role marker; the live
+    # inference stream does not. Drop a single leading opener so both paths
+    # land on the same downstream logic.
+    if ids and ids[0] == assistant_id:
+        ids = ids[1:]
+        offset += 1
+
+    reasoning = None
+    think_end = _find(ids, think_end_id)
+    if think_end != -1:
+        reasoning_ids = [t for t in ids[:think_end] if t != think_id]
+        reasoning = _decode(tokenizer, reasoning_ids).strip()
+        ids = ids[think_end + 1 :]
+        offset += think_end + 1
+    elif think_id in set(ids):
+        # Reasoning opened but never closed (truncation): everything after
+        # the opener is reasoning; there is no committed content yet.
+        think_start = _find(ids, think_id)
+        reasoning = _decode(tokenizer, ids[think_start + 1 :]).strip()
+        return ParsedResponse(
+            content="", reasoning_content=reasoning or None, tool_calls=[]
+        )
+
+    # Content ends at the first tool marker — the outer <tool_calls> wrapper
+    # or, defensively, a bare <tool_call> the model emitted without it.
+    marker_positions = [
+        p for p in (_find(ids, tool_calls_id), _find(ids, tool_call_id)) if p != -1
+    ]
+    tool_calls: list[ParsedToolCall] = []
+    if marker_positions:
+        tool_start = min(marker_positions)
+        content_text = _decode(tokenizer, ids[:tool_start]).strip()
+        tool_calls = _parse_hy3_tool_calls(
+            tokenizer,
+            ids[tool_start:],
+            tool_call_id,
+            tool_call_end_id,
+            tool_sep_id,
+            arg_key_id,
+            arg_key_end_id,
+            arg_value_id,
+            arg_value_end_id,
+            section_offset=offset + tool_start,
+            param_index=_build_param_type_index(tools),
+        )
+    else:
+        content_text = _decode(tokenizer, ids).strip()
+
+    return ParsedResponse(
+        content=content_text,
+        reasoning_content=reasoning or None,
+        tool_calls=tool_calls,
+    )
+
+
+def _parse_hy3_tool_calls(
+    tokenizer,
+    ids,
+    tc_id,
+    tc_end_id,
+    sep_id,
+    ak_id,
+    ake_id,
+    av_id,
+    ave_id,
+    *,
+    section_offset: int,
+    param_index: dict[str, dict[str, dict[str, Any]]],
+) -> list[ParsedToolCall]:
+    """Parse Hy3-style tool calls: ``<tool_call>name<tool_sep>`` then
+    arg_key/arg_value pairs, all by token ID. The outer ``<tool_calls>``
+    wrapper and inter-block newlines are skipped by scanning for the
+    per-call ``<tool_call>`` opener. ``section_offset`` shifts recorded
+    ``token_span`` values back into the stop-stripped completion stream
+    (``ids`` here is a suffix of it)."""
+    tool_calls: list[ParsedToolCall] = []
+    i = 0
+    while i < len(ids):
+        if ids[i] == tc_id:
+            end = _find(ids, tc_end_id, i + 1)
+            if end == -1:
+                raw = _decode(tokenizer, ids[i + 1 :])
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=raw,
+                        token_span=(section_offset + i, section_offset + len(ids)),
+                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                    )
+                )
+                break
+            block = ids[i + 1 : end]
+            block_text = _decode(tokenizer, block)
+            span = (section_offset + i, section_offset + end + 1)
+
+            # Name sits between <tool_call> and <tool_sep>. Fall back to the
+            # first <arg_key> boundary if the separator is missing.
+            sep = _find(block, sep_id)
+            if sep != -1:
+                name = _decode(tokenizer, block[:sep]).strip()
+                arg_ids = block[sep + 1 :]
+            else:
+                first_ak = _find(block, ak_id)
+                if first_ak == -1:
+                    name = _decode(tokenizer, block).strip()
+                    arg_ids = []
+                else:
+                    name = _decode(tokenizer, block[:first_ak]).strip()
+                    arg_ids = block[first_ak:]
+
+            params = param_index.get(name, {})
+            arguments: dict = {}
+            structure_broke = False
+            any_json_fallback = False
+            j = 0
+            while j < len(arg_ids):
+                if arg_ids[j] == ak_id:
+                    ake = _find(arg_ids, ake_id, j + 1)
+                    if ake == -1:
+                        structure_broke = True
+                        break
+                    key = _decode(tokenizer, arg_ids[j + 1 : ake]).strip()
+                    av = _find(arg_ids, av_id, ake + 1)
+                    if av == -1:
+                        structure_broke = True
+                        break
+                    ave = _find(arg_ids, ave_id, av + 1)
+                    if ave == -1:
+                        structure_broke = True
+                        break
+                    val_text = _decode(tokenizer, arg_ids[av + 1 : ave]).strip()
+                    value, used_fallback = _coerce_arg_value(val_text, params.get(key))
+                    arguments[key] = value
+                    any_json_fallback = any_json_fallback or used_fallback
+                    j = ave + 1
+                else:
+                    j += 1
+
+            if not name:
+                status = ToolCallParseStatus.MISSING_NAME
+            elif structure_broke:
+                status = ToolCallParseStatus.MALFORMED_STRUCTURE
+            elif any_json_fallback:
+                status = ToolCallParseStatus.INVALID_JSON
+            else:
+                status = ToolCallParseStatus.OK
+            tool_calls.append(
+                ParsedToolCall(
+                    raw=block_text,
+                    name=name or None,
+                    arguments=arguments,
+                    token_span=span,
+                    status=status,
+                )
+            )
+            i = end + 1
+        else:
+            i += 1
+    return tool_calls
+
+
 # ── Laguna-XS.2: <tool_call> name\n<arg_key>k</arg_key>\n<arg_value>v</arg_value> </tool_call>
 # Same outer skeleton as parse_glm, but <arg_key>/<arg_value> are plain text
 # (multi-token BPE), not single special tokens — so the inner block is decoded
@@ -572,32 +784,40 @@ def parse_laguna_xs2(
     tool_call_id: int,
     tool_call_end_id: int,
     tools: list[ToolSpec] | None = None,
+    strip_newlines: bool = True,
 ) -> ParsedResponse:
-    """Parse Laguna-XS.2 completion tokens.
+    """Parse Laguna-XS.2 / XS-2.1 completion tokens.
 
     Thinking uses single-token ``<think>`` / ``</think>`` (ids found by
     scan). Tool calls are delimited by single-token ``<tool_call>`` /
     ``</tool_call>``, but ``<arg_key>`` / ``<arg_value>`` inside are
     plain text — regex-extracted from the decoded inner block.
+
+    ``strip_newlines`` mirrors the template's whitespace around reasoning
+    and content. XS.2 wraps reasoning with ``\\n`` on both sides
+    (``<think>\\n{r}\\n</think>``) and brackets post-think content with
+    ``\\n`` too (``</think>\\n{c}\\n``) — strip exactly those newlines,
+    never a bare ``.strip()``, which would also eat whitespace the model
+    emitted intentionally. XS-2.1 renders both segments verbatim, so it
+    parses with ``strip_newlines=False``.
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
-    # The template wraps reasoning with ``\n`` on both sides
-    # (``<think>\n{r}\n</think>``) and brackets post-think content with ``\n``
-    # too (``</think>\n{c}\n``). Strip exactly those newlines from each
-    # decoded segment — never a bare ``.strip()``, which would also eat
-    # whitespace the model emitted intentionally.
+    def _segment(segment_ids: list[int]) -> str:
+        text = _decode(tokenizer, segment_ids)
+        return text.strip("\n") if strip_newlines else text
+
     reasoning = None
     parse_offset = 0
     think_end = _find(ids, think_end_id)
     if think_end != -1:
         reasoning_ids = ids[:think_end]
         reasoning_ids = [t for t in reasoning_ids if t != think_id]
-        reasoning = _decode(tokenizer, reasoning_ids).strip("\n")
+        reasoning = _segment(reasoning_ids)
         ids = ids[think_end + 1 :]
         parse_offset = think_end + 1
     elif (think_start := _find(ids, think_id)) != -1:
-        reasoning = _decode(tokenizer, ids[think_start + 1 :]).strip("\n")
+        reasoning = _segment(ids[think_start + 1 :])
         return ParsedResponse(
             content="", reasoning_content=reasoning or None, tool_calls=[]
         )
@@ -605,7 +825,7 @@ def parse_laguna_xs2(
     tc_start = _find(ids, tool_call_id)
     tool_calls: list[ParsedToolCall] = []
     if tc_start != -1:
-        content_text = _decode(tokenizer, ids[:tc_start]).strip("\n")
+        content_text = _segment(ids[:tc_start])
         tool_calls = _parse_laguna_xs2_tool_calls(
             tokenizer,
             ids[tc_start:],
@@ -615,7 +835,7 @@ def parse_laguna_xs2(
             param_index=_build_param_type_index(tools),
         )
     else:
-        content_text = _decode(tokenizer, ids).strip("\n")
+        content_text = _segment(ids)
 
     return ParsedResponse(
         content=content_text,
@@ -633,17 +853,20 @@ def _parse_laguna_xs2_tool_calls(
     section_offset: int,
     param_index: dict[str, dict[str, dict[str, Any]]],
 ) -> list[ParsedToolCall]:
-    """Parse Laguna-XS.2 tool calls.
+    """Parse Laguna-XS.2 / XS-2.1 tool calls.
 
     Inside each ``<tool_call>...</tool_call>`` block, the format is::
 
-        {name}\\n
-        <arg_key>{k1}</arg_key>\\n<arg_value>{v1}</arg_value>\\n
+        {name}
+        <arg_key>{k1}</arg_key><arg_value>{v1}</arg_value>
         ...
-        <arg_key>{kn}</arg_key>\\n<arg_value>{vn}</arg_value>\\n
+        <arg_key>{kn}</arg_key><arg_value>{vn}</arg_value>
 
-    The function name is everything before the first ``<arg_key>`` literal
-    in the decoded block.
+    XS.2 puts a ``\\n`` after the name and between the tag pairs; XS-2.1
+    packs everything tightly. The function name is everything before the
+    first ``<arg_key>`` literal in the decoded block (stripped), and the
+    key/value regex allows optional whitespace between the tags, so both
+    layouts parse identically.
     """
     import re
 

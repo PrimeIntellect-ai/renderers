@@ -3,6 +3,14 @@
 Produces token-for-token identical output to tokenizer.apply_chat_template() while
 also tracking which message produced each token (for per-token loss masks).
 
+One documented deviation: with ``enable_thinking=False`` the empty
+``<think>\n\n</think>\n\n`` wrapper is re-emitted on historical assistant
+turns without ``reasoning_content`` (the Jinja template strips it from turns
+at or before the last user query). The generation prompt prefills that
+wrapper, so every turn sampled with thinking disabled contains it — stripping
+it on re-render would make the same conversation produce different tokens
+depending on when it is rendered. See ``tests/test_disabled_thinking_stability.py``.
+
 Multimodal: the Qwen3.5 family is itself a VLM (HF tag ``image-text-to-text``;
 processor class ``Qwen3VLProcessor``). When a user/tool message carries an
 ``ImagePart``, the renderer emits the same ``<|vision_start|>``+N×``<|image_pad|>``
@@ -884,9 +892,18 @@ class Qwen35Renderer:
         # call tags (``<function=...>``, ``<parameter=...>``, etc.) are
         # part of the model's emitted output too — keep them
         # ``is_content=True`` per the assistant rule.
-        emit_thinking = self._should_render_thinking(
-            msg_idx, last_query_index
-        ) or getattr(self.config, "preserve_thinking", False)
+        # With thinking disabled, the generation prompt prefilled the empty
+        # ``<think>\n\n</think>\n\n`` wrapper, so it is part of every sampled
+        # turn's token stream. Re-emit it on historical turns — deviating
+        # from the Jinja template, which strips it from turns at or before
+        # the last user query — so re-renders stay token-stable with what
+        # the model actually sampled. Turns that carry reasoning_content
+        # were not sampled under this config; those stay template-faithful.
+        emit_thinking = (
+            self._should_render_thinking(msg_idx, last_query_index)
+            or getattr(self.config, "preserve_thinking", False)
+            or (not self.config.enable_thinking and not reasoning_content)
+        )
         if emit_thinking:
             # Include thinking block
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)

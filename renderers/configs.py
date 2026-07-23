@@ -186,7 +186,19 @@ class Qwen3RendererConfig(BaseRendererConfig):
     enable_thinking: bool = True
     """When ``True``, the generation prompt includes ``<think>`` so the
     model continues into a thinking block. Mirrors the chat template's
-    ``enable_thinking`` kwarg."""
+    ``enable_thinking`` kwarg.
+
+    When ``False``, the renderer deliberately deviates from the template
+    on historical assistant turns without ``reasoning_content``: the empty
+    ``<think>\\n\\n</think>\\n\\n`` wrapper the generation prompt prefilled
+    is re-emitted instead of stripped, keeping re-renders token-stable with
+    the sampled stream (see ``renderers/qwen3.py`` module docstring)."""
+
+
+class PrimeQwen3RendererConfig(BaseRendererConfig):
+    """PrimeIntellect Qwen3 renderer config."""
+
+    name: Literal["prime-qwen3"] = "prime-qwen3"
 
 
 class Qwen35RendererConfig(BaseRendererConfig):
@@ -198,7 +210,14 @@ class Qwen35RendererConfig(BaseRendererConfig):
     """When ``True``, the generation prompt includes ``<think>``. ``None``
     auto-detects from the tokenizer's chat-template default — Instruct
     checkpoints default off, Thinking checkpoints default on. Mirrors
-    the chat template's ``enable_thinking`` kwarg."""
+    the chat template's ``enable_thinking`` kwarg.
+
+    When resolved ``False``, the renderer deliberately deviates from the
+    template on historical assistant turns without ``reasoning_content``:
+    the empty ``<think>\\n\\n</think>\\n\\n`` wrapper the generation prompt
+    prefilled is re-emitted instead of stripped, keeping re-renders
+    token-stable with the sampled stream (see ``renderers/qwen35.py``
+    module docstring)."""
 
     add_vision_id: bool = False
     """When ``True``, prefix each ``<|vision_start|>`` placeholder with
@@ -300,6 +319,70 @@ class GLM45RendererConfig(BaseRendererConfig):
     enable_thinking: bool = True
     """When ``True``, the generation prompt includes ``<think>``. Mirrors
     the chat template's ``enable_thinking`` kwarg."""
+
+
+class Hy3RendererConfig(BaseRendererConfig):
+    """Tencent Hunyuan Hy3 renderer config.
+
+    Hy3 reasons via a ``reasoning_effort`` gate rather than a boolean
+    ``enable_thinking``. ``"no_think"`` (the template default) prefills an
+    empty ``<think></think>`` at the generation prompt so the model answers
+    directly; ``"low"`` / ``"high"`` prefill only the ``<think>`` opener so
+    the model streams reasoning up to a ``</think>`` it emits itself.
+
+    ``preserved_thinking`` mirrors the template kwarg of the same name:
+    ``True`` keeps ``<think>{reasoning}</think>`` on every historical
+    assistant turn; ``False`` collapses past-cycle reasoning to
+    ``<think></think>``, keeping it only on the in-flight turn (after the
+    last user query). ``None`` (default) follows the template's own
+    default — ``True`` when ``tools`` are supplied at render time, ``False``
+    otherwise. Bridge policy tracks the same resolution: ``"all"`` whenever
+    ``preserved_thinking`` resolves to ``True`` for the tools at hand,
+    ``"tool_cycle"`` otherwise.
+    """
+
+    name: Literal["hy3"] = "hy3"
+
+    reasoning_effort: Literal["no_think", "low", "high"] = "no_think"
+    """Reasoning gate. Mirrors the chat template's ``reasoning_effort`` kwarg.
+    ``"no_think"`` prefills ``<think></think>`` at the generation prompt;
+    ``"low"`` / ``"high"`` prefill just ``<think>``."""
+
+    preserved_thinking: bool | None = None
+    """Keep historical assistant reasoning. Mirrors the template's
+    ``preserved_thinking`` kwarg. ``None`` defers to the template default
+    (``True`` with tools, ``False`` without). Bridge policy is ``"all"``
+    whenever this resolves to ``True`` for the tools at hand."""
+
+    is_training: bool = False
+    """Mirrors the template's ``is_training`` kwarg. ``True`` renders SFT
+    targets: reasoning is kept on every assistant turn (regardless of
+    ``preserved_thinking`` / position) and the final assistant is terminated
+    with ``<｜hy_eos｜>``. Leave ``False`` for inference-faithful renders;
+    the training loss mask is normally derived via ``build_training_sample``
+    rather than this flag."""
+
+    raw_last_assistant: bool = False
+    """Mirrors the template's ``raw_last_assistant`` kwarg. When ``True`` a
+    trailing non-tool assistant message is emitted as raw visible content —
+    no ``<think>`` wrap, no ``<｜hy_eos｜>`` — for prefill / continuation."""
+
+    fallback_strategy: Literal["reasoning_toolcall_retry"] | None = None
+    """Mirrors the template's ``fallback_strategy`` kwarg. The sole active
+    value, ``"reasoning_toolcall_retry"``, forces ``reasoning_effort="high"``
+    and suppresses the generation prompt (``add_generation_prompt=False``)."""
+
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        if self.preserved_thinking is not None and self.thinking_retention is not None:
+            implied = "all" if self.preserved_thinking else "tool_cycle"
+            if self.thinking_retention != implied:
+                raise ValueError(
+                    f"preserved_thinking={self.preserved_thinking!r} implies "
+                    f"thinking_retention={implied!r}, which conflicts with "
+                    f"explicit thinking_retention={self.thinking_retention!r}."
+                )
+        return self
 
 
 class GptOssRendererConfig(BaseRendererConfig):
@@ -410,24 +493,22 @@ class LagunaXS2RendererConfig(BaseRendererConfig):
 
 
 class LagunaXS21RendererConfig(BaseRendererConfig):
-    """Laguna XS-2.1 renderer config — distinct discriminator so auto
-    resolution gives XS-2.1 checkpoints the no-default-system-message
-    template variant.
+    """Laguna XS-2.1 renderer config.
 
-    XS-2.1's chat template is byte-identical to XS.2's except it ships
-    no default system message: when the caller provides none (and no
-    tools), the ``<system>`` block is omitted entirely. Shares
-    :class:`renderers.laguna_xs2.LagunaXS2Renderer`, which selects the
-    variant from ``config.name``.
+    XS-2.1's chat template reads a single kwarg, ``enable_thinking``,
+    which gates both the generation prompt (``<think>`` vs ``</think>``)
+    and whether assistant reasoning is rendered into the history at all.
+    Served by :class:`renderers.laguna_xs2.LagunaXS21Renderer`.
     """
 
     name: Literal["laguna-xs-2.1"] = "laguna-xs-2.1"
 
     enable_thinking: bool = False
-    """See :class:`LagunaXS2RendererConfig.enable_thinking`."""
-
-    render_assistant_messages_raw: bool = False
-    """See :class:`LagunaXS2RendererConfig.render_assistant_messages_raw`."""
+    """When ``True``, the generation prompt ends with ``<think>`` and
+    every assistant turn renders ``<think>{reasoning}</think>``; when
+    ``False``, turns open with a bare ``</think>`` and reasoning is not
+    rendered. Mirrors the template's ``enable_thinking`` kwarg and its
+    upstream default."""
 
 
 class Llama3RendererConfig(BaseRendererConfig):
@@ -574,6 +655,7 @@ RendererConfig = Annotated[
         AutoRendererConfig,
         DefaultRendererConfig,
         Qwen3RendererConfig,
+        PrimeQwen3RendererConfig,
         Qwen35RendererConfig,
         Qwen36RendererConfig,
         Qwen3VLRendererConfig,
@@ -581,6 +663,7 @@ RendererConfig = Annotated[
         GLM51RendererConfig,
         GLM45RendererConfig,
         GptOssRendererConfig,
+        Hy3RendererConfig,
         KimiK2RendererConfig,
         KimiK25RendererConfig,
         LagunaXS2RendererConfig,
@@ -612,6 +695,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "auto": AutoRendererConfig,
     "default": DefaultRendererConfig,
     "qwen3": Qwen3RendererConfig,
+    "prime-qwen3": PrimeQwen3RendererConfig,
     "qwen3.5": Qwen35RendererConfig,
     "qwen3.6": Qwen36RendererConfig,
     "qwen3-vl": Qwen3VLRendererConfig,
@@ -619,6 +703,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "glm-5.1": GLM51RendererConfig,
     "glm-4.5": GLM45RendererConfig,
     "gpt-oss": GptOssRendererConfig,
+    "hy3": Hy3RendererConfig,
     "kimi-k2": KimiK2RendererConfig,
     "kimi-k2.5": KimiK25RendererConfig,
     "laguna-xs.2": LagunaXS2RendererConfig,
@@ -666,6 +751,7 @@ __all__ = [
     "GLM51RendererConfig",
     "GLM5RendererConfig",
     "GptOssRendererConfig",
+    "Hy3RendererConfig",
     "KimiK25RendererConfig",
     "KimiK2RendererConfig",
     "LagunaXS2RendererConfig",
@@ -675,6 +761,7 @@ __all__ = [
     "MultimodalOutput",
     "Nemotron3RendererConfig",
     "Nemotron3UltraRendererConfig",
+    "PrimeQwen3RendererConfig",
     "Qwen35RendererConfig",
     "Qwen36RendererConfig",
     "Qwen3RendererConfig",

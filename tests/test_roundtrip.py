@@ -25,11 +25,11 @@ from typing import Any
 
 import pytest
 
-
 # (HuggingFace model name, renderer name or "auto"). These are the
 # renderers we actively rely on; expand as new ones get hand-coded.
 _ROUNDTRIP_MODELS = [
     ("Qwen/Qwen3-8B", "auto"),
+    ("PrimeIntellect/Qwen3-0.6B", "auto"),
     ("Qwen/Qwen3.5-9B", "auto"),
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
     ("Qwen/Qwen3-VL-4B-Instruct", "auto"),
@@ -47,6 +47,11 @@ _ROUNDTRIP_MODELS = [
     # (no separating newline) — the Ultra-specific glue stresses the round-trip.
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
+    # Laguna-XS-2.1 is deliberately absent: under the default
+    # ``enable_thinking=False`` its template drops assistant reasoning at
+    # render time, so the reasoning round-trip can't hold by design.
+    # test_laguna_xs21.py covers the round-trip under enable_thinking=True.
+    ("tencent/Hy3", "auto"),
     ("unsloth/Llama-3.2-1B-Instruct", "llama-3"),
     ("openai/gpt-oss-20b", "gpt-oss"),
     ("Qwen/Qwen2.5-0.5B-Instruct", "default"),

@@ -445,6 +445,20 @@ def _build_tool_image_cases(make_part, image):
 # ---------------------------------------------------------------------------
 
 
+def _skip_for_disabled_thinking_deviation(renderer, case_id) -> bool:
+    """With ``enable_thinking=False`` (the resolved default on the small
+    Qwen3.5 sizes) the Qwen family re-emits the empty think wrapper on
+    historical assistant turns without reasoning — a documented deviation
+    from the template for sampled-token stability (see
+    ``test_disabled_thinking_stability.py``). Cases with an assistant turn
+    before the last user query therefore diverge from the processor oracle
+    by exactly those wrapper tokens; skip them for parity purposes."""
+    return getattr(renderer.config, "enable_thinking", True) is False and case_id in (
+        "multi_turn_two_images",
+        "multi_turn_tool_response_images",
+    )
+
+
 def _supports_tool_message_images(renderer) -> bool:
     """True iff this renderer emits image placeholders inside tool-response
     content. Renderers without the feature silently drop image parts in tool
@@ -482,6 +496,8 @@ def test_multimodal_byte_parity_vs_processor(
         messages, add_gp = renderer_case.values
         processor_messages, processor_add_gp = processor_case.values
         assert add_gp == processor_add_gp
+        if _skip_for_disabled_thinking_deviation(renderer, renderer_case.id):
+            continue
 
         # Ours.
         ours = renderer.render_ids(messages, add_generation_prompt=add_gp)
@@ -601,6 +617,12 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     ]
 
     initial_rendered = renderer.render(initial, add_generation_prompt=True)
+    prior_mm = initial_rendered.multi_modal_data
+    prior_counts = (
+        len(prior_mm.mm_placeholders.get(modality, [])),
+        len(prior_mm.mm_items.get(modality, [])),
+        len(prior_mm.mm_hashes.get(modality, [])),
+    )
     # ``previous_completion_ids`` mirrors what a sampler would emit
     # starting AFTER the prompt's assistant role opener — i.e. the
     # response text followed by ``<|im_end|>``.
@@ -650,12 +672,18 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     hashes = bridged_mm.mm_hashes.get(modality, [])
     assert len(items) == 2 and len(hashes) == 2
 
-    # The merge must not mutate the caller's sidecar in place — bridge
-    # callers pass the persisted previous step's object.
-    prev_mm = initial_rendered.multi_modal_data
-    assert len(prev_mm.mm_placeholders.get(modality, [])) == 1
-    assert len(prev_mm.mm_items.get(modality, [])) == 1
-    assert len(prev_mm.mm_hashes.get(modality, [])) == 1
+    # (2b) The prior turn's sidecar is unchanged — the bridge copies the
+    # per-modality lists, so the carried-forward item doesn't grow the
+    # caller's previous_multi_modal_data in place.
+    assert (
+        (
+            len(prior_mm.mm_placeholders.get(modality, [])),
+            len(prior_mm.mm_items.get(modality, [])),
+            len(prior_mm.mm_hashes.get(modality, [])),
+        )
+        == prior_counts
+        == (1, 1, 1)
+    ), f"{mm_model_name} / {modality}: bridge mutated previous_multi_modal_data"
 
     # (3) Extension contains the new turn's pad run, and its
     # placeholder offset lands inside the extension region.
@@ -723,6 +751,8 @@ def test_tool_response_image_byte_parity(
         messages, add_gp = renderer_case.values
         processor_messages, processor_add_gp = processor_case.values
         assert add_gp == processor_add_gp
+        if _skip_for_disabled_thinking_deviation(renderer, renderer_case.id):
+            continue
         ours = renderer.render_ids(messages, add_generation_prompt=add_gp)
         theirs = kit["processor_input_ids"](processor, processor_messages, add_gp)
         assert ours == theirs, (
@@ -816,6 +846,8 @@ def test_add_vision_id_parity_vs_processor(
         messages, add_gp = renderer_case.values
         processor_messages, processor_add_gp = processor_case.values
         assert add_gp == processor_add_gp
+        if _skip_for_disabled_thinking_deviation(renderer, renderer_case.id):
+            continue
         ours = renderer.render_ids(messages, add_generation_prompt=add_gp)
         theirs = _qwen_vl_processor_input_ids_with_kwargs(
             processor, processor_messages, add_gp, add_vision_id=add_vision_id

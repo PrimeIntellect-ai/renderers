@@ -546,6 +546,37 @@ class LagunaXS21RendererConfig(BaseRendererConfig):
     upstream default."""
 
 
+class LagunaS21RendererConfig(BaseRendererConfig):
+    """Laguna S-2.1 renderer config.
+
+    S-2.1 is a larger sibling of XS-2.1 sharing its tokenizer (same vocab,
+    special tokens, and merges), but its chat template is *not* byte-identical:
+    ``enable_thinking`` defaults to ``True`` (XS-2.1 defaults ``False``), and a
+    new ``preserve_thinking`` kwarg widens the reasoning-display gate to
+    ``enable_thinking or preserve_thinking``. The token format is otherwise
+    identical, so this is served by
+    :class:`renderers.laguna_xs2.LagunaS21Renderer`, a thin subclass of
+    ``LagunaXS21Renderer`` that only overrides that gate.
+    """
+
+    name: Literal["laguna-s-2.1"] = "laguna-s-2.1"
+
+    enable_thinking: bool = True
+    """When ``True``, the generation prompt ends with ``<think>`` and every
+    assistant turn renders ``<think>{reasoning}</think>``; when ``False``,
+    turns open with a bare ``</think>``. Mirrors the template's
+    ``enable_thinking`` kwarg — note S-2.1's upstream default is ``True``,
+    unlike XS-2.1's ``False``."""
+
+    preserve_thinking: bool = False
+    """When ``True``, assistant turns keep their ``<think>{reasoning}</think>``
+    block even while ``enable_thinking`` is ``False`` — the template gates
+    reasoning display on ``enable_thinking or preserve_thinking``. With the
+    default ``False`` the gate collapses to ``enable_thinking`` and the
+    renderer matches XS-2.1 turn-for-turn. Mirrors the template's
+    ``preserve_thinking`` kwarg and its upstream default."""
+
+
 class Llama3RendererConfig(BaseRendererConfig):
     """Llama-3.x Instruct renderer config.
 
@@ -735,6 +766,7 @@ RendererConfig = Annotated[
         LagunaXS2RendererConfig,
         LagunaM1RendererConfig,
         LagunaXS21RendererConfig,
+        LagunaS21RendererConfig,
         Llama3RendererConfig,
         MiniMaxM2RendererConfig,
         Nemotron3RendererConfig,
@@ -777,6 +809,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "laguna-xs.2": LagunaXS2RendererConfig,
     "laguna-m.1": LagunaM1RendererConfig,
     "laguna-xs-2.1": LagunaXS21RendererConfig,
+    "laguna-s-2.1": LagunaS21RendererConfig,
     "llama-3": Llama3RendererConfig,
     "minimax-m2": MiniMaxM2RendererConfig,
     "nemotron-3": Nemotron3RendererConfig,
@@ -825,6 +858,7 @@ __all__ = [
     "KimiK25RendererConfig",
     "KimiK2RendererConfig",
     "LagunaM1RendererConfig",
+    "LagunaS21RendererConfig",
     "LagunaXS2RendererConfig",
     "LagunaXS21RendererConfig",
     "Llama3RendererConfig",

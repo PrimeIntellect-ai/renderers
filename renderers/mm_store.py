@@ -28,7 +28,6 @@ _SAFE = {
     "raw multimodal modality": re.compile(r"^[A-Za-z0-9_.-]+$"),
     "image layout fingerprint": re.compile(r"^[a-f0-9]{16,64}$"),
     "image hash": re.compile(r"^[a-f0-9]{16,128}$"),
-    "raw multimodal ref payload segment": re.compile(r"^[A-Za-z0-9_-]*$"),
 }
 
 _MEDIA_TYPE_EXT = {
@@ -104,18 +103,18 @@ def _json_fingerprint_value(value: object) -> str:
 
 
 def _encode_ref_payload(payload: dict[str, object] | None) -> str:
-    raw = json.dumps(payload or {}, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    """Serialize a ref payload as compact JSON.
+
+    Deliberately not base64-wrapped: the ref travels as a string inside a JSON
+    request body, so the only encoding cost is escaping the payload's own quotes
+    (tens of bytes). A base64 wrapper would instead inflate the whole payload by
+    a third — including an inline image source, where that is ~34 KiB per image.
+    """
+    return json.dumps(payload or {}, sort_keys=True, separators=(",", ":"))
 
 
 def _decode_ref_payload(encoded: str) -> dict[str, object]:
-    _ensure_safe("raw multimodal ref payload segment", encoded)
-    padded = encoded + "=" * (-len(encoded) % 4)
-    payload = json.loads(
-        base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
-    )
+    payload = json.loads(encoded)
     if not isinstance(payload, dict):
         raise ValueError("Raw multimodal ref payload must decode to a dict")
     return payload
@@ -204,11 +203,11 @@ def raw_mm_ref(
 
 
 def split_raw_mm_ref(ref: str) -> RawMMRef:
-    parts = ref.split(":")
-    if len(parts) != 2 or parts[0] != IMAGE_REF_PREFIX:
+    prefix, _, encoded = ref.partition(":")
+    if prefix != IMAGE_REF_PREFIX or not encoded:
         raise ValueError(f"Invalid raw multimodal ref shape: {ref!r}")
 
-    payload = _decode_ref_payload(parts[1])
+    payload = _decode_ref_payload(encoded)
     family = payload.get("family")
     fingerprint = payload.get("fingerprint")
     modality = payload.get("modality")

@@ -361,7 +361,7 @@ def _build_mm_features(
 
     NOTE — future engine pluggability: this encoder is vLLM 0.20-specific
     (uses ``vllm.multimodal.inputs.MultiModalKwargsItems``,
-    ``vllm.entrypoints.serve.disagg.mm_serde.encode_mm_kwargs_item``, and
+    ``vllm.entrypoints.scale_out.token_in_token_out.mm_serde.encode_mm_kwargs_item``, and
     ``_create_qwen2vl_field_factory``). When a second inference engine
     arrives (SGLang, MAX, ...) the renderer client should be parameterized
     on engine: either (a) move the encoder onto the renderer as
@@ -408,7 +408,7 @@ def _build_qwen_vl_features(
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature
-        from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
+        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import encode_mm_kwargs_item
         from vllm.model_executor.models.qwen2_vl import _create_qwen2vl_field_factory
         from vllm.multimodal.inputs import MultiModalKwargsItems
     except ImportError as exc:

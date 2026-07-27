@@ -24,6 +24,7 @@ _SAFE = {
     "image hash": re.compile(r"^[a-f0-9]{16,128}$"),
 }
 
+
 def _ensure_safe(label: str, value: str) -> str:
     if not _SAFE[label].fullmatch(value):
         raise ValueError(f"Invalid {label}: {value!r}")

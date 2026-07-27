@@ -407,7 +407,9 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
     ],
     ids=["default_image_modality", "kimi_vllm_modality"],
 )
-def test_generate_serializes_raw_mm_refs(family, payload, expected_modality, vllm_modality):
+def test_generate_serializes_raw_mm_refs(
+    family, payload, expected_modality, vllm_modality
+):
     """``generate`` serializes raw multimodal envelopes to vLLM refs.
 
     The client owns only the generic wire shape: hashes, placeholder spans,
@@ -423,7 +425,9 @@ def test_generate_serializes_raw_mm_refs(family, payload, expected_modality, vll
         split_raw_mm_ref,
     )
 
-    image_data = "data:image/png;base64," + base64.b64encode(b"image-bytes").decode("ascii")
+    image_data = "data:image/png;base64," + base64.b64encode(b"image-bytes").decode(
+        "ascii"
+    )
     fingerprint = image_layout_fingerprint(family=family, revision="test")
     mm_hash = "a" * 32
 

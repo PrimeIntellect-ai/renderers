@@ -1027,7 +1027,9 @@ def test_raw_layout_math_matches_image_processor(mm_model_name):
         pil = Image.new("RGB", (width, height), color=(10, 20, 30))
         buf = io.BytesIO()
         pil.save(buf, format="PNG")
-        data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+        data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(
+            "ascii"
+        )
         part = {"type": "image", "image": data_url}
         label = f"{mm_model_name}: {width}x{height}"
 

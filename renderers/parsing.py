@@ -59,6 +59,26 @@ def _build_param_type_index(
     return index
 
 
+def _extract_tool_names(tools: list[ToolSpec] | None) -> set[str] | None:
+    """Set of declared tool names, or ``None`` when ``tools`` is empty.
+
+    ``None`` disables name validation — mirroring vLLM's
+    ``ParserEngine._is_valid_tool_name``, which returns ``True`` whenever
+    the request carries no tools. Accepts both flat ``ToolSpec`` and the
+    OpenAI ``{"type": "function", "function": {...}}`` envelope, like
+    ``_build_param_type_index`` (but independent of it: a tool with no
+    ``parameters.properties`` still counts as a known name).
+    """
+    if not tools:
+        return None
+    names: set[str] = set()
+    for tool in tools:
+        spec = tool.get("function", tool) if isinstance(tool, dict) else None
+        if isinstance(spec, dict) and isinstance(spec.get("name"), str):
+            names.add(spec["name"])
+    return names
+
+
 def _coerce_arg_value(
     text: str, param_schema: dict[str, Any] | None
 ) -> tuple[Any, bool]:
@@ -434,7 +454,23 @@ def parse_glm(
     arg_value_end_id: int,
     tools: list[ToolSpec] | None = None,
 ) -> ParsedResponse:
-    """Parse GLM completion tokens. Token-level thinking + arg_key/arg_value tool calls."""
+    """Parse GLM completion tokens. Token-level thinking + arg_key/arg_value tool calls.
+
+    When ``tools`` is passed, tool names are validated against it: a call
+    whose name isn't declared gets ``status=UNKNOWN_TOOL`` instead of
+    ``OK``. This mirrors vLLM ≥ 0.24, where the ``glm45``/``glm47`` tool
+    parsers run with ``validate_tool_names=True`` and silently drop
+    unknown-name calls (``vllm/parser/glm47_moe.py``,
+    ``ParserEngine._is_valid_tool_name``) — so a completion that yields no
+    tool call from the engine also yields no ``OK`` call here, and
+    downstream finish-reason promotion (``renderers/client.py``) agrees
+    with an OpenAI chat-completions client talking to the same engine.
+    Notably this covers the missing-``<arg_key>`` shape
+    (``<tool_call>bash\\n<arg_value>...</arg_value></tool_call>``): both
+    this parser and vLLM's resolve the whole block as the name, which then
+    fails validation. Without ``tools``, no validation happens (vLLM
+    behaves the same when the request carries no tools).
+    """
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
     reasoning = None
@@ -468,6 +504,7 @@ def parse_glm(
             arg_value_end_id,
             section_offset=parse_offset + tc_start,
             param_index=_build_param_type_index(tools),
+            known_names=_extract_tool_names(tools),
         )
     else:
         content_text = _decode(tokenizer, ids).strip()
@@ -491,6 +528,7 @@ def _parse_glm_tool_calls(
     *,
     section_offset: int,
     param_index: dict[str, dict[str, dict[str, Any]]],
+    known_names: set[str] | None = None,
 ) -> list[ParsedToolCall]:
     """Parse GLM-style tool calls: name + arg_key/arg_value pairs, all by token ID."""
     tool_calls: list[ParsedToolCall] = []
@@ -548,6 +586,11 @@ def _parse_glm_tool_calls(
                         j += 1
             if not name:
                 status = ToolCallParseStatus.MISSING_NAME
+            elif known_names is not None and name not in known_names:
+                # vLLM ≥ 0.24 drops the call entirely here; we keep the
+                # attempt visible but deny it OK so consumers agree with
+                # the engine on "no tool was called."
+                status = ToolCallParseStatus.UNKNOWN_TOOL
             elif structure_broke:
                 status = ToolCallParseStatus.MALFORMED_STRUCTURE
             elif any_json_fallback:

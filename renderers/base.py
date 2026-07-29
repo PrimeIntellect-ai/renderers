@@ -558,8 +558,15 @@ class ToolCallParseStatus(str, enum.Enum):
     """Per-attempt outcome of parsing a single ``<tool_call>`` block.
 
     The renderer parser's job is JSON-syntax → ``dict`` (the parser-level
-    contract). Schema validation — required fields, argument types, tool
-    name lookup — is the *tool*'s job and is intentionally not done here.
+    contract). Schema validation — required fields, argument types — is
+    the *tool*'s job and is intentionally not done here. Tool-*name*
+    lookup is the one exception, and only where the reference inference
+    parser does it: vLLM ≥ 0.24 aliases ``glm45``/``glm47`` to a parser
+    with ``validate_tool_names=True`` that silently drops any call whose
+    name isn't in the request's tool list. ``parse_glm`` mirrors that as
+    ``UNKNOWN_TOOL`` (when ``tools`` is passed) so train-side parsing
+    agrees with what an eval client sees from the engine — but keeps the
+    attempt visible instead of swallowing it.
     See ``ParsedToolCall.status`` for what each value means.
 
     Diverges from vLLM/SGLang on purpose. Both engines collapse parse
@@ -576,6 +583,7 @@ class ToolCallParseStatus(str, enum.Enum):
     UNCLOSED_BLOCK = "unclosed_block"  # opening delim hit EOS / stop
     MISSING_NAME = "missing_name"  # parsed structurally, but no function name
     MALFORMED_STRUCTURE = "malformed_structure"  # format-specific shape error
+    UNKNOWN_TOOL = "unknown_tool"  # name not in the provided tools list
 
 
 @dataclass

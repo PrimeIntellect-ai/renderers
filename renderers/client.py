@@ -1,4 +1,4 @@
-"""Renderer-based generate client for vLLM 0.20's /inference/v1/generate.
+"""Renderer-based generate client for vLLM's /inference/v1/generate.
 
     messages → Renderer.render_ids() → token IDs → POST /inference/v1/generate
     → completion tokens → Renderer.parse_response() → structured message
@@ -58,8 +58,7 @@ class OverlongPromptError(Exception):
         self.prompt_len = prompt_len
         self.max_prompt_len = max_prompt_len
         super().__init__(
-            f"Prompt length ({prompt_len}) exceeds maximum "
-            f"context length ({max_prompt_len})."
+            f"Prompt length ({prompt_len}) exceeds maximum context length ({max_prompt_len})."
         )
 
 
@@ -187,32 +186,26 @@ def _parse_completion_logprobs(
         expected_token = f"token_id:{completion_ids[index]}"
         if entry.get("token") != expected_token:
             raise MalformedGenerateResponseError(
-                "Engine response "
-                f"choice.logprobs.content[{index}].token must be {expected_token!r}."
+                f"Engine response choice.logprobs.content[{index}].token must be {expected_token!r}."
             )
         raw_logprob = entry.get("logprob")
         if isinstance(raw_logprob, bool) or not isinstance(raw_logprob, (int, float)):
             raise MalformedGenerateResponseError(
-                "Engine response "
-                f"choice.logprobs.content[{index}].logprob must be a number."
+                f"Engine response choice.logprobs.content[{index}].logprob must be a number."
             )
         try:
             logprob = float(raw_logprob)
         except OverflowError as exc:
             raise MalformedGenerateResponseError(
-                "Engine response "
-                f"choice.logprobs.content[{index}].logprob must be finite."
+                f"Engine response choice.logprobs.content[{index}].logprob must be finite."
             ) from exc
         if not math.isfinite(logprob):
             raise MalformedGenerateResponseError(
-                "Engine response "
-                f"choice.logprobs.content[{index}].logprob must be finite."
+                f"Engine response choice.logprobs.content[{index}].logprob must be finite."
             )
         if logprob == VLLM_LOGPROB_SENTINEL:
             raise MalformedGenerateResponseError(
-                "Engine response "
-                f"choice.logprobs.content[{index}].logprob does not contain "
-                "sampling evidence."
+                f"Engine response choice.logprobs.content[{index}].logprob does not contain sampling evidence."
             )
         completion_logprobs.append(logprob)
     return completion_logprobs
@@ -424,9 +417,9 @@ def _build_mm_features(
     model-family specific. For now we dispatch on the renderer class;
     extend the dispatch table as more multimodal renderers land.
 
-    NOTE — future engine pluggability: this encoder is vLLM 0.20-specific
+    NOTE — future engine pluggability: this encoder is vLLM-specific
     (uses ``vllm.multimodal.inputs.MultiModalKwargsItems``,
-    ``vllm.entrypoints.serve.disagg.mm_serde.encode_mm_kwargs_item``, and
+    ``vllm.entrypoints.scale_out.token_in_token_out.mm_serde.encode_mm_kwargs_item``, and
     ``_create_qwen2vl_field_factory``). When a second inference engine
     arrives (SGLang, MAX, ...) the renderer client should be parameterized
     on engine: either (a) move the encoder onto the renderer as
@@ -473,7 +466,9 @@ def _build_qwen_vl_features(
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature
-        from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
+        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+            encode_mm_kwargs_item,
+        )
         from vllm.model_executor.models.qwen2_vl import _create_qwen2vl_field_factory
         from vllm.multimodal.inputs import MultiModalKwargsItems
     except ImportError as exc:

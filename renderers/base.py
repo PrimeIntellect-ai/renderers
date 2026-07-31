@@ -1074,6 +1074,8 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
     # Poolside Laguna. The two checkpoints ship different chat templates,
     # each mirrored by its own renderer class.
+    # RLM chat format (minimal role tags, rlm harness).
+    "PrimeIntellect/RLM-Chat-Template": "rlm",
     "poolside/Laguna-XS.2": "laguna-xs.2",
     "poolside/Laguna-XS-2.1": "laguna-xs-2.1",
     # GPT-OSS.
@@ -1332,6 +1334,7 @@ def _populate_registry():
     from renderers.qwen3_vl import Qwen3VLRenderer
     from renderers.qwen35 import Qwen35Renderer
     from renderers.qwen36 import Qwen36Renderer
+    from renderers.rlm import RlmRenderer
 
     RENDERER_REGISTRY.update(
         {
@@ -1355,6 +1358,7 @@ def _populate_registry():
             "llama-3": Llama3Renderer,
             "nemotron-3": Nemotron3Renderer,
             "nemotron-3-ultra": Nemotron3UltraRenderer,
+            "rlm": RlmRenderer,
             "gpt-oss": GptOssRenderer,
         }
     )

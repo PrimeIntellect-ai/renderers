@@ -141,24 +141,15 @@ def _image_source(item: dict[str, Any]) -> Any:
     return item.get("url") or item.get("path")
 
 
-def _file_path_from_source(source: Any) -> Path | None:
-    if not isinstance(source, str):
-        return None
-    parsed = urlparse(source)
-    if parsed.scheme == "file":
-        return Path(unquote(parsed.path)).resolve()
-    if parsed.scheme == "":
-        return Path(source).resolve()
-    return None
-
-
 def _offloaded_image_path(source: Any) -> Path:
-    path = _file_path_from_source(source)
-    if path is None:
-        raise ValueError(
-            "v1 multimodal image rendering requires offloaded file:// image assets"
-        )
-    return path
+    """The one accepted raw-mode image source: an offloaded ``file://`` URL."""
+    if isinstance(source, str):
+        parsed = urlparse(source)
+        if parsed.scheme == "file":
+            return Path(unquote(parsed.path)).resolve()
+    raise ValueError(
+        "v1 multimodal image rendering requires offloaded file:// image assets"
+    )
 
 
 def _load_pil_image(item: dict[str, Any]):

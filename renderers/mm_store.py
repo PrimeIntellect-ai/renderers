@@ -15,7 +15,9 @@ import os
 import re
 import threading
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 # Contract: must match prime_rl.utils.run_assets.IMAGE_OFFLOAD_DIR_ENV.
 IMAGE_OFFLOAD_DIR_ENV = "VF_RENDERER_IMAGE_OFFLOAD_DIR"
@@ -96,6 +98,37 @@ def offload_image_to_run_assets(
         except OSError:
             pass
     return path.as_uri()
+
+
+@lru_cache(maxsize=8)
+def hub_image_processor_config(
+    model_name: str, revision: str | None = None
+) -> dict[str, Any]:
+    """The checkpoint's ``preprocessor_config.json`` as a plain dict.
+
+    Raw-mode layout math sources its knobs here so they can never drift from
+    the checkpoint. Deliberately a JSON read, never a processor instantiation:
+    instantiating pulls torch-backed processor classes (and, for trust-remote-
+    code models, executes repo code) — neither belongs on a render host.
+    """
+    local = Path(model_name) / "preprocessor_config.json"
+    if local.is_file():
+        return json.loads(local.read_text())
+
+    from huggingface_hub import hf_hub_download
+
+    try:
+        path = hf_hub_download(
+            model_name,
+            "preprocessor_config.json",
+            revision=revision,
+            local_files_only=True,
+        )
+    except Exception:
+        path = hf_hub_download(
+            model_name, "preprocessor_config.json", revision=revision
+        )
+    return json.loads(Path(path).read_text())
 
 
 def _json_fingerprint_value(value: object) -> str:

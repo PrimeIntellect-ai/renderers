@@ -25,7 +25,9 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from functools import lru_cache
 from typing import Any
 
 from transformers.tokenization_utils import PreTrainedTokenizer
@@ -47,7 +49,11 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
-from renderers.mm_store import image_layout_fingerprint, raw_mm_item
+from renderers.mm_store import (
+    hub_image_processor_config,
+    image_layout_fingerprint,
+    raw_mm_item,
+)
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
 from renderers.qwen3_vl import (
     _PROCESSED_IMAGE_CACHE_MAX,
@@ -57,6 +63,7 @@ from renderers.qwen3_vl import (
     _load_image_asset,
     _load_pil_image,
     _pil_image_hash,
+    layout_model_name,
 )
 
 # ---------------------------------------------------------------------------
@@ -415,16 +422,71 @@ def _encode_tools_typescript(tools: list[ToolSpec]) -> str:
 
 @dataclass(frozen=True)
 class KimiK25ImageLayoutSpec:
-    patch_size: int = 14
-    merge_kernel_size: int = 2
-    in_patch_limit: int = 16384
-    patch_limit_on_one_side: int = 512
-    fixed_output_tokens: int | None = None
-    image_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)
-    image_std: tuple[float, float, float] = (0.5, 0.5, 0.5)
+    """The knobs that determine Kimi K2.5 image layout — this dataclass is the
+    canonical field list: the fingerprint hashes exactly these, on both the
+    render side (values from the checkpoint config) and the materialize side
+    (values from the live image processor via :func:`kimi_layout_from`)."""
+
+    patch_size: int
+    merge_kernel_size: int
+    in_patch_limit: int
+    patch_limit_on_one_side: int
+    fixed_output_tokens: int | None
+    image_mean: tuple[float, float, float]
+    image_std: tuple[float, float, float]
+
+    def fingerprint(self) -> str:
+        values = asdict(self)
+        values["image_mean"] = list(self.image_mean)
+        values["image_std"] = list(self.image_std)
+        return image_layout_fingerprint(family=KIMI_K25_FAMILY, **values)
 
 
-KIMI_K25_IMAGE_LAYOUT = KimiK25ImageLayoutSpec()
+def kimi_layout_from(source: Any) -> KimiK25ImageLayoutSpec:
+    """Extract the layout spec from a preprocessor config dict or a live image
+    processor object; both nest the knobs under ``media_proc_cfg``."""
+    cfg = (
+        source.get("media_proc_cfg")
+        if isinstance(source, Mapping)
+        else getattr(source, "media_proc_cfg", None)
+    )
+    if not isinstance(cfg, Mapping):
+        raise ValueError("Kimi image processor config must expose media_proc_cfg")
+
+    def required(name: str) -> Any:
+        if name not in cfg:
+            raise ValueError(f"Kimi media_proc_cfg is missing {name!r}")
+        return cfg[name]
+
+    def float_triple(name: str) -> tuple[float, float, float]:
+        value = required(name)
+        if not isinstance(value, list | tuple) or len(value) != 3:
+            raise ValueError(
+                f"Kimi media_proc_cfg[{name!r}] must be a length-3 sequence"
+            )
+        return (float(value[0]), float(value[1]), float(value[2]))
+
+    fixed = required("fixed_output_tokens")
+    return KimiK25ImageLayoutSpec(
+        patch_size=int(required("patch_size")),
+        merge_kernel_size=int(required("merge_kernel_size")),
+        in_patch_limit=int(required("in_patch_limit")),
+        patch_limit_on_one_side=int(required("patch_limit_on_one_side")),
+        fixed_output_tokens=None if fixed is None else int(fixed),
+        image_mean=float_triple("image_mean"),
+        image_std=float_triple("image_std"),
+    )
+
+
+@lru_cache(maxsize=8)
+def _checkpoint_kimi_layout(model_name: str) -> KimiK25ImageLayoutSpec:
+    from renderers.base import TRUSTED_REVISIONS
+
+    return kimi_layout_from(
+        hub_image_processor_config(
+            model_name, revision=TRUSTED_REVISIONS.get(model_name)
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -468,33 +530,27 @@ def _kimi_resize_config(
     return padded_w, padded_h, int(num_tokens)
 
 
-def describe_kimi_image_layout(part: dict[str, Any]) -> KimiImageLayoutDescriptor:
+def describe_kimi_image_layout(
+    part: dict[str, Any], model_name: str
+) -> KimiImageLayoutDescriptor:
     path, raw = _load_image_asset(part)
     height, width = _image_dimensions(raw)
-    layout = KIMI_K25_IMAGE_LAYOUT
+    layout = _checkpoint_kimi_layout(model_name)
     padded_w, padded_h, num_media_tokens = _kimi_resize_config(width, height, layout)
     grid_thws = [[1, padded_h // layout.patch_size, padded_w // layout.patch_size]]
-    fingerprint = image_layout_fingerprint(
-        family=KIMI_K25_FAMILY,
-        patch_size=layout.patch_size,
-        merge_kernel_size=layout.merge_kernel_size,
-        in_patch_limit=layout.in_patch_limit,
-        patch_limit_on_one_side=layout.patch_limit_on_one_side,
-        fixed_output_tokens=layout.fixed_output_tokens,
-        image_mean=list(layout.image_mean),
-        image_std=list(layout.image_std),
-    )
     return KimiImageLayoutDescriptor(
         mm_hash=hashlib.sha256(raw).hexdigest()[:32],
         grid_thws=grid_thws,
         num_media_tokens=num_media_tokens,
-        fingerprint=fingerprint,
+        fingerprint=layout.fingerprint(),
         raw_image_uri=path.as_uri(),
     )
 
 
-def kimi_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
-    desc = describe_kimi_image_layout(part)
+def kimi_image_item_for_render(
+    part: dict[str, Any], model_name: str
+) -> tuple[int, str, dict[str, Any]]:
+    desc = describe_kimi_image_layout(part, model_name)
     item = raw_mm_item(
         modality="image",
         family=KIMI_K25_FAMILY,
@@ -840,7 +896,9 @@ class KimiK25Renderer:
                 processor=self._get_processor(),
                 image_cache=self._image_cache,
             )
-        return kimi_image_item_for_render(part)
+        return kimi_image_item_for_render(
+            part, layout_model_name(self._tokenizer, type(self).__name__)
+        )
 
     # ------------------------------------------------------------------
     # Core render

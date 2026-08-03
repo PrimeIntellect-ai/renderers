@@ -49,6 +49,7 @@ from renderers.qwen3_vl import (
     _is_image_part,
     _is_video_part,
     load_qwen_processor,
+    layout_model_name,
     qwen_image_item_for_render,
     qwen_processed_image_item_for_render,
 )
@@ -212,7 +213,9 @@ class Qwen35Renderer:
                 processor=self._get_processor(),
                 image_cache=self._image_cache,
             )
-        return qwen_image_item_for_render(part)
+        return qwen_image_item_for_render(
+            part, layout_model_name(self._tokenizer, type(self).__name__)
+        )
 
     # ------------------------------------------------------------------
     # Content rendering (mirrors the render_content Jinja macro)

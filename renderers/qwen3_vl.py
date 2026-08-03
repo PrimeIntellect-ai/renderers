@@ -29,7 +29,9 @@ import base64
 import hashlib
 import io
 import json
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from functools import lru_cache
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -61,6 +63,7 @@ from renderers.base import (
 from renderers.configs import Qwen3VLRendererConfig
 from renderers.mm_store import (
     decode_data_image_url,
+    hub_image_processor_config,
     image_layout_fingerprint,
     raw_mm_item,
 )
@@ -112,14 +115,67 @@ def _is_video_part(item: Any) -> bool:
 
 @dataclass(frozen=True)
 class QwenVLImageLayoutSpec:
-    patch_size: int = 16
-    temporal_patch_size: int = 2
-    merge_size: int = 2
-    min_pixels: int = 65536
-    max_pixels: int = 16777216
+    """The knobs that determine Qwen-VL image layout — this dataclass is the
+    canonical field list: the fingerprint hashes exactly these, on both the
+    render side (values from the checkpoint config) and the materialize side
+    (values from the live image processor via :func:`qwen_layout_from`)."""
+
+    patch_size: int
+    temporal_patch_size: int
+    merge_size: int
+    min_pixels: int
+    max_pixels: int
+
+    def fingerprint(self) -> str:
+        return image_layout_fingerprint(family="qwen_vl", **asdict(self))
 
 
-QWEN_VL_IMAGE_LAYOUT = QwenVLImageLayoutSpec()
+def qwen_layout_from(source: Any) -> QwenVLImageLayoutSpec:
+    """Extract the layout spec from a preprocessor config dict or a live image
+    processor object. Newer configs keep the pixel bounds under ``size``
+    (``shortest_edge``/``longest_edge``) with the legacy top-level
+    ``min_pixels``/``max_pixels`` set to null; honor both shapes."""
+
+    def get(name: str) -> Any:
+        return (
+            source.get(name)
+            if isinstance(source, Mapping)
+            else getattr(source, name, None)
+        )
+
+    def required(name: str) -> int:
+        value = get(name)
+        if value is None:
+            raise ValueError(f"Qwen image processor config is missing {name!r}")
+        return int(value)
+
+    def pixels(name: str, size_key: str) -> int:
+        value = get(name)
+        if value is None:
+            # Config JSON nests the bounds under a plain dict; live processors
+            # expose a SizeDict, which is not a Mapping but does support .get.
+            size_get = getattr(get("size"), "get", None)
+            value = size_get(size_key) if callable(size_get) else None
+        if value is None:
+            raise ValueError(
+                f"Qwen image processor config is missing {name!r} / size[{size_key!r}]"
+            )
+        return int(value)
+
+    return QwenVLImageLayoutSpec(
+        patch_size=required("patch_size"),
+        temporal_patch_size=required("temporal_patch_size"),
+        merge_size=required("merge_size"),
+        min_pixels=pixels("min_pixels", "shortest_edge"),
+        max_pixels=pixels("max_pixels", "longest_edge"),
+    )
+
+
+@lru_cache(maxsize=8)
+def _checkpoint_qwen_layout(model_name: str) -> QwenVLImageLayoutSpec:
+    return qwen_layout_from(hub_image_processor_config(model_name))
+
+
 _PROCESSED_IMAGE_CACHE_MAX = 256
 
 
@@ -207,11 +263,13 @@ def _pil_image_hash(pil_image) -> str:
     return h.hexdigest()[:32]
 
 
-def describe_qwen_image_layout(part: dict[str, Any]) -> QwenImageLayoutDescriptor:
+def describe_qwen_image_layout(
+    part: dict[str, Any], model_name: str
+) -> QwenImageLayoutDescriptor:
     """Return Qwen image layout metadata without invoking an image processor."""
     source, raw = _inline_image_source(part)
     height, width = _image_dimensions(raw)
-    layout = QWEN_VL_IMAGE_LAYOUT
+    layout = _checkpoint_qwen_layout(model_name)
     resized_h, resized_w = smart_resize(
         height,
         width,
@@ -225,25 +283,19 @@ def describe_qwen_image_layout(part: dict[str, Any]) -> QwenImageLayoutDescripto
     num_image_tokens = (
         grid_t * grid_h * grid_w // (layout.merge_size * layout.merge_size)
     )
-    fingerprint = image_layout_fingerprint(
-        family="qwen_vl",
-        patch_size=layout.patch_size,
-        merge_size=layout.merge_size,
-        temporal_patch_size=layout.temporal_patch_size,
-        min_pixels=layout.min_pixels,
-        max_pixels=layout.max_pixels,
-    )
     return QwenImageLayoutDescriptor(
         mm_hash=hashlib.sha256(raw).hexdigest()[:32],
         image_grid_thw=[[grid_t, grid_h, grid_w]],
         num_image_tokens=num_image_tokens,
-        fingerprint=fingerprint,
+        fingerprint=layout.fingerprint(),
         raw_image_data=source,
     )
 
 
-def qwen_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
-    desc = describe_qwen_image_layout(part)
+def qwen_image_item_for_render(
+    part: dict[str, Any], model_name: str
+) -> tuple[int, str, dict[str, Any]]:
+    desc = describe_qwen_image_layout(part, model_name)
     item = raw_mm_item(
         modality="image",
         family="qwen_vl",
@@ -252,6 +304,17 @@ def qwen_image_item_for_render(part: dict[str, Any]) -> tuple[int, str, dict[str
         raw_image_data=desc.raw_image_data,
     )
     return desc.num_image_tokens, desc.mm_hash, item
+
+
+def layout_model_name(tokenizer, renderer_name: str) -> str:
+    """The checkpoint name the raw layout knobs are sourced from."""
+    name = getattr(tokenizer, "name_or_path", None)
+    if not name:
+        raise RuntimeError(
+            f"{renderer_name} needs the checkpoint name to resolve raw image "
+            "layout knobs. Load the tokenizer with a known name_or_path."
+        )
+    return name
 
 
 def load_qwen_processor(tokenizer, renderer_name: str):
@@ -504,7 +567,9 @@ class Qwen3VLRenderer:
                 processor=self._get_processor(),
                 image_cache=self._image_cache,
             )
-        return qwen_image_item_for_render(part)
+        return qwen_image_item_for_render(
+            part, layout_model_name(self._tokenizer, type(self).__name__)
+        )
 
     @staticmethod
     def _render_text_content(content: Any) -> str:

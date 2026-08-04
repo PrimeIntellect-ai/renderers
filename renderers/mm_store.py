@@ -28,7 +28,6 @@ RAW_MM_ITEM_KIND = "prime_raw_mm_item"
 _SAFE = {
     "multimodal family": re.compile(r"^[A-Za-z0-9_.-]+$"),
     "raw multimodal modality": re.compile(r"^[A-Za-z0-9_.-]+$"),
-    "image layout fingerprint": re.compile(r"^[a-f0-9]{16,64}$"),
     "image hash": re.compile(r"^[a-f0-9]{16,128}$"),
 }
 
@@ -117,22 +116,8 @@ def hub_image_processor_config(
 
     from huggingface_hub import hf_hub_download
 
-    try:
-        path = hf_hub_download(
-            model_name,
-            "preprocessor_config.json",
-            revision=revision,
-            local_files_only=True,
-        )
-    except Exception:
-        path = hf_hub_download(
-            model_name, "preprocessor_config.json", revision=revision
-        )
+    path = hf_hub_download(model_name, "preprocessor_config.json", revision=revision)
     return json.loads(Path(path).read_text())
-
-
-def _json_fingerprint_value(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _encode_ref_payload(payload: dict[str, object] | None) -> str:
@@ -153,21 +138,10 @@ def _decode_ref_payload(encoded: str) -> dict[str, object]:
     return payload
 
 
-def image_layout_fingerprint(*, family: str, **values: object) -> str:
-    """Stable adapter-owned fingerprint for raw multimodal layout contracts."""
-    _ensure_safe("multimodal family", family)
-    encoded_values = ":".join(
-        f"{key}={_json_fingerprint_value(values[key])}" for key in sorted(values)
-    )
-    raw = f"image-layout:{family}:{encoded_values}".encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()[:32]
-
-
 def raw_mm_item(
     *,
     modality: str,
     family: str,
-    layout_fingerprint: str,
     payload: dict[str, object],
     raw_image_uri: str,
     vllm_modality: str | None = None,
@@ -180,12 +154,10 @@ def raw_mm_item(
     """
     _ensure_safe("multimodal family", family)
     _ensure_safe("raw multimodal modality", modality)
-    _ensure_safe("image layout fingerprint", layout_fingerprint)
     out: dict[str, object] = {
         "kind": RAW_MM_ITEM_KIND,
         "modality": modality,
         "family": family,
-        "layout_fingerprint": layout_fingerprint,
         "payload": payload,
     }
     if vllm_modality is not None:
@@ -197,7 +169,6 @@ def raw_mm_item(
 @dataclass(frozen=True)
 class RawMMRef:
     family: str
-    fingerprint: str
     modality: str
     mm_hash: str
     payload: dict[str, object]
@@ -207,7 +178,6 @@ class RawMMRef:
 def raw_mm_ref(
     *,
     family: str,
-    fingerprint: str,
     modality: str,
     mm_hash: str,
     raw_image_uri: str,
@@ -219,13 +189,11 @@ def raw_mm_ref(
     future families without baking shape names into the wire id.
     """
     _ensure_safe("multimodal family", family)
-    _ensure_safe("image layout fingerprint", fingerprint)
     _ensure_safe("raw multimodal modality", modality)
     _ensure_safe("image hash", mm_hash)
 
     ref_payload: dict[str, object] = {
         "family": family,
-        "fingerprint": fingerprint,
         "modality": modality,
         "mm_hash": mm_hash,
         "payload": payload or {},
@@ -242,7 +210,6 @@ def split_raw_mm_ref(ref: str) -> RawMMRef:
 
     payload = _decode_ref_payload(encoded)
     family = payload.get("family")
-    fingerprint = payload.get("fingerprint")
     modality = payload.get("modality")
     mm_hash = payload.get("mm_hash")
     raw_image_uri = payload.get("raw_image_uri")
@@ -250,8 +217,6 @@ def split_raw_mm_ref(ref: str) -> RawMMRef:
 
     if not isinstance(family, str):
         raise ValueError("Raw multimodal ref is missing family")
-    if not isinstance(fingerprint, str):
-        raise ValueError("Raw multimodal ref is missing fingerprint")
     if not isinstance(modality, str):
         raise ValueError("Raw multimodal ref is missing modality")
     if not isinstance(mm_hash, str):
@@ -263,7 +228,6 @@ def split_raw_mm_ref(ref: str) -> RawMMRef:
 
     return RawMMRef(
         family=_ensure_safe("multimodal family", family),
-        fingerprint=_ensure_safe("image layout fingerprint", fingerprint),
         modality=_ensure_safe("raw multimodal modality", modality),
         mm_hash=_ensure_safe("image hash", mm_hash),
         payload=item_payload,

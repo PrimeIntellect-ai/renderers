@@ -45,12 +45,15 @@ from renderers.base import (
 )
 from renderers.configs import Qwen35RendererConfig
 from renderers.parsing import parse_qwen35
+from renderers.mm_store import hub_image_processor_config
 from renderers.qwen3_vl import (
+    QwenVLImageLayoutSpec,
     _is_image_part,
     _is_video_part,
-    load_qwen_processor,
     layout_model_name,
+    load_qwen_processor,
     qwen_image_item_for_render,
+    qwen_layout_from,
     qwen_processed_image_item_for_render,
 )
 
@@ -132,6 +135,7 @@ class Qwen35Renderer:
     ):
         self._tokenizer = tokenizer
         self._processor: Any = None
+        self._image_layout: QwenVLImageLayoutSpec | None = None
         self._image_cache: dict[str, tuple[Any, int]] = {}
         cfg = config or type(self)._config_cls()
         # ``enable_thinking=None`` defers to the model's known default (see
@@ -204,6 +208,13 @@ class Qwen35Renderer:
             self._processor = load_qwen_processor(self._tokenizer, type(self).__name__)
         return self._processor
 
+    def _raw_image_layout(self) -> QwenVLImageLayoutSpec:
+        """The checkpoint's layout knobs, resolved once on first image render."""
+        if self._image_layout is None:
+            name = layout_model_name(self._tokenizer, type(self).__name__)
+            self._image_layout = qwen_layout_from(hub_image_processor_config(name))
+        return self._image_layout
+
     def _image_item_for_render(
         self, part: dict[str, Any]
     ) -> tuple[int, str, dict[str, Any]]:
@@ -213,9 +224,7 @@ class Qwen35Renderer:
                 processor=self._get_processor(),
                 image_cache=self._image_cache,
             )
-        return qwen_image_item_for_render(
-            part, layout_model_name(self._tokenizer, type(self).__name__)
-        )
+        return qwen_image_item_for_render(part, self._raw_image_layout())
 
     # ------------------------------------------------------------------
     # Content rendering (mirrors the render_content Jinja macro)

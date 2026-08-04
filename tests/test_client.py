@@ -421,7 +421,6 @@ def test_generate_serializes_raw_mm_refs(
         PlaceholderRange,
     )
     from renderers.mm_store import (
-        image_layout_fingerprint,
         raw_mm_item,
         split_raw_mm_ref,
     )
@@ -431,7 +430,6 @@ def test_generate_serializes_raw_mm_refs(
     image_path = image_dir / "image.png"
     image_path.write_bytes(b"image-bytes")
     image_uri = image_path.as_uri()
-    fingerprint = image_layout_fingerprint(family=family, revision="test")
     mm_hash = "a" * 32
 
     mm_data = MultiModalData(
@@ -446,7 +444,6 @@ def test_generate_serializes_raw_mm_refs(
                 raw_mm_item(
                     modality="image",
                     family=family,
-                    layout_fingerprint=fingerprint,
                     payload=payload,
                     raw_image_uri=image_uri,
                     vllm_modality=vllm_modality,
@@ -481,13 +478,11 @@ def test_generate_serializes_raw_mm_refs(
     assert ref.payload == payload
     assert (
         ref.family,
-        ref.fingerprint,
         ref.modality,
         ref.mm_hash,
         ref.raw_image_uri,
     ) == (
         family,
-        fingerprint,
         expected_modality,
         mm_hash,
         image_uri,

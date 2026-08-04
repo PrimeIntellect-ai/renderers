@@ -49,10 +49,11 @@ class ThinkingPart(TypedDict):
 class ImagePart(TypedDict, total=False):
     """An image attached to a message.
 
-    Accepts several source shapes so callers can pass whatever they have
-    on hand — a pre-loaded PIL Image, a filesystem path, a URL, or the
-    OpenAI ``image_url`` content part verbatim. The renderer resolves
-    these to a PIL Image at render time.
+    Part shape may use ``image`` or OpenAI-style ``image_url``. For
+    ``multimodal_output="processed"``, the value must be a local source the
+    renderer can resolve without network I/O: a PIL Image, filesystem path,
+    ``file://`` URL, or ``data:image/...;base64,...`` URI. Raw mode accepts
+    only offloaded ``file://`` assets.
     """
 
     type: Literal["image", "image_url"]

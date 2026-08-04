@@ -62,7 +62,14 @@ def offloaded_image_path(source: Any) -> Path:
 
 
 def load_pil_image(item: dict[str, Any]):
-    """Resolve an ImagePart to a PIL Image for processed multimodal output."""
+    """Resolve an ImagePart to a PIL Image for processed multimodal output.
+
+    Accepted sources (local only — the renderer is not an HTTP client):
+
+    - a preloaded ``PIL.Image.Image``
+    - a filesystem path or ``file://`` URL
+    - a ``data:image/...;base64,...`` URI
+    """
     try:
         from PIL import Image
     except ImportError as exc:
@@ -75,29 +82,32 @@ def load_pil_image(item: dict[str, Any]):
     if isinstance(raw, Image.Image):
         return raw.convert("RGB") if raw.mode != "RGB" else raw
 
-    if isinstance(raw, (bytes, bytearray)):
-        return Image.open(io.BytesIO(raw)).convert("RGB")
-
     if not isinstance(raw, str):
         raise TypeError(
             f"Unsupported image source {type(raw).__name__!r}; expected PIL "
-            "Image, bytes, path, http(s):// URL, file:// URL, or data: URI."
+            "Image, local path, file:// URL, or data: URI."
         )
 
-    if raw.startswith("data:"):
+    if raw.startswith("data:image/") and ";base64," in raw:
         _, _, payload = raw.partition(",")
         return Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
+    if raw.startswith("data:"):
+        raise ValueError(
+            "Processed multimodal rendering only accepts data:image/...;base64,... "
+            f"URIs, got {raw.split(',', 1)[0]!r}"
+        )
 
     parsed = urlparse(raw)
     if parsed.scheme in ("http", "https"):
-        import urllib.request
-
-        with urllib.request.urlopen(raw) as resp:  # noqa: S310
-            return Image.open(io.BytesIO(resp.read())).convert("RGB")
-
-    if parsed.scheme in ("file", ""):
-        path = unquote(parsed.path) if parsed.scheme == "file" else raw
-        return Image.open(path).convert("RGB")
+        raise ValueError(
+            "Processed multimodal rendering does not fetch remote images; "
+            "pass a PIL Image, local path, file:// URL, or data: URI "
+            f"(got {parsed.scheme}://...)."
+        )
+    if parsed.scheme == "file":
+        return Image.open(unquote(parsed.path)).convert("RGB")
+    if parsed.scheme == "":
+        return Image.open(raw).convert("RGB")
 
     raise ValueError(f"Unsupported image URL scheme: {parsed.scheme!r} in {raw!r}")
 

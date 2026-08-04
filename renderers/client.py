@@ -1,4 +1,4 @@
-"""Renderer-based generate client for vLLM 0.20's /inference/v1/generate.
+"""Renderer-based generate client for vLLM's /inference/v1/generate.
 
     messages → Renderer.render_ids() → token IDs → POST /inference/v1/generate
     → completion tokens → Renderer.parse_response() → structured message
@@ -59,8 +59,7 @@ class OverlongPromptError(Exception):
         self.prompt_len = prompt_len
         self.max_prompt_len = max_prompt_len
         super().__init__(
-            f"Prompt length ({prompt_len}) exceeds maximum "
-            f"context length ({max_prompt_len})."
+            f"Prompt length ({prompt_len}) exceeds maximum context length ({max_prompt_len})."
         )
 
 
@@ -188,32 +187,26 @@ def _parse_completion_logprobs(
         expected_token = f"token_id:{completion_ids[index]}"
         if entry.get("token") != expected_token:
             raise MalformedGenerateResponseError(
-                "Engine response "
-                f"choice.logprobs.content[{index}].token must be {expected_token!r}."
+                f"Engine response choice.logprobs.content[{index}].token must be {expected_token!r}."
             )
         raw_logprob = entry.get("logprob")
         if isinstance(raw_logprob, bool) or not isinstance(raw_logprob, (int, float)):
             raise MalformedGenerateResponseError(
-                "Engine response "
-                f"choice.logprobs.content[{index}].logprob must be a number."
+                f"Engine response choice.logprobs.content[{index}].logprob must be a number."
             )
         try:
             logprob = float(raw_logprob)
         except OverflowError as exc:
             raise MalformedGenerateResponseError(
-                "Engine response "
-                f"choice.logprobs.content[{index}].logprob must be finite."
+                f"Engine response choice.logprobs.content[{index}].logprob must be finite."
             ) from exc
         if not math.isfinite(logprob):
             raise MalformedGenerateResponseError(
-                "Engine response "
-                f"choice.logprobs.content[{index}].logprob must be finite."
+                f"Engine response choice.logprobs.content[{index}].logprob must be finite."
             )
         if logprob == VLLM_LOGPROB_SENTINEL:
             raise MalformedGenerateResponseError(
-                "Engine response "
-                f"choice.logprobs.content[{index}].logprob does not contain "
-                "sampling evidence."
+                f"Engine response choice.logprobs.content[{index}].logprob does not contain sampling evidence."
             )
         completion_logprobs.append(logprob)
     return completion_logprobs

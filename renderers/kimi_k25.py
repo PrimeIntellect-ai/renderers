@@ -48,21 +48,21 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
+from renderers.mm_image import (
+    PROCESSED_IMAGE_CACHE_MAX,
+    image_dimensions,
+    is_image_part,
+    is_video_part,
+    layout_model_name,
+    load_image_asset,
+    load_pil_image,
+    pil_image_hash,
+)
 from renderers.mm_store import (
     hub_image_processor_config,
     raw_mm_item,
 )
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
-from renderers.qwen3_vl import (
-    _PROCESSED_IMAGE_CACHE_MAX,
-    _image_dimensions,
-    _is_image_part,
-    _is_video_part,
-    _load_image_asset,
-    _load_pil_image,
-    _pil_image_hash,
-    layout_model_name,
-)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -496,8 +496,8 @@ def _kimi_resize_config(
 def describe_kimi_image_layout(
     part: dict[str, Any], layout: KimiK25ImageLayoutSpec
 ) -> KimiImageLayoutDescriptor:
-    path, raw = _load_image_asset(part)
-    height, width = _image_dimensions(raw)
+    path, raw = load_image_asset(part)
+    height, width = image_dimensions(raw)
     padded_w, padded_h, num_media_tokens = _kimi_resize_config(width, height, layout)
     grid_thws = [[1, padded_h // layout.patch_size, padded_w // layout.patch_size]]
     return KimiImageLayoutDescriptor(
@@ -553,8 +553,8 @@ def kimi_processed_image_item_for_render(
     processor: Any,
     image_cache: dict[str, tuple[Any, int]],
 ) -> tuple[int, str, dict[str, Any]]:
-    pil = _load_pil_image(part)
-    image_hash = _pil_image_hash(pil)
+    pil = load_pil_image(part)
+    image_hash = pil_image_hash(pil)
     cached = image_cache.get(image_hash)
     if cached is not None:
         out, _num_patches = cached
@@ -563,7 +563,7 @@ def kimi_processed_image_item_for_render(
         media_item = {"type": "image", "image": pil}
         out = img_proc.preprocess([media_item], return_tensors="np")
         num_patches = int(img_proc.media_tokens_calculator(media_item))
-        if len(image_cache) >= _PROCESSED_IMAGE_CACHE_MAX:
+        if len(image_cache) >= PROCESSED_IMAGE_CACHE_MAX:
             image_cache.pop(next(iter(image_cache)))
         image_cache[image_hash] = (out, num_patches)
     item = {
@@ -1369,8 +1369,8 @@ class KimiK25Renderer:
                 if not isinstance(part, dict):
                     continue
                 ptype = part.get("type")
-                is_image = _is_image_part(part)
-                is_video = _is_video_part(part)
+                is_image = is_image_part(part)
+                is_video = is_video_part(part)
                 if is_image:
                     if emit_image is None:
                         # Silently drop — caller didn't opt into multimodal.

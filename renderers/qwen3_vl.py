@@ -25,15 +25,11 @@ materialization is not implemented yet.
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import io
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
@@ -61,6 +57,16 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import Qwen3VLRendererConfig
+from renderers.mm_image import (
+    PROCESSED_IMAGE_CACHE_MAX,
+    image_dimensions,
+    is_image_part,
+    is_video_part,
+    layout_model_name,
+    load_image_asset,
+    load_pil_image,
+    pil_image_hash,
+)
 from renderers.mm_store import (
     hub_image_processor_config,
     raw_mm_item,
@@ -83,32 +89,6 @@ _TOOLS_FOOTER = (
     "</tool_call>"
 )
 
-
-def _is_image_part(item: Any) -> bool:
-    if not isinstance(item, dict):
-        return False
-    t = item.get("type")
-    if t in ("image", "image_url"):
-        return True
-    if t is not None:
-        return False
-    # Untyped fallback for loosely-shaped image parts. Require a truthy
-    # value: HF Arrow schema unification (Dataset.from_list over a list of
-    # heterogeneous content dicts) fills missing keys with None, so any
-    # text part round-tripped through a Dataset will have ``image_url: None``
-    # as a key. Mere key presence isn't enough.
-    return bool(item.get("image")) or bool(item.get("image_url"))
-
-
-def _is_video_part(item: Any) -> bool:
-    if not isinstance(item, dict):
-        return False
-    t = item.get("type")
-    if t in ("video", "video_url"):
-        return True
-    if t is not None:
-        return False
-    return bool(item.get("video")) or bool(item.get("video_url"))
 
 
 @dataclass(frozen=True)
@@ -153,8 +133,6 @@ def qwen_layout_from(config: Mapping[str, Any]) -> QwenVLImageLayoutSpec:
     )
 
 
-_PROCESSED_IMAGE_CACHE_MAX = 256
-
 
 @dataclass(frozen=True)
 class QwenImageLayoutDescriptor:
@@ -164,98 +142,13 @@ class QwenImageLayoutDescriptor:
     raw_image_uri: str
 
 
-def _image_source(item: dict[str, Any]) -> Any:
-    if "image" in item:
-        return item["image"]
-    if "image_url" in item:
-        image_url = item.get("image_url")
-        return image_url.get("url") if isinstance(image_url, dict) else image_url
-    return item.get("url") or item.get("path")
-
-
-def _offloaded_image_path(source: Any) -> Path:
-    """The one accepted raw-mode image source: an offloaded ``file://`` URL."""
-    if isinstance(source, str):
-        parsed = urlparse(source)
-        if parsed.scheme == "file":
-            return Path(unquote(parsed.path)).resolve()
-    raise ValueError(
-        "v1 multimodal image rendering requires offloaded file:// image assets"
-    )
-
-
-def _load_pil_image(item: dict[str, Any]):
-    """Resolve an ImagePart to a PIL Image for processed multimodal output."""
-    try:
-        from PIL import Image
-    except ImportError as exc:
-        raise RuntimeError(
-            "Processed multimodal rendering requires Pillow. Install "
-            "`renderers[vision]` or provide Pillow in the caller environment."
-        ) from exc
-
-    raw = _image_source(item)
-    if isinstance(raw, Image.Image):
-        return raw.convert("RGB") if raw.mode != "RGB" else raw
-
-    if isinstance(raw, (bytes, bytearray)):
-        return Image.open(io.BytesIO(raw)).convert("RGB")
-
-    if not isinstance(raw, str):
-        raise TypeError(
-            f"Unsupported image source {type(raw).__name__!r}; expected PIL "
-            "Image, bytes, path, http(s):// URL, file:// URL, or data: URI."
-        )
-
-    if raw.startswith("data:"):
-        _, _, payload = raw.partition(",")
-        return Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
-
-    parsed = urlparse(raw)
-    if parsed.scheme in ("http", "https"):
-        import urllib.request
-
-        with urllib.request.urlopen(raw) as resp:  # noqa: S310
-            return Image.open(io.BytesIO(resp.read())).convert("RGB")
-
-    if parsed.scheme in ("file", ""):
-        path = unquote(parsed.path) if parsed.scheme == "file" else raw
-        return Image.open(path).convert("RGB")
-
-    raise ValueError(f"Unsupported image URL scheme: {parsed.scheme!r} in {raw!r}")
-
-
-def _load_image_asset(part: dict[str, Any]) -> tuple[Path, bytes]:
-    """Resolve a part's offloaded image source and read it once."""
-    path = _offloaded_image_path(_image_source(part))
-    return path, path.read_bytes()
-
-
-def _image_dimensions(raw: bytes) -> tuple[int, int]:
-    try:
-        from PIL import Image
-    except ImportError as exc:
-        raise RuntimeError(
-            "Pillow is required to read image dimensions for multimodal rendering."
-        ) from exc
-
-    with Image.open(io.BytesIO(raw)) as image:
-        return image.height, image.width
-
-
-def _pil_image_hash(pil_image) -> str:
-    h = hashlib.sha256()
-    h.update(pil_image.tobytes())
-    h.update(f"{pil_image.size}".encode())
-    return h.hexdigest()[:32]
-
 
 def describe_qwen_image_layout(
     part: dict[str, Any], layout: QwenVLImageLayoutSpec
 ) -> QwenImageLayoutDescriptor:
     """Return Qwen image layout metadata without invoking an image processor."""
-    path, raw = _load_image_asset(part)
-    height, width = _image_dimensions(raw)
+    path, raw = load_image_asset(part)
+    height, width = image_dimensions(raw)
     resized_h, resized_w = smart_resize(
         height,
         width,
@@ -289,16 +182,6 @@ def qwen_image_item_for_render(
     return desc.num_image_tokens, desc.mm_hash, item
 
 
-def layout_model_name(tokenizer, renderer_name: str) -> str:
-    """The checkpoint name the raw layout knobs are sourced from."""
-    name = getattr(tokenizer, "name_or_path", None)
-    if not name:
-        raise RuntimeError(
-            f"{renderer_name} needs the checkpoint name to resolve raw image "
-            "layout knobs. Load the tokenizer with a known name_or_path."
-        )
-    return name
-
 
 def load_qwen_processor(tokenizer, renderer_name: str):
     try:
@@ -325,8 +208,8 @@ def qwen_processed_image_item_for_render(
     processor: Any,
     image_cache: dict[str, tuple[Any, int]],
 ) -> tuple[int, str, dict[str, Any]]:
-    pil = _load_pil_image(part)
-    image_hash = _pil_image_hash(pil)
+    pil = load_pil_image(part)
+    image_hash = pil_image_hash(pil)
     cached = image_cache.get(image_hash)
     if cached is not None:
         out, num_image_tokens = cached
@@ -335,7 +218,7 @@ def qwen_processed_image_item_for_render(
         grid_thw = out["image_grid_thw"][0]
         merge_size = processor.image_processor.merge_size
         num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)
-        if len(image_cache) >= _PROCESSED_IMAGE_CACHE_MAX:
+        if len(image_cache) >= PROCESSED_IMAGE_CACHE_MAX:
             image_cache.pop(next(iter(image_cache)))
         image_cache[image_hash] = (out, num_image_tokens)
     item = {
@@ -577,7 +460,7 @@ class Qwen3VLRenderer:
                 if isinstance(item, str):
                     parts.append(item)
                 elif isinstance(item, dict):
-                    if _is_image_part(item) or _is_video_part(item):
+                    if is_image_part(item) or is_video_part(item):
                         continue
                     if "text" in item:
                         parts.append(item["text"])
@@ -670,9 +553,9 @@ class Qwen3VLRenderer:
                 if isinstance(item, str):
                     em.text(item, is_sampled=False, is_content=True)
                 elif isinstance(item, dict):
-                    if _is_image_part(item):
+                    if is_image_part(item):
                         emit_image(item)
-                    elif _is_video_part(item):
+                    elif is_video_part(item):
                         raise NotImplementedError(
                             "Video parts are not yet supported by Qwen3VLRenderer."
                         )
@@ -928,9 +811,9 @@ class Qwen3VLRenderer:
                 if isinstance(item, str):
                     em.text(item, is_sampled=False, is_content=True)
                 elif isinstance(item, dict):
-                    if _is_image_part(item):
+                    if is_image_part(item):
                         emit_image(item)
-                    elif _is_video_part(item):
+                    elif is_video_part(item):
                         raise NotImplementedError(
                             "Video parts are not yet supported by Qwen3VLRenderer."
                         )

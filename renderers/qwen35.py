@@ -44,13 +44,11 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import Qwen35RendererConfig
-from renderers.parsing import parse_qwen35
+from renderers.mm_image import is_image_part, is_video_part, layout_model_name
 from renderers.mm_store import hub_image_processor_config
+from renderers.parsing import parse_qwen35
 from renderers.qwen3_vl import (
     QwenVLImageLayoutSpec,
-    _is_image_part,
-    _is_video_part,
-    layout_model_name,
     load_qwen_processor,
     qwen_image_item_for_render,
     qwen_layout_from,
@@ -187,7 +185,7 @@ class Qwen35Renderer:
         if not isinstance(content, list):
             return False
         return any(
-            isinstance(item, dict) and (_is_image_part(item) or _is_video_part(item))
+            isinstance(item, dict) and (is_image_part(item) or is_video_part(item))
             for item in content
         )
 
@@ -251,7 +249,7 @@ class Qwen35Renderer:
                 if isinstance(item, str):
                     parts.append(item)
                 elif isinstance(item, dict):
-                    if _is_image_part(item) or _is_video_part(item):
+                    if is_image_part(item) or is_video_part(item):
                         continue
                     if "text" in item:
                         parts.append(item["text"])
@@ -426,10 +424,10 @@ class Qwen35Renderer:
                     if item:
                         buf_segments.append((item, True))
                 elif isinstance(item, dict):
-                    if _is_image_part(item):
+                    if is_image_part(item):
                         flush_buf()
                         emit_image(item, msg_idx)
-                    elif _is_video_part(item):
+                    elif is_video_part(item):
                         raise NotImplementedError(
                             "Video parts are not yet supported by Qwen35Renderer."
                         )
@@ -746,10 +744,10 @@ class Qwen35Renderer:
                     if item:
                         buf_segments.append((item, True))
                 elif isinstance(item, dict):
-                    if _is_image_part(item):
+                    if is_image_part(item):
                         flush_buf()
                         emit_image(item, msg_idx)
-                    elif _is_video_part(item):
+                    elif is_video_part(item):
                         raise NotImplementedError(
                             "Video parts are not yet supported by Qwen35Renderer."
                         )
@@ -1051,10 +1049,10 @@ class Qwen35Renderer:
                     if item:
                         buf_segments.append((item, True))
                 elif isinstance(item, dict):
-                    if _is_image_part(item):
+                    if is_image_part(item):
                         flush_buf()
                         emit_image(item, msg_idx)
-                    elif _is_video_part(item):
+                    elif is_video_part(item):
                         raise NotImplementedError(
                             "Video parts are not yet supported by Qwen35Renderer."
                         )

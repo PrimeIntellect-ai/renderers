@@ -27,7 +27,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 from renderers import (
     MULTIMODAL_MODELS,
     Qwen3VLRenderer,
@@ -53,7 +52,6 @@ pytest.importorskip("PIL", reason="Pillow required for multimodal tests")
 pytest.importorskip("torch", reason="torch required for multimodal tests")
 
 from PIL import Image  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Local-snapshot gating — skip when the HF cache doesn't have the model.
@@ -971,32 +969,32 @@ def test_is_image_part_treats_type_field_as_authoritative():
     a key-presence check on ``image_url`` would misclassify the text
     part and the renderer would later try to resolve ``None`` as an image.
     """
-    from renderers.qwen3_vl import _is_image_part, _is_video_part
+    from renderers.mm_image import is_image_part, is_video_part
 
     # Typed parts classify by their ``type``.
-    assert _is_image_part(
+    assert is_image_part(
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,XXX"}}
     )
-    assert _is_image_part({"type": "image", "image": object()})
-    assert _is_video_part(
+    assert is_image_part({"type": "image", "image": object()})
+    assert is_video_part(
         {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,XXX"}}
     )
 
     # Schema-unified text parts — typed as text, with a None zombie key
     # for the sibling modality — must NOT classify as image / video.
     schema_unified_text = {"type": "text", "text": "hello", "image_url": None}
-    assert not _is_image_part(schema_unified_text)
-    assert not _is_video_part(schema_unified_text)
+    assert not is_image_part(schema_unified_text)
+    assert not is_video_part(schema_unified_text)
     schema_unified_text_with_video = {"type": "text", "text": "hi", "video_url": None}
-    assert not _is_video_part(schema_unified_text_with_video)
+    assert not is_video_part(schema_unified_text_with_video)
 
     # Untyped fallback only fires when ``type`` is absent, and requires
     # a truthy value (mere key presence isn't enough).
-    assert _is_image_part({"image_url": {"url": "data:..."}})
-    assert _is_image_part({"image": object()})
-    assert not _is_image_part({"image_url": None})
-    assert not _is_image_part({"image": None})
-    assert not _is_video_part({"video_url": None})
+    assert is_image_part({"image_url": {"url": "data:..."}})
+    assert is_image_part({"image": object()})
+    assert not is_image_part({"image_url": None})
+    assert not is_image_part({"image": None})
+    assert not is_video_part({"video_url": None})
 
 
 @pytest.mark.parametrize(

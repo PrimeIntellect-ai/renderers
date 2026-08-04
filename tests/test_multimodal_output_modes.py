@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-
 from renderers.kimi_k25 import kimi_processed_image_item_for_render
 from renderers.qwen3_vl import qwen_processed_image_item_for_render
 
@@ -30,7 +29,6 @@ def test_qwen_processed_image_item_emits_processor_payload(tmp_path):
     num_tokens, image_hash, item = qwen_processed_image_item_for_render(
         {"type": "image", "image": str(_tiny_image_path(tmp_path))},
         processor=_Processor(),
-        image_cache={},
     )
 
     assert num_tokens == 4
@@ -61,7 +59,6 @@ def test_kimi_processed_image_item_emits_processor_payload(tmp_path):
     placeholder_len, image_hash, item = kimi_processed_image_item_for_render(
         {"type": "image", "image": str(_tiny_image_path(tmp_path))},
         processor=_Processor(),
-        image_cache={},
     )
 
     assert placeholder_len == 1

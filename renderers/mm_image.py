@@ -15,8 +15,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-PROCESSED_IMAGE_CACHE_MAX = 256
-
 
 def is_image_part(item: Any) -> bool:
     if not isinstance(item, dict):

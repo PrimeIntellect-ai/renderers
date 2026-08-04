@@ -58,7 +58,6 @@ from renderers.base import (
 )
 from renderers.configs import Qwen3VLRendererConfig
 from renderers.mm_image import (
-    PROCESSED_IMAGE_CACHE_MAX,
     image_dimensions,
     is_image_part,
     is_video_part,
@@ -206,21 +205,13 @@ def qwen_processed_image_item_for_render(
     part: dict[str, Any],
     *,
     processor: Any,
-    image_cache: dict[str, tuple[Any, int]],
 ) -> tuple[int, str, dict[str, Any]]:
     pil = load_pil_image(part)
     image_hash = pil_image_hash(pil)
-    cached = image_cache.get(image_hash)
-    if cached is not None:
-        out, num_image_tokens = cached
-    else:
-        out = processor.image_processor(images=[pil], return_tensors="np")
-        grid_thw = out["image_grid_thw"][0]
-        merge_size = processor.image_processor.merge_size
-        num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)
-        if len(image_cache) >= PROCESSED_IMAGE_CACHE_MAX:
-            image_cache.pop(next(iter(image_cache)))
-        image_cache[image_hash] = (out, num_image_tokens)
+    out = processor.image_processor(images=[pil], return_tensors="np")
+    grid_thw = out["image_grid_thw"][0]
+    merge_size = processor.image_processor.merge_size
+    num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)
     item = {
         "pixel_values": out["pixel_values"],
         "image_grid_thw": out["image_grid_thw"],
@@ -375,7 +366,6 @@ class Qwen3VLRenderer:
         self._tokenizer = tokenizer
         self._processor: Any = None
         self._image_layout: QwenVLImageLayoutSpec | None = None
-        self._image_cache: dict[str, tuple[Any, int]] = {}
         self.config = config or Qwen3VLRendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
@@ -439,7 +429,6 @@ class Qwen3VLRenderer:
             return qwen_processed_image_item_for_render(
                 part,
                 processor=self._get_processor(),
-                image_cache=self._image_cache,
             )
         return qwen_image_item_for_render(part, self._raw_image_layout())
 

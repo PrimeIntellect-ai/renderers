@@ -49,7 +49,6 @@ from renderers.base import (
 )
 from renderers.configs import KimiK25RendererConfig
 from renderers.mm_image import (
-    PROCESSED_IMAGE_CACHE_MAX,
     image_dimensions,
     is_image_part,
     is_video_part,
@@ -551,21 +550,12 @@ def kimi_processed_image_item_for_render(
     part: dict[str, Any],
     *,
     processor: Any,
-    image_cache: dict[str, tuple[Any, int]],
 ) -> tuple[int, str, dict[str, Any]]:
     pil = load_pil_image(part)
     image_hash = pil_image_hash(pil)
-    cached = image_cache.get(image_hash)
-    if cached is not None:
-        out, _num_patches = cached
-    else:
-        img_proc = processor.image_processor
-        media_item = {"type": "image", "image": pil}
-        out = img_proc.preprocess([media_item], return_tensors="np")
-        num_patches = int(img_proc.media_tokens_calculator(media_item))
-        if len(image_cache) >= PROCESSED_IMAGE_CACHE_MAX:
-            image_cache.pop(next(iter(image_cache)))
-        image_cache[image_hash] = (out, num_patches)
+    img_proc = processor.image_processor
+    media_item = {"type": "image", "image": pil}
+    out = img_proc.preprocess([media_item], return_tensors="np")
     item = {
         "pixel_values": out["pixel_values"],
         "grid_thws": out["grid_thws"],
@@ -769,7 +759,6 @@ class KimiK25Renderer:
         self._tokenizer = tokenizer
         self._processor: Any = None
         self._image_layout: KimiK25ImageLayoutSpec | None = None
-        self._image_cache: dict[str, tuple[Any, int]] = {}
         self.config = config or KimiK25RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
@@ -862,7 +851,6 @@ class KimiK25Renderer:
             return kimi_processed_image_item_for_render(
                 part,
                 processor=self._get_processor(),
-                image_cache=self._image_cache,
             )
         return kimi_image_item_for_render(part, self._raw_image_layout())
 

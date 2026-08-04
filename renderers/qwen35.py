@@ -134,7 +134,6 @@ class Qwen35Renderer:
         self._tokenizer = tokenizer
         self._processor: Any = None
         self._image_layout: QwenVLImageLayoutSpec | None = None
-        self._image_cache: dict[str, tuple[Any, int]] = {}
         cfg = config or type(self)._config_cls()
         # ``enable_thinking=None`` defers to the model's known default (see
         # ``_ENABLE_THINKING_DEFAULTS``). Materialise here so downstream reads
@@ -220,7 +219,6 @@ class Qwen35Renderer:
             return qwen_processed_image_item_for_render(
                 part,
                 processor=self._get_processor(),
-                image_cache=self._image_cache,
             )
         return qwen_image_item_for_render(part, self._raw_image_layout())
 

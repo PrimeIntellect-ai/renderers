@@ -26,8 +26,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
-from functools import lru_cache
+from dataclasses import dataclass
 from typing import Any
 
 from transformers.tokenization_utils import PreTrainedTokenizer
@@ -51,7 +50,6 @@ from renderers.base import (
 from renderers.configs import KimiK25RendererConfig
 from renderers.mm_store import (
     hub_image_processor_config,
-    image_layout_fingerprint,
     raw_mm_item,
 )
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
@@ -422,10 +420,9 @@ def _encode_tools_typescript(tools: list[ToolSpec]) -> str:
 
 @dataclass(frozen=True)
 class KimiK25ImageLayoutSpec:
-    """The knobs that determine Kimi K2.5 image layout — this dataclass is the
-    canonical field list: the fingerprint hashes exactly these, on both the
-    render side (values from the checkpoint config) and the materialize side
-    (values from the live image processor via :func:`kimi_layout_from`)."""
+    """The layout knobs from a checkpoint's ``preprocessor_config.json`` —
+    everything the render-side geometry math needs to predict grids and
+    media token counts without running an image processor."""
 
     patch_size: int
     merge_kernel_size: int
@@ -435,21 +432,11 @@ class KimiK25ImageLayoutSpec:
     image_mean: tuple[float, float, float]
     image_std: tuple[float, float, float]
 
-    def fingerprint(self) -> str:
-        values = asdict(self)
-        values["image_mean"] = list(self.image_mean)
-        values["image_std"] = list(self.image_std)
-        return image_layout_fingerprint(family=KIMI_K25_FAMILY, **values)
 
-
-def kimi_layout_from(source: Any) -> KimiK25ImageLayoutSpec:
-    """Extract the layout spec from a preprocessor config dict or a live image
-    processor object; both nest the knobs under ``media_proc_cfg``."""
-    cfg = (
-        source.get("media_proc_cfg")
-        if isinstance(source, Mapping)
-        else getattr(source, "media_proc_cfg", None)
-    )
+def kimi_layout_from(config: Mapping[str, Any]) -> KimiK25ImageLayoutSpec:
+    """Layout spec from a preprocessor config dict; the knobs nest under
+    ``media_proc_cfg``."""
+    cfg = config.get("media_proc_cfg")
     if not isinstance(cfg, Mapping):
         raise ValueError("Kimi image processor config must expose media_proc_cfg")
 
@@ -478,23 +465,11 @@ def kimi_layout_from(source: Any) -> KimiK25ImageLayoutSpec:
     )
 
 
-@lru_cache(maxsize=8)
-def _checkpoint_kimi_layout(model_name: str) -> KimiK25ImageLayoutSpec:
-    from renderers.base import TRUSTED_REVISIONS
-
-    return kimi_layout_from(
-        hub_image_processor_config(
-            model_name, revision=TRUSTED_REVISIONS.get(model_name)
-        )
-    )
-
-
 @dataclass(frozen=True)
 class KimiImageLayoutDescriptor:
     mm_hash: str
     grid_thws: list[list[int]]
     num_media_tokens: int
-    fingerprint: str
     raw_image_data: str
 
 
@@ -531,30 +506,27 @@ def _kimi_resize_config(
 
 
 def describe_kimi_image_layout(
-    part: dict[str, Any], model_name: str
+    part: dict[str, Any], layout: KimiK25ImageLayoutSpec
 ) -> KimiImageLayoutDescriptor:
     source, raw = _inline_image_source(part)
     height, width = _image_dimensions(raw)
-    layout = _checkpoint_kimi_layout(model_name)
     padded_w, padded_h, num_media_tokens = _kimi_resize_config(width, height, layout)
     grid_thws = [[1, padded_h // layout.patch_size, padded_w // layout.patch_size]]
     return KimiImageLayoutDescriptor(
         mm_hash=hashlib.sha256(raw).hexdigest()[:32],
         grid_thws=grid_thws,
         num_media_tokens=num_media_tokens,
-        fingerprint=layout.fingerprint(),
         raw_image_data=source,
     )
 
 
 def kimi_image_item_for_render(
-    part: dict[str, Any], model_name: str
+    part: dict[str, Any], layout: KimiK25ImageLayoutSpec
 ) -> tuple[int, str, dict[str, Any]]:
-    desc = describe_kimi_image_layout(part, model_name)
+    desc = describe_kimi_image_layout(part, layout)
     item = raw_mm_item(
         modality="image",
         family=KIMI_K25_FAMILY,
-        layout_fingerprint=desc.fingerprint,
         payload={
             "grid_thws": desc.grid_thws,
             "num_media_tokens": desc.num_media_tokens,
@@ -812,6 +784,7 @@ class KimiK25Renderer:
     ):
         self._tokenizer = tokenizer
         self._processor: Any = None
+        self._image_layout: KimiK25ImageLayoutSpec | None = None
         self._image_cache: dict[str, tuple[Any, int]] = {}
         self.config = config or KimiK25RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
@@ -887,6 +860,17 @@ class KimiK25Renderer:
             self._processor = load_kimi_processor(self._tokenizer)
         return self._processor
 
+    def _raw_image_layout(self) -> KimiK25ImageLayoutSpec:
+        """The checkpoint's layout knobs, resolved once on first image render."""
+        if self._image_layout is None:
+            from renderers.base import TRUSTED_REVISIONS
+
+            name = layout_model_name(self._tokenizer, type(self).__name__)
+            self._image_layout = kimi_layout_from(
+                hub_image_processor_config(name, revision=TRUSTED_REVISIONS.get(name))
+            )
+        return self._image_layout
+
     def _image_item_for_render(
         self, part: dict[str, Any]
     ) -> tuple[int, str, dict[str, Any]]:
@@ -896,9 +880,7 @@ class KimiK25Renderer:
                 processor=self._get_processor(),
                 image_cache=self._image_cache,
             )
-        return kimi_image_item_for_render(
-            part, layout_model_name(self._tokenizer, type(self).__name__)
-        )
+        return kimi_image_item_for_render(part, self._raw_image_layout())
 
     # ------------------------------------------------------------------
     # Core render

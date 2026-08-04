@@ -1016,29 +1016,20 @@ def test_raw_layout_math_matches_image_processor(mm_model_name):
     if not _hf_snapshot_cached(mm_model_name):
         pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
 
-    from renderers.kimi_k25 import (
-        _checkpoint_kimi_layout,
-        describe_kimi_image_layout,
-        kimi_layout_from,
-    )
-    from renderers.qwen3_vl import (
-        _checkpoint_qwen_layout,
-        describe_qwen_image_layout,
-        qwen_layout_from,
-    )
+    from renderers.base import TRUSTED_REVISIONS
+    from renderers.kimi_k25 import describe_kimi_image_layout, kimi_layout_from
+    from renderers.mm_store import hub_image_processor_config
+    from renderers.qwen3_vl import describe_qwen_image_layout, qwen_layout_from
 
     _, processor, _ = _load_processor_and_renderer(mm_model_name)
     img_proc = processor.image_processor
     family = _detect_family(mm_model_name)
-
-    # The extractor's two sources — the checkpoint's config JSON (render side)
-    # and the live image processor (materialize side) — must agree, spec and
-    # fingerprint both. Live processors expose e.g. SizeDict instead of plain
-    # dicts, so this guards the object-attribute path.
-    if family == "kimi_k25":
-        assert kimi_layout_from(img_proc) == _checkpoint_kimi_layout(mm_model_name)
-    else:
-        assert qwen_layout_from(img_proc) == _checkpoint_qwen_layout(mm_model_name)
+    config = hub_image_processor_config(
+        mm_model_name, revision=TRUSTED_REVISIONS.get(mm_model_name)
+    )
+    layout = (
+        kimi_layout_from(config) if family == "kimi_k25" else qwen_layout_from(config)
+    )
 
     for width, height in [(17, 31), (255, 257), (300, 200), (523, 480), (1023, 769)]:
         pil = Image.new("RGB", (width, height), color=(10, 20, 30))
@@ -1051,14 +1042,14 @@ def test_raw_layout_math_matches_image_processor(mm_model_name):
         label = f"{mm_model_name}: {width}x{height}"
 
         if family == "kimi_k25":
-            desc = describe_kimi_image_layout(part, mm_model_name)
+            desc = describe_kimi_image_layout(part, layout)
             media_item = {"type": "image", "image": pil}
             out = img_proc.preprocess([media_item], return_tensors="np")
             assert desc.grid_thws == out["grid_thws"].reshape(-1, 3).tolist(), label
             expected_tokens = int(img_proc.media_tokens_calculator(media_item))
             assert desc.num_media_tokens == expected_tokens, label
         else:
-            desc = describe_qwen_image_layout(part, mm_model_name)
+            desc = describe_qwen_image_layout(part, layout)
             out = img_proc(images=[pil], return_tensors="np")
             assert desc.image_grid_thw == out["image_grid_thw"].tolist(), label
             grid = out["image_grid_thw"][0]

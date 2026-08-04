@@ -30,8 +30,7 @@ import hashlib
 import io
 import json
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
-from functools import lru_cache
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -64,7 +63,6 @@ from renderers.configs import Qwen3VLRendererConfig
 from renderers.mm_store import (
     decode_data_image_url,
     hub_image_processor_config,
-    image_layout_fingerprint,
     raw_mm_item,
 )
 from renderers.parsing import parse_qwen3
@@ -115,10 +113,9 @@ def _is_video_part(item: Any) -> bool:
 
 @dataclass(frozen=True)
 class QwenVLImageLayoutSpec:
-    """The knobs that determine Qwen-VL image layout — this dataclass is the
-    canonical field list: the fingerprint hashes exactly these, on both the
-    render side (values from the checkpoint config) and the materialize side
-    (values from the live image processor via :func:`qwen_layout_from`)."""
+    """The layout knobs from a checkpoint's ``preprocessor_config.json`` —
+    everything the render-side geometry math needs to predict grids and
+    placeholder counts without running an image processor."""
 
     patch_size: int
     temporal_patch_size: int
@@ -126,36 +123,23 @@ class QwenVLImageLayoutSpec:
     min_pixels: int
     max_pixels: int
 
-    def fingerprint(self) -> str:
-        return image_layout_fingerprint(family="qwen_vl", **asdict(self))
 
-
-def qwen_layout_from(source: Any) -> QwenVLImageLayoutSpec:
-    """Extract the layout spec from a preprocessor config dict or a live image
-    processor object. Newer configs keep the pixel bounds under ``size``
-    (``shortest_edge``/``longest_edge``) with the legacy top-level
-    ``min_pixels``/``max_pixels`` set to null; honor both shapes."""
-
-    def get(name: str) -> Any:
-        return (
-            source.get(name)
-            if isinstance(source, Mapping)
-            else getattr(source, name, None)
-        )
+def qwen_layout_from(config: Mapping[str, Any]) -> QwenVLImageLayoutSpec:
+    """Layout spec from a preprocessor config dict. Newer configs keep the
+    pixel bounds under ``size`` (``shortest_edge``/``longest_edge``) with the
+    legacy top-level ``min_pixels``/``max_pixels`` set to null; honor both."""
 
     def required(name: str) -> int:
-        value = get(name)
+        value = config.get(name)
         if value is None:
             raise ValueError(f"Qwen image processor config is missing {name!r}")
         return int(value)
 
     def pixels(name: str, size_key: str) -> int:
-        value = get(name)
-        if value is None:
-            # Config JSON nests the bounds under a plain dict; live processors
-            # expose a SizeDict, which is not a Mapping but does support .get.
-            size_get = getattr(get("size"), "get", None)
-            value = size_get(size_key) if callable(size_get) else None
+        size = config.get("size")
+        value = config.get(name)
+        if value is None and isinstance(size, Mapping):
+            value = size.get(size_key)
         if value is None:
             raise ValueError(
                 f"Qwen image processor config is missing {name!r} / size[{size_key!r}]"
@@ -171,11 +155,6 @@ def qwen_layout_from(source: Any) -> QwenVLImageLayoutSpec:
     )
 
 
-@lru_cache(maxsize=8)
-def _checkpoint_qwen_layout(model_name: str) -> QwenVLImageLayoutSpec:
-    return qwen_layout_from(hub_image_processor_config(model_name))
-
-
 _PROCESSED_IMAGE_CACHE_MAX = 256
 
 
@@ -184,7 +163,6 @@ class QwenImageLayoutDescriptor:
     mm_hash: str
     image_grid_thw: list[list[int]]
     num_image_tokens: int
-    fingerprint: str
     raw_image_data: str
 
 
@@ -264,12 +242,11 @@ def _pil_image_hash(pil_image) -> str:
 
 
 def describe_qwen_image_layout(
-    part: dict[str, Any], model_name: str
+    part: dict[str, Any], layout: QwenVLImageLayoutSpec
 ) -> QwenImageLayoutDescriptor:
     """Return Qwen image layout metadata without invoking an image processor."""
     source, raw = _inline_image_source(part)
     height, width = _image_dimensions(raw)
-    layout = _checkpoint_qwen_layout(model_name)
     resized_h, resized_w = smart_resize(
         height,
         width,
@@ -287,19 +264,17 @@ def describe_qwen_image_layout(
         mm_hash=hashlib.sha256(raw).hexdigest()[:32],
         image_grid_thw=[[grid_t, grid_h, grid_w]],
         num_image_tokens=num_image_tokens,
-        fingerprint=layout.fingerprint(),
         raw_image_data=source,
     )
 
 
 def qwen_image_item_for_render(
-    part: dict[str, Any], model_name: str
+    part: dict[str, Any], layout: QwenVLImageLayoutSpec
 ) -> tuple[int, str, dict[str, Any]]:
-    desc = describe_qwen_image_layout(part, model_name)
+    desc = describe_qwen_image_layout(part, layout)
     item = raw_mm_item(
         modality="image",
         family="qwen_vl",
-        layout_fingerprint=desc.fingerprint,
         payload={"image_grid_thw": desc.image_grid_thw},
         raw_image_data=desc.raw_image_data,
     )
@@ -508,6 +483,7 @@ class Qwen3VLRenderer:
     ):
         self._tokenizer = tokenizer
         self._processor: Any = None
+        self._image_layout: QwenVLImageLayoutSpec | None = None
         self._image_cache: dict[str, tuple[Any, int]] = {}
         self.config = config or Qwen3VLRendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
@@ -558,6 +534,13 @@ class Qwen3VLRenderer:
             self._processor = load_qwen_processor(self._tokenizer, type(self).__name__)
         return self._processor
 
+    def _raw_image_layout(self) -> QwenVLImageLayoutSpec:
+        """The checkpoint's layout knobs, resolved once on first image render."""
+        if self._image_layout is None:
+            name = layout_model_name(self._tokenizer, type(self).__name__)
+            self._image_layout = qwen_layout_from(hub_image_processor_config(name))
+        return self._image_layout
+
     def _image_item_for_render(
         self, part: dict[str, Any]
     ) -> tuple[int, str, dict[str, Any]]:
@@ -567,9 +550,7 @@ class Qwen3VLRenderer:
                 processor=self._get_processor(),
                 image_cache=self._image_cache,
             )
-        return qwen_image_item_for_render(
-            part, layout_model_name(self._tokenizer, type(self).__name__)
-        )
+        return qwen_image_item_for_render(part, self._raw_image_layout())
 
     @staticmethod
     def _render_text_content(content: Any) -> str:

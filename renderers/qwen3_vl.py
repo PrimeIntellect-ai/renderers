@@ -118,7 +118,6 @@ class QwenVLImageLayoutSpec:
     placeholder counts without running an image processor."""
 
     patch_size: int
-    temporal_patch_size: int
     merge_size: int
     min_pixels: int
     max_pixels: int
@@ -148,7 +147,6 @@ def qwen_layout_from(config: Mapping[str, Any]) -> QwenVLImageLayoutSpec:
 
     return QwenVLImageLayoutSpec(
         patch_size=required("patch_size"),
-        temporal_patch_size=required("temporal_patch_size"),
         merge_size=required("merge_size"),
         min_pixels=pixels("min_pixels", "shortest_edge"),
         max_pixels=pixels("max_pixels", "longest_edge"),
@@ -273,7 +271,6 @@ def qwen_image_item_for_render(
 ) -> tuple[int, str, dict[str, Any]]:
     desc = describe_qwen_image_layout(part, layout)
     item = raw_mm_item(
-        modality="image",
         family="qwen_vl",
         payload={"image_grid_thw": desc.image_grid_thw},
         raw_image_data=desc.raw_image_data,

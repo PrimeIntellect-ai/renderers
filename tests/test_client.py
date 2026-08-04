@@ -401,7 +401,7 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
         ("qwen_vl", {"image_grid_thw": [[1, 2, 2]]}, "image", None),
         (
             "kimi_k25",
-            {"grid_thws": [[1, 2, 2]], "num_media_tokens": 1},
+            {"grid_thws": [[1, 2, 2]]},
             "vision_chunk",
             "vision_chunk",
         ),
@@ -442,7 +442,6 @@ def test_generate_serializes_raw_mm_refs(
         mm_items={
             "image": [
                 raw_mm_item(
-                    modality="image",
                     family=family,
                     payload=payload,
                     raw_image_uri=image_uri,

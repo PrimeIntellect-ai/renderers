@@ -429,8 +429,6 @@ class KimiK25ImageLayoutSpec:
     in_patch_limit: int
     patch_limit_on_one_side: int
     fixed_output_tokens: int | None
-    image_mean: tuple[float, float, float]
-    image_std: tuple[float, float, float]
 
 
 def kimi_layout_from(config: Mapping[str, Any]) -> KimiK25ImageLayoutSpec:
@@ -445,14 +443,6 @@ def kimi_layout_from(config: Mapping[str, Any]) -> KimiK25ImageLayoutSpec:
             raise ValueError(f"Kimi media_proc_cfg is missing {name!r}")
         return cfg[name]
 
-    def float_triple(name: str) -> tuple[float, float, float]:
-        value = required(name)
-        if not isinstance(value, list | tuple) or len(value) != 3:
-            raise ValueError(
-                f"Kimi media_proc_cfg[{name!r}] must be a length-3 sequence"
-            )
-        return (float(value[0]), float(value[1]), float(value[2]))
-
     fixed = required("fixed_output_tokens")
     return KimiK25ImageLayoutSpec(
         patch_size=int(required("patch_size")),
@@ -460,8 +450,6 @@ def kimi_layout_from(config: Mapping[str, Any]) -> KimiK25ImageLayoutSpec:
         in_patch_limit=int(required("in_patch_limit")),
         patch_limit_on_one_side=int(required("patch_limit_on_one_side")),
         fixed_output_tokens=None if fixed is None else int(fixed),
-        image_mean=float_triple("image_mean"),
-        image_std=float_triple("image_std"),
     )
 
 
@@ -525,12 +513,8 @@ def kimi_image_item_for_render(
 ) -> tuple[int, str, dict[str, Any]]:
     desc = describe_kimi_image_layout(part, layout)
     item = raw_mm_item(
-        modality="image",
         family=KIMI_K25_FAMILY,
-        payload={
-            "grid_thws": desc.grid_thws,
-            "num_media_tokens": desc.num_media_tokens,
-        },
+        payload={"grid_thws": desc.grid_thws},
         raw_image_uri=desc.raw_image_uri,
         vllm_modality=KIMI_K25_VLLM_MODALITY,
     )

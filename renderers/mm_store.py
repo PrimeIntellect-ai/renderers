@@ -140,7 +140,6 @@ def _decode_ref_payload(encoded: str) -> dict[str, object]:
 
 def raw_mm_item(
     *,
-    modality: str,
     family: str,
     payload: dict[str, object],
     raw_image_uri: str,
@@ -150,13 +149,12 @@ def raw_mm_item(
 
     ``payload`` is intentionally adapter-owned. Shared consumers may route by
     ``family`` and validate the common envelope, but must not inspect adapter
-    payload keys.
+    payload keys. The item's modality is its key in ``MultiModalData.mm_items``;
+    only the standalone ``mmraw:`` ref carries its own.
     """
     _ensure_safe("multimodal family", family)
-    _ensure_safe("raw multimodal modality", modality)
     out: dict[str, object] = {
         "kind": RAW_MM_ITEM_KIND,
-        "modality": modality,
         "family": family,
         "payload": payload,
     }

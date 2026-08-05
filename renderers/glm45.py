@@ -91,9 +91,7 @@ class GLM45Renderer:
     def _encode(self, text: str) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(
-            text, add_special_tokens=False, split_special_tokens=True
-        )
+        return self._tokenizer.encode(text, add_special_tokens=False)
 
     @staticmethod
     def _visible_text(content: Any) -> str:
@@ -160,8 +158,10 @@ class GLM45Renderer:
             same way as the chat template, but attributed separately"
             without splitting the encode call (which could shift BPE
             merges at the boundary)."""
+            # split_special_tokens=False: GLM's template reads /nothink out of
+            # user content, so content must keep matching special tokens here.
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=False
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -383,8 +383,10 @@ class GLM45Renderer:
             *,
             is_sampled: bool = False,
         ) -> None:
+            # split_special_tokens=False: GLM's template reads /nothink out of
+            # user content, so content must keep matching special tokens here.
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=False
             ):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)

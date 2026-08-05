@@ -1819,6 +1819,7 @@ def attribute_text_segments(
     segments: "list[tuple[str, bool]]",
     *,
     overlap_is_content: bool = False,
+    split_special_tokens: bool = True,
 ) -> "list[tuple[int, bool]]":
     """Tokenize concatenated segments as a single BPE pass and return
     ``(token_id, is_content)`` pairs.
@@ -1867,7 +1868,7 @@ def attribute_text_segments(
     encoding = offset_tokenizer(
         full_text,
         add_special_tokens=False,
-        split_special_tokens=True,
+        split_special_tokens=split_special_tokens,
         return_offsets_mapping=True,
     )
     token_ids = list(encoding["input_ids"])

@@ -1867,6 +1867,7 @@ def attribute_text_segments(
     encoding = offset_tokenizer(
         full_text,
         add_special_tokens=False,
+        split_special_tokens=True,
         return_offsets_mapping=True,
     )
     token_ids = list(encoding["input_ids"])

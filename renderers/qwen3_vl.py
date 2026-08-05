@@ -370,7 +370,9 @@ class Qwen3VLRenderer:
     def _encode(self, text: str) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return self._tokenizer.encode(
+            text, add_special_tokens=False, split_special_tokens=True
+        )
 
     def _get_processor(self):
         if self._processor is not None:

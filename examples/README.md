@@ -86,5 +86,9 @@ Each script runs `Qwen/Qwen3.5-4B` with `enable_thinking=True` and `False`, then
 
 ## Multimodal Note
 
-Renderers are text-only today. For image/video demos, use the backend's message
-or prompt path until renderers grow multimodal placeholder support.
+Image rendering is supported for Qwen3-VL, Qwen3.5 / Qwen3.6, and Kimi K2.5 /
+K2.6. Their renderers return token IDs plus a framework-agnostic
+`multi_modal_data` sidecar containing placeholder ranges and processed image
+features. `renderers.client` can serialize the Qwen-VL family sidecar for
+vLLM's token-in endpoint; other backends need their own adapter. Video content
+parts are represented by the public types but are not yet rendered.

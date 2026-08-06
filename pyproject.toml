@@ -39,10 +39,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Raw multimodal needs Pillow for dimension / PIL decode. Torch stays a
+# caller/dev concern (processed mode + processor-backed tests).
 vision = [
     "pillow>=12.2.0",
-    "torch>=2.11.0",
-    "torchvision>=0.26.0",
 ]
 
 [tool.hatch.version]

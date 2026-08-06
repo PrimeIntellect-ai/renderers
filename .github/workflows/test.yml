@@ -5,12 +5,14 @@ on:
     branches: [main]
     paths:
       - "**.py"
+      - "tests/golden_renderer_outputs.json"
       - "pyproject.toml"
       - ".github/workflows/test.yml"
   pull_request:
     branches: [main]
     paths:
       - "**.py"
+      - "tests/golden_renderer_outputs.json"
       - "pyproject.toml"
       - ".github/workflows/test.yml"
 

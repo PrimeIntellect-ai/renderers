@@ -11,6 +11,7 @@ import renderers
 from renderers import RendererConfig
 from renderers import base as base_module
 from renderers import configs as configs_module
+from tests.golden_corpus import GOLDEN_CASES
 
 
 def test_runtime_registry_matches_config_registry():
@@ -47,3 +48,11 @@ def test_model_and_multimodal_maps_only_reference_registered_renderers():
 
     assert set(base_module.MODEL_RENDERER_MAP.values()) <= runtime_names
     assert set(base_module.MULTIMODAL_MODELS) <= set(base_module.MODEL_RENDERER_MAP)
+
+
+def test_golden_corpus_covers_each_registered_renderer_once():
+    base_module._populate_registry()
+    golden_names = [case.renderer_name for case in GOLDEN_CASES]
+
+    assert len(golden_names) == len(set(golden_names))
+    assert set(golden_names) == set(base_module.RENDERER_REGISTRY)

@@ -24,6 +24,7 @@ _MODEL_ASSET_TEST_MODULES = frozenset(
         "test_deepseek_r1",
         "test_disabled_thinking_stability",
         "test_glm_tool_name_validation",
+        "test_golden_renderer_outputs",
         "test_gpt_oss_harmony_parity",
         "test_hy3",
         "test_is_content",

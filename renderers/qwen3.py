@@ -36,6 +36,7 @@ from renderers.base import (
 )
 from renderers.configs import Qwen3RendererConfig
 from renderers.parsing import parse_qwen3
+from renderers.tools import normalize_tool_specs
 
 _TOOLS_HEADER = (
     "# Tools\n\n"
@@ -130,6 +131,7 @@ class Qwen3Renderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         tokens: list[int] = []
         indices: list[int] = []

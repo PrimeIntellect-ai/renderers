@@ -28,6 +28,7 @@ from renderers.base import (
 )
 from renderers.configs import GLM45RendererConfig
 from renderers.parsing import parse_glm
+from renderers.tools import normalize_tool_specs
 
 _TOOLS_HEADER = (
     "\n# Tools\n\n"
@@ -125,6 +126,7 @@ class GLM45Renderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         tokens: list[int] = []
         indices: list[int] = []

@@ -43,6 +43,7 @@ from renderers.base import (
 )
 from renderers.configs import Qwen35RendererConfig
 from renderers.parsing import parse_qwen35
+from renderers.tools import normalize_tool_specs
 from renderers.qwen3_vl import (
     _image_hash,
     _is_image_part,
@@ -318,6 +319,7 @@ class Qwen35Renderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         tokens: list[int] = []
         indices: list[int] = []

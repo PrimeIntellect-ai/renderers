@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, cast
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
@@ -44,6 +44,7 @@ from renderers.base import (
 )
 from renderers.configs import KimiK25RendererConfig
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
+from renderers.tools import normalize_tool_specs
 from renderers.qwen3_vl import (
     _image_hash,
     _is_image_part,
@@ -393,7 +394,7 @@ def _encode_tools_typescript(tools: list[ToolSpec]) -> str:
             func_def_dict = tool
         if not func_def_dict:
             continue
-        func_def = _function_to_typescript(func_def_dict)
+        func_def = _function_to_typescript(cast(dict[str, Any], func_def_dict))
         if func_def:
             functions.append(func_def)
     if not functions:
@@ -749,6 +750,7 @@ class KimiK25Renderer:
         """
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         # Hist/suffix split — assistants up to and including the last
         # non-tool-call assistant strip reasoning_content, those after

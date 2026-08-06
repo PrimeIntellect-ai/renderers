@@ -31,6 +31,7 @@ from renderers.base import (
 )
 from renderers.configs import KimiK2RendererConfig
 from renderers.parsing import parse_kimi_k2
+from renderers.tools import normalize_tool_specs
 
 _DEFAULT_SYSTEM = "You are Kimi, an AI assistant created by Moonshot AI."
 
@@ -122,6 +123,7 @@ class KimiK2Renderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         # Preserve the caller's list — ``message_roles`` and per-token
         # attribution refer to this frame (not the post-normalisation

@@ -67,6 +67,20 @@ from renderers.configs import (
     Qwen3VLRendererConfig,
     RendererConfig,
 )
+from renderers.tools import (
+    AnthropicToolSpec,
+    CanonicalToolSpec,
+    ChatCompletionToolSpec,
+    FunctionSpec,
+    KnownToolSpec,
+    MCPToolSpec,
+    normalize_tool_spec,
+    normalize_tool_specs,
+    ResponsesFunctionToolSpec,
+    ToolSpecError,
+    ToolSpecInput,
+    UnsupportedToolSpecError,
+)
 
 # Concrete renderer classes are lazy-loaded so that consumers needing
 # only the config layer (``RendererConfig`` discriminated union) don't
@@ -121,9 +135,12 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "AutoRendererConfig",
+    "AnthropicToolSpec",
     "BaseRendererConfig",
     "Content",
     "ContentPart",
+    "CanonicalToolSpec",
+    "ChatCompletionToolSpec",
     "DeepSeekR1Renderer",
     "DeepSeekR1RendererConfig",
     "DeepSeekV3Renderer",
@@ -138,6 +155,8 @@ __all__ = [
     "GLM5RendererConfig",
     "GptOssRenderer",
     "GptOssRendererConfig",
+    "FunctionSpec",
+    "KnownToolSpec",
     "Hy3Renderer",
     "Hy3RendererConfig",
     "ImagePart",
@@ -154,6 +173,7 @@ __all__ = [
     "MULTIMODAL_MODELS",
     "MalformedGenerateResponseError",
     "Message",
+    "MCPToolSpec",
     "MiniMaxM2Renderer",
     "MiniMaxM2RendererConfig",
     "MultiModalData",
@@ -182,12 +202,16 @@ __all__ = [
     "Renderer",
     "RendererConfig",
     "RendererPool",
+    "ResponsesFunctionToolSpec",
     "TextPart",
     "ThinkingPart",
     "ToolCall",
     "ToolCallFunction",
     "ToolCallParseStatus",
     "ToolSpec",
+    "ToolSpecError",
+    "ToolSpecInput",
+    "UnsupportedToolSpecError",
     "VideoPart",
     "__version__",
     "attribute_text_segments",
@@ -198,6 +222,8 @@ __all__ = [
     "create_renderer_pool",
     "extract_message_tool_names",
     "is_multimodal",
+    "normalize_tool_spec",
+    "normalize_tool_specs",
     "reject_assistant_in_extension",
     "trim_to_turn_close",
 ]

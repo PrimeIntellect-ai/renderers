@@ -22,6 +22,7 @@ from renderers.base import (
 )
 from renderers.configs import PrimeQwen3RendererConfig
 from renderers.parsing import parse_qwen35
+from renderers.tools import normalize_tool_specs
 
 _DEFAULT_TOOL_SYSTEM = "You are Qwen, a helpful AI assistant that can interact with a computer to solve tasks."
 _TOOLS_HEADER = "\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>"
@@ -237,6 +238,7 @@ class PrimeQwen3Renderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         builder = _TokenBuilder(self._tokenizer)
         first_is_system = messages[0].get("role") == "system"

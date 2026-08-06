@@ -58,6 +58,7 @@ from renderers.base import (
 )
 from renderers.configs import LagunaXS2RendererConfig, LagunaXS21RendererConfig
 from renderers.parsing import parse_laguna_xs2
+from renderers.tools import normalize_tool_specs
 
 _DEFAULT_SYSTEM_MESSAGE = (
     "You are a helpful, conversationally-fluent assistant made by Poolside. "
@@ -177,6 +178,7 @@ class LagunaXS2Renderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         tokens: list[int] = []
         indices: list[int] = []
@@ -646,6 +648,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         tokens: list[int] = []
         indices: list[int] = []

@@ -64,6 +64,7 @@ from renderers.base import (
 )
 from renderers.configs import GptOssRendererConfig
 from renderers.parsing import parse_gpt_oss
+from renderers.tools import normalize_tool_specs
 
 
 def _reasoning_effort(effort: str | None) -> ReasoningEffort:
@@ -269,6 +270,7 @@ class GptOssRenderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         tokens: list[int] = []
         indices: list[int] = []

@@ -20,6 +20,7 @@ import json
 from typing import Any
 
 from renderers.base import ParsedResponse, ParsedToolCall, ToolCallParseStatus, ToolSpec
+from renderers.tools import normalize_tool_specs
 
 
 # ── Schema-aware argument coercion ──────────────────────────────────
@@ -39,16 +40,15 @@ def _build_param_type_index(
     """Map tool name → param name → param JSON-schema fragment.
 
     Accepts both flat ``ToolSpec`` (``{name, description, parameters}``)
-    and the OpenAI envelope (``{"type": "function", "function": {...}}``)
-    so callers can pass either shape.
+    and every function-compatible provider shape accepted by
+    :func:`renderers.tools.normalize_tool_specs`.
     """
-    if not tools:
+    normalized_tools = normalize_tool_specs(tools)
+    if not normalized_tools:
         return {}
     index: dict[str, dict[str, dict[str, Any]]] = {}
-    for tool in tools:
-        spec = tool.get("function", tool) if isinstance(tool, dict) else None
-        if not isinstance(spec, dict):
-            continue
+    for tool in normalized_tools:
+        spec = tool["function"]
         name = spec.get("name")
         if not isinstance(name, str):
             continue
@@ -64,17 +64,17 @@ def _extract_tool_names(tools: list[ToolSpec] | None) -> set[str] | None:
 
     ``None`` disables name validation — mirroring vLLM's
     ``ParserEngine._is_valid_tool_name``, which returns ``True`` whenever
-    the request carries no tools. Accepts both flat ``ToolSpec`` and the
-    OpenAI ``{"type": "function", "function": {...}}`` envelope, like
-    ``_build_param_type_index`` (but independent of it: a tool with no
-    ``parameters.properties`` still counts as a known name).
+    the request carries no tools. Accepts every function-compatible provider
+    shape handled by ``_build_param_type_index`` (but is independent of it: a
+    tool with no ``parameters.properties`` still counts as a known name).
     """
-    if not tools:
+    normalized_tools = normalize_tool_specs(tools)
+    if not normalized_tools:
         return None
     names: set[str] = set()
-    for tool in tools:
-        spec = tool.get("function", tool) if isinstance(tool, dict) else None
-        if isinstance(spec, dict) and isinstance(spec.get("name"), str):
+    for tool in normalized_tools:
+        spec = tool["function"]
+        if isinstance(spec.get("name"), str):
             names.add(spec["name"])
     return names
 

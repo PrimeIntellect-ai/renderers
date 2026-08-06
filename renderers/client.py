@@ -362,19 +362,23 @@ async def generate(
     routed_experts = choice.get("routed_experts")
     kept_tokens = choice.get("kept_tokens")
 
+    # An engine's chat-completions endpoint only ever emits calls it accepted:
+    # vLLM's glm45/glm47 parsers run with ``validate_tool_names=True`` and drop
+    # the rest. ``tool_calls`` mirrors that — the calls a caller should execute —
+    # so an agent loop behaves the same whether it generated through this client
+    # or through the engine. Every attempt, accepted or not, stays available on
+    # ``tool_call_attempts`` for the uses engines can't serve: schema-adherence
+    # rubrics and selective token masking over non-OK spans.
+    #
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
-    # when we extracted at least one well-formed tool call client-side, so
-    # OpenAI-compatible agent loops continue past the tool turn instead of
-    # treating the response as final. Malformed attempts (INVALID_JSON,
-    # UNCLOSED_BLOCK, ...) don't qualify — those still surface on
-    # ``parsed.tool_calls`` so verifiers can inspect them, but they don't
-    # trigger the tool-loop continuation.
+    # when we extracted at least one executable call, so OpenAI-compatible agent
+    # loops continue past the tool turn instead of treating the response as final.
     finish_reason = choice.get("finish_reason")
-    ok_tool_calls = [
+    emitted_tool_calls = [
         tc for tc in parsed.tool_calls if tc.status == ToolCallParseStatus.OK
     ]
-    if ok_tool_calls and finish_reason == "stop":
+    if emitted_tool_calls and finish_reason == "stop":
         finish_reason = "tool_calls"
 
     return {
@@ -384,7 +388,8 @@ async def generate(
         "completion_logprobs": completion_logprobs,
         "content": parsed.content,
         "reasoning_content": parsed.reasoning_content,
-        "tool_calls": parsed.tool_calls,
+        "tool_calls": emitted_tool_calls,
+        "tool_call_attempts": parsed.tool_calls,
         "finish_reason": finish_reason,
         "routed_experts": routed_experts,
         "kept_tokens": kept_tokens,

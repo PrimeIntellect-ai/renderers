@@ -52,7 +52,7 @@ _ROUNDTRIP_MODELS = [
     # render time, so the reasoning round-trip can't hold by design.
     # test_laguna_xs21.py covers the round-trip under enable_thinking=True.
     ("tencent/Hy3", "auto"),
-    ("unsloth/Llama-3.2-1B-Instruct", "llama-3"),
+    ("meta-llama/Llama-3.2-1B-Instruct", "llama-3"),
     ("openai/gpt-oss-20b", "gpt-oss"),
     ("Qwen/Qwen2.5-0.5B-Instruct", "default"),
 ]

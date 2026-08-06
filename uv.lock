@@ -1384,7 +1384,7 @@ dev = [
     { name = "pre-commit" },
     { name = "pytest", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.21.0" },
-    { name = "ruff" },
+    { name = "ruff", specifier = "==0.15.12" },
     { name = "torch", specifier = ">=2.11.0" },
     { name = "torchvision", specifier = ">=0.26.0" },
     { name = "ty", specifier = ">=0.0.1a29,<0.0.22" },

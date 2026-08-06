@@ -83,13 +83,20 @@ version-file = "renderers/_version.py"
 [tool.hatch.build.targets.wheel]
 packages = ["renderers"]
 
+# Explicit so a checkout under prime-rl does not inherit prime-rl's
+# line-length=120. CI runs this repo standalone against ruff defaults (88)
+# via .github/workflows/style.yml — keep that pin and this length in sync.
+[tool.ruff]
+line-length = 88
+required-version = "==0.15.12"
+
 [dependency-groups]
 dev = [
     "pillow>=12.2.0",
     "pre-commit",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
-    "ruff",
+    "ruff==0.15.12",
     "torch>=2.11.0",
     "torchvision>=0.26.0",
     "ty>=0.0.1a29,<0.0.22",

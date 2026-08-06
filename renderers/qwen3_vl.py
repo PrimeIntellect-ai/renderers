@@ -89,7 +89,6 @@ _TOOLS_FOOTER = (
 )
 
 
-
 @dataclass(frozen=True)
 class QwenVLImageLayoutSpec:
     """The layout knobs from a checkpoint's ``preprocessor_config.json`` —
@@ -132,14 +131,12 @@ def qwen_layout_from(config: Mapping[str, Any]) -> QwenVLImageLayoutSpec:
     )
 
 
-
 @dataclass(frozen=True)
 class QwenImageLayoutDescriptor:
     mm_hash: str
     image_grid_thw: list[list[int]]
     num_image_tokens: int
     raw_image_uri: str
-
 
 
 def describe_qwen_image_layout(
@@ -179,7 +176,6 @@ def qwen_image_item_for_render(
         raw_image_uri=desc.raw_image_uri,
     )
     return desc.num_image_tokens, desc.mm_hash, item
-
 
 
 def load_qwen_processor(tokenizer, renderer_name: str):

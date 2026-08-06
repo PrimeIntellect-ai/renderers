@@ -58,7 +58,9 @@ def offloaded_image_path(source: Any) -> Path:
         parsed = urlparse(source)
         if parsed.scheme == "file":
             return Path(unquote(parsed.path)).resolve()
-    raise ValueError("v1 multimodal image rendering requires offloaded file:// image assets")
+    raise ValueError(
+        "v1 multimodal image rendering requires offloaded file:// image assets"
+    )
 
 
 def load_pil_image(item: dict[str, Any]):
@@ -122,7 +124,9 @@ def image_dimensions(raw: bytes) -> tuple[int, int]:
     try:
         from PIL import Image
     except ImportError as exc:
-        raise RuntimeError("Pillow is required to read image dimensions for multimodal rendering.") from exc
+        raise RuntimeError(
+            "Pillow is required to read image dimensions for multimodal rendering."
+        ) from exc
 
     with Image.open(io.BytesIO(raw)) as image:
         return image.height, image.width

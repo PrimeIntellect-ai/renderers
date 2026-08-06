@@ -34,9 +34,9 @@ from renderers import create_renderer
 from renderers.base import (
     MODEL_RENDERER_MAP,
     _populate_registry,
-    load_tokenizer,
 )
 from renderers.configs import _config_class_for
+from tests.model_assets import load_test_tokenizer
 
 
 # Models exercised by the parity tests. Mirrors ``conftest.RENDERER_MODELS``
@@ -354,7 +354,7 @@ def test_kwarg_values_covers_every_declared_kwarg():
 
 @lru_cache(maxsize=None)
 def _tokenizer(model_name: str):
-    return load_tokenizer(model_name)
+    return load_test_tokenizer(model_name)
 
 
 @lru_cache(maxsize=None)

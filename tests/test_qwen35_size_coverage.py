@@ -19,7 +19,8 @@ from __future__ import annotations
 import pytest
 
 from renderers import Qwen35Renderer, Qwen35RendererConfig, create_renderer
-from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP
+from tests.model_assets import load_test_tokenizer
 
 
 _QWEN35_IN_MAP = {
@@ -76,7 +77,7 @@ def test_qwen35_enable_thinking_polarity_default(qwen35_model, expected_default)
     """With no explicit flag, the renderer resolves ``enable_thinking`` from
     the hard-coded per-model default — so big / small sizes each match their
     own template at the gen-prompt boundary."""
-    tok = load_tokenizer(qwen35_model)
+    tok = load_test_tokenizer(qwen35_model)
     renderer = create_renderer(tok, Qwen35RendererConfig())
     assert isinstance(renderer, Qwen35Renderer)
     assert renderer.config.enable_thinking is expected_default, (
@@ -170,7 +171,7 @@ def test_qwen35_size_parity_with_apply_chat_template(
     ``apply_chat_template`` output. Locks in the property that lets us
     share ``Qwen35Renderer`` across all seven sizes — the polarity
     flip on 0.8B / 2B is absorbed by the per-model default."""
-    tok = load_tokenizer(qwen35_model)
+    tok = load_test_tokenizer(qwen35_model)
     renderer = create_renderer(tok, Qwen35RendererConfig())
     assert isinstance(renderer, Qwen35Renderer)
 

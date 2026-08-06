@@ -96,9 +96,9 @@ def test_kimi_k2_unknown_role_message_indices():
     caller list of length 2.
     """
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer
 
-    tok = load_tokenizer("moonshotai/Kimi-K2-Instruct")
+    tok = load_test_tokenizer("moonshotai/Kimi-K2-Instruct")
     renderer = create_renderer(tok)
 
     msgs = [

@@ -16,8 +16,8 @@ from renderers.base import (
     MODEL_RENDERER_MAP,
     ParsedResponse,
     ToolCallParseStatus,
-    load_tokenizer,
 )
+from tests.model_assets import load_test_tokenizer
 
 # Pinned date for byte-parity tests. Matches the chat template's
 # strftime fallback so we don't have to override on the apply side.
@@ -34,7 +34,7 @@ _MODEL_PAIRS = [
 @pytest.fixture(scope="module", params=_MODEL_PAIRS, ids=[m for m, _ in _MODEL_PAIRS])
 def llama_pair(request):
     canonical, mirror = request.param
-    tok = load_tokenizer(canonical)
+    tok = load_test_tokenizer(canonical)
     renderer = Llama3Renderer(tok, Llama3RendererConfig(date_string=_PINNED_DATE))
     return canonical, mirror, tok, renderer
 
@@ -59,7 +59,7 @@ def test_create_renderer_via_explicit_config(llama_pair):
 
 
 def test_create_renderer_auto_resolves_after_mirror_load(llama_pair):
-    """``load_tokenizer(canonical_meta_id)`` loads from the unrestricted
+    """``load_test_tokenizer(canonical_meta_id)`` loads from the unrestricted
     mirror but preserves the canonical name needed for auto-resolution."""
     canonical, _, tok, _ = llama_pair
     assert tok.name_or_path == canonical

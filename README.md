@@ -33,14 +33,19 @@ parsed = r.parse_response(completion_ids)
 For the next turn, extend the previous sampled stream instead of re-rendering history:
 
 ```python
-next_prompt_ids = r.bridge_to_next_turn(
+bridged = r.bridge_to_next_turn(
     previous_prompt_ids=prompt_ids,
     previous_completion_ids=completion_ids,
     new_messages=[{"role": "tool", "content": "..."}],
 )
+if bridged is None:
+    # The renderer could not prove that preserving the sampled prefix is safe.
+    # Fall back to a full render of the conversation in that case.
+    ...
+next_prompt_ids = bridged.token_ids
 ```
 
-Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `glm-5`, `glm-5.1`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `nemotron-3`, `nemotron-3-ultra`, `llama-3`, `gpt-oss`, `hy3`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper.
+Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `glm-5`, `glm-5.1`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `nemotron-3`, `nemotron-3-ultra`, `llama-3`, `gpt-oss`, `hy3`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper.
 
 ## API
 
@@ -50,7 +55,7 @@ class Renderer(Protocol):
     def render_ids(messages, *, tools=None, add_generation_prompt=False) -> list[int]: ...
     def parse_response(token_ids) -> ParsedResponse: ...
     def get_stop_token_ids() -> list[int]: ...
-    def bridge_to_next_turn(prev_prompt_ids, prev_completion_ids, new_messages, *, tools=None) -> list[int] | None: ...
+    def bridge_to_next_turn(prev_prompt_ids, prev_completion_ids, new_messages, *, tools=None) -> RenderedTokens | None: ...
 ```
 
 - `RenderedTokens` carries `token_ids` **and** `message_indices` — one entry per token attributing each to its source message (`-1` for structural scaffolding). Lets `build_training_sample` build a per-token loss mask in one render.
@@ -59,7 +64,7 @@ class Renderer(Protocol):
 
 ### `bridge_to_next_turn` (the core contract)
 
-Given `(prev_prompt_ids, prev_completion_ids)` and new environment messages, return ids for the next turn's prompt such that the result starts with `prev_prompt_ids + prev_completion_ids` byte-for-byte and continues with the new messages plus the next assistant opener. If that cannot be proven safe, return `None` and the caller falls back to a full render.
+Given `(prev_prompt_ids, prev_completion_ids)` and new environment messages, return a `RenderedTokens` object for the next turn's prompt whose `token_ids` start with `prev_prompt_ids + prev_completion_ids` byte-for-byte and continue with the new messages plus the next assistant opener. If that cannot be proven safe, return `None` and the caller falls back to a full render. Attribution in a bridge result is relative to `new_messages`; the preserved prefix uses `message_indices=-1` because only its raw token IDs are available.
 
 Each hand-coded bridge:
 1. Anchors at the previous turn's canonical close token. On clean stops it's already in `prev_completion_ids`. On truncation, the renderer synthesizes the close as non-loss prompt context.

@@ -43,9 +43,9 @@ _MODELS = [
 @lru_cache(maxsize=None)
 def _load(model: str, renderer_name: str):
     from renderers import config_from_name, create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer
 
-    tok = load_tokenizer(model)
+    tok = load_test_tokenizer(model)
     return tok, create_renderer(tok, config_from_name(renderer_name))
 
 

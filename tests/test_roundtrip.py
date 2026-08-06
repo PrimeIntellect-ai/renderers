@@ -52,7 +52,7 @@ _ROUNDTRIP_MODELS = [
     # render time, so the reasoning round-trip can't hold by design.
     # test_laguna_xs21.py covers the round-trip under enable_thinking=True.
     ("tencent/Hy3", "auto"),
-    ("unsloth/Llama-3.2-1B-Instruct", "llama-3"),
+    ("meta-llama/Llama-3.2-1B-Instruct", "llama-3"),
     ("openai/gpt-oss-20b", "gpt-oss"),
     ("Qwen/Qwen2.5-0.5B-Instruct", "default"),
 ]
@@ -61,9 +61,9 @@ _ROUNDTRIP_MODELS = [
 @lru_cache(maxsize=None)
 def _load_renderer(model_name: str, renderer_name: str):
     from renderers import config_from_name, create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer
 
-    tok = load_tokenizer(model_name)
+    tok = load_test_tokenizer(model_name)
     return tok, create_renderer(tok, config_from_name(renderer_name))
 
 

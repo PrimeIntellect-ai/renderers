@@ -2,7 +2,7 @@ from functools import lru_cache
 
 import pytest
 from renderers import create_renderer
-from renderers.base import load_tokenizer
+from tests.model_assets import load_test_tokenizer
 
 MODELS = [
     "PrimeIntellect/Qwen3-0.6B",
@@ -141,7 +141,7 @@ CASES = [
 
 @lru_cache(maxsize=None)
 def _load(model: str):
-    tokenizer = load_tokenizer(model)
+    tokenizer = load_test_tokenizer(model)
     return tokenizer, create_renderer(tokenizer)
 
 

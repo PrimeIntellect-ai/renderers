@@ -1,0 +1,4242 @@
+{
+  "schema_version": 1,
+  "cases": {
+    "default": {
+      "renderer": "default",
+      "renderer_class": "DefaultRenderer",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct",
+      "model_revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+      "config": {
+        "thinking_retention": null,
+        "name": "default",
+        "tool_parser": null,
+        "reasoning_parser": null
+      },
+      "generation_prompt": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n",
+        "token_count": 158,
+        "token_ids_sha256": "080aab54d0ee370f49c843eae30a493eabc252eca32ef5ecc0b3b1ddc72ae500",
+        "message_indices_rle": [
+          [
+            0,
+            143
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [],
+        "is_content_rle": [],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\nFour.<|im_end|>\n",
+        "token_count": 162,
+        "token_ids_sha256": "7e2438ca9883ff87c221f58e1c0d88b43689ffc815ffc8cdbbcde7315dc518fb",
+        "message_indices_rle": [
+          [
+            0,
+            143
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            2,
+            7
+          ]
+        ],
+        "sampled_mask_rle": [],
+        "is_content_rle": [],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "Four.<|im_end|>\n",
+        "token_count": 4,
+        "token_ids_sha256": "bedeeb025a9ae6fd87206808a83f920932b43f0a59fdf5f19aac9c0167031836"
+      },
+      "parsed_completion": {
+        "content": "Four.\n",
+        "reasoning_content": null,
+        "tool_calls": []
+      },
+      "bridge": null
+    },
+    "qwen3": {
+      "renderer": "qwen3",
+      "renderer_class": "Qwen3Renderer",
+      "model": "Qwen/Qwen3-8B",
+      "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "config": {
+        "thinking_retention": null,
+        "name": "qwen3",
+        "enable_thinking": true
+      },
+      "generation_prompt": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n",
+        "token_count": 158,
+        "token_ids_sha256": "080aab54d0ee370f49c843eae30a493eabc252eca32ef5ecc0b3b1ddc72ae500",
+        "message_indices_rle": [
+          [
+            0,
+            143
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            158
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            139
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nTwo plus two equals four.\n</think>\n\nFour.<|im_end|>\n",
+        "token_count": 172,
+        "token_ids_sha256": "0a3b9ecf2923febbe4f40a14cfdf1b293e7b2e3073230ddbf5e1f00914883109",
+        "message_indices_rle": [
+          [
+            0,
+            143
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            2,
+            17
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            158
+          ],
+          [
+            true,
+            13
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            139
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            13
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "<think>\nTwo plus two equals four.\n</think>\n\nFour.<|im_end|>",
+        "token_count": 13,
+        "token_ids_sha256": "ae59d3cb1f34a68b0109b6092c9e3b783bab325bad5fe7bd1a0aa38d78f2dba0"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": "Two plus two equals four.",
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<|im_start|>system\nYou are concise.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nPrior answer.<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n",
+        "token_count": 47,
+        "token_ids_sha256": "ae61a84d8b9ad2ce6d57335f11d3b25ce73936e2abd5e4fc6ed4a75b03c2747c",
+        "message_indices_rle": [
+          [
+            -1,
+            33
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            47
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            36
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "qwen3",
+          "enable_thinking": true
+        },
+        "extension": {
+          "text": "\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n",
+          "token_count": 15,
+          "token_ids_sha256": "cf39a84fd7c4c25c0d96678c623ef14190fed0e32995be6cfffdd29f97846b6f"
+        }
+      }
+    },
+    "prime-qwen3": {
+      "renderer": "prime-qwen3",
+      "renderer_class": "PrimeQwen3Renderer",
+      "model": "PrimeIntellect/Qwen3-0.6B",
+      "model_revision": "15aba67c8ec68aeac96f57ba7e31d373564ee03c",
+      "config": {
+        "thinking_retention": null,
+        "name": "prime-qwen3"
+      },
+      "generation_prompt": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Return the weather for a city.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n",
+        "token_count": 269,
+        "token_ids_sha256": "afa9279d4e2e2fd6567565dbea9ff22776b481affba76a5f897a477f1c4f4eeb",
+        "message_indices_rle": [
+          [
+            0,
+            254
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            269
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            250
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Return the weather for a city.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>Two plus two equals four.</think>\nFour.<|im_end|>\n",
+        "token_count": 282,
+        "token_ids_sha256": "6748ef4a8b646af9a799f6abe26d77a2bf0b37d4d7bffae4f4274a06378516ed",
+        "message_indices_rle": [
+          [
+            0,
+            254
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            2,
+            16
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            269
+          ],
+          [
+            true,
+            12
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            250
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            12
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "<think>Two plus two equals four.</think>\nFour.<|im_end|>",
+        "token_count": 12,
+        "token_ids_sha256": "3a82be8a37c4ce8d9789661a62aa39228fca099cff9e9d938f2d24859a6c0ddb"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": "Two plus two equals four.",
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<|im_start|>system\nYou are concise.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\nPrior answer.<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n",
+        "token_count": 43,
+        "token_ids_sha256": "371d225bc816e7bf37ce3a240f424d93c8e42414c2822fb06b2765b82d72f636",
+        "message_indices_rle": [
+          [
+            -1,
+            29
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            43
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            32
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "prime-qwen3"
+        },
+        "extension": {
+          "text": "\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n",
+          "token_count": 15,
+          "token_ids_sha256": "cf39a84fd7c4c25c0d96678c623ef14190fed0e32995be6cfffdd29f97846b6f"
+        }
+      }
+    },
+    "qwen3-vl": {
+      "renderer": "qwen3-vl",
+      "renderer_class": "Qwen3VLRenderer",
+      "model": "Qwen/Qwen3-VL-4B-Instruct",
+      "model_revision": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+      "config": {
+        "thinking_retention": null,
+        "name": "qwen3-vl",
+        "add_vision_id": false,
+        "image_cache_max": 256
+      },
+      "generation_prompt": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n",
+        "token_count": 158,
+        "token_ids_sha256": "080aab54d0ee370f49c843eae30a493eabc252eca32ef5ecc0b3b1ddc72ae500",
+        "message_indices_rle": [
+          [
+            0,
+            143
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            158
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            139
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\nFour.<|im_end|>\n",
+        "token_count": 162,
+        "token_ids_sha256": "7e2438ca9883ff87c221f58e1c0d88b43689ffc815ffc8cdbbcde7315dc518fb",
+        "message_indices_rle": [
+          [
+            0,
+            143
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            2,
+            7
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            158
+          ],
+          [
+            true,
+            3
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            139
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            3
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "Four.<|im_end|>",
+        "token_count": 3,
+        "token_ids_sha256": "8c9c840f115008c23f98f09a0ae2d0cf23c17af40eff7e0dc2001f01cb8cf14b"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": null,
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<|im_start|>system\nYou are concise.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\nPrior answer.<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n",
+        "token_count": 43,
+        "token_ids_sha256": "371d225bc816e7bf37ce3a240f424d93c8e42414c2822fb06b2765b82d72f636",
+        "message_indices_rle": [
+          [
+            -1,
+            29
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            43
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            32
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "qwen3-vl",
+          "add_vision_id": false,
+          "image_cache_max": 256
+        },
+        "extension": {
+          "text": "\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n",
+          "token_count": 15,
+          "token_ids_sha256": "cf39a84fd7c4c25c0d96678c623ef14190fed0e32995be6cfffdd29f97846b6f"
+        }
+      }
+    },
+    "qwen3.5": {
+      "renderer": "qwen3.5",
+      "renderer_class": "Qwen35Renderer",
+      "model": "Qwen/Qwen3.5-9B",
+      "model_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+      "config": {
+        "thinking_retention": null,
+        "name": "qwen3.5",
+        "enable_thinking": true,
+        "add_vision_id": false,
+        "image_cache_max": 256
+      },
+      "generation_prompt": {
+        "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are concise.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+        "token_count": 280,
+        "token_ids_sha256": "adbac690e6768c6f1314ddd82e2e4c53d4e1fb3d3edc56c74b0e8145434d91b8",
+        "message_indices_rle": [
+          [
+            0,
+            263
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            -1,
+            5
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            280
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            257
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            7
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are concise.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nTwo plus two equals four.\n</think>\n\nFour.<|im_end|>\n",
+        "token_count": 293,
+        "token_ids_sha256": "acb2513c56e51c539e4efce8245a3f761bdee03fe6b8e3909fcd42b9f6405a4d",
+        "message_indices_rle": [
+          [
+            0,
+            263
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            2,
+            18
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            278
+          ],
+          [
+            true,
+            14
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            257
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            14
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "<think>\nTwo plus two equals four.\n</think>\n\nFour.<|im_end|>",
+        "token_count": 14,
+        "token_ids_sha256": "6de6a897f24e53a8431bd456c34631afbfac74dc9120d2641b0a191f0c4bc107"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": "Two plus two equals four.",
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<|im_start|>system\nYou are concise.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n</think>\n\nPrior answer.<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+        "token_count": 49,
+        "token_ids_sha256": "51a6866b82c62fcc15859f3654d7c5faeb3af6dae6a9b244ee4afbabd72c0739",
+        "message_indices_rle": [
+          [
+            -1,
+            33
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            -1,
+            5
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            49
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            36
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            7
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "qwen3.5",
+          "enable_thinking": true,
+          "add_vision_id": false,
+          "image_cache_max": 256
+        },
+        "extension": {
+          "text": "\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+          "token_count": 17,
+          "token_ids_sha256": "6ef5d60bff9e75950e0e7ff44788b2963ac81f7a08e0380263e121dec1c0d3bb"
+        }
+      }
+    },
+    "qwen3.6": {
+      "renderer": "qwen3.6",
+      "renderer_class": "Qwen36Renderer",
+      "model": "Qwen/Qwen3.6-35B-A3B",
+      "model_revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+      "config": {
+        "thinking_retention": null,
+        "name": "qwen3.6",
+        "enable_thinking": true,
+        "add_vision_id": false,
+        "preserve_thinking": false,
+        "image_cache_max": 256
+      },
+      "generation_prompt": {
+        "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are concise.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+        "token_count": 280,
+        "token_ids_sha256": "adbac690e6768c6f1314ddd82e2e4c53d4e1fb3d3edc56c74b0e8145434d91b8",
+        "message_indices_rle": [
+          [
+            0,
+            263
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            -1,
+            5
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            280
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            257
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            7
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are concise.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nTwo plus two equals four.\n</think>\n\nFour.<|im_end|>\n",
+        "token_count": 293,
+        "token_ids_sha256": "acb2513c56e51c539e4efce8245a3f761bdee03fe6b8e3909fcd42b9f6405a4d",
+        "message_indices_rle": [
+          [
+            0,
+            263
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            2,
+            18
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            278
+          ],
+          [
+            true,
+            14
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            257
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            14
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "<think>\nTwo plus two equals four.\n</think>\n\nFour.<|im_end|>",
+        "token_count": 14,
+        "token_ids_sha256": "6de6a897f24e53a8431bd456c34631afbfac74dc9120d2641b0a191f0c4bc107"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": "Two plus two equals four.",
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<|im_start|>system\nYou are concise.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n</think>\n\nPrior answer.<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+        "token_count": 49,
+        "token_ids_sha256": "51a6866b82c62fcc15859f3654d7c5faeb3af6dae6a9b244ee4afbabd72c0739",
+        "message_indices_rle": [
+          [
+            -1,
+            33
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            -1,
+            5
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            49
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            36
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            7
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "qwen3.6",
+          "enable_thinking": true,
+          "add_vision_id": false,
+          "preserve_thinking": true,
+          "image_cache_max": 256
+        },
+        "extension": {
+          "text": "\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+          "token_count": 17,
+          "token_ids_sha256": "6ef5d60bff9e75950e0e7ff44788b2963ac81f7a08e0380263e121dec1c0d3bb"
+        }
+      }
+    },
+    "glm-5": {
+      "renderer": "glm-5",
+      "renderer_class": "GLM5Renderer",
+      "model": "zai-org/GLM-5",
+      "model_revision": "4e6698ba8e85059d749020e3c4d2123719f23926",
+      "config": {
+        "thinking_retention": null,
+        "name": "glm-5",
+        "enable_thinking": true,
+        "clear_thinking": true
+      },
+      "generation_prompt": {
+        "text": "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|system|>You are concise.<|user|>What is 2+2?<|assistant|><think>",
+        "token_count": 170,
+        "token_ids_sha256": "cd54a1dbbc47ee1944954bdc93e68891ac5c04856e8c272264e4d9da4ac8b0c3",
+        "message_indices_rle": [
+          [
+            -1,
+            155
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            -1,
+            2
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            170
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            156
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            2
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|system|>You are concise.<|user|>What is 2+2?<|assistant|><think>Two plus two equals four.</think>Four.",
+        "token_count": 179,
+        "token_ids_sha256": "76d92f011f27a028804ae908a6f3d8d0c976d00abdc818eb7196578a0169f4a6",
+        "message_indices_rle": [
+          [
+            -1,
+            155
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            2,
+            11
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            170
+          ],
+          [
+            true,
+            9
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            156
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            2
+          ],
+          [
+            true,
+            9
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "Two plus two equals four.</think>Four.",
+        "token_count": 9,
+        "token_ids_sha256": "9a6a08fbb37bc5652afd010f1e4525471e4e1c839bb89c27be7e2a74c1940dc6"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": "Two plus two equals four.",
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "[gMASK]<sop><|system|>You are concise.<|user|>What is 2+2?<|assistant|><think>Prior answer.<|endoftext|><|user|>And 3+3?<|assistant|><think>",
+        "token_count": 30,
+        "token_ids_sha256": "3a91feadac1aa889b8289f122d03db24d3d3a41d15f8a9147d891701c51200cf",
+        "message_indices_rle": [
+          [
+            -1,
+            21
+          ],
+          [
+            0,
+            7
+          ],
+          [
+            -1,
+            2
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            30
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            22
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            2
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "glm-5",
+          "enable_thinking": true,
+          "clear_thinking": false
+        },
+        "extension": {
+          "text": "<|endoftext|><|user|>And 3+3?<|assistant|><think>",
+          "token_count": 10,
+          "token_ids_sha256": "9e9a09e456ea99d7de65e6f111fd39729b7ea9b2399041a286154f6f59a12067"
+        }
+      }
+    },
+    "glm-5.1": {
+      "renderer": "glm-5.1",
+      "renderer_class": "GLM51Renderer",
+      "model": "zai-org/GLM-5.1",
+      "model_revision": "26e1bd6e011feb778d25ae34b09b07074139d92d",
+      "config": {
+        "thinking_retention": null,
+        "name": "glm-5.1",
+        "enable_thinking": true,
+        "clear_thinking": true
+      },
+      "generation_prompt": {
+        "text": "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|system|>You are concise.<|user|>What is 2+2?<|assistant|><think>",
+        "token_count": 160,
+        "token_ids_sha256": "26b70df854681ec7abf7df7294c0d965b06167309c449e07394c21b67aef86a7",
+        "message_indices_rle": [
+          [
+            -1,
+            145
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            -1,
+            2
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            160
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            146
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            2
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|system|>You are concise.<|user|>What is 2+2?<|assistant|><think>Two plus two equals four.</think>Four.",
+        "token_count": 169,
+        "token_ids_sha256": "c424706b3fabd58b081c00dc8793cd61a54774a934c0cd145308c600fd4b8883",
+        "message_indices_rle": [
+          [
+            -1,
+            145
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            2,
+            11
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            160
+          ],
+          [
+            true,
+            9
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            146
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            2
+          ],
+          [
+            true,
+            9
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "Two plus two equals four.</think>Four.",
+        "token_count": 9,
+        "token_ids_sha256": "9a6a08fbb37bc5652afd010f1e4525471e4e1c839bb89c27be7e2a74c1940dc6"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": "Two plus two equals four.",
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "[gMASK]<sop><|system|>You are concise.<|user|>What is 2+2?<|assistant|><think></think>Prior answer.<|endoftext|><|user|>And 3+3?<|assistant|><think>",
+        "token_count": 31,
+        "token_ids_sha256": "8d2b9fcb086c5a248ea71e0baf227da356e4a4cc246f080b8ca7dc26ed81c5e0",
+        "message_indices_rle": [
+          [
+            -1,
+            22
+          ],
+          [
+            0,
+            7
+          ],
+          [
+            -1,
+            2
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            31
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            23
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            2
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "glm-5.1",
+          "enable_thinking": true,
+          "clear_thinking": false
+        },
+        "extension": {
+          "text": "<|endoftext|><|user|>And 3+3?<|assistant|><think>",
+          "token_count": 10,
+          "token_ids_sha256": "9e9a09e456ea99d7de65e6f111fd39729b7ea9b2399041a286154f6f59a12067"
+        }
+      }
+    },
+    "glm-4.5": {
+      "renderer": "glm-4.5",
+      "renderer_class": "GLM45Renderer",
+      "model": "THUDM/GLM-4.5-Air",
+      "model_revision": "a24ceef6ce4f3536971efe9b778bdaa1bab18daa",
+      "config": {
+        "thinking_retention": null,
+        "name": "glm-4.5",
+        "enable_thinking": true
+      },
+      "generation_prompt": {
+        "text": "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call><|system|>\nYou are concise.<|user|>\nWhat is 2+2?<|assistant|>",
+        "token_count": 175,
+        "token_ids_sha256": "fa428da2ac0ee4acded50eb23683a2fc1fa342f4ff557517c60f1674b4c6972c",
+        "message_indices_rle": [
+          [
+            -1,
+            159
+          ],
+          [
+            0,
+            6
+          ],
+          [
+            1,
+            9
+          ],
+          [
+            -1,
+            1
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            175
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            161
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            2
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call><|system|>\nYou are concise.<|user|>\nWhat is 2+2?<|assistant|>\n<think>Two plus two equals four.</think>\nFour.",
+        "token_count": 187,
+        "token_ids_sha256": "b99d137d29fb2a312cfbad46e49322b02a283e9729f7baaa467bdec8ba8d5be7",
+        "message_indices_rle": [
+          [
+            -1,
+            159
+          ],
+          [
+            0,
+            6
+          ],
+          [
+            1,
+            9
+          ],
+          [
+            2,
+            13
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            176
+          ],
+          [
+            true,
+            11
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            161
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            2
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            2
+          ],
+          [
+            true,
+            11
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "<think>Two plus two equals four.</think>\nFour.",
+        "token_count": 11,
+        "token_ids_sha256": "1a764fe4dc8e375b93a80d6a8088778782d401123423842e525961c2e26b7d64"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": "Two plus two equals four.",
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "[gMASK]<sop><|system|>\nYou are concise.<|user|>\nWhat is 2+2?<|assistant|>\n<think></think>\nPrior answer.<|endoftext|><|user|>\nAnd 3+3?<|assistant|>",
+        "token_count": 35,
+        "token_ids_sha256": "8ceaf09056012b41c54f7ac12ac403248de6a95c898f539d8e0c644d1d4c6298",
+        "message_indices_rle": [
+          [
+            -1,
+            26
+          ],
+          [
+            0,
+            8
+          ],
+          [
+            -1,
+            1
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            35
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            28
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "glm-4.5",
+          "enable_thinking": true
+        },
+        "extension": {
+          "text": "<|endoftext|><|user|>\nAnd 3+3?<|assistant|>",
+          "token_count": 10,
+          "token_ids_sha256": "94403070bdd544603e0ffebd4d53a1ad125504b4c23bcaac303dbbb3fd3ee304"
+        }
+      }
+    },
+    "minimax-m2": {
+      "renderer": "minimax-m2",
+      "renderer_class": "MiniMaxM2Renderer",
+      "model": "MiniMaxAI/MiniMax-M2.5",
+      "model_revision": "f710177d938eff80b684d42c5aa84b382612f21f",
+      "config": {
+        "thinking_retention": null,
+        "name": "minimax-m2",
+        "model_identity": "You are a helpful assistant. Your name is MiniMax-M2.5 and is built by MiniMax."
+      },
+      "generation_prompt": {
+        "text": "]~!b[]~b]system\nYou are concise.\n\n# Tools\nYou may call one or more tools to assist with the user query.\nHere are the tools available in JSONSchema format:\n\n<tools>\n<tool>{\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}</tool>\n</tools>\n\nWhen making tool calls, use XML format to invoke tools and pass parameters:\n\n<minimax:tool_call>\n<invoke name=\"tool-name-1\">\n<parameter name=\"param-key-1\">param-value-1</parameter>\n<parameter name=\"param-key-2\">param-value-2</parameter>\n...\n</invoke>\n</minimax:tool_call>[e~[\n]~b]user\nWhat is 2+2?[e~[\n]~b]ai\n<think>\n",
+        "token_count": 196,
+        "token_ids_sha256": "064526018c882c61da6276d298945df7b0f5d4cf77b3e2da597a25381230332c",
+        "message_indices_rle": [
+          [
+            0,
+            179
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            -1,
+            5
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            196
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            4
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            174
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            7
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "]~!b[]~b]system\nYou are concise.\n\n# Tools\nYou may call one or more tools to assist with the user query.\nHere are the tools available in JSONSchema format:\n\n<tools>\n<tool>{\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}</tool>\n</tools>\n\nWhen making tool calls, use XML format to invoke tools and pass parameters:\n\n<minimax:tool_call>\n<invoke name=\"tool-name-1\">\n<parameter name=\"param-key-1\">param-value-1</parameter>\n<parameter name=\"param-key-2\">param-value-2</parameter>\n...\n</invoke>\n</minimax:tool_call>[e~[\n]~b]user\nWhat is 2+2?[e~[\n]~b]ai\n<think>\nTwo plus two equals four.\n</think>\n\nFour.[e~[\n",
+        "token_count": 210,
+        "token_ids_sha256": "a34c9c7c9b0b3db3c465ac14b95d3b774cc8961bc732287362d66055c113ed37",
+        "message_indices_rle": [
+          [
+            0,
+            179
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            2,
+            19
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            194
+          ],
+          [
+            true,
+            15
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            4
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            174
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            15
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "<think>\nTwo plus two equals four.\n</think>\n\nFour.[e~[",
+        "token_count": 15,
+        "token_ids_sha256": "cacfaf93755f67ed770279017c950ab6a6bb82d15c6e6ae444712c2c97d54af9"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": "Two plus two equals four.",
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "]~!b[]~b]system\nYou are concise.[e~[\n]~b]user\nWhat is 2+2?[e~[\n]~b]ai\n<think>\n.[e~[\n]~b]user\nAnd 3+3?[e~[\n]~b]ai\n<think>\n",
+        "token_count": 46,
+        "token_ids_sha256": "3df206dd4ef94e9cffb9a11c507f92fe24a3994729831f17d2d1c2f25842ac5d",
+        "message_indices_rle": [
+          [
+            -1,
+            30
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            -1,
+            5
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            46
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            33
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            7
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "minimax-m2",
+          "model_identity": "You are a helpful assistant. Your name is MiniMax-M2.5 and is built by MiniMax."
+        },
+        "extension": {
+          "text": "\n]~b]user\nAnd 3+3?[e~[\n]~b]ai\n<think>\n",
+          "token_count": 17,
+          "token_ids_sha256": "81a357c832bf91a3e8929da22b490e905815c64e35165ff574520d25446ac33f"
+        }
+      }
+    },
+    "deepseek-v3": {
+      "renderer": "deepseek-v3",
+      "renderer_class": "DeepSeekV3Renderer",
+      "model": "deepseek-ai/DeepSeek-V3",
+      "model_revision": "e815299b0bcbac849fa540c768ef21845365c9eb",
+      "config": {
+        "thinking_retention": null,
+        "name": "deepseek-v3"
+      },
+      "generation_prompt": {
+        "text": "<｜begin of sentence｜>Youareconcise.<｜User｜>Whatis2+2?<｜Assistant｜>",
+        "token_count": 14,
+        "token_ids_sha256": "4348fa7c62ebf42108816bbb85970fce36527dba26b14919f54351f813f573a8",
+        "message_indices_rle": [
+          [
+            -1,
+            1
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            1,
+            7
+          ],
+          [
+            -1,
+            1
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            14
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            5
+          ],
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<｜begin of sentence｜>Youareconcise.<｜User｜>Whatis2+2?<｜Assistant｜>Four.<｜end of sentence｜>",
+        "token_count": 17,
+        "token_ids_sha256": "0d9b03f25f72f34dbd171601c401ebc65230d1621b412ef7f8488454140820bf",
+        "message_indices_rle": [
+          [
+            -1,
+            1
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            1,
+            7
+          ],
+          [
+            2,
+            4
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            14
+          ],
+          [
+            true,
+            3
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            5
+          ],
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            3
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "Four.<｜end of sentence｜>",
+        "token_count": 3,
+        "token_ids_sha256": "6776aa573920f8a5b8b899e24602d2b9928ccd4cc6c85208c3ebbe40c0d17060"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": null,
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<｜begin of sentence｜>Youareconcise.<｜User｜>Whatis2+2?<｜Assistant｜>Prioranswer.<｜end of sentence｜><｜User｜>And3+3?<｜Assistant｜>",
+        "token_count": 25,
+        "token_ids_sha256": "676fa47450b580f66868c4d98909a31bf625d352b84ffd06517857eedd534f75",
+        "message_indices_rle": [
+          [
+            -1,
+            18
+          ],
+          [
+            0,
+            6
+          ],
+          [
+            -1,
+            1
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            25
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            19
+          ],
+          [
+            true,
+            5
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "deepseek-v3"
+        },
+        "extension": {
+          "text": "<｜User｜>And3+3?<｜Assistant｜>",
+          "token_count": 7,
+          "token_ids_sha256": "166f3e1f2eee1c95718bb6ecd4172ae521338e099bec9ecd3109e73b96e894e0"
+        }
+      }
+    },
+    "deepseek-r1": {
+      "renderer": "deepseek-r1",
+      "renderer_class": "DeepSeekR1Renderer",
+      "model": "deepseek-ai/DeepSeek-R1",
+      "model_revision": "56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad",
+      "config": {
+        "thinking_retention": null,
+        "name": "deepseek-r1"
+      },
+      "generation_prompt": {
+        "text": "<｜begin of sentence｜>Youareconcise.<｜User｜>Whatis2+2?<｜Assistant｜><think>",
+        "token_count": 15,
+        "token_ids_sha256": "b23a074ae7df65c370ecb1f7b0207abf99af3a6329285defaf556f4554f92a5e",
+        "message_indices_rle": [
+          [
+            -1,
+            1
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            1,
+            7
+          ],
+          [
+            -1,
+            2
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            15
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            5
+          ],
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            2
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<｜begin of sentence｜>Youareconcise.<｜User｜>Whatis2+2?<｜Assistant｜>Four.<｜end of sentence｜>",
+        "token_count": 17,
+        "token_ids_sha256": "0d9b03f25f72f34dbd171601c401ebc65230d1621b412ef7f8488454140820bf",
+        "message_indices_rle": [
+          [
+            -1,
+            1
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            1,
+            7
+          ],
+          [
+            2,
+            4
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            14
+          ],
+          [
+            true,
+            3
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            5
+          ],
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            3
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "Four.<｜end of sentence｜>",
+        "token_count": 3,
+        "token_ids_sha256": "6776aa573920f8a5b8b899e24602d2b9928ccd4cc6c85208c3ebbe40c0d17060"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": null,
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<｜begin of sentence｜>Youareconcise.<｜User｜>Whatis2+2?<｜Assistant｜><think>answer.<｜end of sentence｜><｜User｜>And3+3?<｜Assistant｜><think>",
+        "token_count": 26,
+        "token_ids_sha256": "673e5a8e63f498ec99266eeba0c308d370f3b93cae3f05f6bb265e468d46931c",
+        "message_indices_rle": [
+          [
+            -1,
+            18
+          ],
+          [
+            0,
+            6
+          ],
+          [
+            -1,
+            2
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            26
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            19
+          ],
+          [
+            true,
+            5
+          ],
+          [
+            false,
+            2
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "deepseek-r1"
+        },
+        "extension": {
+          "text": "<｜User｜>And3+3?<｜Assistant｜><think>",
+          "token_count": 8,
+          "token_ids_sha256": "3c1247538646f180dc7b05ca2b44a7f94a74c17b0440d4a1bdb8aec3e58296e8"
+        }
+      }
+    },
+    "hy3": {
+      "renderer": "hy3",
+      "renderer_class": "Hy3Renderer",
+      "model": "tencent/Hy3",
+      "model_revision": "a960ebc3da325ba167f069f76c41eb62c9280d22",
+      "config": {
+        "thinking_retention": null,
+        "name": "hy3",
+        "reasoning_effort": "no_think",
+        "preserved_thinking": null,
+        "is_training": false,
+        "raw_last_assistant": false,
+        "fallback_strategy": null
+      },
+      "generation_prompt": {
+        "text": "<｜hy_begin_of_sentence:opensource｜>You are concise.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor function call returns, you should first print <tool_calls:opensource>\nFor each function call, you should return object like:\n<tool_call:opensource>{function-name}<tool_sep:opensource>\n<arg_key:opensource>{arg-key-1}</arg_key:opensource>\n<arg_value:opensource>{arg-value-1}</arg_value:opensource>\n<arg_key:opensource>{arg-key-2}</arg_key:opensource>\n<arg_value:opensource>{arg-value-2}</arg_value:opensource>\n...\n</tool_call:opensource>\nAt the end of function call returns, you should print </tool_calls:opensource><｜reasoning_mode:opensource｜>reasoning_effort:no_think<｜hy_User:opensource｜>What is 2+2?<｜hy_Assistant:opensource｜><think:opensource></think:opensource>",
+        "token_count": 203,
+        "token_ids_sha256": "87a7898def35d1a408436e8a96b4aa710dc6cbb5350be08219d29e379f5d10b0",
+        "message_indices_rle": [
+          [
+            -1,
+            1
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            -1,
+            187
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            203
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            188
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            3
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<｜hy_begin_of_sentence:opensource｜>You are concise.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor function call returns, you should first print <tool_calls:opensource>\nFor each function call, you should return object like:\n<tool_call:opensource>{function-name}<tool_sep:opensource>\n<arg_key:opensource>{arg-key-1}</arg_key:opensource>\n<arg_value:opensource>{arg-value-1}</arg_value:opensource>\n<arg_key:opensource>{arg-key-2}</arg_key:opensource>\n<arg_value:opensource>{arg-value-2}</arg_value:opensource>\n...\n</tool_call:opensource>\nAt the end of function call returns, you should print </tool_calls:opensource><｜reasoning_mode:opensource｜>reasoning_effort:no_think<｜hy_User:opensource｜>What is 2+2?<｜hy_Assistant:opensource｜><think:opensource>Two plus two equals four.</think:opensource>Four.",
+        "token_count": 211,
+        "token_ids_sha256": "01f553043c4084dc8f25ccfff3c9ae30e8ef2b0c9b787d3e67293dcd0ea5bab9",
+        "message_indices_rle": [
+          [
+            -1,
+            1
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            -1,
+            187
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            2,
+            11
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            209
+          ],
+          [
+            true,
+            2
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            1
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            188
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            9
+          ],
+          [
+            true,
+            2
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "Four.",
+        "token_count": 2,
+        "token_ids_sha256": "0d80ef2b0667af0bfc80d7f203a85a096c3642d78dd21830b539a0404fd22f00"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": null,
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<｜hy_begin_of_sentence:opensource｜>You are concise.<｜reasoning_mode:opensource｜>reasoning_effort:no_think<｜hy_User:opensource｜>What is 2+2?<｜hy_Assistant:opensource｜><think:opensource></think:opensource>Prior answer.<｜hy_eos:opensource｜><｜hy_User:opensource｜>And 3+3?<｜hy_Assistant:opensource｜><think:opensource></think:opensource>",
+        "token_count": 40,
+        "token_ids_sha256": "d3a62980d412626a15d713b5c554154a7f2dc655bc89a69f6fdcfa7f3c1a86b1",
+        "message_indices_rle": [
+          [
+            -1,
+            30
+          ],
+          [
+            0,
+            7
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            40
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            31
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            3
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "hy3",
+          "reasoning_effort": "no_think",
+          "preserved_thinking": true,
+          "is_training": false,
+          "raw_last_assistant": false,
+          "fallback_strategy": null
+        },
+        "extension": {
+          "text": "<｜hy_eos:opensource｜><｜hy_User:opensource｜>And 3+3?<｜hy_Assistant:opensource｜><think:opensource></think:opensource>",
+          "token_count": 11,
+          "token_ids_sha256": "7a6621f04ebe88491ef220f65f80784e52ea9e07d4705d9679346c3a45f9947f"
+        }
+      }
+    },
+    "kimi-k2": {
+      "renderer": "kimi-k2",
+      "renderer_class": "KimiK2Renderer",
+      "model": "moonshotai/Kimi-K2-Instruct",
+      "model_revision": "fd1984e2b7a3350dbf7305fe73a4ede25c14de50",
+      "config": {
+        "thinking_retention": null,
+        "name": "kimi-k2",
+        "enable_thinking": true
+      },
+      "generation_prompt": {
+        "text": "<|im_system|>tool_declare<|im_middle|>[{\"function\":{\"description\":\"Return the weather for a city.\",\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"}},\"type\":\"function\"}]<|im_end|><|im_system|>system<|im_middle|>You are concise.<|im_end|><|im_user|>user<|im_middle|>What is 2+2?<|im_end|><|im_assistant|>assistant<|im_middle|>",
+        "token_count": 72,
+        "token_ids_sha256": "d723bc7a064f55fa3355339a72b4571f0888a6d26a7c76d3a4669f40b5058207",
+        "message_indices_rle": [
+          [
+            -1,
+            50
+          ],
+          [
+            0,
+            8
+          ],
+          [
+            1,
+            11
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            72
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            53
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            4
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            4
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|im_system|>tool_declare<|im_middle|>[{\"function\":{\"description\":\"Return the weather for a city.\",\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"}},\"type\":\"function\"}]<|im_end|><|im_system|>system<|im_middle|>You are concise.<|im_end|><|im_user|>user<|im_middle|>What is 2+2?<|im_end|><|im_assistant|>assistant<|im_middle|>Four.<|im_end|>",
+        "token_count": 75,
+        "token_ids_sha256": "f3d525f2077f092358cc0716a1c4b4cfcc07c689c2202cf5ce1e67743e718612",
+        "message_indices_rle": [
+          [
+            -1,
+            50
+          ],
+          [
+            0,
+            8
+          ],
+          [
+            1,
+            11
+          ],
+          [
+            2,
+            6
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            72
+          ],
+          [
+            true,
+            3
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            53
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            4
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            4
+          ],
+          [
+            true,
+            3
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "Four.<|im_end|>",
+        "token_count": 3,
+        "token_ids_sha256": "f00b967291aa8086eede4025d42b7ef63338b1e81a767590065333f1ca2b6f90"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": null,
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<|im_system|>system<|im_middle|>You are concise.<|im_end|><|im_user|>user<|im_middle|>What is 2+2?<|im_end|><|im_assistant|>assistant<|im_middle|>Prior answer.<|im_end|><|im_user|>user<|im_middle|>And 3+3?<|im_end|><|im_assistant|>assistant<|im_middle|>",
+        "token_count": 39,
+        "token_ids_sha256": "898c52d29a0d1a27d31b35c57a2f609b6fa8d69a165b96aeca605d31a0a66795",
+        "message_indices_rle": [
+          [
+            -1,
+            26
+          ],
+          [
+            0,
+            10
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            39
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            29
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            4
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "kimi-k2",
+          "enable_thinking": true
+        },
+        "extension": {
+          "text": "<|im_user|>user<|im_middle|>And 3+3?<|im_end|><|im_assistant|>assistant<|im_middle|>",
+          "token_count": 13,
+          "token_ids_sha256": "737f09355e21e945eea13bbe80faf0f0ebec1fa7efcb03e0cdc859ecea6867db"
+        }
+      }
+    },
+    "kimi-k2.5": {
+      "renderer": "kimi-k2.5",
+      "renderer_class": "KimiK25Renderer",
+      "model": "moonshotai/Kimi-K2.5",
+      "model_revision": "4d01dfe0332d63057c186e0b262165819efb6611",
+      "config": {
+        "thinking_retention": null,
+        "name": "kimi-k2.5",
+        "thinking": true,
+        "image_cache_max": 256
+      },
+      "generation_prompt": {
+        "text": "<|im_system|>tool_declare<|im_middle|># Tools\n\n## functions\nnamespace functions {\n// Return the weather for a city.\ntype get_weather = (_: {\n  city: string\n}) => any;\n}\n<|im_end|><|im_system|>system<|im_middle|>You are concise.<|im_end|><|im_user|>user<|im_middle|>What is 2+2?<|im_end|><|im_assistant|>assistant<|im_middle|><think>",
+        "token_count": 64,
+        "token_ids_sha256": "6c57efcebad1a6790ad211f0b300bf06d33fb89004d1fd8daba7e3a8e29a532b",
+        "message_indices_rle": [
+          [
+            -1,
+            41
+          ],
+          [
+            0,
+            8
+          ],
+          [
+            1,
+            11
+          ],
+          [
+            -1,
+            4
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            64
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            44
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            4
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|im_system|>tool_declare<|im_middle|># Tools\n\n## functions\nnamespace functions {\n// Return the weather for a city.\ntype get_weather = (_: {\n  city: string\n}) => any;\n}\n<|im_end|><|im_system|>system<|im_middle|>You are concise.<|im_end|><|im_user|>user<|im_middle|>What is 2+2?<|im_end|><|im_assistant|>assistant<|im_middle|><think></think>Four.<|im_end|>",
+        "token_count": 68,
+        "token_ids_sha256": "c5b43c9c5a2280ce4cc4fc785a0bffa0166973dda5efdd71599d209c8da0dd0d",
+        "message_indices_rle": [
+          [
+            -1,
+            41
+          ],
+          [
+            0,
+            8
+          ],
+          [
+            1,
+            11
+          ],
+          [
+            2,
+            8
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            63
+          ],
+          [
+            true,
+            5
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            44
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            4
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            4
+          ],
+          [
+            true,
+            5
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "<think></think>Four.<|im_end|>",
+        "token_count": 5,
+        "token_ids_sha256": "cdd71bb6844d792df08028acbfe38d937e31f3806cf363f885f212a8588ff1ad"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": null,
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<|im_system|>system<|im_middle|>You are concise.<|im_end|><|im_user|>user<|im_middle|>What is 2+2?<|im_end|><|im_assistant|>assistant<|im_middle|><think></think>Prior answer.<|im_end|><|im_user|>user<|im_middle|>And 3+3?<|im_end|><|im_assistant|>assistant<|im_middle|><think>",
+        "token_count": 42,
+        "token_ids_sha256": "9bfe9520230e132680a78bf94649d8b139d4b6c4eb13e151defb9d69149e590e",
+        "message_indices_rle": [
+          [
+            -1,
+            28
+          ],
+          [
+            0,
+            10
+          ],
+          [
+            -1,
+            4
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            42
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            31
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "kimi-k2.5",
+          "thinking": true,
+          "image_cache_max": 256
+        },
+        "extension": {
+          "text": "<|im_user|>user<|im_middle|>And 3+3?<|im_end|><|im_assistant|>assistant<|im_middle|><think>",
+          "token_count": 14,
+          "token_ids_sha256": "e50c295ecd43151e62240781ca6b89f2b32bf22372151a86e71c8708286dc865"
+        }
+      }
+    },
+    "laguna-xs.2": {
+      "renderer": "laguna-xs.2",
+      "renderer_class": "LagunaXS2Renderer",
+      "model": "poolside/Laguna-XS.2",
+      "model_revision": "69e3f4046616e40fb55ac54e0e2e6accbe5cadfe",
+      "config": {
+        "thinking_retention": null,
+        "name": "laguna-xs.2",
+        "enable_thinking": false,
+        "render_assistant_messages_raw": false
+      },
+      "generation_prompt": {
+        "text": "〈|EOS|〉<system>\n\nYou are concise.\n\n### Tools\n\nYou may call functions to assist with the user query.\nAll available function signatures are listed below:\n<available_tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</available_tools>\n\nFor each function call, return an unescaped XML-like object with function name and arguments within '<tool_call>' and '</tool_call>' tags, like here:\n<tool_call>function-name\n<arg_key>argument-key</arg_key>\n<arg_value>value-of-argument-key</arg_value>\n</tool_call>\n</system>\n<user>\nWhat is 2+2?\n</user>\n<assistant>\n</think>",
+        "token_count": 184,
+        "token_ids_sha256": "41f835bc77481985b356fdda415cb4c15d282ba408641814ceddb0196b87248d",
+        "message_indices_rle": [
+          [
+            -1,
+            5
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            -1,
+            156
+          ],
+          [
+            1,
+            16
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            184
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            160
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            8
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "〈|EOS|〉<system>\n\nYou are concise.\n\n### Tools\n\nYou may call functions to assist with the user query.\nAll available function signatures are listed below:\n<available_tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</available_tools>\n\nFor each function call, return an unescaped XML-like object with function name and arguments within '<tool_call>' and '</tool_call>' tags, like here:\n<tool_call>function-name\n<arg_key>argument-key</arg_key>\n<arg_value>value-of-argument-key</arg_value>\n</tool_call>\n</system>\n<user>\nWhat is 2+2?\n</user>\n<assistant>\n<think>\nTwo plus two equals four.\n</think>\nFour.\n</assistant>\n",
+        "token_count": 199,
+        "token_ids_sha256": "ebe233315fb4946d6b23d661aa3026dca7a77735f074e041fdc985b653c01a78",
+        "message_indices_rle": [
+          [
+            -1,
+            5
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            -1,
+            156
+          ],
+          [
+            1,
+            16
+          ],
+          [
+            2,
+            18
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            183
+          ],
+          [
+            true,
+            15
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            160
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            7
+          ],
+          [
+            true,
+            15
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "<think>\nTwo plus two equals four.\n</think>\nFour.\n</assistant>",
+        "token_count": 15,
+        "token_ids_sha256": "6a8c980962bac4e5c4b60f094848485017c9127a20c096ba8059947bddcf755e"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": "Two plus two equals four.",
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "〈|EOS|〉<system>\n\nYou are concise.\n</system>\n<user>\nWhat is 2+2?\n</user>\n<assistant>\n</think>\nPrior answer.\n</assistant><user>\nAnd 3+3?\n</user>\n<assistant>\n</think>",
+        "token_count": 57,
+        "token_ids_sha256": "f06677006fe7c6f3577ac7f7f32b54dd4a3805ba3241edf65fb239372dfb1125",
+        "message_indices_rle": [
+          [
+            -1,
+            39
+          ],
+          [
+            0,
+            15
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            57
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            43
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            8
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "laguna-xs.2",
+          "enable_thinking": false,
+          "render_assistant_messages_raw": false
+        },
+        "extension": {
+          "text": "<user>\nAnd 3+3?\n</user>\n<assistant>\n</think>",
+          "token_count": 18,
+          "token_ids_sha256": "3dde2bc1c5d96c09cb9c110ca55a462e7f0bad8946e47ca1be75a3db8c96d6fa"
+        }
+      }
+    },
+    "laguna-xs-2.1": {
+      "renderer": "laguna-xs-2.1",
+      "renderer_class": "LagunaXS21Renderer",
+      "model": "poolside/Laguna-XS-2.1",
+      "model_revision": "e9df9a59996d790b94b70f3fef343fe1d9e34bdf",
+      "config": {
+        "thinking_retention": null,
+        "name": "laguna-xs-2.1",
+        "enable_thinking": false
+      },
+      "generation_prompt": {
+        "text": "〈|EOS|〉<system>You are concise.\n\n### Tools\n\nYou may call functions to assist with the user query.\nAll available function signatures are listed below:\n<available_tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</available_tools></system>\n<user>What is 2+2?</user>\n<assistant></think>",
+        "token_count": 114,
+        "token_ids_sha256": "82b73c980a35330e3982069ec9bc5bf7bcef57a366c02ac3e9e33153e414a4d6",
+        "message_indices_rle": [
+          [
+            -1,
+            3
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            -1,
+            93
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            -1,
+            2
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            114
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            95
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "〈|EOS|〉<system>You are concise.\n\n### Tools\n\nYou may call functions to assist with the user query.\nAll available function signatures are listed below:\n<available_tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Return the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</available_tools></system>\n<user>What is 2+2?</user>\n<assistant></think>Four.</assistant>\n",
+        "token_count": 118,
+        "token_ids_sha256": "217890f96a94727a65317f1cc1bbb00e1fd696ffa757cdab2c7970fdfe9fc8fa",
+        "message_indices_rle": [
+          [
+            -1,
+            3
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            -1,
+            93
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            2,
+            6
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            114
+          ],
+          [
+            true,
+            3
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            95
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            3
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "Four.</assistant>",
+        "token_count": 3,
+        "token_ids_sha256": "f5cfd11242c7e5df2a67a82ef629821d9ff243e2363e7a5a98fef158e13d4a0a"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": null,
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "〈|EOS|〉<system>You are concise.</system>\n<user>What is 2+2?</user>\n<assistant></think>Prior answer.</assistant>\n<user>And 3+3?</user>\n<assistant></think>",
+        "token_count": 43,
+        "token_ids_sha256": "4442f0216467b883c1747022db8260e3ac29d4fb34956385f7a7c39e887903d4",
+        "message_indices_rle": [
+          [
+            -1,
+            28
+          ],
+          [
+            0,
+            13
+          ],
+          [
+            -1,
+            2
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            43
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            32
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "laguna-xs-2.1",
+          "enable_thinking": false
+        },
+        "extension": {
+          "text": "\n<user>And 3+3?</user>\n<assistant></think>",
+          "token_count": 15,
+          "token_ids_sha256": "cd7a1343732f37e2dde9b6b03358f1d2d939081b07c5ba235b131884eb5fdf6a"
+        }
+      }
+    },
+    "llama-3": {
+      "renderer": "llama-3",
+      "renderer_class": "Llama3Renderer",
+      "model": "meta-llama/Llama-3.2-1B-Instruct",
+      "model_revision": "5a8abab4a5d6f164389b1079fb721cfab8d7126c",
+      "config": {
+        "thinking_retention": null,
+        "name": "llama-3",
+        "date_string": "26 Jul 2024",
+        "tools_in_user_message": true
+      },
+      "generation_prompt": {
+        "text": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nEnvironment: ipython\nCutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\nYou are concise.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nGiven the following functions, please respond with a JSON for a function call with its proper arguments that best answers the given prompt.\n\nRespond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its value}.Do not use variables.\n\n{\n    \"type\": \"function\",\n    \"function\": {\n        \"name\": \"get_weather\",\n        \"description\": \"Return the weather for a city.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"city\": {\n                    \"type\": \"string\"\n                }\n            },\n            \"required\": [\n                \"city\"\n            ]\n        }\n    }\n}\n\nWhat is 2+2?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+        "token_count": 184,
+        "token_ids_sha256": "bf6e3613f5731ec844e14744b434dcd3e68e619bd26ba061e7165704ed68f6ce",
+        "message_indices_rle": [
+          [
+            -1,
+            1
+          ],
+          [
+            0,
+            34
+          ],
+          [
+            1,
+            145
+          ],
+          [
+            -1,
+            4
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            184
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            30
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            138
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nEnvironment: ipython\nCutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\nYou are concise.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nGiven the following functions, please respond with a JSON for a function call with its proper arguments that best answers the given prompt.\n\nRespond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its value}.Do not use variables.\n\n{\n    \"type\": \"function\",\n    \"function\": {\n        \"name\": \"get_weather\",\n        \"description\": \"Return the weather for a city.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"city\": {\n                    \"type\": \"string\"\n                }\n            },\n            \"required\": [\n                \"city\"\n            ]\n        }\n    }\n}\n\nWhat is 2+2?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nFour.<|eot_id|>",
+        "token_count": 187,
+        "token_ids_sha256": "a62739bb8f58556690620f7fe58e9ed4c5ad401ba1312bfea39c6cc74dedf61c",
+        "message_indices_rle": [
+          [
+            -1,
+            1
+          ],
+          [
+            0,
+            34
+          ],
+          [
+            1,
+            145
+          ],
+          [
+            2,
+            7
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            184
+          ],
+          [
+            true,
+            3
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            30
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            138
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            5
+          ],
+          [
+            true,
+            3
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "Four.<|eot_id|>",
+        "token_count": 3,
+        "token_ids_sha256": "7b3902220739646e69cf69a7a01cabf34b727fbf4f1b1b8a89825ca3b6044711"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": null,
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\nYou are concise.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nWhat is 2+2?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nPrior answer.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nAnd 3+3?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+        "token_count": 65,
+        "token_ids_sha256": "192ae0293aba2c5f83fb0daba913e79aa12c1e38752efe819c3d67cb882cf058",
+        "message_indices_rle": [
+          [
+            -1,
+            50
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            -1,
+            4
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            65
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            54
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            5
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "llama-3",
+          "date_string": "26 Jul 2024",
+          "tools_in_user_message": true
+        },
+        "extension": {
+          "text": "<|start_header_id|>user<|end_header_id|>\n\nAnd 3+3?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+          "token_count": 15,
+          "token_ids_sha256": "c5c629c5dec69f2eba2b66398f2483b3ffe5de5f1674c4b2b6e3857ef87e6655"
+        }
+      }
+    },
+    "nemotron-3": {
+      "renderer": "nemotron-3",
+      "renderer_class": "Nemotron3Renderer",
+      "model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "model_revision": "2d59de1cbd51c0adf384eb906b766d1aee0e0517",
+      "config": {
+        "thinking_retention": null,
+        "name": "nemotron-3",
+        "enable_thinking": true,
+        "truncate_history_thinking": true,
+        "low_effort": false
+      },
+      "generation_prompt": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Return the weather for a city.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+        "token_count": 279,
+        "token_ids_sha256": "dc9ff3c24c451dfc2c85fe05c8bf1fb5f5c07fc7d242cb7b3d7638f1e095bc49",
+        "message_indices_rle": [
+          [
+            0,
+            261
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            -1,
+            6
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            279
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            257
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            8
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Return the weather for a city.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nTwo plus two equals four.\n</think>\nFour.<|im_end|>\n",
+        "token_count": 291,
+        "token_ids_sha256": "aa0e2c3ea22e3225c61b7472f49f098e29fb0d5193ee17fabb0785036a10d7f9",
+        "message_indices_rle": [
+          [
+            0,
+            261
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            2,
+            18
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            277
+          ],
+          [
+            true,
+            13
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            257
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            6
+          ],
+          [
+            true,
+            13
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "<think>\nTwo plus two equals four.\n</think>\nFour.<|im_end|>",
+        "token_count": 13,
+        "token_ids_sha256": "7f34d41d7134b6706726a8332c91ec136369b3fd1a97319be00ac492361d8453"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": "Two plus two equals four.",
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<|im_start|>system\nYou are concise.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nPrior answer.<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+        "token_count": 49,
+        "token_ids_sha256": "2482c5693c06c73b3171111b1e75b3956e07f3491ad66c78152fbfe62c32791c",
+        "message_indices_rle": [
+          [
+            -1,
+            32
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            -1,
+            6
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            49
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            35
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            8
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "nemotron-3",
+          "enable_thinking": true,
+          "truncate_history_thinking": false,
+          "low_effort": false
+        },
+        "extension": {
+          "text": "\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+          "token_count": 18,
+          "token_ids_sha256": "aaf62b6cf1798710dddd574ff83aa44cfbb894cb725d7a42274660b2040e409d"
+        }
+      }
+    },
+    "nemotron-3-ultra": {
+      "renderer": "nemotron-3-ultra",
+      "renderer_class": "Nemotron3UltraRenderer",
+      "model": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+      "model_revision": "624ba927cfbef0427354998700de3d51173c8c04",
+      "config": {
+        "thinking_retention": null,
+        "name": "nemotron-3-ultra",
+        "enable_thinking": true,
+        "truncate_history_thinking": true,
+        "medium_effort": false
+      },
+      "generation_prompt": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Return the weather for a city.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+        "token_count": 279,
+        "token_ids_sha256": "dc9ff3c24c451dfc2c85fe05c8bf1fb5f5c07fc7d242cb7b3d7638f1e095bc49",
+        "message_indices_rle": [
+          [
+            0,
+            261
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            -1,
+            6
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            279
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            257
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            8
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|im_start|>system\nYou are concise.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Return the weather for a city.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nTwo plus two equals four.</think>Four.<|im_end|>\n",
+        "token_count": 290,
+        "token_ids_sha256": "9d0876fe354b4257eb1c5648f55a126107e27ddab68093b29959d45f8eacca97",
+        "message_indices_rle": [
+          [
+            0,
+            261
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            2,
+            17
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            277
+          ],
+          [
+            true,
+            12
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            false,
+            257
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            6
+          ],
+          [
+            true,
+            12
+          ],
+          [
+            false,
+            1
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "<think>\nTwo plus two equals four.</think>Four.<|im_end|>",
+        "token_count": 12,
+        "token_ids_sha256": "f1ec73673e71597f8ef09928391a9a09bdff0c894c4151348857edd2496cce3f"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": "Two plus two equals four.",
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<|im_start|>system\nYou are concise.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nPrior answer.<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+        "token_count": 49,
+        "token_ids_sha256": "2482c5693c06c73b3171111b1e75b3956e07f3491ad66c78152fbfe62c32791c",
+        "message_indices_rle": [
+          [
+            -1,
+            32
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            -1,
+            6
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            49
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            35
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            8
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "nemotron-3-ultra",
+          "enable_thinking": true,
+          "truncate_history_thinking": false,
+          "medium_effort": false
+        },
+        "extension": {
+          "text": "\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+          "token_count": 18,
+          "token_ids_sha256": "aaf62b6cf1798710dddd574ff83aa44cfbb894cb725d7a42274660b2040e409d"
+        }
+      }
+    },
+    "gpt-oss": {
+      "renderer": "gpt-oss",
+      "renderer_class": "GptOssRenderer",
+      "model": "openai/gpt-oss-20b",
+      "model_revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+      "config": {
+        "thinking_retention": null,
+        "name": "gpt-oss",
+        "reasoning_effort": "medium",
+        "conversation_start_date": "2025-01-15",
+        "use_system_prompt": true,
+        "knowledge_cutoff": null,
+        "model_identity": null,
+        "auto_drop_analysis": true
+      },
+      "generation_prompt": {
+        "text": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-01-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Instructions\n\nYou are concise.\n\n# Tools\n\n## functions\n\nnamespace functions {\n\n// Return the weather for a city.\ntype get_weather = (_: {\ncity: string,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>What is 2+2?<|end|><|start|>assistant<|channel|>analysis<|message|>",
+        "token_count": 137,
+        "token_ids_sha256": "2b3451835637d6aab0b61ba661839c2ea87edea6c24d00f5e7729907627ae14a",
+        "message_indices_rle": [
+          [
+            0,
+            121
+          ],
+          [
+            1,
+            11
+          ],
+          [
+            -1,
+            5
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            137
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            79
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            38
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            6
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user"
+        ],
+        "message_tool_names": [
+          null,
+          null
+        ]
+      },
+      "completed_turn": {
+        "text": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-01-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Instructions\n\nYou are concise.\n\n# Tools\n\n## functions\n\nnamespace functions {\n\n// Return the weather for a city.\ntype get_weather = (_: {\ncity: string,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>What is 2+2?<|end|><|start|>assistant<|channel|>final<|message|>Four.<|return|>",
+        "token_count": 140,
+        "token_ids_sha256": "e1d61a4419e80253f3ddcae9c9299c8afde2a6a68f198bd05e35813654a44c3b",
+        "message_indices_rle": [
+          [
+            0,
+            121
+          ],
+          [
+            1,
+            11
+          ],
+          [
+            2,
+            8
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            137
+          ],
+          [
+            true,
+            3
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            79
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            38
+          ],
+          [
+            true,
+            7
+          ],
+          [
+            false,
+            6
+          ],
+          [
+            true,
+            3
+          ]
+        ],
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "message_tool_names": [
+          null,
+          null,
+          null
+        ]
+      },
+      "parser_input": {
+        "text": "<|start|>assistant<|channel|>final<|message|>Four.<|return|>",
+        "token_count": 8,
+        "token_ids_sha256": "595367d24916debfc84b50b7741fb2c16eb2136500d3a4439c647448c0913c35"
+      },
+      "parsed_completion": {
+        "content": "Four.",
+        "reasoning_content": null,
+        "tool_calls": []
+      },
+      "bridge": {
+        "text": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-01-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>developer<|message|># Instructions\n\nYou are concise.<|end|><|start|>user<|message|>What is 2+2?<|end|><|start|>assistant<|channel|>analysis<|message|>Prior answer.<|return|><|start|>user<|message|>And 3+3?<|end|><|start|>assistant<|channel|>analysis<|message|>",
+        "token_count": 107,
+        "token_ids_sha256": "99ee782584e8f2bb4eb308e909d9172d76cf520351c0d57839db75887671b51f",
+        "message_indices_rle": [
+          [
+            -1,
+            92
+          ],
+          [
+            0,
+            10
+          ],
+          [
+            -1,
+            5
+          ]
+        ],
+        "sampled_mask_rle": [
+          [
+            false,
+            107
+          ]
+        ],
+        "is_content_rle": [
+          [
+            false,
+            95
+          ],
+          [
+            true,
+            6
+          ],
+          [
+            false,
+            6
+          ]
+        ],
+        "message_roles": [
+          "user"
+        ],
+        "message_tool_names": [
+          null
+        ],
+        "config": {
+          "thinking_retention": "all",
+          "name": "gpt-oss",
+          "reasoning_effort": "medium",
+          "conversation_start_date": "2025-01-15",
+          "use_system_prompt": true,
+          "knowledge_cutoff": null,
+          "model_identity": null,
+          "auto_drop_analysis": false
+        },
+        "extension": {
+          "text": "<|start|>user<|message|>And 3+3?<|end|><|start|>assistant<|channel|>analysis<|message|>",
+          "token_count": 15,
+          "token_ids_sha256": "226e613ad7f518ed4053e0c764441220d9ced9dba263db7451937f22ba2c9ebf"
+        }
+      }
+    }
+  }
+}

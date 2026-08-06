@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from renderers.base import ToolCallParseStatus, load_tokenizer
+from renderers.base import ToolCallParseStatus
 from renderers.parsers import (
     REASONING_PARSERS,
     TOOL_PARSERS,
@@ -13,6 +13,7 @@ from renderers.parsers import (
     get_reasoning_parser,
     get_tool_parser,
 )
+from tests.model_assets import load_test_tokenizer
 
 
 def test_registries_nonempty():
@@ -24,7 +25,7 @@ def test_registries_nonempty():
 
 
 def test_unknown_parser_errors():
-    tok = load_tokenizer("Qwen/Qwen3-0.6B")
+    tok = load_test_tokenizer("Qwen/Qwen3-0.6B")
     with pytest.raises(ValueError, match="Unknown tool_parser"):
         get_tool_parser("does-not-exist", tok)
     with pytest.raises(ValueError, match="Unknown reasoning_parser"):
@@ -33,7 +34,7 @@ def test_unknown_parser_errors():
 
 def test_qwen3_tool_parser_roundtrip():
     """Tokenize a Hermes-style tool call, parse it back out."""
-    tok = load_tokenizer("Qwen/Qwen3-0.6B")
+    tok = load_test_tokenizer("Qwen/Qwen3-0.6B")
     parser = get_tool_parser("qwen3", tok)
     assert isinstance(parser, Qwen3ToolParser)
 
@@ -53,7 +54,7 @@ def test_qwen3_tool_parser_roundtrip():
 
 
 def test_qwen3_tool_parser_no_tool_call():
-    tok = load_tokenizer("Qwen/Qwen3-0.6B")
+    tok = load_test_tokenizer("Qwen/Qwen3-0.6B")
     parser = get_tool_parser("qwen3", tok)
     ids = tok.encode("just plain text response", add_special_tokens=False)
     content_ids, tool_calls = parser.extract(list(ids))
@@ -63,7 +64,7 @@ def test_qwen3_tool_parser_no_tool_call():
 
 def test_qwen3_tool_parser_records_invalid_json():
     """Malformed JSON in a <tool_call> block surfaces as INVALID_JSON, not silently dropped."""
-    tok = load_tokenizer("Qwen/Qwen3-0.6B")
+    tok = load_test_tokenizer("Qwen/Qwen3-0.6B")
     parser = get_tool_parser("qwen3", tok)
     completion = (
         'hi\n<tool_call>\n{"name": "f", "arguments": {broken json\n</tool_call>'
@@ -77,7 +78,7 @@ def test_qwen3_tool_parser_records_invalid_json():
 
 def test_qwen3_tool_parser_parallel_partial_success():
     """Parallel calls: parser keeps the good ones AND records the broken one."""
-    tok = load_tokenizer("Qwen/Qwen3-0.6B")
+    tok = load_test_tokenizer("Qwen/Qwen3-0.6B")
     parser = get_tool_parser("qwen3", tok)
     completion = (
         "pre\n"
@@ -96,7 +97,7 @@ def test_qwen3_tool_parser_parallel_partial_success():
 
 
 def test_think_reasoning_parser_extracts_block():
-    tok = load_tokenizer("Qwen/Qwen3-0.6B")
+    tok = load_test_tokenizer("Qwen/Qwen3-0.6B")
     parser = get_reasoning_parser("think", tok)
     assert isinstance(parser, ThinkTextReasoningParser)
     reasoning, content = parser.extract("<think>let me think</think>the answer")
@@ -105,7 +106,7 @@ def test_think_reasoning_parser_extracts_block():
 
 
 def test_think_reasoning_parser_no_block():
-    tok = load_tokenizer("Qwen/Qwen3-0.6B")
+    tok = load_test_tokenizer("Qwen/Qwen3-0.6B")
     parser = get_reasoning_parser("think", tok)
     reasoning, content = parser.extract("no reasoning here")
     assert reasoning is None
@@ -116,7 +117,7 @@ def test_default_renderer_uses_parsers():
     """DefaultRenderer + parsers should extract tool calls and reasoning."""
     from renderers import DefaultRendererConfig, create_renderer
 
-    tok = load_tokenizer("Qwen/Qwen3-0.6B")
+    tok = load_test_tokenizer("Qwen/Qwen3-0.6B")
     renderer = create_renderer(
         tok,
         DefaultRendererConfig(tool_parser="qwen3", reasoning_parser="think"),
@@ -137,7 +138,7 @@ def test_default_renderer_without_parsers_is_backward_compatible():
     """Without parsers, DefaultRenderer still does basic <think> extraction."""
     from renderers import DefaultRendererConfig, create_renderer
 
-    tok = load_tokenizer("Qwen/Qwen3-0.6B")
+    tok = load_test_tokenizer("Qwen/Qwen3-0.6B")
     renderer = create_renderer(tok, DefaultRendererConfig())
     assert renderer.supports_tools is False
 

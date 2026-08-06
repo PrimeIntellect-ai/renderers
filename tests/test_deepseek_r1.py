@@ -15,18 +15,18 @@ from renderers import (
     DeepSeekV3Renderer,
     create_renderer,
 )
-from renderers.base import load_tokenizer
+from tests.model_assets import load_test_tokenizer
 
 
 @lru_cache
 def _r1():
-    tok = load_tokenizer("deepseek-ai/DeepSeek-R1")
+    tok = load_test_tokenizer("deepseek-ai/DeepSeek-R1")
     return tok, create_renderer(tok)
 
 
 @lru_cache
 def _v3():
-    tok = load_tokenizer("deepseek-ai/DeepSeek-V3")
+    tok = load_test_tokenizer("deepseek-ai/DeepSeek-V3")
     return tok, create_renderer(tok)
 
 

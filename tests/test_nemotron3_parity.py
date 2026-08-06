@@ -37,8 +37,9 @@ from functools import lru_cache
 import pytest
 
 from renderers import create_renderer
-from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP
 from renderers.configs import _config_class_for
+from tests.model_assets import load_test_tokenizer
 
 # BF16 / FP8 share a tokenizer; only the BF16 checkpoints are cached for tests.
 NANO = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
@@ -49,7 +50,7 @@ MODELS = [NANO, SUPER, ULTRA]
 
 @lru_cache
 def _tok(model: str):
-    return load_tokenizer(model)
+    return load_test_tokenizer(model)
 
 
 def _config_cls(model: str):

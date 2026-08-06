@@ -5,11 +5,62 @@ The same barrage of tests runs against every pair.
 """
 
 import os
+from pathlib import Path
 
 import pytest
 from renderers import create_renderer
-from renderers.base import load_tokenizer
 from renderers.configs import config_from_name
+from tests.model_assets import load_test_tokenizer
+
+
+# Tests in these modules exercise real, pinned model assets. Keeping the tier
+# declaration here avoids hundreds of repeated decorators on parameterized
+# cases while still making ``pytest -m 'not network'`` a complete offline
+# suite. Mixed unit/network modules use per-test decorators instead.
+_MODEL_ASSET_TEST_MODULES = frozenset(
+    {
+        "test_bridge",
+        "test_build_helpers",
+        "test_deepseek_r1",
+        "test_disabled_thinking_stability",
+        "test_glm_tool_name_validation",
+        "test_golden_renderer_outputs",
+        "test_gpt_oss_harmony_parity",
+        "test_hy3",
+        "test_is_content",
+        "test_laguna_xs21",
+        "test_llama_3",
+        "test_message_indices",
+        "test_message_tool_names",
+        "test_multimodal",
+        "test_nemotron3_parity",
+        "test_parse_response",
+        "test_parse_response_robustness",
+        "test_parsers",
+        "test_preserve_thinking",
+        "test_prime_qwen3_parity",
+        "test_qwen35_size_coverage",
+        "test_render_ids",
+        "test_renderer_config_parity",
+        "test_roundtrip",
+        "test_sampled_mask",
+        "test_tokens_per_message",
+        "test_tool_arg_type_preservation",
+    }
+)
+
+
+def pytest_collection_modifyitems(items):
+    """Assign network/parity tiers without changing test parametrization."""
+    for item in items:
+        module_name = Path(str(item.path)).stem
+        if module_name not in _MODEL_ASSET_TEST_MODULES:
+            continue
+        item.add_marker(pytest.mark.network)
+        item.add_marker(pytest.mark.model_parity)
+        if module_name == "test_multimodal":
+            item.add_marker(pytest.mark.multimodal)
+
 
 # (HuggingFace model name, renderer name or "auto")
 #
@@ -65,7 +116,7 @@ _cache: dict[str, tuple] = {}
 def _load(model_name: str, renderer_name: str):
     key = f"{model_name}:{renderer_name}"
     if key not in _cache:
-        tokenizer = load_tokenizer(model_name)
+        tokenizer = load_test_tokenizer(model_name)
         renderer = create_renderer(tokenizer, config_from_name(renderer_name))
         _cache[key] = (tokenizer, renderer)
     return _cache[key]

@@ -34,7 +34,7 @@ _BRIDGE_MODELS = [
     ("moonshotai/Kimi-K2.5", "auto"),
     ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
     ("tencent/Hy3", "auto"),
-    ("unsloth/Llama-3.2-1B-Instruct", "llama-3"),
+    ("meta-llama/Llama-3.2-1B-Instruct", "llama-3"),
     ("openai/gpt-oss-20b", "gpt-oss"),
 ]
 
@@ -42,10 +42,10 @@ _BRIDGE_MODELS = [
 @lru_cache(maxsize=None)
 def _load(model_name: str, renderer_name: str):
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer
     from renderers.configs import config_from_name
 
-    tok = load_tokenizer(model_name)
+    tok = load_test_tokenizer(model_name)
     return tok, create_renderer(tok, config_from_name(renderer_name))
 
 
@@ -227,10 +227,10 @@ def test_bridge_declines_across_user_query_when_template_drops_thinking():
       - no prior thinking + new user query -> decline; no marker lookback.
     """
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer
     from renderers.configs import Qwen3RendererConfig
 
-    tok = load_tokenizer("Qwen/Qwen3-8B")
+    tok = load_test_tokenizer("Qwen/Qwen3-8B")
     im_end = tok.convert_tokens_to_ids("<|im_end|>")
 
     u1 = {"role": "user", "content": "What is 2+2?"}
@@ -322,7 +322,7 @@ def test_bridge_keeps_thinking_when_history_kwarg_disables_truncation():
     bridge must NOT decline across a user turn — declining would re-render and
     re-tokenize model-sampled thinking bytes."""
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer
     from renderers.configs import GLM5RendererConfig, Nemotron3RendererConfig
 
     asst = [
@@ -336,7 +336,7 @@ def test_bridge_keeps_thinking_when_history_kwarg_disables_truncation():
         ),
     ]
     for model, cfg in cases:
-        r = create_renderer(load_tokenizer(model), cfg)
+        r = create_renderer(load_test_tokenizer(model), cfg)
         prev_prompt, prev_completion = _simulate_prior_turn(r, asst)
         bridged = r.bridge_to_next_turn(
             prev_prompt, prev_completion, [{"role": "user", "content": "next"}]

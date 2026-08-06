@@ -42,6 +42,7 @@ from renderers.base import (
 )
 from renderers.configs import Hy3RendererConfig, ResolvedThinkingRetention
 from renderers.parsing import parse_hy3
+from renderers.tools import normalize_tool_specs
 
 # Special-token strings, constructed exactly as the Jinja template does
 # (``'<｜hy_eos{}｜>'.format(':opensource')`` etc.) so ``convert_tokens_to_ids``
@@ -277,6 +278,7 @@ class Hy3Renderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         # fallback_strategy="reasoning_toolcall_retry" suppresses the gen prompt.
         if self._force_no_gen_prompt:

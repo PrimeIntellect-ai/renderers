@@ -57,6 +57,7 @@ from renderers.base import (
 )
 from renderers.configs import Llama3RendererConfig
 from renderers.parsing import parse_llama_3
+from renderers.tools import normalize_tool_specs
 
 # ---------------------------------------------------------------------------
 # Constants — must match the Jinja chat template's literal strings exactly.
@@ -183,6 +184,7 @@ class Llama3Renderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         tokens: list[int] = []
         indices: list[int] = []

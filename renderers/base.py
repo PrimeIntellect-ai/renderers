@@ -17,6 +17,8 @@ from typing import (
     runtime_checkable,
 )
 
+from renderers.tools import ToolSpec
+
 if TYPE_CHECKING:
     from renderers.configs import (
         AutoRendererConfig,
@@ -95,14 +97,6 @@ class ToolCall(TypedDict, total=False):
     type: str  # "function"
     id: str
     function: ToolCallFunction
-
-
-class ToolSpec(TypedDict):
-    """Tool specification (OpenAI function-calling format)."""
-
-    name: str
-    description: str
-    parameters: dict[str, Any]
 
 
 class Message(TypedDict, total=False):

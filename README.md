@@ -53,7 +53,7 @@ Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `glm-5`
 class Renderer(Protocol):
     def render(messages, *, tools=None, add_generation_prompt=False) -> RenderedTokens: ...
     def render_ids(messages, *, tools=None, add_generation_prompt=False) -> list[int]: ...
-    def parse_response(token_ids) -> ParsedResponse: ...
+    def parse_response(token_ids, *, tools=None) -> ParsedResponse: ...
     def get_stop_token_ids() -> list[int]: ...
     def bridge_to_next_turn(prev_prompt_ids, prev_completion_ids, new_messages, *, tools=None) -> RenderedTokens | None: ...
 ```
@@ -61,6 +61,21 @@ class Renderer(Protocol):
 - `RenderedTokens` carries `token_ids` **and** `message_indices` — one entry per token attributing each to its source message (`-1` for structural scaffolding). Lets `build_training_sample` build a per-token loss mask in one render.
 - `ParsedResponse` is `(content, reasoning_content, tool_calls)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
 - Round-trip: rendering `[user, assistant(content, reasoning, tool_calls)]`, slicing the assistant completion, and feeding it through `parse_response` returns an equivalent structured message. Tested per-renderer in `tests/test_roundtrip.py`.
+
+### Tool definitions
+
+Renderer entry points accept the common wire shapes for client-executed JSON-schema functions:
+
+- legacy / verifiers and Gemini function declarations: `{name, description, parameters}`
+- OpenAI Chat Completions: `{type: "function", function: {...}}`
+- OpenAI Responses and Gemini Interactions: `{type: "function", name, description, parameters, strict}`
+- Anthropic: `{name, description, input_schema}`
+- MCP: `{name, description, inputSchema}`
+- Pydantic-style objects exposing `model_dump()`
+
+`normalize_tool_spec()` exposes the conversion directly. All supported shapes become the existing Chat-style envelope before rendering or schema-aware response parsing, so switching provider payloads does not change the model's token stream. Inputs are deep-copied and never mutated.
+
+Hosted and non-JSON function protocols—such as OpenAI web search, file search, remote MCP, custom-text, namespace, shell, and computer tools—raise `UnsupportedToolSpecError`. Those tools need model-specific execution semantics and cannot be faithfully rewritten as ordinary client functions.
 
 ### `bridge_to_next_turn` (the core contract)
 

@@ -26,6 +26,7 @@ from renderers.parsers import (
     get_reasoning_parser,
     get_tool_parser,
 )
+from renderers.tools import normalize_tool_specs
 
 
 def _decode_tool_call_arguments(messages: list) -> list:
@@ -124,6 +125,7 @@ class DefaultRenderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        tools = normalize_tool_specs(tools)
         # Incremental rendering to get per-token message attribution
         token_ids: list[int] = []
         message_indices: list[int] = []

@@ -30,6 +30,7 @@ from renderers.base import (
 )
 from renderers.configs import DeepSeekV3RendererConfig
 from renderers.parsing import parse_deepseek_v3
+from renderers.tools import normalize_tool_specs
 
 # Fullwidth vertical bar used in DeepSeek special token names.
 _SEP = "\uff5c"  # ｜  (U+FF5C)
@@ -125,6 +126,7 @@ class DeepSeekV3Renderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         tokens: list[int] = []
         indices: list[int] = []

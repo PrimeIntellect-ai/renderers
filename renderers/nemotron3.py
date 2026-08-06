@@ -15,7 +15,8 @@ Nemotron 3 uses the same <|im_start|>/<|im_end|> format as Qwen3.5 but differs i
 from __future__ import annotations
 
 import json
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, cast
 
 from transformers.tokenization_utils import PreTrainedTokenizer
 
@@ -33,6 +34,7 @@ from renderers.base import (
 )
 from renderers.configs import Nemotron3RendererConfig, Nemotron3UltraRendererConfig
 from renderers.parsing import parse_qwen35
+from renderers.tools import normalize_tool_specs
 
 # ---------------------------------------------------------------------------
 # Tool system prompt constants
@@ -60,7 +62,7 @@ _TOOLS_INSTRUCTIONS = (
 )
 
 
-def _render_extra_keys(obj: dict[str, Any], handled_keys: set[str]) -> list[str]:
+def _render_extra_keys(obj: Mapping[str, Any], handled_keys: set[str]) -> list[str]:
     """Render extra dict keys as XML, mirroring the HF template's render_extra_keys macro.
 
     Dicts and lists are JSON-encoded; scalars are string-coerced.
@@ -208,7 +210,7 @@ class Nemotron3Renderer:
         # Accept the OpenAI-style ``{"type":"function","function":{...}}``
         # envelope by unwrapping before formatting.
         if "function" in tool and isinstance(tool["function"], dict):
-            tool = tool["function"]
+            tool = cast(ToolSpec, tool["function"])
         lines = [
             "<function>",
             f"<name>{tool['name']}</name>",
@@ -279,6 +281,7 @@ class Nemotron3Renderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         original_messages = list(messages)
         # Always ensure an empty system message is present.

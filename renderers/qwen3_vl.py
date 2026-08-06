@@ -51,6 +51,7 @@ from renderers.base import (
 )
 from renderers.configs import Qwen3VLRendererConfig
 from renderers.parsing import parse_qwen3
+from renderers.tools import normalize_tool_specs
 
 _TOOLS_HEADER = (
     "# Tools\n\n"
@@ -460,6 +461,7 @@ class Qwen3VLRenderer:
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
+        tools = normalize_tool_specs(tools)
 
         em = _Emitter(self._encode, tokenizer=self._tokenizer)
         mm_hashes: dict[str, list[str]] = {}

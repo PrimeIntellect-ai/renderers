@@ -20,7 +20,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from renderers import create_renderer
-from renderers.base import load_tokenizer
+from tests.model_assets import load_test_tokenizer
 from renderers.configs import LagunaXS21RendererConfig
 from renderers.laguna_xs2 import LagunaXS21Renderer
 
@@ -47,7 +47,7 @@ TOOLS = [
 
 @lru_cache(maxsize=None)
 def _tok():
-    return load_tokenizer(_MODEL)
+    return load_test_tokenizer(_MODEL)
 
 
 def _renderer(**config_kwargs) -> LagunaXS21Renderer:

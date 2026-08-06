@@ -7,12 +7,13 @@ Runs against every (model, renderer) pair.
 from functools import lru_cache
 
 from renderers import create_renderer
-from renderers.base import ToolCallParseStatus, load_tokenizer
+from renderers.base import ToolCallParseStatus
+from tests.model_assets import load_test_tokenizer
 
 
 @lru_cache
 def _qwen3_vl():
-    tokenizer = load_tokenizer("Qwen/Qwen3-VL-4B-Instruct")
+    tokenizer = load_test_tokenizer("Qwen/Qwen3-VL-4B-Instruct")
     renderer = create_renderer(tokenizer)
     return tokenizer, renderer
 
@@ -100,7 +101,7 @@ def test_qwen3_vl_malformed_tool_call_surfaces_as_invalid_json():
 
 @lru_cache
 def _qwen3():
-    tokenizer = load_tokenizer("Qwen/Qwen3-0.6B")
+    tokenizer = load_test_tokenizer("Qwen/Qwen3-0.6B")
     renderer = create_renderer(tokenizer)
     return tokenizer, renderer
 
@@ -163,7 +164,7 @@ def test_qwen3_distinct_parallel_calls_after_think_are_preserved():
 
 @lru_cache
 def _kimi_k25():
-    tokenizer = load_tokenizer("moonshotai/Kimi-K2.5")
+    tokenizer = load_test_tokenizer("moonshotai/Kimi-K2.5")
     renderer = create_renderer(tokenizer)
     return tokenizer, renderer
 
@@ -232,7 +233,7 @@ def test_kimi_k25_in_think_section_is_not_a_real_call():
 
 @lru_cache
 def _deepseek_v3():
-    tokenizer = load_tokenizer("deepseek-ai/DeepSeek-V3")
+    tokenizer = load_test_tokenizer("deepseek-ai/DeepSeek-V3")
     renderer = create_renderer(tokenizer)
     return tokenizer, renderer
 

@@ -61,9 +61,9 @@ _ROUNDTRIP_MODELS = [
 @lru_cache(maxsize=None)
 def _load_renderer(model_name: str, renderer_name: str):
     from renderers import config_from_name, create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer
 
-    tok = load_tokenizer(model_name)
+    tok = load_test_tokenizer(model_name)
     return tok, create_renderer(tok, config_from_name(renderer_name))
 
 

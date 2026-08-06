@@ -15,7 +15,8 @@ support which non-text modalities. This test matrix iterates over every
    the combined message list.
 
 Tests skip per-pair when:
-- The HF snapshot isn't cached locally (network-free CI mode).
+- The HF snapshot isn't cached locally and ``RENDERERS_TEST_NETWORK`` is not
+  set to ``1``.
 - The model lists a modality the renderer doesn't yet support
   (``NotImplementedError`` in ``render``).
 - ``Pillow`` / ``torch`` are missing.
@@ -33,8 +34,9 @@ from renderers import (
     Qwen3VLRenderer,
     create_renderer,
 )
-from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP
 from renderers.configs import _config_class_for
+from tests.model_assets import load_test_tokenizer, processor_load_kwargs
 
 
 def _config_for_model(model_name: str, **kwargs):
@@ -67,6 +69,8 @@ def _hf_snapshot_cached(model_name: str) -> bool:
     Mirrors the convention used elsewhere in this repo (test_qwen35_size_coverage)
     of relying on the user having pre-fetched relevant models.
     """
+    if os.environ.get("RENDERERS_TEST_NETWORK") == "1":
+        return True
     cache = (
         Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
         / "hub"
@@ -103,27 +107,14 @@ _CASES = _modality_cases()
 _loaded: dict[str, tuple] = {}
 
 
-# Models whose processors need ``trust_remote_code=True`` (custom Python
-# in the repo) AND a pinned revision for security. Mirrors the
-# ``TRUSTED_REVISIONS`` policy in ``renderers.base`` for tokenizers.
-_PROCESSOR_TRUSTED_REVISIONS: dict[str, str] = {
-    "moonshotai/Kimi-K2.5": "4d01dfe0332d63057c186e0b262165819efb6611",
-    "moonshotai/Kimi-K2.6": "2755962d07cb42aa2d988a35bcb65cd4a9c2de82",
-}
-
-
 def _load_processor_and_renderer(model_name: str):
     if model_name not in _loaded:
         from transformers import AutoProcessor
 
-        tokenizer = load_tokenizer(model_name)
-        revision = _PROCESSOR_TRUSTED_REVISIONS.get(model_name)
-        if revision is not None:
-            processor = AutoProcessor.from_pretrained(
-                model_name, trust_remote_code=True, revision=revision
-            )
-        else:
-            processor = AutoProcessor.from_pretrained(model_name)
+        tokenizer = load_test_tokenizer(model_name)
+        processor = AutoProcessor.from_pretrained(
+            model_name, **processor_load_kwargs(model_name)
+        )
         renderer = create_renderer(tokenizer)
         # Inject processor so the renderer doesn't try to fetch it lazily.
         if hasattr(renderer, "_processor") and renderer._processor is None:
@@ -688,7 +679,7 @@ def test_modality_registry_models_route_to_renderer():
     for model_name in MULTIMODAL_MODELS:
         if not _hf_snapshot_cached(model_name):
             continue
-        tokenizer = load_tokenizer(model_name)
+        tokenizer = load_test_tokenizer(model_name)
         renderer = create_renderer(tokenizer)
         # We expect a hand-coded VL renderer, not the default fallback.
         assert not type(renderer).__name__.startswith("Default"), (
@@ -924,7 +915,7 @@ def test_qwen3_vl_renderer_exposes_image_modality():
     model = "Qwen/Qwen3-VL-4B-Instruct"
     if not _hf_snapshot_cached(model):
         pytest.skip(f"{model}: HF snapshot not cached locally")
-    tokenizer = load_tokenizer(model)
+    tokenizer = load_test_tokenizer(model)
     renderer = create_renderer(tokenizer)
     assert isinstance(renderer, Qwen3VLRenderer)
     assert "image" in MULTIMODAL_MODELS[model]

@@ -16,6 +16,7 @@ import pytest
 
 from renderers import base
 from renderers.base import TOKENIZER_SOURCE_OVERRIDES, TRUSTED_REVISIONS, load_tokenizer
+from tests.model_assets import load_test_tokenizer
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +63,21 @@ def test_unlisted_model_loads_without_remote_code(mock_from_pretrained):
 
 
 @patch("transformers.AutoTokenizer.from_pretrained")
+def test_unlisted_model_accepts_immutable_revision_without_remote_code(
+    mock_from_pretrained,
+):
+    """Parity tests may pin ordinary tokenizer repositories without opting
+    into repository-supplied Python."""
+    revision = "a" * 40
+
+    load_tokenizer("Qwen/Qwen3-0.6B", revision=revision)
+
+    args, kwargs = mock_from_pretrained.call_args
+    assert args == ("Qwen/Qwen3-0.6B",)
+    assert kwargs == {"trust_remote_code": False, "revision": revision}
+
+
+@patch("transformers.AutoTokenizer.from_pretrained")
 def test_kimi_loads_with_pinned_revision(mock_from_pretrained):
     """Kimi-K2 family: trust_remote_code=True, revision pinned to the
     sha listed in TRUSTED_REVISIONS — never a branch name."""
@@ -72,6 +88,14 @@ def test_kimi_loads_with_pinned_revision(mock_from_pretrained):
         "trust_remote_code": True,
         "revision": TRUSTED_REVISIONS["moonshotai/Kimi-K2.5"],
     }
+
+
+@patch("transformers.AutoTokenizer.from_pretrained")
+def test_kimi_rejects_caller_revision_override(mock_from_pretrained):
+    with pytest.raises(ValueError, match="only at reviewed revision"):
+        load_tokenizer("moonshotai/Kimi-K2.5", revision="a" * 40)
+
+    mock_from_pretrained.assert_not_called()
 
 
 @patch("transformers.AutoTokenizer.from_pretrained")
@@ -89,6 +113,20 @@ def test_meta_llama_loads_tokenizer_from_unsloth_mirror(mock_from_pretrained):
     assert args == (mirror,)
     assert kwargs == {"trust_remote_code": False}
     assert tok.name_or_path == canonical
+
+
+@patch("transformers.AutoTokenizer.from_pretrained")
+def test_meta_llama_forwards_pinned_mirror_revision(mock_from_pretrained):
+    canonical = "meta-llama/Llama-3.2-1B-Instruct"
+    mirror = "unsloth/Llama-3.2-1B-Instruct"
+    revision = "b" * 40
+    mock_from_pretrained.return_value = SimpleNamespace(name_or_path=mirror)
+
+    load_tokenizer(canonical, revision=revision)
+
+    args, kwargs = mock_from_pretrained.call_args
+    assert args == (mirror,)
+    assert kwargs == {"trust_remote_code": False, "revision": revision}
 
 
 @patch("transformers.AutoTokenizer.from_pretrained")
@@ -145,22 +183,26 @@ def test_get_offset_tokenizer_rejects_offsetless_byo():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.network
+@pytest.mark.model_parity
 def test_load_tokenizer_real_qwen_works_without_remote_code():
     """End-to-end: an unlisted model loads successfully without
     trust_remote_code. Qwen tokenizers don't ship custom Python."""
-    tok = load_tokenizer("Qwen/Qwen3-0.6B")
+    tok = load_test_tokenizer("Qwen/Qwen3-0.6B")
     assert tok is not None
     # Smoke: the tokenizer can encode a basic string.
     ids = tok.encode("hello", add_special_tokens=False)
     assert len(ids) > 0
 
 
+@pytest.mark.network
+@pytest.mark.model_parity
 def test_load_tokenizer_real_kimi_uses_pinned_revision():
     """End-to-end: Kimi-K2.5 loads via the pinned-revision path. The
     parity tests already exercise this path — this test pins the
     contract that ``load_tokenizer`` is the only sanctioned entry
     point for the trusted-revision allow-list."""
-    tok = load_tokenizer("moonshotai/Kimi-K2.5")
+    tok = load_test_tokenizer("moonshotai/Kimi-K2.5")
     assert tok is not None
     ids = tok.encode("hello", add_special_tokens=False)
     assert len(ids) > 0

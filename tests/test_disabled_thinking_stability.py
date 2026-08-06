@@ -26,7 +26,7 @@ from functools import lru_cache
 
 
 from renderers import create_renderer
-from renderers.base import load_tokenizer
+from tests.model_assets import load_test_tokenizer
 from renderers.configs import (
     Qwen3RendererConfig,
     Qwen35RendererConfig,
@@ -46,7 +46,7 @@ _EMPTY_WRAPPER = "<think>\n\n</think>\n\n"
 
 @lru_cache(maxsize=None)
 def _load(model_name: str):
-    return load_tokenizer(model_name)
+    return load_test_tokenizer(model_name)
 
 
 def pytest_generate_tests(metafunc):

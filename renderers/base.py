@@ -1190,11 +1190,22 @@ def _tokenizer_source_for(model_name_or_path: str) -> str:
     return TOKENIZER_SOURCE_OVERRIDES.get(model_name_or_path, model_name_or_path)
 
 
-def _tokenizer_load_kwargs(model_name_or_path: str) -> dict[str, Any]:
-    revision = TRUSTED_REVISIONS.get(model_name_or_path)
+def _tokenizer_load_kwargs(
+    model_name_or_path: str, *, revision: str | None = None
+) -> dict[str, Any]:
+    trusted_revision = TRUSTED_REVISIONS.get(model_name_or_path)
+    if trusted_revision is not None:
+        if revision is not None and revision != trusted_revision:
+            raise ValueError(
+                f"{model_name_or_path!r} executes trusted remote tokenizer code "
+                f"only at reviewed revision {trusted_revision}; received "
+                f"revision={revision!r}."
+            )
+        return {"trust_remote_code": True, "revision": trusted_revision}
+    kwargs: dict[str, Any] = {"trust_remote_code": False}
     if revision is not None:
-        return {"trust_remote_code": True, "revision": revision}
-    return {"trust_remote_code": False}
+        kwargs["revision"] = revision
+    return kwargs
 
 
 def _preserve_requested_tokenizer_name(
@@ -1281,13 +1292,16 @@ def _load_tokenizer_via_auto(model_name_or_path: str, **kwargs) -> Any:
         return tok
 
 
-def load_tokenizer(model_name_or_path: str):
+def load_tokenizer(model_name_or_path: str, *, revision: str | None = None):
     """Load a tokenizer with the renderers-package security policy.
 
     Default ``trust_remote_code=False``. Models listed in
     ``TRUSTED_REVISIONS`` (Moonshot Kimi-K2 family) load with
     ``trust_remote_code=True`` AND a pinned ``revision=<sha>`` so
     transformers only executes the reviewed commit's tokenizer Python.
+    Callers may pin ``revision`` for repositories that do not execute remote
+    code (for example reproducible parity tests). A caller-supplied revision
+    may not override a reviewed ``TRUSTED_REVISIONS`` entry.
 
     ``AutoTokenizer.from_pretrained`` eagerly builds the model config to
     resolve the tokenizer class. If that construction raises on a
@@ -1302,7 +1316,7 @@ def load_tokenizer(model_name_or_path: str):
     the requested Meta ID so auto-resolution still selects ``Llama3Renderer``.
     """
     load_name_or_path = _tokenizer_source_for(model_name_or_path)
-    kwargs = _tokenizer_load_kwargs(load_name_or_path)
+    kwargs = _tokenizer_load_kwargs(load_name_or_path, revision=revision)
     tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
     return _preserve_requested_tokenizer_name(
         tok,

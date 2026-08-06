@@ -117,3 +117,10 @@ invalid-key = "warn"
 unsupported-operator = "warn"
 invalid-return-type = "warn"
 invalid-assignment = "warn"
+
+[tool.pytest.ini_options]
+markers = [
+    "network: requires pinned external model assets from Hugging Face",
+    "model_parity: compares a renderer with a pinned upstream tokenizer or reference encoder",
+    "multimodal: exercises image/video processors and multimodal sidecars",
+]

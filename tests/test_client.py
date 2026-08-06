@@ -379,6 +379,9 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.network
+@pytest.mark.model_parity
+@pytest.mark.multimodal
 @pytest.mark.parametrize(
     "model_id,renderer_class_path",
     [
@@ -403,8 +406,8 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     from renderers.base import (
         MultiModalData,
         PlaceholderRange,
-        load_tokenizer,
     )
+    from tests.model_assets import load_test_tokenizer
 
     mod_name, cls_name = renderer_class_path.split(":")
     renderer_cls = getattr(importlib.import_module(mod_name), cls_name)
@@ -413,7 +416,7 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     # _build_mm_features hits the qwen branch. The tokenizer is only
     # touched in __init__ to grab special-token ids; render() / etc.
     # aren't called here because we pre-supply prompt_ids + mm_data.
-    tokenizer = load_tokenizer(model_id)
+    tokenizer = load_test_tokenizer(model_id)
     renderer = renderer_cls(tokenizer)
 
     # Two synthetic 1×2×2 images. Field factory expects pixel_values

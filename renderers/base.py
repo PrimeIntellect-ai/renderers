@@ -117,6 +117,7 @@ class Message(TypedDict, total=False):
     tool_calls: list[ToolCall]
     tool_call_id: str
     name: str
+    reasoning: str
     reasoning_content: str
 
 
@@ -1072,9 +1073,10 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # construction to pin a different date.
     "meta-llama/Llama-3.2-1B-Instruct": "llama-3",
     "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
-    # Poolside Laguna. The two checkpoints ship different chat templates,
-    # each mirrored by its own renderer class.
+    # Poolside Laguna. These checkpoints ship distinct chat templates,
+    # each mirrored by its own renderer class/config discriminator.
     "poolside/Laguna-XS.2": "laguna-xs.2",
+    "poolside/Laguna-M.1": "laguna-m.1",
     "poolside/Laguna-XS-2.1": "laguna-xs-2.1",
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
@@ -1323,7 +1325,11 @@ def _populate_registry():
     from renderers.hy3 import Hy3Renderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
-    from renderers.laguna_xs2 import LagunaXS2Renderer, LagunaXS21Renderer
+    from renderers.laguna_xs2 import (
+        LagunaM1Renderer,
+        LagunaXS2Renderer,
+        LagunaXS21Renderer,
+    )
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
     from renderers.nemotron3 import Nemotron3Renderer, Nemotron3UltraRenderer
@@ -1351,6 +1357,7 @@ def _populate_registry():
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
             "laguna-xs.2": LagunaXS2Renderer,
+            "laguna-m.1": LagunaM1Renderer,
             "laguna-xs-2.1": LagunaXS21Renderer,
             "llama-3": Llama3Renderer,
             "nemotron-3": Nemotron3Renderer,

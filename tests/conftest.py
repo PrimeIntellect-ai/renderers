@@ -37,6 +37,7 @@ RENDERER_MODELS = [
     # name (auto → MODEL_RENDERER_MAP → nemotron-3-ultra).
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
+    ("poolside/Laguna-M.1", "auto"),
     # XS-2.1 resolves to `LagunaXS21Renderer` via the model name — its
     # chat template differs from XS.2's (see renderers/laguna_xs2.py).
     ("poolside/Laguna-XS-2.1", "auto"),

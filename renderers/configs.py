@@ -505,6 +505,28 @@ class LagunaXS2RendererConfig(BaseRendererConfig):
     chat template's ``render_assistant_messages_raw`` gate."""
 
 
+class LagunaM1RendererConfig(BaseRendererConfig):
+    """Laguna M.1 renderer config.
+
+    Laguna M.1 shares Laguna XS.2's role and tool-call format, but its
+    official checkpoint has a distinct chat template: it does not inject
+    XS.2's fallback system message and it gives ``message.reasoning``
+    precedence over ``message.reasoning_content``. Served by
+    :class:`renderers.laguna_xs2.LagunaM1Renderer`.
+    """
+
+    name: Literal["laguna-m.1"] = "laguna-m.1"
+
+    enable_thinking: bool = False
+    """When ``True``, the generation prompt includes ``<think>``. Mirrors
+    the official template's ``enable_thinking`` kwarg and default."""
+
+    render_assistant_messages_raw: bool = False
+    """When ``True``, assistant messages use the official template's
+    verbatim passthrough branch. See
+    :class:`LagunaXS2RendererConfig.render_assistant_messages_raw`."""
+
+
 class LagunaXS21RendererConfig(BaseRendererConfig):
     """Laguna XS-2.1 renderer config.
 
@@ -680,6 +702,7 @@ RendererConfig = Annotated[
         KimiK2RendererConfig,
         KimiK25RendererConfig,
         LagunaXS2RendererConfig,
+        LagunaM1RendererConfig,
         LagunaXS21RendererConfig,
         Llama3RendererConfig,
         MiniMaxM2RendererConfig,
@@ -720,6 +743,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "kimi-k2": KimiK2RendererConfig,
     "kimi-k2.5": KimiK25RendererConfig,
     "laguna-xs.2": LagunaXS2RendererConfig,
+    "laguna-m.1": LagunaM1RendererConfig,
     "laguna-xs-2.1": LagunaXS21RendererConfig,
     "llama-3": Llama3RendererConfig,
     "minimax-m2": MiniMaxM2RendererConfig,
@@ -767,6 +791,7 @@ __all__ = [
     "Hy3RendererConfig",
     "KimiK25RendererConfig",
     "KimiK2RendererConfig",
+    "LagunaM1RendererConfig",
     "LagunaXS2RendererConfig",
     "LagunaXS21RendererConfig",
     "Llama3RendererConfig",

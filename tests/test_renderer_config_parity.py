@@ -64,6 +64,7 @@ _RENDERER_MODELS = [
     # name; parity asserted against the Ultra apply_chat_template (``medium_effort``).
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
+    ("poolside/Laguna-M.1", "auto"),
     ("poolside/Laguna-XS-2.1", "auto"),
     ("tencent/Hy3", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
@@ -119,7 +120,7 @@ _KWARG_VALUES: dict[str, list[Any]] = {
         "You are a helpful assistant. Your name is MiniMax-M2.5 and is built by MiniMax.",
         "You are CustomBot, a research assistant.",
     ],
-    # Laguna-XS.2 — switches assistant rendering to a verbatim
+    # Laguna-XS.2 / Laguna-M.1 — switches assistant rendering to a verbatim
     # passthrough mode. The renderer paths diverge significantly under
     # this flag, so both values are exercised.
     "render_assistant_messages_raw": [True, False],

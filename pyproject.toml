@@ -38,6 +38,13 @@ dependencies = [
     "prime-pydantic-config>=0.3.0.dev83",
 ]
 
+[project.optional-dependencies]
+vision = [
+    "pillow>=12.2.0",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+]
+
 [tool.hatch.version]
 source = "vcs"
 # Tags look like ``renderers-v0.1.8`` (prefix matches the publish.yml

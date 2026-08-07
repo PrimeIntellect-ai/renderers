@@ -14,13 +14,15 @@ from renderers.base import (
 )
 from renderers.client import generate
 
+_OPENAI_TOOL = {"type": "function", "function": {"name": "echo"}}
+
 
 class _FakeRenderer:
     supports_tools = True
 
     def render(self, messages, *, tools=None, add_generation_prompt=False):
         assert messages == [{"role": "user", "content": "hi"}]
-        assert tools == [{"type": "function", "function": {"name": "echo"}}]
+        assert tools == [_OPENAI_TOOL]
         assert add_generation_prompt is True
         # Populate the full attribution surface so the test can verify
         # ``generate`` threads it through to the result dict unchanged.
@@ -99,6 +101,21 @@ class _FakeClient:
         )
 
 
+def test_decode_data_image_url_round_trips_and_rejects_non_inline():
+    import pytest
+
+    from renderers.mm_store import decode_data_image_url
+
+    raw = b"png-ish bytes"
+    url = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+    assert decode_data_image_url(url) == raw
+
+    with pytest.raises(ValueError, match="requires data:image"):
+        decode_data_image_url("file:///tmp/image.png")
+    with pytest.raises(ValueError, match="base64"):
+        decode_data_image_url("data:image/png;utf8,not-base64")
+
+
 def _run_generate(client, renderer=None):
     return asyncio.run(
         generate(
@@ -121,7 +138,7 @@ def test_generate_builds_request_body_and_parses_response():
             renderer=renderer,
             messages=[{"role": "user", "content": "hi"}],
             model="test-model",
-            tools=[{"type": "function", "function": {"name": "echo"}}],
+            tools=[_OPENAI_TOOL],
             sampling_params={"temperature": 0.3, "max_tokens": 7, "min_tokens": 2},
             cache_salt="ckpt-42",
         )
@@ -129,9 +146,7 @@ def test_generate_builds_request_body_and_parses_response():
 
     # The client must plumb `tools` through to parse_response so XML-style
     # parsers can preserve declared-string args verbatim.
-    assert renderer._last_parse_tools == [
-        {"type": "function", "function": {"name": "echo"}}
-    ]
+    assert renderer._last_parse_tools == [_OPENAI_TOOL]
 
     assert len(client.calls) == 1
     # /inference/v1/generate is mounted at the server root, so we post to
@@ -303,7 +318,7 @@ def test_generate_does_not_promote_finish_reason_for_malformed_tool_calls():
             renderer=_MalformedToolRenderer(),
             messages=[{"role": "user", "content": "hi"}],
             model="test-model",
-            tools=[{"type": "function", "function": {"name": "echo"}}],
+            tools=[_OPENAI_TOOL],
         )
     )
     assert result["finish_reason"] == "stop"
@@ -380,74 +395,66 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
 
 
 @pytest.mark.parametrize(
-    "model_id,renderer_class_path",
+    "family,payload,expected_modality,vllm_modality",
     [
-        ("Qwen/Qwen3-VL-4B-Instruct", "renderers.qwen3_vl:Qwen3VLRenderer"),
-        ("Qwen/Qwen3.5-2B", "renderers.qwen35:Qwen35Renderer"),
+        ("qwen_vl", {"image_grid_thw": [[1, 2, 2]]}, "image", None),
+        (
+            "kimi_k25",
+            {"grid_thws": [[1, 2, 2]]},
+            "vision_chunk",
+            "vision_chunk",
+        ),
     ],
-    ids=["qwen3_vl", "qwen35"],
+    ids=["default_image_modality", "kimi_vllm_modality"],
 )
-def test_generate_serializes_multimodal_features_for_qwen_vl_family(
-    model_id, renderer_class_path
+def test_generate_serializes_raw_mm_refs(
+    family, payload, expected_modality, vllm_modality
 ):
-    """When the renderer emits ``MultiModalData``, ``generate`` translates
-    it into vLLM's ``features`` payload (mm_hashes + mm_placeholders +
-    base64-encoded kwargs_data) and sticks it in the request body. Covers
-    every renderer routed through ``_build_qwen_vl_features``."""
-    import importlib
+    """``generate`` serializes raw multimodal envelopes to vLLM refs.
 
-    pytest.importorskip("torch")
-    pytest.importorskip("vllm", reason="vllm needed for features serialization")
-
-    import torch as _torch
+    The client owns only the generic wire shape: hashes, placeholder spans,
+    and one raw ref per item. Family-specific payload keys stay opaque here.
+    """
     from renderers.base import (
         MultiModalData,
         PlaceholderRange,
-        load_tokenizer,
+    )
+    from renderers.mm_store import (
+        raw_mm_item,
+        split_raw_mm_ref,
     )
 
-    mod_name, cls_name = renderer_class_path.split(":")
-    renderer_cls = getattr(importlib.import_module(mod_name), cls_name)
+    image_data = "data:image/png;base64," + base64.b64encode(b"image-bytes").decode(
+        "ascii"
+    )
+    mm_hash = "a" * 32
 
-    # Build a minimal real renderer so type dispatch in
-    # _build_mm_features hits the qwen branch. The tokenizer is only
-    # touched in __init__ to grab special-token ids; render() / etc.
-    # aren't called here because we pre-supply prompt_ids + mm_data.
-    tokenizer = load_tokenizer(model_id)
-    renderer = renderer_cls(tokenizer)
-
-    # Two synthetic 1×2×2 images. Field factory expects pixel_values
-    # shape ``(sum_HW, embed_dim)`` and grid_thw shape ``(N, 3)``; the
-    # values themselves don't matter for the encoding round-trip.
     mm_data = MultiModalData(
-        mm_hashes={"image": ["aaa", "bbb"]},
+        mm_hashes={"image": [mm_hash]},
         mm_placeholders={
             "image": [
                 PlaceholderRange(offset=5, length=1),
-                PlaceholderRange(offset=10, length=1),
             ]
         },
         mm_items={
             "image": [
-                {
-                    "pixel_values": _torch.zeros(4, 8, dtype=_torch.float32),
-                    "image_grid_thw": _torch.tensor([[1, 2, 2]], dtype=_torch.int64),
-                },
-                {
-                    "pixel_values": _torch.zeros(4, 8, dtype=_torch.float32),
-                    "image_grid_thw": _torch.tensor([[1, 2, 2]], dtype=_torch.int64),
-                },
+                raw_mm_item(
+                    family=family,
+                    payload=payload,
+                    raw_image_data=image_data,
+                    vllm_modality=vllm_modality,
+                ),
             ],
         },
     )
 
     client = _FakeClient()
-    asyncio.run(
+    result = asyncio.run(
         generate(
             client=client,
-            renderer=renderer,
+            renderer=_NoRenderRenderer(),
             messages=[],
-            model="qwen3-vl",
+            model="test-model",
             prompt_ids=list(range(20)),
             multi_modal_data=mm_data,
             sampling_params={"max_tokens": 4},
@@ -457,17 +464,26 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     body = client.calls[0]["body"]
     assert "features" in body, "multimodal call should attach features"
     features = body["features"]
-    assert features["mm_hashes"] == {"image": ["aaa", "bbb"]}
+    assert features["mm_hashes"] == {expected_modality: [mm_hash]}
     assert features["mm_placeholders"] == {
-        "image": [{"offset": 5, "length": 1}, {"offset": 10, "length": 1}],
+        expected_modality: [{"offset": 5, "length": 1}],
     }
-    assert "kwargs_data" in features
-    assert features["kwargs_data"] is not None
-    assert "image" in features["kwargs_data"]
-    assert len(features["kwargs_data"]["image"]) == 2
-    # Items are base64 strings (encode_mm_kwargs_item output).
-    for item in features["kwargs_data"]["image"]:
-        assert isinstance(item, str) and len(item) > 0
+    refs = features["kwargs_data"][expected_modality]
+    assert len(refs) == 1
+    ref = split_raw_mm_ref(refs[0])
+    assert ref.payload == payload
+    assert (
+        ref.family,
+        ref.modality,
+        ref.mm_hash,
+        ref.raw_image_data,
+    ) == (
+        family,
+        expected_modality,
+        mm_hash,
+        image_data,
+    )
+    assert result["multi_modal_data"] is mm_data
 
 
 # ---------------------------------------------------------------------------

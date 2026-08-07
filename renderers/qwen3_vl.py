@@ -1,4 +1,4 @@
-"""Qwen3-VL renderer with multimodal (image + video) support.
+"""Qwen3-VL renderer with multimodal image support.
 
 Produces a token stream that matches ``Qwen3VLProcessor.apply_chat_template``
 byte-for-byte for text-only inputs and emits the same
@@ -6,14 +6,10 @@ byte-for-byte for text-only inputs and emits the same
 for image inputs as the HF processor (``N = image_grid_thw.prod() //
 merge_size**2``).
 
-Image data is shipped to the inference engine via
-``RenderedTokens.multi_modal_data``: ``mm_placeholders`` records the
-``(offset, length)`` span of each image's placeholder tokens in the
-prompt, ``mm_items`` carries the per-image processor output
-(``pixel_values``, ``image_grid_thw``), and ``mm_hashes`` carries a
-stable identifier for cache lookup. The wire-format conversion to
-vLLM's ``/inference/v1/generate`` ``features`` field lives in
-``renderers.client``.
+By default, image data is shipped to the inference engine via run image refs,
+not processed image-processor payloads. ``multimodal_output="processed"``
+instead emits processor payloads for SFT/training callers that need
+``pixel_values`` directly.
 
 BPE boundary discipline: text runs that the chat template emits
 contiguously (e.g. ``"user\\n" + content_text``) must be encoded as a
@@ -22,6 +18,9 @@ output. The internal ``_Emitter`` buffers text and flushes on special
 tokens (``<|im_start|>``, ``<|im_end|>``, ``<tool_response>``,
 ``<|vision_start|>``…), which act as atomic boundaries the template
 also can't merge across.
+
+Video-shaped content parts are detected and rejected explicitly; video
+materialization is not implemented yet.
 """
 
 from __future__ import annotations
@@ -30,10 +29,20 @@ import base64
 import hashlib
 import io
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from transformers.tokenization_utils import PreTrainedTokenizer
+
+# Qwen's own resize math — imported (not ported) so layout predictions can't
+# drift from the processor's actual behavior. The PIL-backend module is
+# torch-free; older transformers keep the same function in the classic module.
+try:
+    from transformers.models.qwen2_vl.image_processing_pil_qwen2_vl import smart_resize
+except ImportError:
+    from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
 from renderers.base import (
     Message,
@@ -44,12 +53,18 @@ from renderers.base import (
     ToolSpec,
     attribute_text_segments,
     extract_message_tool_names,
+    merge_multi_modal_data,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import Qwen3VLRendererConfig
+from renderers.mm_store import (
+    decode_data_image_url,
+    hub_image_processor_config,
+    raw_mm_item,
+)
 from renderers.parsing import parse_qwen3
 
 _TOOLS_HEADER = (
@@ -96,32 +111,85 @@ def _is_video_part(item: Any) -> bool:
     return bool(item.get("video")) or bool(item.get("video_url"))
 
 
-def _load_pil_image(item: dict[str, Any]):
-    """Resolve an ImagePart to a PIL Image.
+@dataclass(frozen=True)
+class QwenVLImageLayoutSpec:
+    """The layout knobs from a checkpoint's ``preprocessor_config.json`` —
+    everything the render-side geometry math needs to predict grids and
+    placeholder counts without running an image processor."""
 
-    Accepts pre-loaded PIL Images, raw bytes, filesystem paths,
-    ``file://``/``http(s)://`` URLs, and ``data:image/...;base64,...`` URIs.
-    """
+    patch_size: int
+    merge_size: int
+    min_pixels: int
+    max_pixels: int
+
+
+def qwen_layout_from(config: Mapping[str, Any]) -> QwenVLImageLayoutSpec:
+    """Layout spec from a preprocessor config dict. Newer configs keep the
+    pixel bounds under ``size`` (``shortest_edge``/``longest_edge``) with the
+    legacy top-level ``min_pixels``/``max_pixels`` set to null; honor both."""
+
+    def required(name: str) -> int:
+        value = config.get(name)
+        if value is None:
+            raise ValueError(f"Qwen image processor config is missing {name!r}")
+        return int(value)
+
+    def pixels(name: str, size_key: str) -> int:
+        size = config.get("size")
+        value = config.get(name)
+        if value is None and isinstance(size, Mapping):
+            value = size.get(size_key)
+        if value is None:
+            raise ValueError(
+                f"Qwen image processor config is missing {name!r} / size[{size_key!r}]"
+            )
+        return int(value)
+
+    return QwenVLImageLayoutSpec(
+        patch_size=required("patch_size"),
+        merge_size=required("merge_size"),
+        min_pixels=pixels("min_pixels", "shortest_edge"),
+        max_pixels=pixels("max_pixels", "longest_edge"),
+    )
+
+
+_PROCESSED_IMAGE_CACHE_MAX = 256
+
+
+@dataclass(frozen=True)
+class QwenImageLayoutDescriptor:
+    mm_hash: str
+    image_grid_thw: list[list[int]]
+    num_image_tokens: int
+    raw_image_data: str
+
+
+def _image_source(item: dict[str, Any]) -> Any:
+    if "image" in item:
+        return item["image"]
+    if "image_url" in item:
+        image_url = item.get("image_url")
+        return image_url.get("url") if isinstance(image_url, dict) else image_url
+    return item.get("url") or item.get("path")
+
+
+def _inline_image_source(part: dict[str, Any]) -> tuple[str, bytes]:
+    """Resolve a part's inline data-image source and decode it once."""
+    source = _image_source(part)
+    return source, decode_data_image_url(source)
+
+
+def _load_pil_image(item: dict[str, Any]):
+    """Resolve an ImagePart to a PIL Image for processed multimodal output."""
     try:
         from PIL import Image
     except ImportError as exc:
         raise RuntimeError(
-            "Pillow is required for multimodal rendering. Install with "
-            "`pip install Pillow` (or `pip install renderers[multimodal]`)."
+            "Processed multimodal rendering requires Pillow. Install "
+            "`renderers[vision]` or provide Pillow in the caller environment."
         ) from exc
 
-    raw: Any
-    if "image" in item:
-        raw = item["image"]
-    elif "image_url" in item:
-        # OpenAI canonical shape is ``image_url: {"url": "..."}`` — but
-        # some VLM processors (Kimi K2.5 / K2.6) hand a raw PIL / str
-        # directly under ``image_url``. Accept both.
-        iu = item.get("image_url")
-        raw = iu.get("url") if isinstance(iu, dict) else iu
-    else:
-        raw = item.get("url") or item.get("path")
-
+    raw = _image_source(item)
     if isinstance(raw, Image.Image):
         return raw.convert("RGB") if raw.mode != "RGB" else raw
 
@@ -135,7 +203,6 @@ def _load_pil_image(item: dict[str, Any]):
         )
 
     if raw.startswith("data:"):
-        # data:image/png;base64,XXXX
         _, _, payload = raw.partition(",")
         return Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
 
@@ -143,26 +210,128 @@ def _load_pil_image(item: dict[str, Any]):
     if parsed.scheme in ("http", "https"):
         import urllib.request
 
-        with urllib.request.urlopen(raw) as resp:  # noqa: S310 — user-supplied URL
+        with urllib.request.urlopen(raw) as resp:  # noqa: S310
             return Image.open(io.BytesIO(resp.read())).convert("RGB")
 
-    if parsed.scheme == "file" or parsed.scheme == "":
-        path = parsed.path if parsed.scheme == "file" else raw
+    if parsed.scheme in ("file", ""):
+        path = unquote(parsed.path) if parsed.scheme == "file" else raw
         return Image.open(path).convert("RGB")
 
     raise ValueError(f"Unsupported image URL scheme: {parsed.scheme!r} in {raw!r}")
 
 
-def _image_hash(pil_image) -> str:
-    """Stable per-image identifier for cache lookup.
+def _image_dimensions(raw: bytes) -> tuple[int, int]:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError(
+            "Pillow is required to read image dimensions for multimodal rendering."
+        ) from exc
 
-    Uses the resolved RGB bytes so two ``ImagePart``\\s pointing at the
-    same logical image (path, in-memory, data URI) hash identically.
-    """
+    with Image.open(io.BytesIO(raw)) as image:
+        return image.height, image.width
+
+
+def _pil_image_hash(pil_image) -> str:
     h = hashlib.sha256()
     h.update(pil_image.tobytes())
     h.update(f"{pil_image.size}".encode())
     return h.hexdigest()[:32]
+
+
+def describe_qwen_image_layout(
+    part: dict[str, Any], layout: QwenVLImageLayoutSpec
+) -> QwenImageLayoutDescriptor:
+    """Return Qwen image layout metadata without invoking an image processor."""
+    source, raw = _inline_image_source(part)
+    height, width = _image_dimensions(raw)
+    resized_h, resized_w = smart_resize(
+        height,
+        width,
+        factor=layout.patch_size * layout.merge_size,
+        min_pixels=layout.min_pixels,
+        max_pixels=layout.max_pixels,
+    )
+    grid_t = 1
+    grid_h = resized_h // layout.patch_size
+    grid_w = resized_w // layout.patch_size
+    num_image_tokens = (
+        grid_t * grid_h * grid_w // (layout.merge_size * layout.merge_size)
+    )
+    return QwenImageLayoutDescriptor(
+        mm_hash=hashlib.sha256(raw).hexdigest()[:32],
+        image_grid_thw=[[grid_t, grid_h, grid_w]],
+        num_image_tokens=num_image_tokens,
+        raw_image_data=source,
+    )
+
+
+def qwen_image_item_for_render(
+    part: dict[str, Any], layout: QwenVLImageLayoutSpec
+) -> tuple[int, str, dict[str, Any]]:
+    desc = describe_qwen_image_layout(part, layout)
+    item = raw_mm_item(
+        family="qwen_vl",
+        payload={"image_grid_thw": desc.image_grid_thw},
+        raw_image_data=desc.raw_image_data,
+    )
+    return desc.num_image_tokens, desc.mm_hash, item
+
+
+def layout_model_name(tokenizer, renderer_name: str) -> str:
+    """The checkpoint name the raw layout knobs are sourced from."""
+    name = getattr(tokenizer, "name_or_path", None)
+    if not name:
+        raise RuntimeError(
+            f"{renderer_name} needs the checkpoint name to resolve raw image "
+            "layout knobs. Load the tokenizer with a known name_or_path."
+        )
+    return name
+
+
+def load_qwen_processor(tokenizer, renderer_name: str):
+    try:
+        from transformers import AutoProcessor
+    except ImportError as exc:
+        raise RuntimeError(
+            "Processed multimodal rendering requires transformers with "
+            "AutoProcessor support."
+        ) from exc
+
+    name = getattr(tokenizer, "name_or_path", None)
+    if not name:
+        raise RuntimeError(
+            f"{renderer_name} needs a processor for multimodal_output='processed'. "
+            "Inject `renderer._processor` or load the tokenizer with a known "
+            "name_or_path."
+        )
+    return AutoProcessor.from_pretrained(name)
+
+
+def qwen_processed_image_item_for_render(
+    part: dict[str, Any],
+    *,
+    processor: Any,
+    image_cache: dict[str, tuple[Any, int]],
+) -> tuple[int, str, dict[str, Any]]:
+    pil = _load_pil_image(part)
+    image_hash = _pil_image_hash(pil)
+    cached = image_cache.get(image_hash)
+    if cached is not None:
+        out, num_image_tokens = cached
+    else:
+        out = processor.image_processor(images=[pil], return_tensors="np")
+        grid_thw = out["image_grid_thw"][0]
+        merge_size = processor.image_processor.merge_size
+        num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)
+        if len(image_cache) >= _PROCESSED_IMAGE_CACHE_MAX:
+            image_cache.pop(next(iter(image_cache)))
+        image_cache[image_hash] = (out, num_image_tokens)
+    item = {
+        "pixel_values": out["pixel_values"],
+        "image_grid_thw": out["image_grid_thw"],
+    }
+    return num_image_tokens, image_hash, item
 
 
 class _Emitter:
@@ -298,11 +467,6 @@ class Qwen3VLRenderer:
         config: Typed renderer config (see
             :class:`renderers.Qwen3VLRendererConfig`). Defaults to a
             blank config with template defaults.
-        processor: Optional ``Qwen3VLProcessor``. Required when rendering
-            messages that contain image / video parts. If not supplied,
-            the renderer lazy-loads it via ``AutoProcessor.from_pretrained``
-            keyed off ``tokenizer.name_or_path`` the first time a
-            multimodal part is seen.
 
     Qwen3-VL has no historical reasoning channel in this renderer. The
     default bridge policy therefore resolves to ``"all"``; explicit
@@ -313,11 +477,11 @@ class Qwen3VLRenderer:
         self,
         tokenizer: PreTrainedTokenizer,
         config: Qwen3VLRendererConfig | None = None,
-        *,
-        processor: Any = None,
     ):
         self._tokenizer = tokenizer
-        self._processor = processor
+        self._processor: Any = None
+        self._image_layout: QwenVLImageLayoutSpec | None = None
+        self._image_cache: dict[str, tuple[Any, int]] = {}
         self.config = config or Qwen3VLRendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
@@ -336,16 +500,6 @@ class Qwen3VLRenderer:
         self._vision_end = self._token_id("<|vision_end|>")
         self._image_pad = self._token_id("<|image_pad|>")
         self._video_pad = self._token_id("<|video_pad|>")
-
-        # Per-instance image-processor cache. The HF image processor is the
-        # most expensive step on the renderer hot path (~tens of ms per
-        # image for typical grid_thw). The same image gets re-seen across
-        # ``rollouts_per_example`` rollouts of one example and (for
-        # multi-turn) across turn boundaries when the bridge re-renders
-        # rather than extends. Cache keyed by content hash — values are
-        # tuples of ``(processor_out, num_image_tokens)`` — bounded to
-        # avoid unbounded growth on long-lived pools.
-        self._image_cache: dict[str, tuple[Any, int]] = {}
 
     def _token_id(self, token: str) -> int:
         tid = self._tokenizer.convert_tokens_to_ids(token)
@@ -373,20 +527,27 @@ class Qwen3VLRenderer:
         return self._tokenizer.encode(text, add_special_tokens=False)
 
     def _get_processor(self):
-        if self._processor is not None:
-            return self._processor
-        from transformers import AutoProcessor
-
-        name = getattr(self._tokenizer, "name_or_path", None)
-        if not name:
-            raise RuntimeError(
-                "Qwen3VLRenderer needs a processor to render image / video parts. "
-                "Pass `processor=AutoProcessor.from_pretrained(...)` to the "
-                "constructor, or load the tokenizer with a known name_or_path "
-                "so the processor can be auto-loaded."
-            )
-        self._processor = AutoProcessor.from_pretrained(name)
+        if self._processor is None:
+            self._processor = load_qwen_processor(self._tokenizer, type(self).__name__)
         return self._processor
+
+    def _raw_image_layout(self) -> QwenVLImageLayoutSpec:
+        """The checkpoint's layout knobs, resolved once on first image render."""
+        if self._image_layout is None:
+            name = layout_model_name(self._tokenizer, type(self).__name__)
+            self._image_layout = qwen_layout_from(hub_image_processor_config(name))
+        return self._image_layout
+
+    def _image_item_for_render(
+        self, part: dict[str, Any]
+    ) -> tuple[int, str, dict[str, Any]]:
+        if self.config.multimodal_output == "processed":
+            return qwen_processed_image_item_for_render(
+                part,
+                processor=self._get_processor(),
+                image_cache=self._image_cache,
+            )
+        return qwen_image_item_for_render(part, self._raw_image_layout())
 
     @staticmethod
     def _render_text_content(content: Any) -> str:
@@ -426,31 +587,6 @@ class Qwen3VLRenderer:
             and content.endswith("</tool_response>")
         )
 
-    def _process_image(self, part: dict[str, Any]):
-        """Resolve, process, and characterize a single image part.
-
-        Returns ``(pil, processor_out, num_image_tokens, image_hash)``.
-        Hashes the loaded PIL first and consults ``self._image_cache``;
-        on hit the HF image-processor call is skipped entirely.
-        """
-        pil = _load_pil_image(part)
-        h = _image_hash(pil)
-        cached = self._image_cache.get(h)
-        if cached is not None:
-            out, num_image_tokens = cached
-            return pil, out, num_image_tokens, h
-        proc = self._get_processor()
-        out = proc.image_processor(images=[pil], return_tensors="np")
-        grid_thw = out["image_grid_thw"][0]
-        merge_size = proc.image_processor.merge_size
-        num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)
-        if len(self._image_cache) >= self.config.image_cache_max:
-            # FIFO eviction — Python dicts preserve insertion order, so
-            # ``next(iter(...))`` is the oldest key.
-            self._image_cache.pop(next(iter(self._image_cache)))
-        self._image_cache[h] = (out, num_image_tokens)
-        return pil, out, num_image_tokens, h
-
     def render(
         self,
         messages: list[Message],
@@ -480,7 +616,7 @@ class Qwen3VLRenderer:
             # image data, so they ARE body content (is_content=True);
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # markers are renderer-emitted scaffold.
-            _, out, n, h = self._process_image(part)
+            n, h, mm_item = self._image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 em.text(
@@ -497,12 +633,7 @@ class Qwen3VLRenderer:
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
             )
-            mm_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            mm_items.setdefault("image", []).append(mm_item)
 
         def render_media_content(content: Any) -> None:
             """Emit a user/tool content list with media handled inline.
@@ -752,7 +883,7 @@ class Qwen3VLRenderer:
         vision_counts = {"image": prev_image_count, "video": prev_video_count}
 
         def emit_image(part: dict[str, Any]) -> None:
-            _, out, n, h = self._process_image(part)
+            n, h, mm_item = self._image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 em.text(
@@ -769,12 +900,7 @@ class Qwen3VLRenderer:
             new_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
             )
-            new_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            new_items.setdefault("image", []).append(mm_item)
 
         def render_media_content(content: Any) -> None:
             if isinstance(content, str):
@@ -828,38 +954,9 @@ class Qwen3VLRenderer:
         em.text("assistant\n", is_sampled=False, is_content=False)
         em.finalize()
 
-        # Merge prev mm_data with the new turn's items. Copy the per-modality
-        # lists (not just the outer dict) so appending below never mutates the
-        # caller's previous_multi_modal_data.
-        merged_hashes = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
-            if previous_multi_modal_data
-            else {}
+        mm_data = merge_multi_modal_data(
+            previous_multi_modal_data, new_hashes, new_placeholders, new_items
         )
-        merged_placeholders = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
-            if previous_multi_modal_data
-            else {}
-        )
-        merged_items = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
-            if previous_multi_modal_data
-            else {}
-        )
-        for modality, vals in new_hashes.items():
-            merged_hashes.setdefault(modality, []).extend(vals)
-        for modality, vals in new_placeholders.items():
-            merged_placeholders.setdefault(modality, []).extend(vals)
-        for modality, vals in new_items.items():
-            merged_items.setdefault(modality, []).extend(vals)
-
-        mm_data: MultiModalData | None = None
-        if merged_hashes or merged_placeholders or merged_items:
-            mm_data = MultiModalData(
-                mm_hashes=merged_hashes,
-                mm_placeholders=merged_placeholders,
-                mm_items=merged_items,
-            )
 
         return RenderedTokens(
             token_ids=em.token_ids,

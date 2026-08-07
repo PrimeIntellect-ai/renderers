@@ -21,8 +21,12 @@ Generation prompt (thinking disabled):
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from transformers.tokenization_utils import PreTrainedTokenizer
@@ -37,18 +41,27 @@ from renderers.base import (
     ToolCallParseStatus,
     ToolSpec,
     extract_message_tool_names,
+    merge_multi_modal_data,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
+from renderers.mm_store import (
+    hub_image_processor_config,
+    raw_mm_item,
+)
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
 from renderers.qwen3_vl import (
-    _image_hash,
+    _PROCESSED_IMAGE_CACHE_MAX,
+    _image_dimensions,
+    _inline_image_source,
     _is_image_part,
     _is_video_part,
     _load_pil_image,
+    _pil_image_hash,
+    layout_model_name,
 )
 
 # ---------------------------------------------------------------------------
@@ -56,6 +69,9 @@ from renderers.qwen3_vl import (
 # ---------------------------------------------------------------------------
 
 _DEFAULT_SYSTEM_PROMPT = "You are Kimi, an AI assistant created by Moonshot AI."
+
+KIMI_K25_FAMILY = "kimi_k25"
+KIMI_K25_VLLM_MODALITY = "vision_chunk"
 
 # ---------------------------------------------------------------------------
 # TypeScript-style tool declaration
@@ -402,6 +418,161 @@ def _encode_tools_typescript(tools: list[ToolSpec]) -> str:
     return "# Tools\n\n## functions\nnamespace functions {\n" + functions_str + "\n}\n"
 
 
+@dataclass(frozen=True)
+class KimiK25ImageLayoutSpec:
+    """The layout knobs from a checkpoint's ``preprocessor_config.json`` —
+    everything the render-side geometry math needs to predict grids and
+    media token counts without running an image processor."""
+
+    patch_size: int
+    merge_kernel_size: int
+    in_patch_limit: int
+    patch_limit_on_one_side: int
+    fixed_output_tokens: int | None
+
+
+def kimi_layout_from(config: Mapping[str, Any]) -> KimiK25ImageLayoutSpec:
+    """Layout spec from a preprocessor config dict; the knobs nest under
+    ``media_proc_cfg``."""
+    cfg = config.get("media_proc_cfg")
+    if not isinstance(cfg, Mapping):
+        raise ValueError("Kimi image processor config must expose media_proc_cfg")
+
+    def required(name: str) -> Any:
+        if name not in cfg:
+            raise ValueError(f"Kimi media_proc_cfg is missing {name!r}")
+        return cfg[name]
+
+    fixed = required("fixed_output_tokens")
+    return KimiK25ImageLayoutSpec(
+        patch_size=int(required("patch_size")),
+        merge_kernel_size=int(required("merge_kernel_size")),
+        in_patch_limit=int(required("in_patch_limit")),
+        patch_limit_on_one_side=int(required("patch_limit_on_one_side")),
+        fixed_output_tokens=None if fixed is None else int(fixed),
+    )
+
+
+@dataclass(frozen=True)
+class KimiImageLayoutDescriptor:
+    mm_hash: str
+    grid_thws: list[list[int]]
+    num_media_tokens: int
+    raw_image_data: str
+
+
+def _ceil_to_factor(value: int, factor: int) -> int:
+    return max(factor, math.ceil(value / factor) * factor)
+
+
+def _kimi_resize_config(
+    width: int, height: int, layout: KimiK25ImageLayoutSpec
+) -> tuple[int, int, int]:
+    """Kimi MoonViT/NavIT image resize layout without materializing pixels."""
+    if height <= 0 or width <= 0:
+        raise ValueError(f"image dimensions must be positive, got {height}x{width}")
+    patch_size = layout.patch_size
+    patch_limit_pixels = layout.patch_limit_on_one_side * patch_size
+    s1 = math.sqrt(
+        layout.in_patch_limit
+        / (max(1.0, width // patch_size) * max(1.0, height // patch_size))
+    )
+    s2 = patch_limit_pixels / width
+    s3 = patch_limit_pixels / height
+    scale = min(1.0, s1, s2, s3)
+    resized_w = min(max(1, int(width * scale)), patch_limit_pixels)
+    resized_h = min(max(1, int(height * scale)), patch_limit_pixels)
+
+    factor = layout.merge_kernel_size * patch_size
+    padded_w = _ceil_to_factor(resized_w, factor)
+    padded_h = _ceil_to_factor(resized_h, factor)
+    if layout.fixed_output_tokens is not None:
+        num_tokens = layout.fixed_output_tokens
+    else:
+        num_tokens = (padded_h // factor) * (padded_w // factor)
+    return padded_w, padded_h, int(num_tokens)
+
+
+def describe_kimi_image_layout(
+    part: dict[str, Any], layout: KimiK25ImageLayoutSpec
+) -> KimiImageLayoutDescriptor:
+    source, raw = _inline_image_source(part)
+    height, width = _image_dimensions(raw)
+    padded_w, padded_h, num_media_tokens = _kimi_resize_config(width, height, layout)
+    grid_thws = [[1, padded_h // layout.patch_size, padded_w // layout.patch_size]]
+    return KimiImageLayoutDescriptor(
+        mm_hash=hashlib.sha256(raw).hexdigest()[:32],
+        grid_thws=grid_thws,
+        num_media_tokens=num_media_tokens,
+        raw_image_data=source,
+    )
+
+
+def kimi_image_item_for_render(
+    part: dict[str, Any], layout: KimiK25ImageLayoutSpec
+) -> tuple[int, str, dict[str, Any]]:
+    desc = describe_kimi_image_layout(part, layout)
+    item = raw_mm_item(
+        family=KIMI_K25_FAMILY,
+        payload={"grid_thws": desc.grid_thws},
+        raw_image_data=desc.raw_image_data,
+        vllm_modality=KIMI_K25_VLLM_MODALITY,
+    )
+    return 1, desc.mm_hash, item
+
+
+def load_kimi_processor(tokenizer):
+    try:
+        from transformers import AutoProcessor
+    except ImportError as exc:
+        raise RuntimeError(
+            "Processed multimodal rendering requires transformers with "
+            "AutoProcessor support."
+        ) from exc
+
+    name = getattr(tokenizer, "name_or_path", None)
+    if not name:
+        raise RuntimeError(
+            "KimiK25Renderer needs a processor for multimodal_output='processed'. "
+            "Inject `renderer._processor` or load the tokenizer with a known "
+            "name_or_path."
+        )
+
+    from renderers.base import TRUSTED_REVISIONS
+
+    kwargs: dict[str, Any] = {"trust_remote_code": True}
+    revision = TRUSTED_REVISIONS.get(name)
+    if revision is not None:
+        kwargs["revision"] = revision
+    return AutoProcessor.from_pretrained(name, **kwargs)
+
+
+def kimi_processed_image_item_for_render(
+    part: dict[str, Any],
+    *,
+    processor: Any,
+    image_cache: dict[str, tuple[Any, int]],
+) -> tuple[int, str, dict[str, Any]]:
+    pil = _load_pil_image(part)
+    image_hash = _pil_image_hash(pil)
+    cached = image_cache.get(image_hash)
+    if cached is not None:
+        out, _num_patches = cached
+    else:
+        img_proc = processor.image_processor
+        media_item = {"type": "image", "image": pil}
+        out = img_proc.preprocess([media_item], return_tensors="np")
+        num_patches = int(img_proc.media_tokens_calculator(media_item))
+        if len(image_cache) >= _PROCESSED_IMAGE_CACHE_MAX:
+            image_cache.pop(next(iter(image_cache)))
+        image_cache[image_hash] = (out, num_patches)
+    item = {
+        "pixel_values": out["pixel_values"],
+        "grid_thws": out["grid_thws"],
+    }
+    return 1, image_hash, item
+
+
 # ---------------------------------------------------------------------------
 # Kimi K2.5 response parsing (mirrors K2 format, same token structure)
 # ---------------------------------------------------------------------------
@@ -594,11 +765,11 @@ class KimiK25Renderer:
         self,
         tokenizer: PreTrainedTokenizer,
         config: KimiK25RendererConfig | None = None,
-        *,
-        processor: Any = None,
     ):
         self._tokenizer = tokenizer
-        self._processor = processor
+        self._processor: Any = None
+        self._image_layout: KimiK25ImageLayoutSpec | None = None
+        self._image_cache: dict[str, tuple[Any, int]] = {}
         self.config = config or KimiK25RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
@@ -638,67 +809,12 @@ class KimiK25Renderer:
         # The stop token for generation
         self._endoftext: int | None = self._try_token_id("<|endoftext|>")
 
-        # Per-instance image-processor cache (FIFO-bounded). Same shape as
-        # ``Qwen3VLRenderer._image_cache`` — keyed by content hash, value is
-        # ``(processor_out, num_patches)``. ``num_patches`` is informational
-        # for Kimi (we emit a single placeholder regardless), but kept for
-        # consistency / debugging.
-        self._image_cache: dict[str, tuple[Any, int]] = {}
-
     @property
     def mm_token_type_id_map(self) -> dict[int, int]:
         """Token-id → modality marker. For Kimi K2.5 only ``<|media_pad|>``
         carries an image marker (1); the model expands per-patch attention
         internally from ``pixel_values``."""
         return {self._media_pad: 1}
-
-    def _get_processor(self):
-        if self._processor is not None:
-            return self._processor
-        from transformers import AutoProcessor
-
-        name = getattr(self._tokenizer, "name_or_path", None)
-        if not name:
-            raise RuntimeError(
-                "KimiK25Renderer needs a processor to render image content. "
-                "Pass `processor=AutoProcessor.from_pretrained(name, trust_remote_code=True, "
-                "revision=<pinned sha>)` to the constructor, or load the tokenizer with a "
-                "known name_or_path so the processor can be auto-loaded."
-            )
-        # Kimi's processor is custom Python in the model repo and requires
-        # trust_remote_code=True. Callers using ``create_renderer_pool`` go
-        # through ``load_tokenizer`` which already pins the revision; for
-        # auto-load here, we delegate to AutoProcessor with the same flag.
-        self._processor = AutoProcessor.from_pretrained(name, trust_remote_code=True)
-        return self._processor
-
-    def _process_image(self, part: dict[str, Any]):
-        """Resolve, process, and characterize a single image part for Kimi K2.5.
-
-        Returns ``(pil, processor_out, num_patches, image_hash)`` where
-        ``processor_out`` contains ``pixel_values`` and ``grid_thws``
-        (Kimi's keys; differ from Qwen-VL's ``image_grid_thw``). Single
-        ``<|media_pad|>`` per image in the token stream; the patch count
-        is informational only.
-        """
-        pil = _load_pil_image(part)
-        h = _image_hash(pil)
-        cached = self._image_cache.get(h)
-        if cached is not None:
-            out, num_patches = cached
-            return pil, out, num_patches, h
-        proc = self._get_processor()
-        img_proc = proc.image_processor
-        # Kimi's vision processor takes a media-dict shape, not raw PIL.
-        media_item = {"type": "image", "image": pil}
-        out = img_proc.preprocess([media_item], return_tensors="np")
-        # Patch count via the processor's own calculator (matches the
-        # model's per-patch attention count); kept for debugging.
-        num_patches = int(img_proc.media_tokens_calculator(media_item))
-        if len(self._image_cache) >= self.config.image_cache_max:
-            self._image_cache.pop(next(iter(self._image_cache)))
-        self._image_cache[h] = (out, num_patches)
-        return pil, out, num_patches, h
 
     # ------------------------------------------------------------------
     # Token helpers
@@ -722,6 +838,33 @@ class KimiK25Renderer:
         if not text:
             return []
         return self._tokenizer.encode(text, add_special_tokens=False)
+
+    def _get_processor(self):
+        if self._processor is None:
+            self._processor = load_kimi_processor(self._tokenizer)
+        return self._processor
+
+    def _raw_image_layout(self) -> KimiK25ImageLayoutSpec:
+        """The checkpoint's layout knobs, resolved once on first image render."""
+        if self._image_layout is None:
+            from renderers.base import TRUSTED_REVISIONS
+
+            name = layout_model_name(self._tokenizer, type(self).__name__)
+            self._image_layout = kimi_layout_from(
+                hub_image_processor_config(name, revision=TRUSTED_REVISIONS.get(name))
+            )
+        return self._image_layout
+
+    def _image_item_for_render(
+        self, part: dict[str, Any]
+    ) -> tuple[int, str, dict[str, Any]]:
+        if self.config.multimodal_output == "processed":
+            return kimi_processed_image_item_for_render(
+                part,
+                processor=self._get_processor(),
+                image_cache=self._image_cache,
+            )
+        return kimi_image_item_for_render(part, self._raw_image_layout())
 
     # ------------------------------------------------------------------
     # Core render
@@ -820,7 +963,7 @@ class KimiK25Renderer:
             ``<|media_content|>``, ``<|media_end|>``, the trailing
             ``\\n``) are template-injected scaffold.
             """
-            _, out, _num_patches, h = self._process_image(part)
+            _placeholder_len, h, mm_item = self._image_item_for_render(part)
             emit_special(
                 self._media_begin, msg_idx, is_sampled=is_sampled, is_content=False
             )
@@ -843,16 +986,7 @@ class KimiK25Renderer:
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=1)
             )
-            # ``grid_thws`` (Kimi) is the per-image equivalent of Qwen-VL's
-            # ``image_grid_thw``. Ship under Kimi's native key so the
-            # orchestrator's generic ``torch.cat``-based packer routes it
-            # directly into the model's forward kwargs.
-            mm_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "grid_thws": out["grid_thws"],
-                }
-            )
+            mm_items.setdefault("image", []).append(mm_item)
 
         # ── Tool declaration prefix (comes first) ──
         # K2.5/K2.6's tokenizer auto-computes ``tools_ts_str`` and threads
@@ -1114,7 +1248,7 @@ class KimiK25Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            _, out, _num_patches, h = self._process_image(part)
+            _placeholder_len, h, mm_item = self._image_item_for_render(part)
             emit_special(self._media_begin, msg_idx)
             emit_text("image", msg_idx)
             emit_special(self._media_content, msg_idx)
@@ -1128,12 +1262,7 @@ class KimiK25Renderer:
             new_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=1)
             )
-            new_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "grid_thws": out["grid_thws"],
-                }
-            )
+            new_items.setdefault("image", []).append(mm_item)
 
         # Bridge handles user/system/tool only (reject_assistant_in_extension
         # blocks assistants), so no hist/suffix split needed.
@@ -1183,54 +1312,16 @@ class KimiK25Renderer:
             emit_text("<think></think>", -1)
 
         # Merge prev mm_data (earlier-turn images) with the new turn's items.
-        # Copy the per-modality lists (not just the outer dict) so appending
-        # below never mutates the caller's previous_multi_modal_data.
-        merged_hashes: dict[str, list[str]] = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
-            if previous_multi_modal_data
-            else {}
-        )
-        merged_placeholders: dict[str, list[PlaceholderRange]] = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
-            if previous_multi_modal_data
-            else {}
-        )
-        merged_items: dict[str, list[dict[str, Any]]] = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
-            if previous_multi_modal_data
-            else {}
-        )
-        for modality, vals in new_hashes.items():
-            merged_hashes.setdefault(modality, []).extend(vals)
-        for modality, vals in new_placeholders.items():
-            merged_placeholders.setdefault(modality, []).extend(vals)
-        for modality, vals in new_items.items():
-            merged_items.setdefault(modality, []).extend(vals)
-
-        bridge_roles = [m.get("role") or "" for m in new_messages]
-        bridge_tool_names = extract_message_tool_names(new_messages)
-        if not (merged_hashes or merged_placeholders or merged_items):
-            return RenderedTokens(
-                token_ids=tokens,
-                message_indices=indices,
-                sampled_mask=sampled,
-                is_content=content_mask,
-                message_roles=bridge_roles,
-                message_tool_names=bridge_tool_names,
-            )
-
-        mm_data = MultiModalData(
-            mm_hashes=merged_hashes,
-            mm_placeholders=merged_placeholders,
-            mm_items=merged_items,
+        mm_data = merge_multi_modal_data(
+            previous_multi_modal_data, new_hashes, new_placeholders, new_items
         )
         return RenderedTokens(
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
             is_content=content_mask,
-            message_roles=bridge_roles,
-            message_tool_names=bridge_tool_names,
+            message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
             multi_modal_data=mm_data,
         )
 

@@ -101,13 +101,14 @@ def test_create_renderer_auto_resolves_via_model_map(monkeypatch):
 
     renderer = create_renderer(
         SimpleNamespace(name_or_path="fake/qwen35"),
-        AutoRendererConfig(thinking_retention="all"),
+        AutoRendererConfig(thinking_retention="all", multimodal_output="processed"),
     )
 
     assert isinstance(renderer.config, Qwen35RendererConfig)
     assert renderer.config.thinking_retention == "all"
+    assert renderer.config.multimodal_output == "processed"
     # Template-level kwargs stay at their per-renderer defaults — auto
-    # carries only the thinking_retention flag.
+    # carries only shared base fields.
     assert renderer.config.add_vision_id is False
 
 

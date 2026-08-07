@@ -49,10 +49,11 @@ class ThinkingPart(TypedDict):
 class ImagePart(TypedDict, total=False):
     """An image attached to a message.
 
-    Accepts several source shapes so callers can pass whatever they have
-    on hand — a pre-loaded PIL Image, a filesystem path, a URL, or the
-    OpenAI ``image_url`` content part verbatim. The renderer resolves
-    these to a PIL Image at render time.
+    Part shape may use ``image`` or OpenAI-style ``image_url``. For
+    ``multimodal_output="processed"``, the value must be a local source the
+    renderer can resolve without network I/O: a PIL Image, filesystem path,
+    ``file://`` URL, or ``data:image/...;base64,...`` URI. Raw mode accepts
+    only offloaded ``file://`` assets.
     """
 
     type: Literal["image", "image_url"]
@@ -206,12 +207,10 @@ class PlaceholderRange:
 class MultiModalData:
     """Multimodal sidecar produced alongside the token stream.
 
-    Renderer output is framework-agnostic: ``mm_items[modality][i]`` is a
-    plain ``dict`` mirroring the per-item output of a HuggingFace processor
-    (e.g. ``{"pixel_values": Tensor, "image_grid_thw": Tensor}`` for
-    Qwen3-VL images). Translation to engine-specific wire formats — vLLM's
-    ``MultiModalKwargsItem``, SGLang's payload, etc. — happens in the
-    inference glue layer (see ``renderers.client``).
+    ``mm_items[modality][i]`` follows the renderer's configured
+    ``multimodal_output``. The default ``"raw"`` mode emits JSON-safe image
+    descriptor envelopes for inference paths. ``"processed"`` emits
+    image-processor payloads such as ``pixel_values`` for SFT/training paths.
     """
 
     mm_hashes: dict[str, list[str]] = field(default_factory=dict)
@@ -220,6 +219,42 @@ class MultiModalData:
 
     def is_empty(self) -> bool:
         return not (self.mm_hashes or self.mm_placeholders or self.mm_items)
+
+
+def merge_multi_modal_data(
+    previous: "MultiModalData | None",
+    new_hashes: dict[str, list[str]],
+    new_placeholders: dict[str, list[PlaceholderRange]],
+    new_items: dict[str, list[dict[str, Any]]],
+) -> "MultiModalData | None":
+    """Concatenate a prior turn's sidecar with a bridge turn's new media.
+
+    Bridge callers pass the persisted previous step's sidecar as ``previous``;
+    inner lists are copied so that object is never mutated. Returns ``None``
+    when there is no media at all.
+    """
+    merged_hashes = (
+        {k: list(v) for k, v in previous.mm_hashes.items()} if previous else {}
+    )
+    merged_placeholders = (
+        {k: list(v) for k, v in previous.mm_placeholders.items()} if previous else {}
+    )
+    merged_items = (
+        {k: list(v) for k, v in previous.mm_items.items()} if previous else {}
+    )
+    for modality, hashes in new_hashes.items():
+        merged_hashes.setdefault(modality, []).extend(hashes)
+    for modality, placeholders in new_placeholders.items():
+        merged_placeholders.setdefault(modality, []).extend(placeholders)
+    for modality, items in new_items.items():
+        merged_items.setdefault(modality, []).extend(items)
+    if not (merged_hashes or merged_placeholders or merged_items):
+        return None
+    return MultiModalData(
+        mm_hashes=merged_hashes,
+        mm_placeholders=merged_placeholders,
+        mm_items=merged_items,
+    )
 
 
 @dataclass
@@ -769,8 +804,8 @@ class Renderer(Protocol):
         Text-only renderers return :class:`RenderedTokens` with
         ``multi_modal_data=None``. Multimodal renderers (see
         :class:`MultimodalRenderer`) populate ``multi_modal_data`` so
-        the caller can recover placeholder offsets + per-item processed
-        tensors for the new full prompt; they also accept a
+        the caller can recover placeholder offsets + per-item image
+        descriptors for the new full prompt; they also accept a
         ``previous_multi_modal_data`` kwarg via the
         :class:`MultimodalRenderer` Protocol override.
 
@@ -830,8 +865,8 @@ class MultimodalRenderer(Renderer, Protocol):
           the combined token sequence and silently falls back to
           hash-cache lookup (or errors)
         - returns :class:`RenderedTokens` (not ``list[int]``) so the
-          caller can recover the placeholder offsets + per-item
-          processed tensors for the new full prompt
+          caller can recover the placeholder offsets + per-item image
+          descriptors for the new full prompt
         """
         ...
 
@@ -1507,7 +1542,7 @@ def _resolve_auto_config(
     model_name = getattr(tokenizer, "name_or_path", "")
     renderer_name = MODEL_RENDERER_MAP.get(model_name)
 
-    preserve_carry = {}
+    preserve_carry: dict[str, Any] = {"multimodal_output": auto.multimodal_output}
     if auto.thinking_retention is not None:
         preserve_carry["thinking_retention"] = auto.thinking_retention
 
@@ -1558,7 +1593,7 @@ def _resolve_auto_config(
         "reasoning_parser=...) to enable structured output parsing.",
         model_name or "<unnamed tokenizer>",
     )
-    return DefaultRendererConfig()
+    return DefaultRendererConfig(multimodal_output=auto.multimodal_output)
 
 
 # ---------------------------------------------------------------------------

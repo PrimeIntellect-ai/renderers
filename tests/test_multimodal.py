@@ -27,7 +27,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 from renderers import (
     MULTIMODAL_MODELS,
     Qwen3VLRenderer,
@@ -53,7 +52,6 @@ pytest.importorskip("PIL", reason="Pillow required for multimodal tests")
 pytest.importorskip("torch", reason="torch required for multimodal tests")
 
 from PIL import Image  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Local-snapshot gating — skip when the HF cache doesn't have the model.
@@ -136,6 +134,14 @@ def _load_processor_and_renderer(model_name: str):
 def tiny_image():
     """A small synthetic RGB image — keeps per-image-processor cost low."""
     return Image.new("RGB", (224, 224), color=(128, 192, 255))
+
+
+@pytest.fixture
+def offloaded_tiny_image(tmp_path, tiny_image):
+    """Renderer-side image fixture: v1 renderers require offloaded file assets."""
+    path = tmp_path / "tiny.png"
+    tiny_image.save(path)
+    return path.as_uri()
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +471,9 @@ def _supports_tool_message_images(renderer) -> bool:
 @pytest.mark.parametrize(
     "mm_model_name,modality", _CASES, ids=[f"{m}|{mo}" for m, mo in _CASES]
 )
-def test_multimodal_byte_parity_vs_processor(mm_model_name, modality, tiny_image):
+def test_multimodal_byte_parity_vs_processor(
+    mm_model_name, modality, tiny_image, offloaded_tiny_image
+):
     """Token byte-parity with ``processor.apply_chat_template`` + ``processor(...)``.
 
     Locks in the property that lets the inference engine see byte-identical
@@ -478,9 +486,15 @@ def test_multimodal_byte_parity_vs_processor(mm_model_name, modality, tiny_image
     kit = _modality_kit(modality, mm_model_name)
     tokenizer, processor, renderer = _load_processor_and_renderer(mm_model_name)
 
-    for case in _build_cases(kit["make_part"], tiny_image):
-        messages, add_gp = case.values
-        if _skip_for_disabled_thinking_deviation(renderer, case.id):
+    renderer_cases = _build_cases(kit["make_part"], offloaded_tiny_image)
+    processor_cases = _build_cases(kit["make_part"], tiny_image)
+    for renderer_case, processor_case in zip(
+        renderer_cases, processor_cases, strict=True
+    ):
+        messages, add_gp = renderer_case.values
+        processor_messages, processor_add_gp = processor_case.values
+        assert add_gp == processor_add_gp
+        if _skip_for_disabled_thinking_deviation(renderer, renderer_case.id):
             continue
 
         # Ours.
@@ -489,10 +503,10 @@ def test_multimodal_byte_parity_vs_processor(mm_model_name, modality, tiny_image
         # Theirs: family-specific processor call. Qwen-VL is a two-step
         # (apply_chat_template + processor(images=, text=)); Kimi K2.5 is
         # a one-shot processor(messages=).
-        theirs = kit["processor_input_ids"](processor, messages, add_gp)
+        theirs = kit["processor_input_ids"](processor, processor_messages, add_gp)
 
         assert ours == theirs, (
-            f"{mm_model_name} / {modality} / case={case.id}: "
+            f"{mm_model_name} / {modality} / case={renderer_case.id}: "
             f"renderer diverges from processor.\n"
             f"  ours[:80]={ours[:80]}\n  theirs[:80]={theirs[:80]}\n"
             f"  len(ours)={len(ours)} len(theirs)={len(theirs)}"
@@ -502,7 +516,9 @@ def test_multimodal_byte_parity_vs_processor(mm_model_name, modality, tiny_image
 @pytest.mark.parametrize(
     "mm_model_name,modality", _CASES, ids=[f"{m}|{mo}" for m, mo in _CASES]
 )
-def test_multimodal_placeholders_match_pad_runs(mm_model_name, modality, tiny_image):
+def test_multimodal_placeholders_match_pad_runs(
+    mm_model_name, modality, offloaded_tiny_image
+):
     """``mm_placeholders`` exactly cover the runs of the modality's pad token."""
     if not _hf_snapshot_cached(mm_model_name):
         pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
@@ -511,7 +527,7 @@ def test_multimodal_placeholders_match_pad_runs(mm_model_name, modality, tiny_im
     tokenizer, _, renderer = _load_processor_and_renderer(mm_model_name)
     pad_id = tokenizer.convert_tokens_to_ids(kit["placeholder_token"])
 
-    for case in _build_cases(kit["make_part"], tiny_image):
+    for case in _build_cases(kit["make_part"], offloaded_tiny_image):
         messages, add_gp = case.values
         rendered = renderer.render(messages, add_generation_prompt=add_gp)
 
@@ -545,7 +561,7 @@ def test_multimodal_placeholders_match_pad_runs(mm_model_name, modality, tiny_im
     "mm_model_name,modality", _CASES, ids=[f"{m}|{mo}" for m, mo in _CASES]
 )
 def test_multimodal_bridge_extends_and_carries_mm_data(
-    mm_model_name, modality, tiny_image
+    mm_model_name, modality, offloaded_tiny_image
 ):
     """Bridge-to-next-turn invariants for the multimodal case.
 
@@ -583,7 +599,7 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
         {
             "role": "user",
             "content": [
-                kit["make_part"](tiny_image),
+                kit["make_part"](offloaded_tiny_image),
                 {"type": "text", "text": "Turn one."},
             ],
         }
@@ -592,7 +608,7 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
         {
             "role": "user",
             "content": [
-                kit["make_part"](tiny_image),
+                kit["make_part"](offloaded_tiny_image),
                 {"type": "text", "text": "Turn two."},
             ],
         }
@@ -700,7 +716,9 @@ def test_modality_registry_models_route_to_renderer():
 @pytest.mark.parametrize(
     "mm_model_name,modality", _CASES, ids=[f"{m}|{mo}" for m, mo in _CASES]
 )
-def test_tool_response_image_byte_parity(mm_model_name, modality, tiny_image):
+def test_tool_response_image_byte_parity(
+    mm_model_name, modality, tiny_image, offloaded_tiny_image
+):
     """Tool-message image parity vs ``processor.apply_chat_template`` + ``processor(...)``.
 
     Browser-agent SFT traces carry post-action screenshots as ``tool``
@@ -723,14 +741,20 @@ def test_tool_response_image_byte_parity(mm_model_name, modality, tiny_image):
             f"{type(renderer).__name__} does not yet emit images inside tool responses"
         )
 
-    for case in _build_tool_image_cases(kit["make_part"], tiny_image):
-        messages, add_gp = case.values
-        if _skip_for_disabled_thinking_deviation(renderer, case.id):
+    renderer_cases = _build_tool_image_cases(kit["make_part"], offloaded_tiny_image)
+    processor_cases = _build_tool_image_cases(kit["make_part"], tiny_image)
+    for renderer_case, processor_case in zip(
+        renderer_cases, processor_cases, strict=True
+    ):
+        messages, add_gp = renderer_case.values
+        processor_messages, processor_add_gp = processor_case.values
+        assert add_gp == processor_add_gp
+        if _skip_for_disabled_thinking_deviation(renderer, renderer_case.id):
             continue
         ours = renderer.render_ids(messages, add_generation_prompt=add_gp)
-        theirs = kit["processor_input_ids"](processor, messages, add_gp)
+        theirs = kit["processor_input_ids"](processor, processor_messages, add_gp)
         assert ours == theirs, (
-            f"{mm_model_name} / tool / case={case.id}: "
+            f"{mm_model_name} / tool / case={renderer_case.id}: "
             f"renderer diverges from processor.\n"
             f"  len(ours)={len(ours)} len(theirs)={len(theirs)}\n"
             f"  ours[:60]={ours[:60]}\n  theirs[:60]={theirs[:60]}"
@@ -787,7 +811,7 @@ _ADD_VISION_ID_CASES = [
 )
 @pytest.mark.parametrize("add_vision_id", [True, False])
 def test_add_vision_id_parity_vs_processor(
-    mm_model_name, modality, add_vision_id, tiny_image
+    mm_model_name, modality, add_vision_id, tiny_image, offloaded_tiny_image
 ):
     """Parity for ``add_vision_id`` across image-bearing shapes.
 
@@ -812,17 +836,23 @@ def test_add_vision_id_parity_vs_processor(
     if hasattr(renderer, "_processor") and renderer._processor is None:
         renderer._processor = processor
 
-    for case in _build_cases(kit["make_part"], tiny_image):
-        messages, add_gp = case.values
-        if _skip_for_disabled_thinking_deviation(renderer, case.id):
+    renderer_cases = _build_cases(kit["make_part"], offloaded_tiny_image)
+    processor_cases = _build_cases(kit["make_part"], tiny_image)
+    for renderer_case, processor_case in zip(
+        renderer_cases, processor_cases, strict=True
+    ):
+        messages, add_gp = renderer_case.values
+        processor_messages, processor_add_gp = processor_case.values
+        assert add_gp == processor_add_gp
+        if _skip_for_disabled_thinking_deviation(renderer, renderer_case.id):
             continue
         ours = renderer.render_ids(messages, add_generation_prompt=add_gp)
         theirs = _qwen_vl_processor_input_ids_with_kwargs(
-            processor, messages, add_gp, add_vision_id=add_vision_id
+            processor, processor_messages, add_gp, add_vision_id=add_vision_id
         )
         assert ours == theirs, (
             f"{mm_model_name} / add_vision_id={add_vision_id} / "
-            f"case={case.id}: renderer diverges from processor.\n"
+            f"case={renderer_case.id}: renderer diverges from processor.\n"
             f"  ours[:80]={ours[:80]}\n  theirs[:80]={theirs[:80]}\n"
             f"  len(ours)={len(ours)} len(theirs)={len(theirs)}"
         )
@@ -834,7 +864,7 @@ def test_add_vision_id_parity_vs_processor(
     ids=[f"{m}|{mo}" for m, mo in _ADD_VISION_ID_CASES],
 )
 def test_bridge_refuses_when_add_vision_id_loses_prior_count(
-    mm_model_name, modality, tiny_image
+    mm_model_name, modality, offloaded_tiny_image
 ):
     """When ``add_vision_id=True``, the bridge needs the prior turn's
     image / video count to keep the ``Picture N:`` numbering correct.
@@ -871,7 +901,7 @@ def test_bridge_refuses_when_add_vision_id_loses_prior_count(
         {
             "role": "user",
             "content": [
-                kit["make_part"](tiny_image),
+                kit["make_part"](offloaded_tiny_image),
                 {"type": "text", "text": "Turn one."},
             ],
         }
@@ -880,7 +910,7 @@ def test_bridge_refuses_when_add_vision_id_loses_prior_count(
         {
             "role": "user",
             "content": [
-                kit["make_part"](tiny_image),
+                kit["make_part"](offloaded_tiny_image),
                 {"type": "text", "text": "Turn two."},
             ],
         }
@@ -937,31 +967,90 @@ def test_is_image_part_treats_type_field_as_authoritative():
     ``text: None`` added to every image part). The classifier must treat
     the ``type`` field as authoritative when present — falling back to
     a key-presence check on ``image_url`` would misclassify the text
-    part and the renderer would later raise on ``_load_pil_image(None)``.
+    part and the renderer would later try to resolve ``None`` as an image.
     """
-    from renderers.qwen3_vl import _is_image_part, _is_video_part
+    from renderers.mm_image import is_image_part, is_video_part
 
     # Typed parts classify by their ``type``.
-    assert _is_image_part(
+    assert is_image_part(
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,XXX"}}
     )
-    assert _is_image_part({"type": "image", "image": object()})
-    assert _is_video_part(
+    assert is_image_part({"type": "image", "image": object()})
+    assert is_video_part(
         {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,XXX"}}
     )
 
     # Schema-unified text parts — typed as text, with a None zombie key
     # for the sibling modality — must NOT classify as image / video.
     schema_unified_text = {"type": "text", "text": "hello", "image_url": None}
-    assert not _is_image_part(schema_unified_text)
-    assert not _is_video_part(schema_unified_text)
+    assert not is_image_part(schema_unified_text)
+    assert not is_video_part(schema_unified_text)
     schema_unified_text_with_video = {"type": "text", "text": "hi", "video_url": None}
-    assert not _is_video_part(schema_unified_text_with_video)
+    assert not is_video_part(schema_unified_text_with_video)
 
     # Untyped fallback only fires when ``type`` is absent, and requires
     # a truthy value (mere key presence isn't enough).
-    assert _is_image_part({"image_url": {"url": "data:..."}})
-    assert _is_image_part({"image": object()})
-    assert not _is_image_part({"image_url": None})
-    assert not _is_image_part({"image": None})
-    assert not _is_video_part({"video_url": None})
+    assert is_image_part({"image_url": {"url": "data:..."}})
+    assert is_image_part({"image": object()})
+    assert not is_image_part({"image_url": None})
+    assert not is_image_part({"image": None})
+    assert not is_video_part({"video_url": None})
+
+
+@pytest.mark.parametrize(
+    "mm_model_name", ["Qwen/Qwen3-VL-4B-Instruct", "moonshotai/Kimi-K2.5"]
+)
+def test_raw_layout_math_matches_image_processor(mm_model_name, tmp_path):
+    """Raw-mode layout predictions (grids and token counts, computed without
+    an image processor) must match what the real image processor produces.
+
+    Dimensions target the rounding boundaries where ported resize math tends
+    to diverge: below/at the pixel floor, odd sizes, and non-multiples of the
+    patch size.
+    """
+    if not _hf_snapshot_cached(mm_model_name):
+        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+
+    from renderers.base import TRUSTED_REVISIONS
+    from renderers.kimi_k25 import describe_kimi_image_layout, kimi_layout_from
+    from renderers.mm_store import hub_image_processor_config
+    from renderers.qwen3_vl import describe_qwen_image_layout, qwen_layout_from
+
+    _, processor, _ = _load_processor_and_renderer(mm_model_name)
+    img_proc = processor.image_processor
+    family = _detect_family(mm_model_name)
+    config = hub_image_processor_config(
+        mm_model_name, revision=TRUSTED_REVISIONS.get(mm_model_name)
+    )
+    layout = (
+        kimi_layout_from(config) if family == "kimi_k25" else qwen_layout_from(config)
+    )
+
+    for width, height in [(17, 31), (255, 257), (300, 200), (523, 480), (1023, 769)]:
+        pil = Image.new("RGB", (width, height), color=(10, 20, 30))
+        path = tmp_path / f"img-{width}x{height}.png"
+        pil.save(path)
+        part = {"type": "image", "image": path.as_uri()}
+        label = f"{mm_model_name}: {width}x{height}"
+
+        if family == "kimi_k25":
+            desc = describe_kimi_image_layout(part, layout)
+            media_item = {"type": "image", "image": pil}
+            out = img_proc.preprocess([media_item], return_tensors="np")
+            assert desc.grid_thws == out["grid_thws"].reshape(-1, 3).tolist(), label
+            expected_tokens = int(img_proc.media_tokens_calculator(media_item))
+            assert desc.num_media_tokens == expected_tokens, label
+        else:
+            desc = describe_qwen_image_layout(part, layout)
+            out = img_proc(images=[pil], return_tensors="np")
+            assert desc.image_grid_thw == out["image_grid_thw"].tolist(), label
+            grid = out["image_grid_thw"][0]
+            merge = img_proc.merge_size
+            expected_tokens = int(grid[0] * grid[1] * grid[2]) // (merge * merge)
+            assert desc.num_image_tokens == expected_tokens, label
+            # HF's own metadata-only oracle (the API vLLM uses to size
+            # placeholders without pixels) must agree with our grid math.
+            t, h, w = desc.image_grid_thw[0]
+            assert t * h * w == img_proc.get_number_of_image_patches(
+                height, width, images_kwargs={}
+            ), label

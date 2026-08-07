@@ -15,9 +15,10 @@ Multimodal: the Qwen3.5 family is itself a VLM (HF tag ``image-text-to-text``;
 processor class ``Qwen3VLProcessor``). When a user/tool message carries an
 ``ImagePart``, the renderer emits the same ``<|vision_start|>``+N×``<|image_pad|>``
 +``<|vision_end|>`` expansion as the HF chat template (``N =
-image_grid_thw.prod() // merge_size**2``) and ships processed pixel_values via
-``RenderedTokens.multi_modal_data``. Text-only inputs take the original fast
-path and remain byte-identical to ``apply_chat_template``.
+image_grid_thw.prod() // merge_size**2``) using the renderer's baked image
+layout spec. By default, vLLM receives run image refs for images it must
+process; ``multimodal_output="processed"`` emits image-processor payloads for
+SFT/training callers.
 """
 
 from __future__ import annotations
@@ -36,18 +37,22 @@ from renderers.base import (
     ToolSpec,
     attribute_text_segments,
     extract_message_tool_names,
+    merge_multi_modal_data,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import Qwen35RendererConfig
+from renderers.mm_image import is_image_part, is_video_part, layout_model_name
+from renderers.mm_store import hub_image_processor_config
 from renderers.parsing import parse_qwen35
 from renderers.qwen3_vl import (
-    _image_hash,
-    _is_image_part,
-    _is_video_part,
-    _load_pil_image,
+    QwenVLImageLayoutSpec,
+    load_qwen_processor,
+    qwen_image_item_for_render,
+    qwen_layout_from,
+    qwen_processed_image_item_for_render,
 )
 
 # ---------------------------------------------------------------------------
@@ -125,11 +130,10 @@ class Qwen35Renderer:
         self,
         tokenizer: PreTrainedTokenizer,
         config: Qwen35RendererConfig | None = None,
-        *,
-        processor: Any = None,
     ):
         self._tokenizer = tokenizer
-        self._processor = processor
+        self._processor: Any = None
+        self._image_layout: QwenVLImageLayoutSpec | None = None
         cfg = config or type(self)._config_cls()
         # ``enable_thinking=None`` defers to the model's known default (see
         # ``_ENABLE_THINKING_DEFAULTS``). Materialise here so downstream reads
@@ -166,11 +170,6 @@ class Qwen35Renderer:
         self._image_pad = self._token_id("<|image_pad|>")
         self._video_pad = self._token_id("<|video_pad|>")
 
-        # Per-instance image-processor cache; see Qwen3VLRenderer for the
-        # rationale (FIFO-bounded; same image seen across rollouts /
-        # bridge re-renders).
-        self._image_cache: dict[str, tuple[Any, int]] = {}
-
     @property
     def mm_token_type_id_map(self) -> dict[int, int]:
         """Token-id → modality marker (1 = image, 2 = video) used by the
@@ -179,53 +178,13 @@ class Qwen35Renderer:
         """
         return {self._image_pad: 1, self._video_pad: 2}
 
-    def _get_processor(self):
-        if self._processor is not None:
-            return self._processor
-        from transformers import AutoProcessor
-
-        name = getattr(self._tokenizer, "name_or_path", None)
-        if not name:
-            raise RuntimeError(
-                "Qwen35Renderer needs a processor to render image / video parts. "
-                "Pass `processor=AutoProcessor.from_pretrained(...)` to the "
-                "constructor, or load the tokenizer with a known name_or_path "
-                "so the processor can be auto-loaded."
-            )
-        self._processor = AutoProcessor.from_pretrained(name)
-        return self._processor
-
-    def _process_image(self, part: dict[str, Any]):
-        """Resolve, process, and characterize a single image part.
-
-        Returns ``(pil, processor_out, num_image_tokens, image_hash)``.
-        Mirrors ``Qwen3VLRenderer._process_image``: hashes the loaded PIL,
-        consults ``self._image_cache``, runs the HF image processor on
-        miss, FIFO-evicts on overflow.
-        """
-        pil = _load_pil_image(part)
-        h = _image_hash(pil)
-        cached = self._image_cache.get(h)
-        if cached is not None:
-            out, num_image_tokens = cached
-            return pil, out, num_image_tokens, h
-        proc = self._get_processor()
-        out = proc.image_processor(images=[pil], return_tensors="np")
-        grid_thw = out["image_grid_thw"][0]
-        merge_size = proc.image_processor.merge_size
-        num_image_tokens = int(grid_thw.prod()) // (merge_size * merge_size)
-        if len(self._image_cache) >= self.config.image_cache_max:
-            self._image_cache.pop(next(iter(self._image_cache)))
-        self._image_cache[h] = (out, num_image_tokens)
-        return pil, out, num_image_tokens, h
-
     @staticmethod
     def _content_has_media(content: Any) -> bool:
         """True when ``content`` is a structured list containing image / video parts."""
         if not isinstance(content, list):
             return False
         return any(
-            isinstance(item, dict) and (_is_image_part(item) or _is_video_part(item))
+            isinstance(item, dict) and (is_image_part(item) or is_video_part(item))
             for item in content
         )
 
@@ -240,6 +199,28 @@ class Qwen35Renderer:
         if not text:
             return []
         return self._tokenizer.encode(text, add_special_tokens=False)
+
+    def _get_processor(self):
+        if self._processor is None:
+            self._processor = load_qwen_processor(self._tokenizer, type(self).__name__)
+        return self._processor
+
+    def _raw_image_layout(self) -> QwenVLImageLayoutSpec:
+        """The checkpoint's layout knobs, resolved once on first image render."""
+        if self._image_layout is None:
+            name = layout_model_name(self._tokenizer, type(self).__name__)
+            self._image_layout = qwen_layout_from(hub_image_processor_config(name))
+        return self._image_layout
+
+    def _image_item_for_render(
+        self, part: dict[str, Any]
+    ) -> tuple[int, str, dict[str, Any]]:
+        if self.config.multimodal_output == "processed":
+            return qwen_processed_image_item_for_render(
+                part,
+                processor=self._get_processor(),
+            )
+        return qwen_image_item_for_render(part, self._raw_image_layout())
 
     # ------------------------------------------------------------------
     # Content rendering (mirrors the render_content Jinja macro)
@@ -266,7 +247,7 @@ class Qwen35Renderer:
                 if isinstance(item, str):
                     parts.append(item)
                 elif isinstance(item, dict):
-                    if _is_image_part(item) or _is_video_part(item):
+                    if is_image_part(item) or is_video_part(item):
                         continue
                     if "text" in item:
                         parts.append(item["text"])
@@ -386,7 +367,7 @@ class Qwen35Renderer:
             # image data, so they ARE body content (is_content=True);
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # specials are template scaffold.
-            _, out, n, h = self._process_image(part)
+            n, h, mm_item = self._image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(
@@ -408,12 +389,7 @@ class Qwen35Renderer:
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
             )
-            mm_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            mm_items.setdefault("image", []).append(mm_item)
 
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             """Emit a user message whose content list contains image parts.
@@ -446,10 +422,10 @@ class Qwen35Renderer:
                     if item:
                         buf_segments.append((item, True))
                 elif isinstance(item, dict):
-                    if _is_image_part(item):
+                    if is_image_part(item):
                         flush_buf()
                         emit_image(item, msg_idx)
-                    elif _is_video_part(item):
+                    elif is_video_part(item):
                         raise NotImplementedError(
                             "Video parts are not yet supported by Qwen35Renderer."
                         )
@@ -737,7 +713,7 @@ class Qwen35Renderer:
                 content_mask.append(is_content)
 
         def emit_image(part: dict[str, Any], msg_idx: int = -1) -> None:
-            _, out, n, h = self._process_image(part)
+            n, h, mm_item = self._image_item_for_render(part)
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(f"Picture {vision_counts['image']}: ", msg_idx)
@@ -750,12 +726,7 @@ class Qwen35Renderer:
             new_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=n)
             )
-            new_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            new_items.setdefault("image", []).append(mm_item)
 
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             emit_special(self._im_start, msg_idx)
@@ -771,10 +742,10 @@ class Qwen35Renderer:
                     if item:
                         buf_segments.append((item, True))
                 elif isinstance(item, dict):
-                    if _is_image_part(item):
+                    if is_image_part(item):
                         flush_buf()
                         emit_image(item, msg_idx)
-                    elif _is_video_part(item):
+                    elif is_video_part(item):
                         raise NotImplementedError(
                             "Video parts are not yet supported by Qwen35Renderer."
                         )
@@ -842,54 +813,16 @@ class Qwen35Renderer:
             emit_text("\n\n", -1)
 
         # Merge prev mm_data (images from earlier turns) with the new turn's.
-        # Copy the per-modality lists (not just the outer dict) so appending
-        # below never mutates the caller's previous_multi_modal_data.
-        merged_hashes: dict[str, list[str]] = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
-            if previous_multi_modal_data
-            else {}
-        )
-        merged_placeholders: dict[str, list[PlaceholderRange]] = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
-            if previous_multi_modal_data
-            else {}
-        )
-        merged_items: dict[str, list[dict[str, Any]]] = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
-            if previous_multi_modal_data
-            else {}
-        )
-        for modality, vals in new_hashes.items():
-            merged_hashes.setdefault(modality, []).extend(vals)
-        for modality, vals in new_placeholders.items():
-            merged_placeholders.setdefault(modality, []).extend(vals)
-        for modality, vals in new_items.items():
-            merged_items.setdefault(modality, []).extend(vals)
-
-        bridge_roles = [m.get("role") or "" for m in new_messages]
-        bridge_tool_names = extract_message_tool_names(new_messages)
-        if not (merged_hashes or merged_placeholders or merged_items):
-            return RenderedTokens(
-                token_ids=tokens,
-                message_indices=indices,
-                sampled_mask=sampled,
-                is_content=content_mask,
-                message_roles=bridge_roles,
-                message_tool_names=bridge_tool_names,
-            )
-
-        mm_data = MultiModalData(
-            mm_hashes=merged_hashes,
-            mm_placeholders=merged_placeholders,
-            mm_items=merged_items,
+        mm_data = merge_multi_modal_data(
+            previous_multi_modal_data, new_hashes, new_placeholders, new_items
         )
         return RenderedTokens(
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
             is_content=content_mask,
-            message_roles=bridge_roles,
-            message_tool_names=bridge_tool_names,
+            message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
             multi_modal_data=mm_data,
         )
 
@@ -1114,10 +1047,10 @@ class Qwen35Renderer:
                     if item:
                         buf_segments.append((item, True))
                 elif isinstance(item, dict):
-                    if _is_image_part(item):
+                    if is_image_part(item):
                         flush_buf()
                         emit_image(item, msg_idx)
-                    elif _is_video_part(item):
+                    elif is_video_part(item):
                         raise NotImplementedError(
                             "Video parts are not yet supported by Qwen35Renderer."
                         )

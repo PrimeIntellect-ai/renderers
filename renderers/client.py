@@ -16,6 +16,7 @@ import json
 import logging
 import math
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any, cast
 
 import httpx
@@ -240,11 +241,12 @@ async def generate(
     attribution (``is_content`` / ``sampled_mask`` / ``message_indices`` /
     ``message_roles``) into the result without re-rendering.
 
-    For multimodal renderers (e.g. ``Qwen3VLRenderer``), the call goes
+    For multimodal renderers, the call goes
     through ``renderer.render(...)`` to recover the ``multi_modal_data``
     sidecar, then serializes it to vLLM's ``features`` schema (mm_hashes,
-    mm_placeholders, kwargs_data) before POSTing. The serializer imports
-    ``vllm.*`` lazily so text-only consumers never pay for the import.
+    mm_placeholders, kwargs_data) before POSTing. Raw image ``kwargs_data``
+    slots always carry a descriptor ref — every image (current and prior
+    turns) is sent as a pointer that the inference endpoint materializes.
 
     ``max_prompt_len`` controls the pre-flight overflow check. When the
     rendered prompt is strictly longer than the cap, the request is never
@@ -281,12 +283,14 @@ async def generate(
     def _prepare():
         if prompt_ids is not None:
             # Caller-supplied prompt; if they also gave us pre-computed
-            # attribution (e.g. the bridge path in verifiers), thread it
-            # through unchanged.
+            # attribution (e.g. the bridge path in verifiers), thread it through.
+            prompt_mm_data = multi_modal_data
+            if prompt_mm_data is None and prompt_attribution is not None:
+                prompt_mm_data = prompt_attribution.multi_modal_data
             return (
                 list(prompt_ids),
                 renderer.get_stop_token_ids(),
-                multi_modal_data,
+                prompt_mm_data,
                 prompt_attribution,
             )
         rendered = renderer.render(messages, tools=tools, add_generation_prompt=True)
@@ -318,13 +322,15 @@ async def generate(
         "token_ids": prompt_ids,
         "sampling_params": sp,
     }
-    features = (
-        _build_mm_features(renderer, mm_data)
-        if mm_data and not mm_data.is_empty()
-        else None
-    )
-    if features is not None:
-        body["features"] = features
+
+    # Every image slot carries its raw ref (the pointer) — prior-turn images
+    # ride forward unchanged, and the inference endpoint materializes them.
+    if mm_data is not None and not mm_data.is_empty():
+        body["features"] = await _maybe_offload(
+            renderer, lambda: _build_vllm_mm_features(mm_data)
+        )
+        if prompt_attr is not None and prompt_attr.multi_modal_data is not mm_data:
+            prompt_attr = replace(prompt_attr, multi_modal_data=mm_data)
     if cache_salt is not None:
         body["cache_salt"] = cache_salt
     if priority is not None:
@@ -403,80 +409,19 @@ async def generate(
     }
 
 
-def _build_mm_features(
-    renderer: Renderer | RendererPool,
-    mm_data: MultiModalData,
-) -> dict[str, Any] | None:
+def _build_vllm_mm_features(mm_data: MultiModalData) -> dict[str, Any]:
     """Serialize ``MultiModalData`` to vLLM's ``/inference/v1/generate`` features payload.
 
-    vLLM's ``MultiModalFeatures`` carries three things: hashes (for cache
-    lookup), placeholder positions (so the engine knows where in the
-    token stream each item lives), and per-item ``MultiModalKwargsItem``
-    base64-encoded. The encoding requires vLLM-side type info — what
-    fields belong to each modality, how they batch — and is currently
-    model-family specific. For now we dispatch on the renderer class;
-    extend the dispatch table as more multimodal renderers land.
-
-    NOTE — future engine pluggability: this encoder is vLLM-specific
-    (uses ``vllm.multimodal.inputs.MultiModalKwargsItems``,
-    ``vllm.entrypoints.scale_out.token_in_token_out.mm_serde.encode_mm_kwargs_item``, and
-    ``_create_qwen2vl_field_factory``). When a second inference engine
-    arrives (SGLang, MAX, ...) the renderer client should be parameterized
-    on engine: either (a) move the encoder onto the renderer as
-    ``encode_mm_for_<engine>(mm_data)`` methods, or (b) accept an
-    ``Encoder`` strategy at the ``generate(...)`` call site. The data type
-    (``MultiModalData``) is already framework-agnostic and does not need
-    to change. Don't pre-build the abstraction with one engine in tree.
+    vLLM's ``MultiModalFeatures`` carries three things: hashes, placeholder
+    positions (so the engine knows where in the token stream each item lives),
+    and one raw ref per item. Raw multimodal descriptors use the common envelope
+    emitted by renderers; family-specific geometry stays inside the descriptor
+    payload and is interpreted downstream by prime-rl/vLLM adapters.
     """
-    from renderers.qwen3_vl import Qwen3VLRenderer
-    from renderers.qwen35 import Qwen35Renderer
-
-    # Type dispatch only needs the renderer class. Pools expose
-    # ``renderer_cls`` as a snapshot attribute, so we don't have to check
-    # out a slot just to read ``type(r)``.
-    renderer_cls = (
-        renderer.renderer_cls if isinstance(renderer, RendererPool) else type(renderer)
+    from renderers.mm_store import (
+        RAW_MM_ITEM_KIND,
+        raw_mm_ref,
     )
-
-    # Qwen3-VL and Qwen3.5 both ship ``pixel_values`` + ``image_grid_thw``
-    # via the shared Qwen2-VL field factory. ``spatial_merge_size=2`` is
-    # the family default and matches every Qwen-VL processor in tree.
-    if issubclass(renderer_cls, (Qwen3VLRenderer, Qwen35Renderer)):
-        return _build_qwen_vl_features(mm_data, spatial_merge_size=2)
-
-    raise NotImplementedError(
-        f"Multimodal serialization not implemented for {renderer_cls.__name__}. "
-        "Add a dispatch branch in renderers.client._build_mm_features."
-    )
-
-
-def _build_qwen_vl_features(
-    mm_data: MultiModalData, *, spatial_merge_size: int
-) -> dict[str, Any]:
-    """vLLM features payload for the Qwen-VL family (Qwen2-VL / Qwen3-VL).
-
-    Stacks per-image processor outputs back into a batched ``BatchFeature``,
-    runs the Qwen2-VL field factory (shared across the family), wraps as
-    ``MultiModalKwargsItems``, base64-encodes each item, and assembles a
-    JSON-serializable dict matching vLLM's ``MultiModalFeatures`` schema.
-
-    Returns ``None`` semantics live one level up — this helper assumes
-    the caller already verified ``mm_data`` is non-empty.
-    """
-    try:
-        import torch
-        from transformers.feature_extraction_utils import BatchFeature
-        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
-            encode_mm_kwargs_item,
-        )
-        from vllm.model_executor.models.qwen2_vl import _create_qwen2vl_field_factory
-        from vllm.multimodal.inputs import MultiModalKwargsItems
-    except ImportError as exc:
-        raise RuntimeError(
-            "Multimodal generate via /inference/v1/generate requires `vllm` "
-            "and `torch` to encode the features payload. Install vLLM in this "
-            "environment, or pre-build features upstream."
-        ) from exc
 
     out: dict[str, Any] = {
         "mm_hashes": {},
@@ -484,34 +429,51 @@ def _build_qwen_vl_features(
         "kwargs_data": {},
     }
 
-    image_items = mm_data.mm_items.get("image") or []
-    if image_items:
-        # mm_items now ship numpy arrays (the renderer is torch-free);
-        # convert at this vLLM-glue boundary where torch is already a
-        # hard dependency.
-        pixel_values = torch.cat(
-            [torch.as_tensor(it["pixel_values"]) for it in image_items], dim=0
-        )
-        image_grid_thw = torch.cat(
-            [torch.as_tensor(it["image_grid_thw"]) for it in image_items], dim=0
-        )
-        hf_inputs = BatchFeature(
-            data={"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}
-        )
-        config = _create_qwen2vl_field_factory(spatial_merge_size)(hf_inputs)
-        kwargs_items = MultiModalKwargsItems.from_hf_inputs(hf_inputs, config)
-        encoded = [encode_mm_kwargs_item(it) for it in kwargs_items["image"]]
-        out["kwargs_data"]["image"] = encoded
-        out["mm_hashes"]["image"] = list(mm_data.mm_hashes.get("image") or [])
-        out["mm_placeholders"]["image"] = [
-            {"offset": p.offset, "length": p.length}
-            for p in mm_data.mm_placeholders.get("image") or []
-        ]
+    for source_modality, items in mm_data.mm_items.items():
+        if not items:
+            continue
+        mm_hashes = list(mm_data.mm_hashes.get(source_modality) or [])
+        placeholders = list(mm_data.mm_placeholders.get(source_modality) or [])
+        if len(mm_hashes) != len(items) or len(placeholders) != len(items):
+            raise ValueError(
+                "Multimodal sidecar length mismatch: "
+                f"modality={source_modality} items={len(items)} "
+                f"hashes={len(mm_hashes)} placeholders={len(placeholders)}"
+            )
 
-    # If kwargs_data is empty across all modalities, drop the key so vLLM
-    # falls back to the hash-only (cache-hit) path. Otherwise hand it the
-    # full payload.
-    if not any(out["kwargs_data"].values()):
-        out["kwargs_data"] = None
+        for idx, item in enumerate(items):
+            if item.get("kind") != RAW_MM_ITEM_KIND:
+                raise NotImplementedError(
+                    "renderers.client.generate() requires raw multimodal "
+                    "descriptor envelopes (multimodal_output='raw'); "
+                    f"got item keys {sorted(item)} for modality {source_modality!r}."
+                )
+            feature_modality = item.get("vllm_modality") or source_modality
+            if not isinstance(feature_modality, str) or not feature_modality:
+                raise ValueError("raw multimodal item has invalid vllm_modality")
+
+            raw_image_uri = item.get("raw_image_uri")
+            family = item.get("family")
+            payload = item.get("payload")
+            if not isinstance(raw_image_uri, str) or not raw_image_uri:
+                raise ValueError("raw multimodal item is missing raw_image_uri")
+            if not isinstance(family, str) or not family:
+                raise ValueError("raw multimodal item is missing family")
+            if not isinstance(payload, dict):
+                raise ValueError("raw multimodal item payload must be a dict")
+
+            out["mm_hashes"].setdefault(feature_modality, []).append(mm_hashes[idx])
+            out["mm_placeholders"].setdefault(feature_modality, []).append(
+                {"offset": placeholders[idx].offset, "length": placeholders[idx].length}
+            )
+            out["kwargs_data"].setdefault(feature_modality, []).append(
+                raw_mm_ref(
+                    family=family,
+                    modality=feature_modality,
+                    mm_hash=mm_hashes[idx],
+                    raw_image_uri=raw_image_uri,
+                    payload=payload,
+                )
+            )
 
     return out

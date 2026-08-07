@@ -52,6 +52,9 @@ def _reject_thinking_retention_conflict(
 ThinkingRetention = Literal["tool_cycle", "all"]
 """User-facing historical thinking/analysis retention override."""
 
+MultimodalOutput = Literal["raw", "processed"]
+"""Renderer multimodal sidecar format."""
+
 ResolvedThinkingRetention = Literal["template", "tool_cycle", "all"]
 """Internal bridge policy after template kwargs have been resolved."""
 
@@ -87,9 +90,15 @@ class BaseRendererConfig(BaseConfig):
     to the Python chat-template implementation and its explicit template
     kwargs."""
 
+    multimodal_output: MultimodalOutput = "raw"
+    """Multimodal sidecar format:
+
+    - ``"raw"`` — emit JSON-safe image refs/descriptors for inference paths.
+    - ``"processed"`` — emit image-processor payloads for SFT/training paths."""
+
     # Fields that are renderer-internal — not forwarded to (or mirrored
     # by) ``apply_chat_template``. Override in subclasses that hold
-    # non-template config (e.g. ``image_cache_max``, GptOss's
+    # non-template config (e.g. GptOss's
     # ``use_system_prompt`` / ``knowledge_cutoff`` / ``model_identity``,
     # or fields that exist as renderer conventions without a Jinja
     # analogue like DeepSeek V3 / Kimi K2 ``enable_thinking``).
@@ -116,10 +125,9 @@ class BaseRendererConfig(BaseConfig):
 
 class AutoRendererConfig(BaseRendererConfig):
     """Resolve the renderer from ``tokenizer.name_or_path`` at construction
-    time via ``MODEL_RENDERER_MAP``. Carries only the shared
-    ``thinking_retention`` field when explicitly set; template kwargs require
-    an explicit renderer choice so template-dependent behaviour stays visible
-    at the call site."""
+    time via ``MODEL_RENDERER_MAP``. Carries the shared base fields into the
+    concrete renderer config; template kwargs require an explicit renderer
+    choice so template-dependent behaviour stays visible at the call site."""
 
     name: Literal["auto"] = "auto"
 
@@ -217,12 +225,6 @@ class Qwen35RendererConfig(BaseRendererConfig):
     running across the entire conversation. Mirrors the chat template's
     ``add_vision_id`` toggle."""
 
-    image_cache_max: int = 256
-    """FIFO bound on the per-renderer image processor cache. Renderer-
-    internal — not a Jinja chat-template kwarg."""
-
-    _internal_fields = frozenset({"image_cache_max"})
-
 
 class Qwen36RendererConfig(BaseRendererConfig):
     """Qwen3.6 renderer config. Inherits Qwen3.5's template surface."""
@@ -239,11 +241,6 @@ class Qwen36RendererConfig(BaseRendererConfig):
     """When ``True``, keep historical ``<think>`` blocks even before the
     last real user query. Mirrors the Qwen3.6 chat template's native
     ``preserve_thinking`` kwarg."""
-
-    image_cache_max: int = 256
-    """See :class:`Qwen35RendererConfig.image_cache_max`."""
-
-    _internal_fields = frozenset({"image_cache_max"})
 
     @model_validator(mode="after")
     def _check_thinking_retention(self):
@@ -263,11 +260,6 @@ class Qwen3VLRendererConfig(BaseRendererConfig):
 
     add_vision_id: bool = False
     """See :class:`Qwen35RendererConfig.add_vision_id`."""
-
-    image_cache_max: int = 256
-    """See :class:`Qwen35RendererConfig.image_cache_max`."""
-
-    _internal_fields = frozenset({"image_cache_max"})
 
 
 class GLM5RendererConfig(BaseRendererConfig):
@@ -480,11 +472,6 @@ class KimiK25RendererConfig(BaseRendererConfig):
     ``False`` it prefills ``<think></think>``. The kwarg is named
     ``thinking`` (not ``enable_thinking``) to match the upstream chat
     template's native variable name."""
-
-    image_cache_max: int = 256
-    """See :class:`Qwen35RendererConfig.image_cache_max`."""
-
-    _internal_fields = frozenset({"image_cache_max"})
 
 
 class LagunaXS2RendererConfig(BaseRendererConfig):
@@ -796,6 +783,7 @@ __all__ = [
     "LagunaXS21RendererConfig",
     "Llama3RendererConfig",
     "MiniMaxM2RendererConfig",
+    "MultimodalOutput",
     "Nemotron3RendererConfig",
     "Nemotron3UltraRendererConfig",
     "PrimeQwen3RendererConfig",

@@ -49,7 +49,7 @@ from openai_harmony import (
     ToolDescription,
     load_harmony_encoding,
 )
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.tokenizer import TokenizerLike
 
 from renderers.base import (
     Message,
@@ -123,7 +123,7 @@ class GptOssRenderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: TokenizerLike,
         config: GptOssRendererConfig | None = None,
     ):
         """Initialise the renderer.

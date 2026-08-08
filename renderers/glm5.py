@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.tokenizer import TokenizerLike
 
 from renderers.base import (
     Message,
@@ -64,7 +64,7 @@ class GLM5Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: TokenizerLike,
         config: GLM5RendererConfig | GLM51RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer

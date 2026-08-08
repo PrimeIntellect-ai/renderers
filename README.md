@@ -10,13 +10,21 @@ Standalone on PyPI, and portable across training and inference stacks (transform
 uv add renderers
 ```
 
+The core install uses the standalone Rust `tokenizers` package. Add the
+optional Hugging Face integration only when you need an unknown model's
+`apply_chat_template`, a custom remote-code tokenizer such as Kimi's, or
+automatic multimodal processor loading:
+
+```bash
+uv add 'renderers[hf]'
+```
+
 ## At a glance
 
 ```python
-from transformers import AutoTokenizer
-from renderers import create_renderer
+from renderers import create_renderer, load_tokenizer
 
-tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
+tok = load_tokenizer("Qwen/Qwen3-8B")
 r = create_renderer(tok)                            # → Qwen3Renderer (auto-resolved)
 
 prompt_ids = r.render_ids(
@@ -40,7 +48,7 @@ next_prompt_ids = r.bridge_to_next_turn(
 )
 ```
 
-Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `glm-5`, `glm-5.1`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `laguna-m.1`, `nemotron-3`, `nemotron-3-ultra`, `llama-3`, `gpt-oss`, `hy3`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper.
+Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `glm-5`, `glm-5.1`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `laguna-m.1`, `nemotron-3`, `nemotron-3-ultra`, `llama-3`, `gpt-oss`, `hy3`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper that requires `renderers[hf]` (or a compatible caller-supplied tokenizer).
 
 ## API
 
@@ -86,7 +94,12 @@ with pool.checkout() as r:
     ids = r.render_ids(messages)
 ```
 
-Each slot owns its own tokenizer copy. Construction fans out across a thread pool so a 32-slot pool doesn't serially eat ~10–15s of `from_pretrained` calls at startup.
+Each slot owns its own tokenizer copy. Core installs load `tokenizer.json` with
+the standalone `tokenizers` backend. If `renderers[hf]` is installed,
+`load_tokenizer(..., backend="auto")` preserves the Hugging Face wrapper for
+backward compatibility; pass `backend="tokenizers"` to select the lean backend
+explicitly. Construction fans out across a thread pool so a 32-slot pool
+doesn't serially eat ~10–15s of `from_pretrained` calls at startup.
 
 ## Why use a renderer
 

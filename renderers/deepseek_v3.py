@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.tokenizer import TokenizerLike
 
 from renderers.base import (
     Message,
@@ -63,7 +63,7 @@ class DeepSeekV3Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: TokenizerLike,
         config: DeepSeekV3RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer

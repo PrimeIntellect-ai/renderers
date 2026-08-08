@@ -17,6 +17,8 @@ from typing import (
     runtime_checkable,
 )
 
+from renderers.tokenizer import TokenizerLike, TokenizersTokenizer
+
 if TYPE_CHECKING:
     from renderers.configs import (
         AutoRendererConfig,
@@ -1128,7 +1130,7 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
 }
 
 
-def _model_has_vision_config(model_name: str) -> bool:
+def _model_has_vision_config(model_name: str) -> bool | None:
     """Return True if the HF config for ``model_name`` declares vision inputs.
 
     Used by ``create_renderer`` to fail loudly on VLMs that miss the
@@ -1138,12 +1140,18 @@ def _model_has_vision_config(model_name: str) -> bool:
     match what the trainer reconstructs — a class of bug the renderer
     abstraction exists to prevent.
 
-    Returns False on any AutoConfig failure (offline, gated, missing) so
-    a flaky HF probe never blocks a legitimate text-only fine-tune.
+    Returns ``None`` when the optional ``transformers`` integration is not
+    installed. Returns False on other AutoConfig failures (offline, gated,
+    missing) so a flaky HF probe never blocks a legitimate text-only
+    fine-tune.
     """
     try:
         from transformers import AutoConfig
-
+    except ModuleNotFoundError as exc:
+        if exc.name == "transformers":
+            return None
+        raise
+    try:
         cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=False)
     except Exception:
         return False
@@ -1192,11 +1200,22 @@ def _tokenizer_source_for(model_name_or_path: str) -> str:
     return TOKENIZER_SOURCE_OVERRIDES.get(model_name_or_path, model_name_or_path)
 
 
-def _tokenizer_load_kwargs(model_name_or_path: str) -> dict[str, Any]:
-    revision = TRUSTED_REVISIONS.get(model_name_or_path)
+def _tokenizer_load_kwargs(
+    model_name_or_path: str, *, revision: str | None = None
+) -> dict[str, Any]:
+    trusted_revision = TRUSTED_REVISIONS.get(model_name_or_path)
+    if trusted_revision is not None:
+        if revision is not None and revision != trusted_revision:
+            raise ValueError(
+                f"{model_name_or_path!r} executes trusted remote tokenizer code "
+                f"only at reviewed revision {trusted_revision}; received "
+                f"revision={revision!r}."
+            )
+        return {"trust_remote_code": True, "revision": trusted_revision}
+    kwargs: dict[str, Any] = {"trust_remote_code": False}
     if revision is not None:
-        return {"trust_remote_code": True, "revision": revision}
-    return {"trust_remote_code": False}
+        kwargs["revision"] = revision
+    return kwargs
 
 
 def _preserve_requested_tokenizer_name(
@@ -1280,16 +1299,60 @@ def _load_tokenizer_via_auto(model_name_or_path: str, **kwargs) -> Any:
             type(exc).__name__,
             str(exc)[:160],
         )
-        return tok
+    return tok
 
 
-def load_tokenizer(model_name_or_path: str):
+def _load_transformers_tokenizer(model_name_or_path: str, **kwargs: Any) -> Any:
+    try:
+        import transformers  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if exc.name != "transformers":
+            raise
+        raise ImportError(
+            "This tokenizer requires the optional Hugging Face integration. "
+            "Install it with `pip install 'renderers[hf]'`."
+        ) from exc
+    return _load_tokenizer_via_auto(model_name_or_path, **kwargs)
+
+
+def _load_tokenizers_tokenizer(
+    model_name_or_path: str, *, revision: str | None
+) -> TokenizersTokenizer:
+    try:
+        return TokenizersTokenizer.from_pretrained(
+            model_name_or_path,
+            revision=revision,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"The standalone tokenizers backend could not load "
+            f"{model_name_or_path!r}. The repository may not publish a "
+            "self-contained tokenizer.json (custom tokenizers such as Kimi "
+            "do not). Install `renderers[hf]` and use "
+            "backend='transformers' for that model."
+        ) from exc
+
+
+def load_tokenizer(
+    model_name_or_path: str,
+    *,
+    revision: str | None = None,
+    backend: Literal["auto", "tokenizers", "transformers"] = "auto",
+) -> TokenizerLike:
     """Load a tokenizer with the renderers-package security policy.
 
-    Default ``trust_remote_code=False``. Models listed in
-    ``TRUSTED_REVISIONS`` (Moonshot Kimi-K2 family) load with
-    ``trust_remote_code=True`` AND a pinned ``revision=<sha>`` so
-    transformers only executes the reviewed commit's tokenizer Python.
+    The default ``backend="auto"`` preserves the Hugging Face tokenizer when
+    the optional ``transformers`` integration is installed, and otherwise
+    loads ``tokenizer.json`` through the standalone Rust ``tokenizers``
+    package. Select a backend explicitly when environment-independent wrapper
+    behaviour matters.
+
+    Default ``trust_remote_code=False`` on the Transformers path. Models
+    listed in ``TRUSTED_REVISIONS`` (Moonshot Kimi-K2 family) load with
+    ``trust_remote_code=True`` AND a pinned ``revision=<sha>`` so Transformers
+    only executes the reviewed commit's tokenizer Python. Those custom
+    tokenizers do not publish ``tokenizer.json`` and therefore require the
+    ``renderers[hf]`` extra when loaded by model ID.
 
     ``AutoTokenizer.from_pretrained`` eagerly builds the model config to
     resolve the tokenizer class. If that construction raises on a
@@ -1303,9 +1366,32 @@ def load_tokenizer(model_name_or_path: str):
     ``unsloth`` mirrors instead, then restore ``tokenizer.name_or_path`` to
     the requested Meta ID so auto-resolution still selects ``Llama3Renderer``.
     """
+    if backend not in {"auto", "tokenizers", "transformers"}:
+        raise ValueError(
+            "backend must be one of 'auto', 'tokenizers', or 'transformers'."
+        )
+
     load_name_or_path = _tokenizer_source_for(model_name_or_path)
-    kwargs = _tokenizer_load_kwargs(load_name_or_path)
-    tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
+    kwargs = _tokenizer_load_kwargs(load_name_or_path, revision=revision)
+    if backend == "tokenizers":
+        tok = _load_tokenizers_tokenizer(
+            load_name_or_path,
+            revision=kwargs.get("revision"),
+        )
+    elif backend == "transformers":
+        tok = _load_transformers_tokenizer(load_name_or_path, **kwargs)
+    else:
+        try:
+            import transformers  # noqa: F401
+        except ModuleNotFoundError as exc:
+            if exc.name != "transformers":
+                raise
+            tok = _load_tokenizers_tokenizer(
+                load_name_or_path,
+                revision=kwargs.get("revision"),
+            )
+        else:
+            tok = _load_transformers_tokenizer(load_name_or_path, **kwargs)
     return _preserve_requested_tokenizer_name(
         tok,
         requested_name_or_path=model_name_or_path,
@@ -1389,9 +1475,9 @@ def create_renderer_pool(
     Every slot in the pool shares the same config; to run a different
     config, build a different pool.
 
-    Tokenizers load via ``load_tokenizer`` — see its docstring for the
-    ``trust_remote_code`` policy (default off; Moonshot Kimi-K2 family
-    opts in with a pinned ``revision``).
+    Tokenizers load via ``load_tokenizer``. Core installs use the standalone
+    Rust ``tokenizers`` backend; installs with the ``hf`` extra preserve the
+    Hugging Face wrapper and its custom-tokenizer support.
     """
 
     def factory() -> Renderer:
@@ -1532,7 +1618,8 @@ def _resolve_auto_config(
     # Catch this at the renderer-selection seam — well before any
     # rollout — so the failure mode is "config error at startup," not
     # "mysterious KL divergence after 100 steps."
-    if model_name in MULTIMODAL_MODELS or _model_has_vision_config(model_name):
+    vision_probe = _model_has_vision_config(model_name)
+    if model_name in MULTIMODAL_MODELS or vision_probe is True:
         supported_vlms = sorted(MULTIMODAL_MODELS)
         raise ValueError(
             f"No multimodal renderer registered for {model_name!r}, and "
@@ -1540,6 +1627,14 @@ def _resolve_auto_config(
             f"renderer in MODEL_RENDERER_MAP (currently supported VLMs: "
             f"{supported_vlms}), or pass an explicit typed renderer "
             f"config if you know what you're doing."
+        )
+    if vision_probe is None:
+        raise ValueError(
+            f"No renderer registered for {model_name!r}, and the optional "
+            "Transformers integration is not installed to determine whether "
+            "this unknown model is multimodal. Pass an explicit "
+            "DefaultRendererConfig with a tokenizer that implements "
+            "apply_chat_template, or install `renderers[hf]`."
         )
 
     # Text-only fall back to default (apply_chat_template). For fine-tunes
@@ -1805,8 +1900,8 @@ def _get_offset_tokenizer(tokenizer):
     back to its source segment via the fast tokenizer's
     ``offset_mapping`` (see :func:`attribute_text_segments`). The
     contract: every BYO tokenizer must be a fast tokenizer with offset
-    support. Tokenizers loaded via :func:`load_tokenizer` are
-    ``PreTrainedTokenizerFast`` instances that satisfy this trivially.
+    support. Tokenizers loaded via :func:`load_tokenizer` satisfy this
+    structurally, whether backed by ``tokenizers`` or Transformers.
     """
     try:
         tokenizer("a", add_special_tokens=False, return_offsets_mapping=True)
@@ -1815,8 +1910,8 @@ def _get_offset_tokenizer(tokenizer):
             "Hand-coded renderers require a fast tokenizer with "
             "``return_offsets_mapping=True`` support for body/scaffold "
             "attribution. Pass a tokenizer loaded via "
-            "``renderers.base.load_tokenizer``, or any "
-            "``transformers.PreTrainedTokenizerFast`` instance."
+            "``renderers.base.load_tokenizer``, or any structurally "
+            "compatible tokenizer exposing offsets."
         ) from exc
     return tokenizer
 
@@ -1854,13 +1949,11 @@ def attribute_text_segments(
     every body byte inside the ``is_content=True`` run at the cost of a
     few adjacent wrap bytes.
 
-    Requires a HuggingFace fast tokenizer with offset tracking. Every
-    model in ``MODEL_RENDERER_MAP`` ships one, so the offset lookup
-    always succeeds for tokenizers obtained via :func:`load_tokenizer`.
-    BYO tokenizers must be a ``PreTrainedTokenizerFast`` (or anything
-    else exposing ``return_offsets_mapping=True``); slow tokenizers
-    aren't supported — BPE drift at the wrap/body boundary would
-    defeat the whole point.
+    Requires a tokenizer with offset tracking. The standalone
+    :class:`~renderers.tokenizer.TokenizersTokenizer`, Hugging Face fast
+    tokenizers, and any structurally compatible BYO tokenizer satisfy this
+    contract. Slow or offsetless tokenizers aren't supported — BPE drift at
+    the wrap/body boundary would defeat the whole point.
 
     Empty input or empty joined text returns an empty list.
     """

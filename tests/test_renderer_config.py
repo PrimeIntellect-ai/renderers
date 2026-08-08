@@ -207,7 +207,10 @@ def test_chat_template_kwargs_preserve_default_field_unset_state(monkeypatch):
 def test_create_renderer_default_argument_is_auto():
     """Passing no config is equivalent to passing ``AutoRendererConfig()``
     — short form for the common case."""
-    tok = SimpleNamespace(name_or_path="")  # no MODEL_RENDERER_MAP entry
+    tok = SimpleNamespace(
+        name_or_path="",
+        apply_chat_template=lambda *args, **kwargs: [],
+    )  # no MODEL_RENDERER_MAP entry
     renderer = create_renderer(tok)
     # Falls through to DefaultRenderer when no match and no vision config.
     assert renderer.__class__.__name__ == "DefaultRenderer"
@@ -302,7 +305,10 @@ def test_thinking_retention_consistent_pairs_are_accepted(config_cls, kwargs):
 
 def test_default_renderer_rejects_explicit_retention():
     """Opaque apply_chat_template fallback cannot implement bridge policy."""
-    tok = SimpleNamespace(name_or_path="")
+    tok = SimpleNamespace(
+        name_or_path="",
+        apply_chat_template=lambda *args, **kwargs: [],
+    )
     create_renderer(tok, DefaultRendererConfig())
 
     for retention in ("tool_cycle", "all"):

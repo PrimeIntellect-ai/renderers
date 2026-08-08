@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.tokenizer import ChatTemplateTokenizerLike
 
 from renderers.base import (
     Message,
@@ -92,9 +92,16 @@ class DefaultRenderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: ChatTemplateTokenizerLike,
         config: DefaultRendererConfig | None = None,
     ):
+        if not callable(getattr(tokenizer, "apply_chat_template", None)):
+            raise TypeError(
+                "DefaultRenderer requires a tokenizer implementing "
+                "apply_chat_template. Install `renderers[hf]` and load with "
+                "backend='transformers', or use a registered model-specific "
+                "renderer with the standalone tokenizers backend."
+            )
         cfg = config or DefaultRendererConfig()
         if cfg.thinking_retention is not None:
             raise ValueError(

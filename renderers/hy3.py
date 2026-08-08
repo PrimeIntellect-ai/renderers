@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.tokenizer import TokenizerLike
 
 from renderers.base import (
     Message,
@@ -74,7 +74,7 @@ class Hy3Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: TokenizerLike,
         config: Hy3RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer

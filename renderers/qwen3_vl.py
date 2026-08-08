@@ -33,7 +33,7 @@ import json
 from typing import Any
 from urllib.parse import urlparse
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.tokenizer import TokenizerLike
 
 from renderers.base import (
     Message,
@@ -311,7 +311,7 @@ class Qwen3VLRenderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: TokenizerLike,
         config: Qwen3VLRendererConfig | None = None,
         *,
         processor: Any = None,
@@ -375,7 +375,15 @@ class Qwen3VLRenderer:
     def _get_processor(self):
         if self._processor is not None:
             return self._processor
-        from transformers import AutoProcessor
+        try:
+            from transformers import AutoProcessor
+        except ModuleNotFoundError as exc:
+            if exc.name != "transformers":
+                raise
+            raise ImportError(
+                "Qwen3VLRenderer image/video processing requires the optional "
+                "HF integration. Install `renderers[hf]`, or pass a processor."
+            ) from exc
 
         name = getattr(self._tokenizer, "name_or_path", None)
         if not name:

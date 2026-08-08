@@ -474,8 +474,9 @@ def _build_qwen_vl_features(
     except ImportError as exc:
         raise RuntimeError(
             "Multimodal generate via /inference/v1/generate requires `vllm` "
-            "and `torch` to encode the features payload. Install vLLM in this "
-            "environment, or pre-build features upstream."
+            "and the `renderers[hf]` integration to encode the features "
+            "payload. Install them in this environment, or pre-build features "
+            "upstream."
         ) from exc
 
     out: dict[str, Any] = {

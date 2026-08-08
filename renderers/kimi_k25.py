@@ -25,7 +25,7 @@ import json
 import re
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.tokenizer import TokenizerLike
 
 from renderers.base import (
     Message,
@@ -592,7 +592,7 @@ class KimiK25Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: TokenizerLike,
         config: KimiK25RendererConfig | None = None,
         *,
         processor: Any = None,
@@ -655,7 +655,15 @@ class KimiK25Renderer:
     def _get_processor(self):
         if self._processor is not None:
             return self._processor
-        from transformers import AutoProcessor
+        try:
+            from transformers import AutoProcessor
+        except ModuleNotFoundError as exc:
+            if exc.name != "transformers":
+                raise
+            raise ImportError(
+                "KimiK25Renderer image processing requires the optional HF "
+                "integration. Install `renderers[hf]`, or pass a processor."
+            ) from exc
 
         name = getattr(self._tokenizer, "name_or_path", None)
         if not name:
@@ -669,7 +677,20 @@ class KimiK25Renderer:
         # trust_remote_code=True. Callers using ``create_renderer_pool`` go
         # through ``load_tokenizer`` which already pins the revision; for
         # auto-load here, we delegate to AutoProcessor with the same flag.
-        self._processor = AutoProcessor.from_pretrained(name, trust_remote_code=True)
+        from renderers.base import TRUSTED_REVISIONS
+
+        revision = TRUSTED_REVISIONS.get(name)
+        if revision is None:
+            raise RuntimeError(
+                f"Kimi processor auto-loading is allowed only for reviewed "
+                f"model revisions; {name!r} is not allow-listed. Pass an "
+                "already-loaded processor explicitly."
+            )
+        self._processor = AutoProcessor.from_pretrained(
+            name,
+            trust_remote_code=True,
+            revision=revision,
+        )
         return self._processor
 
     def _process_image(self, part: dict[str, Any]):

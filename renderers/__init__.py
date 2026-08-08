@@ -36,6 +36,7 @@ from renderers.base import (
     create_renderer_pool,
     extract_message_tool_names,
     is_multimodal,
+    load_tokenizer,
     reject_assistant_in_extension,
     trim_to_turn_close,
 )
@@ -68,13 +69,15 @@ from renderers.configs import (
     Qwen3VLRendererConfig,
     RendererConfig,
 )
+from renderers.tokenizer import (
+    ChatTemplateTokenizerLike,
+    TokenizerLike,
+    TokenizersTokenizer,
+)
 
 # Concrete renderer classes are lazy-loaded so that consumers needing
 # only the config layer (``RendererConfig`` discriminated union) don't
-# pay the ``transformers`` import cost. Each renderer module does
-# ``from transformers.tokenization_utils import PreTrainedTokenizer``
-# at module level, so eager imports here would drag ``transformers``
-# into every downstream ``import renderers``. ``__getattr__`` (PEP 562)
+# pay renderer-import costs. ``__getattr__`` (PEP 562)
 # resolves the names on first attribute access, so ``from renderers
 # import DefaultRenderer`` and ``renderers.DefaultRenderer`` both work
 # transparently. ``create_renderer`` doesn't depend on these eager
@@ -124,6 +127,7 @@ def __dir__() -> list[str]:
 __all__ = [
     "AutoRendererConfig",
     "BaseRendererConfig",
+    "ChatTemplateTokenizerLike",
     "Content",
     "ContentPart",
     "DeepSeekR1Renderer",
@@ -192,6 +196,8 @@ __all__ = [
     "ToolCallFunction",
     "ToolCallParseStatus",
     "ToolSpec",
+    "TokenizerLike",
+    "TokenizersTokenizer",
     "VideoPart",
     "__version__",
     "attribute_text_segments",
@@ -202,6 +208,7 @@ __all__ = [
     "create_renderer_pool",
     "extract_message_tool_names",
     "is_multimodal",
+    "load_tokenizer",
     "reject_assistant_in_extension",
     "trim_to_turn_close",
 ]

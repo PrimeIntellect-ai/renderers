@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.tokenizer import TokenizerLike
 
 from renderers.base import (
     Message,
@@ -57,7 +57,7 @@ class MiniMaxM2Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: TokenizerLike,
         config: MiniMaxM2RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer

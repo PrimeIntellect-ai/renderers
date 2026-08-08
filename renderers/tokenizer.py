@@ -27,9 +27,7 @@ class TokenizerLike(Protocol):
 
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]: ...
 
-    def decode(
-        self, ids: list[int], *, skip_special_tokens: bool = False
-    ) -> str: ...
+    def decode(self, ids: list[int], *, skip_special_tokens: bool = False) -> str: ...
 
     def convert_tokens_to_ids(self, token: str) -> int | None: ...
 
@@ -98,9 +96,7 @@ class TokenizersTokenizer:
             ).ids
         )
 
-    def decode(
-        self, ids: list[int], *, skip_special_tokens: bool = False
-    ) -> str:
+    def decode(self, ids: list[int], *, skip_special_tokens: bool = False) -> str:
         return self._tokenizer.decode(
             ids,
             skip_special_tokens=skip_special_tokens,

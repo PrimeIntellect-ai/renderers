@@ -42,12 +42,8 @@ Laguna M.1's official template (revision ``2bf8a4ab``) is served by
 generation prompt, but has no fallback system prompt and reads assistant
 reasoning from ``reasoning`` before falling back to ``reasoning_content``.
 
-S-2.1 is a larger sibling of XS-2.1 served by :class:`LagunaS21Renderer`. It
-shares XS-2.1's tokenizer and token format, so the two differ only in the chat
-template's thinking knobs: ``enable_thinking`` defaults to ``True`` (XS-2.1
-defaults ``False``), and a new ``preserve_thinking`` kwarg widens the
-reasoning-display gate to ``enable_thinking or preserve_thinking``. The
-subclass overrides only that gate; everything else is inherited.
+S-2.1 subclasses :class:`LagunaXS21Renderer` from :mod:`renderers.laguna_s21`,
+overriding only the ``_render_history_reasoning`` seam.
 """
 
 from __future__ import annotations
@@ -1033,36 +1029,3 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
 
         emit_special(self._assistant_end, msg_idx, is_sampled=True, is_content=True)
         emit_text("\n", msg_idx, is_sampled=False, is_content=False)
-
-
-class LagunaS21Renderer(LagunaXS21Renderer):
-    """Laguna-S-2.1 — a larger sibling of XS-2.1 that shares its tokenizer
-    and token format but ships a slightly different chat template.
-
-    The only template differences are the ``enable_thinking`` default (``True``
-    here, ``False`` for XS-2.1) and a new ``preserve_thinking`` kwarg that
-    widens the reasoning-display gate to ``enable_thinking or
-    preserve_thinking``. Everything else — role tags, tool-call packing,
-    system-block gate, generation prompt, and the whole parse skeleton — is
-    inherited unchanged from :class:`LagunaXS21Renderer`.
-    """
-
-    # Narrow the inherited ``config`` attribute so ``preserve_thinking`` (an
-    # S-2.1-only field) resolves; ``__init__`` always stores an S-2.1 config.
-    config: LagunaS21RendererConfig
-
-    def __init__(
-        self,
-        tokenizer: PreTrainedTokenizer,
-        config: LagunaS21RendererConfig | None = None,
-    ):
-        # ``LagunaXS21Renderer.__init__`` forwards any config straight through;
-        # pass an S-2.1 config so ``enable_thinking`` defaults to ``True`` and
-        # ``preserve_thinking`` is available.
-        super().__init__(tokenizer, config or LagunaS21RendererConfig())
-
-    def _render_history_reasoning(self) -> bool:
-        # S-2.1's template gates reasoning display on
-        # ``enable_thinking or preserve_thinking`` — the latter keeps
-        # historical ``<think>`` blocks even while thinking is off.
-        return self.config.enable_thinking or self.config.preserve_thinking

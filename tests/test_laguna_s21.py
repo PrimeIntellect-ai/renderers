@@ -21,7 +21,7 @@ from itertools import product
 from renderers import create_renderer
 from renderers.base import load_tokenizer
 from renderers.configs import LagunaS21RendererConfig
-from renderers.laguna_xs2 import LagunaS21Renderer
+from renderers.laguna_s21 import LagunaS21Renderer
 
 _MODEL = "poolside/Laguna-S-2.1"
 

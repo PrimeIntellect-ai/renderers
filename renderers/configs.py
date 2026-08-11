@@ -555,7 +555,7 @@ class LagunaS21RendererConfig(BaseRendererConfig):
     new ``preserve_thinking`` kwarg widens the reasoning-display gate to
     ``enable_thinking or preserve_thinking``. The token format is otherwise
     identical, so this is served by
-    :class:`renderers.laguna_xs2.LagunaS21Renderer`, a thin subclass of
+    :class:`renderers.laguna_s21.LagunaS21Renderer`, a thin subclass of
     ``LagunaXS21Renderer`` that only overrides that gate.
     """
 

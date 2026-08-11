@@ -1329,9 +1329,9 @@ def _populate_registry():
     from renderers.hy3 import Hy3Renderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
+    from renderers.laguna_s21 import LagunaS21Renderer
     from renderers.laguna_xs2 import (
         LagunaM1Renderer,
-        LagunaS21Renderer,
         LagunaXS2Renderer,
         LagunaXS21Renderer,
     )

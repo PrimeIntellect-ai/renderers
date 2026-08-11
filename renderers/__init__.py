@@ -94,7 +94,7 @@ _LAZY_RENDERERS: dict[str, str] = {
     "KimiK25Renderer": "renderers.kimi_k25",
     "KimiK2Renderer": "renderers.kimi_k2",
     "LagunaM1Renderer": "renderers.laguna_xs2",
-    "LagunaS21Renderer": "renderers.laguna_xs2",
+    "LagunaS21Renderer": "renderers.laguna_s21",
     "LagunaXS21Renderer": "renderers.laguna_xs2",
     "LagunaXS2Renderer": "renderers.laguna_xs2",
     "Llama3Renderer": "renderers.llama_3",

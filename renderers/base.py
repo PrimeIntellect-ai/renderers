@@ -1077,11 +1077,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "meta-llama/Llama-3.2-1B-Instruct": "llama-3",
     "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
     # Poolside Laguna. These checkpoints ship distinct chat templates, each
-    # mirrored by its own renderer class/config discriminator. S-2.1 is a
-    # larger sibling of XS-2.1 that shares its tokenizer but NOT its chat
-    # template: S-2.1 defaults ``enable_thinking`` to True and adds a
-    # ``preserve_thinking`` gate, so it gets its own renderer/config
-    # (``LagunaS21Renderer``), a thin subclass of the XS-2.1 renderer.
+    # mirrored by its own renderer class/config discriminator.
     "poolside/Laguna-XS.2": "laguna-xs.2",
     "poolside/Laguna-M.1": "laguna-m.1",
     "poolside/Laguna-XS-2.1": "laguna-xs-2.1",

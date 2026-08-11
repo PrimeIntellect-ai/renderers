@@ -470,6 +470,65 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
         assert isinstance(item, str) and len(item) > 0
 
 
+def test_generate_serializes_multimodal_features_for_gemma4():
+    """Gemma 4's HF image positions are translated to vLLM's field name."""
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm", reason="vllm needed for features serialization")
+
+    import torch as _torch
+    from renderers.base import MultiModalData, PlaceholderRange, load_tokenizer
+    from renderers.gemma4 import Gemma4Renderer
+
+    renderer = Gemma4Renderer(load_tokenizer("google/gemma-4-31B-it"))
+    mm_data = MultiModalData(
+        mm_hashes={"image": ["aaa", "bbb"]},
+        mm_placeholders={
+            "image": [
+                PlaceholderRange(offset=5, length=2),
+                PlaceholderRange(offset=12, length=2),
+            ]
+        },
+        mm_items={
+            "image": [
+                {
+                    "pixel_values": _torch.zeros(1, 4, 8),
+                    "image_position_ids": _torch.zeros(1, 4, 2, dtype=_torch.int64),
+                },
+                {
+                    "pixel_values": _torch.zeros(1, 4, 8),
+                    "image_position_ids": _torch.zeros(1, 4, 2, dtype=_torch.int64),
+                },
+            ]
+        },
+    )
+
+    client = _FakeClient()
+    asyncio.run(
+        generate(
+            client=client,
+            renderer=renderer,
+            messages=[],
+            model="gemma4",
+            prompt_ids=list(range(20)),
+            multi_modal_data=mm_data,
+            sampling_params={"max_tokens": 4},
+        )
+    )
+
+    features = client.calls[0]["body"]["features"]
+    assert features["mm_hashes"] == {"image": ["aaa", "bbb"]}
+    assert features["mm_placeholders"] == {
+        "image": [
+            {"offset": 5, "length": 2},
+            {"offset": 12, "length": 2},
+        ]
+    }
+    assert len(features["kwargs_data"]["image"]) == 2
+    assert all(
+        isinstance(item, str) and item for item in features["kwargs_data"]["image"]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Prompt overflow handling.
 # ---------------------------------------------------------------------------

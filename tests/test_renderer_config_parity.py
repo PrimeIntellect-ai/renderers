@@ -47,6 +47,7 @@ _RENDERER_MODELS = [
     ("Qwen/Qwen3-8B", "auto"),
     ("Qwen/Qwen3.5-9B", "auto"),
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
+    ("google/gemma-4-31B-it", "auto"),
     ("zai-org/GLM-5", "auto"),
     ("zai-org/GLM-5.1", "auto"),
     ("zai-org/GLM-4.7-Flash", "auto"),

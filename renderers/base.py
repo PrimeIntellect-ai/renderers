@@ -1491,12 +1491,31 @@ def _merge_chat_template_kwargs(
         return config
     if not isinstance(chat_template_kwargs, Mapping):
         raise TypeError("chat_template_kwargs must be a mapping.")
+    kwargs = dict(chat_template_kwargs)
+    config_cls = type(config)
+    allowed = config_cls.template_field_names()
+    if config_cls._allow_opaque_template_kwargs:
+        reserved = frozenset(config_cls.model_fields) - allowed - {"name"}
+        unsupported = frozenset(kwargs) & reserved
+    else:
+        unsupported = frozenset(kwargs) - allowed
+    if unsupported:
+        allowed_text = (
+            "opaque Jinja kwargs"
+            if config_cls._allow_opaque_template_kwargs
+            else ", ".join(sorted(allowed)) or "(none)"
+        )
+        raise ValueError(
+            f"Unsupported chat_template_kwargs for {config.name!r}: "
+            f"{sorted(unsupported)}. Allowed: {allowed_text}. Pass "
+            "renderer-internal options through the typed config instead."
+        )
     data: dict[str, Any] = {"name": config.name}
     for field_name in config.__pydantic_fields_set__:
         data[field_name] = getattr(config, field_name)
     data.update(getattr(config, "model_extra", None) or {})
-    data.update(dict(chat_template_kwargs))
-    return type(config).model_validate(data)
+    data.update(kwargs)
+    return config_cls.model_validate(data)
 
 
 def _resolve_renderer_config(

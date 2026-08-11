@@ -19,8 +19,10 @@ construction.
 
 ## Per-renderer configs
 
-Use `type(config).template_field_names()` to inspect the fields that mirror
-chat-template kwargs. Those fields are covered by parity tests against
+Use `type(config).template_field_names()` to inspect the explicit allowlist of
+fields accepted through `chat_template_kwargs`. Every renderer-specific field
+is classified as either a template field or a renderer-only field at class
+definition time. Template fields are covered by parity tests against
 `apply_chat_template` in `tests/test_renderer_config_parity.py`.
 
 | Renderer | Config class | Template fields | Renderer-only fields |
@@ -81,8 +83,10 @@ pool = create_renderer_pool(
 ```
 
 Renderers resolves auto configs before applying `chat_template_kwargs`, so the
-kwargs validate against the concrete renderer config. Unknown kwargs, or kwargs
-that conflict with an explicit `thinking_retention`, fail at construction.
+kwargs validate against the concrete renderer's template-field allowlist.
+Unknown kwargs, renderer-only fields, or kwargs that conflict with an explicit
+`thinking_retention` fail at construction. Renderer-only options remain valid
+when supplied through the typed config itself.
 
 Auto-resolution fails loudly for VLMs without an exact registered renderer.
 Text-only unknown models fall back to `DefaultRenderer`, unless
@@ -91,7 +95,10 @@ cannot implement selective bridge retention, so that combination raises.
 `AutoRendererConfig` with `chat_template_kwargs` also raises for unknown models,
 because renderers cannot validate those kwargs without a concrete renderer.
 Use an explicit model-specific config, or `DefaultRendererConfig(...)` when you
-intentionally want opaque `apply_chat_template` kwargs.
+intentionally want opaque `apply_chat_template` kwargs. Even for the default
+renderer, typed fields such as `tool_parser`, `reasoning_parser`, and
+`thinking_retention` must be passed through the config rather than through the
+opaque kwargs mapping.
 
 ## `thinking_retention`
 

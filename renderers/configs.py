@@ -1,10 +1,11 @@
 """Typed renderer configs — one pydantic model per renderer, unified by a
 discriminated union (``RendererConfig``).
 
-Each renderer accepts its own typed config; bad combinations (e.g.
-``add_vision_id`` under ``name="qwen3"``) fail at config-load time with a
-pydantic ``ValidationError`` rather than at runtime via an allowlist
-check. The shared ``thinking_retention`` flag is optional: ``None`` means
+Each renderer accepts its own typed config and declares an explicit
+``_template_fields`` allowlist for fields that may arrive through
+``chat_template_kwargs``. Bad combinations (e.g. ``add_vision_id`` under
+``name="qwen3"``) fail before renderer construction. The shared
+``thinking_retention`` flag is optional: ``None`` means
 "derive bridge policy from this renderer's chat-template knobs"; an
 explicit value is a bridge-policy override.
 
@@ -87,31 +88,36 @@ class BaseRendererConfig(BaseConfig):
     to the Python chat-template implementation and its explicit template
     kwargs."""
 
-    # Fields that are renderer-internal — not forwarded to (or mirrored
-    # by) ``apply_chat_template``. Override in subclasses that hold
-    # non-template config (e.g. ``image_cache_max``, GptOss's
-    # ``use_system_prompt`` / ``knowledge_cutoff`` / ``model_identity``,
-    # or fields that exist as renderer conventions without a Jinja
-    # analogue like DeepSeek V3 / Kimi K2 ``enable_thinking``).
-    #
-    # Used by parity tests to compute the field subset that, when
-    # changed, must produce token streams matching
-    # ``apply_chat_template`` — see :meth:`template_field_names`. The
-    # renderer is the only end-to-end consumer of these fields, so this
-    # is a renderer-side bookkeeping concern rather than a public API.
+    # Every renderer-specific field must be classified exactly once: either
+    # as a chat-template kwarg or as renderer-internal configuration.
+    _template_fields: ClassVar[frozenset[str]] = frozenset()
     _internal_fields: ClassVar[frozenset[str]] = frozenset()
+    _allow_opaque_template_kwargs: ClassVar[bool] = False
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        base_fields = frozenset(BaseRendererConfig.model_fields)
+        renderer_fields = frozenset(cls.model_fields) - base_fields - {"name"}
+        overlap = cls._template_fields & cls._internal_fields
+        missing = renderer_fields - cls._template_fields - cls._internal_fields
+        unknown = (cls._template_fields | cls._internal_fields) - renderer_fields
+        if overlap or missing or unknown:
+            raise TypeError(
+                f"{cls.__name__} has an invalid renderer-field classification: "
+                f"overlap={sorted(overlap)}, missing={sorted(missing)}, "
+                f"unknown={sorted(unknown)}"
+            )
 
     @classmethod
     def template_field_names(cls) -> frozenset[str]:
         """Subset of fields that mirror Jinja chat-template kwargs.
 
-        Default: every non-base field except ``name`` and any field
-        listed in ``_internal_fields``. Used by the parity test matrix
-        (``tests/test_renderer_config_parity.py``) to discover the
-        cells that must agree with ``apply_chat_template``.
+        Used both as the runtime allowlist for ``chat_template_kwargs`` and
+        by parity tests to discover the cells that must agree with
+        ``apply_chat_template``.
         """
-        base = frozenset(BaseRendererConfig.model_fields)
-        return frozenset(cls.model_fields) - base - {"name"} - cls._internal_fields
+        return cls._template_fields
 
 
 class AutoRendererConfig(BaseRendererConfig):
@@ -122,6 +128,7 @@ class AutoRendererConfig(BaseRendererConfig):
     at the call site."""
 
     name: Literal["auto"] = "auto"
+    _template_fields = frozenset()
 
 
 class DefaultRendererConfig(BaseRendererConfig):
@@ -148,6 +155,8 @@ class DefaultRendererConfig(BaseRendererConfig):
     # DefaultRenderer's parsing pipeline, not the underlying Jinja
     # template. Jinja kwargs live in ``model_extra`` (extra="allow").
     _internal_fields = frozenset({"tool_parser", "reasoning_parser"})
+    _template_fields = frozenset()
+    _allow_opaque_template_kwargs = True
 
     @model_validator(mode="after")
     def _reject_legacy_preserve_flags(self):
@@ -174,6 +183,7 @@ class Qwen3RendererConfig(BaseRendererConfig):
     """Qwen3 (text-only) renderer config."""
 
     name: Literal["qwen3"] = "qwen3"
+    _template_fields = frozenset({"enable_thinking"})
 
     enable_thinking: bool = True
     """When ``True``, the generation prompt includes ``<think>`` so the
@@ -191,12 +201,14 @@ class PrimeQwen3RendererConfig(BaseRendererConfig):
     """PrimeIntellect Qwen3 renderer config."""
 
     name: Literal["prime-qwen3"] = "prime-qwen3"
+    _template_fields = frozenset()
 
 
 class Qwen35RendererConfig(BaseRendererConfig):
     """Qwen3.5 renderer config."""
 
     name: Literal["qwen3.5"] = "qwen3.5"
+    _template_fields = frozenset({"enable_thinking", "add_vision_id"})
 
     enable_thinking: bool | None = None
     """When ``True``, the generation prompt includes ``<think>``. ``None``
@@ -228,6 +240,9 @@ class Qwen36RendererConfig(BaseRendererConfig):
     """Qwen3.6 renderer config. Inherits Qwen3.5's template surface."""
 
     name: Literal["qwen3.6"] = "qwen3.6"
+    _template_fields = frozenset(
+        {"enable_thinking", "add_vision_id", "preserve_thinking"}
+    )
 
     enable_thinking: bool | None = None
     """See :class:`Qwen35RendererConfig.enable_thinking`."""
@@ -260,6 +275,7 @@ class Qwen3VLRendererConfig(BaseRendererConfig):
     """Qwen3-VL renderer config."""
 
     name: Literal["qwen3-vl"] = "qwen3-vl"
+    _template_fields = frozenset({"add_vision_id"})
 
     add_vision_id: bool = False
     """See :class:`Qwen35RendererConfig.add_vision_id`."""
@@ -274,6 +290,7 @@ class Gemma4RendererConfig(BaseRendererConfig):
     """Gemma 4 renderer config."""
 
     name: Literal["gemma4"] = "gemma4"
+    _template_fields = frozenset({"enable_thinking", "preserve_thinking"})
 
     enable_thinking: bool = False
     """Enable Gemma 4's thinking mode. Mirrors the canonical template kwarg."""
@@ -301,6 +318,7 @@ class GLM5RendererConfig(BaseRendererConfig):
     """GLM-5 renderer config."""
 
     name: Literal["glm-5"] = "glm-5"
+    _template_fields = frozenset({"enable_thinking", "clear_thinking"})
 
     enable_thinking: bool = True
     """When ``True``, the generation prompt includes ``<think>``. Mirrors
@@ -328,6 +346,7 @@ class GLM51RendererConfig(BaseRendererConfig):
     discriminator so the registry can route to ``GLM51Renderer``."""
 
     name: Literal["glm-5.1"] = "glm-5.1"
+    _template_fields = frozenset({"enable_thinking", "clear_thinking"})
 
     enable_thinking: bool = True
     """See :class:`GLM5RendererConfig.enable_thinking`."""
@@ -350,6 +369,7 @@ class GLM45RendererConfig(BaseRendererConfig):
     """GLM-4.5 Air renderer config."""
 
     name: Literal["glm-4.5"] = "glm-4.5"
+    _template_fields = frozenset({"enable_thinking"})
 
     enable_thinking: bool = True
     """When ``True``, the generation prompt includes ``<think>``. Mirrors
@@ -377,6 +397,15 @@ class Hy3RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["hy3"] = "hy3"
+    _template_fields = frozenset(
+        {
+            "reasoning_effort",
+            "preserved_thinking",
+            "is_training",
+            "raw_last_assistant",
+            "fallback_strategy",
+        }
+    )
 
     reasoning_effort: Literal["no_think", "low", "high"] = "no_think"
     """Reasoning gate. Mirrors the chat template's ``reasoning_effort`` kwarg.
@@ -449,6 +478,7 @@ class InklingRendererConfig(BaseRendererConfig):
     """
 
     name: Literal["inkling"] = "inkling"
+    _template_fields = frozenset({"reasoning_effort"})
 
     reasoning_effort: str | float = 0.9
     """Reasoning-effort gate. Mirrors the chat template's ``reasoning_effort``
@@ -495,6 +525,7 @@ class GptOssRendererConfig(BaseRendererConfig):
     """
 
     name: Literal["gpt-oss"] = "gpt-oss"
+    _template_fields = frozenset({"reasoning_effort", "conversation_start_date"})
 
     reasoning_effort: Literal["low", "medium", "high"] = "medium"
     """Harmony reasoning-effort tag. Mirrors the ``apply_chat_template``
@@ -551,6 +582,7 @@ class KimiK2RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["kimi-k2"] = "kimi-k2"
+    _template_fields = frozenset()
 
     enable_thinking: bool = True
     """No-op for Kimi K2 (template doesn't gate on it). Stored for
@@ -563,6 +595,7 @@ class KimiK25RendererConfig(BaseRendererConfig):
     """Kimi K2.5 renderer config."""
 
     name: Literal["kimi-k2.5"] = "kimi-k2.5"
+    _template_fields = frozenset({"thinking"})
 
     thinking: bool = True
     """When ``True``, the generation prompt prefills ``<think>``; when
@@ -580,6 +613,7 @@ class LagunaXS2RendererConfig(BaseRendererConfig):
     """Laguna XS.2 renderer config."""
 
     name: Literal["laguna-xs.2"] = "laguna-xs.2"
+    _template_fields = frozenset({"enable_thinking", "render_assistant_messages_raw"})
 
     enable_thinking: bool = False
     """When ``True``, the generation prompt includes ``<think>``. Mirrors
@@ -605,6 +639,7 @@ class LagunaM1RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["laguna-m.1"] = "laguna-m.1"
+    _template_fields = frozenset({"enable_thinking", "render_assistant_messages_raw"})
 
     enable_thinking: bool = False
     """When ``True``, the generation prompt includes ``<think>``. Mirrors
@@ -626,6 +661,7 @@ class LagunaXS21RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["laguna-xs-2.1"] = "laguna-xs-2.1"
+    _template_fields = frozenset({"enable_thinking"})
 
     enable_thinking: bool = False
     """When ``True``, the generation prompt ends with ``<think>`` and
@@ -649,6 +685,7 @@ class LagunaS21RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["laguna-s-2.1"] = "laguna-s-2.1"
+    _template_fields = frozenset({"enable_thinking", "preserve_thinking"})
 
     enable_thinking: bool = True
     """When ``True``, the generation prompt ends with ``<think>`` and every
@@ -678,6 +715,7 @@ class Llama3RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["llama-3"] = "llama-3"
+    _template_fields = frozenset({"date_string", "tools_in_user_message"})
 
     date_string: str = "26 Jul 2024"
     """``Today Date`` value injected into the system preamble. Pinned to
@@ -696,6 +734,7 @@ class MiniMaxM2RendererConfig(BaseRendererConfig):
     """MiniMax M2 / M2.5 renderer config."""
 
     name: Literal["minimax-m2"] = "minimax-m2"
+    _template_fields = frozenset({"model_identity"})
 
     model_identity: str = "You are a helpful assistant. Your name is MiniMax-M2.5 and is built by MiniMax."
     """Fallback persona used when no system message is supplied. Mirrors
@@ -713,6 +752,9 @@ class Nemotron3RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["nemotron-3"] = "nemotron-3"
+    _template_fields = frozenset(
+        {"enable_thinking", "truncate_history_thinking", "low_effort"}
+    )
 
     enable_thinking: bool = True
     """When ``True``, the generation prompt includes ``<think>``. Mirrors
@@ -755,6 +797,9 @@ class Nemotron3UltraRendererConfig(BaseRendererConfig):
     """
 
     name: Literal["nemotron-3-ultra"] = "nemotron-3-ultra"
+    _template_fields = frozenset(
+        {"enable_thinking", "truncate_history_thinking", "medium_effort"}
+    )
 
     enable_thinking: bool = True
     """See :class:`Nemotron3RendererConfig.enable_thinking`."""
@@ -790,6 +835,7 @@ class Nemotron35RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["nemotron-3.5"] = "nemotron-3.5"
+    _template_fields = frozenset({"enable_thinking", "truncate_history_thinking"})
 
     enable_thinking: bool = True
     """See :class:`Nemotron3RendererConfig.enable_thinking`."""
@@ -817,6 +863,7 @@ class DeepSeekV3RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["deepseek-v3"] = "deepseek-v3"
+    _template_fields = frozenset()
 
 
 class DeepSeekR1RendererConfig(BaseRendererConfig):
@@ -834,6 +881,7 @@ class DeepSeekR1RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["deepseek-r1"] = "deepseek-r1"
+    _template_fields = frozenset()
 
 
 RendererConfig = Annotated[

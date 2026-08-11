@@ -63,6 +63,9 @@ _RENDERER_MODELS = [
     # Ultra: auto-resolves to the ``nemotron-3-ultra`` config via the model
     # name; parity asserted against the Ultra apply_chat_template (``medium_effort``).
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
+    # Nemotron 3.5 (Lightning): Ultra's template minus the effort kwarg — its
+    # config declares only ``enable_thinking`` / ``truncate_history_thinking``.
+    ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
     ("poolside/Laguna-M.1", "auto"),
     ("poolside/Laguna-XS-2.1", "auto"),

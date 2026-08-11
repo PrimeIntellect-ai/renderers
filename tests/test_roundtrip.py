@@ -46,6 +46,8 @@ _ROUNDTRIP_MODELS = [
     # Ultra: parse must recover content after a </think> glued directly to it
     # (no separating newline) — the Ultra-specific glue stresses the round-trip.
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
+    # Nemotron 3.5 (Lightning): same glue as Ultra, distinct renderer class.
+    ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
     ("poolside/Laguna-M.1", "auto"),
     # Laguna-XS-2.1 is deliberately absent: under the default

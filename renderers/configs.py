@@ -657,6 +657,37 @@ class Nemotron3UltraRendererConfig(BaseRendererConfig):
     user message. Mirrors the Ultra chat template's ``medium_effort`` kwarg."""
 
 
+class Nemotron35RendererConfig(BaseRendererConfig):
+    """Nemotron-3.5 (Lightning) renderer config.
+
+    Nemotron 3.5's chat template is the Ultra variant's minus the effort
+    kwarg: same reasoning-block glue (no ``\\n`` around ``</think>``, no
+    trim on truncated tool-call history), but its Jinja defines no
+    reasoning-effort variable at all. It shares the
+    :class:`renderers.nemotron3.Nemotron3Renderer` implementation via the
+    :class:`renderers.nemotron3.Nemotron35Renderer` subclass and is reached
+    via the ``nemotron-3.5`` discriminator.
+    """
+
+    name: Literal["nemotron-3.5"] = "nemotron-3.5"
+
+    enable_thinking: bool = True
+    """See :class:`Nemotron3RendererConfig.enable_thinking`."""
+
+    truncate_history_thinking: bool = True
+    """See :class:`Nemotron3RendererConfig.truncate_history_thinking`."""
+
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        _reject_thinking_retention_conflict(
+            self,
+            "truncate_history_thinking",
+            true_implies="tool_cycle",
+            false_implies="all",
+        )
+        return self
+
+
 class DeepSeekV3RendererConfig(BaseRendererConfig):
     """DeepSeek-V3 renderer config (non-reasoning).
 
@@ -708,6 +739,7 @@ RendererConfig = Annotated[
         MiniMaxM2RendererConfig,
         Nemotron3RendererConfig,
         Nemotron3UltraRendererConfig,
+        Nemotron35RendererConfig,
         DeepSeekV3RendererConfig,
         DeepSeekR1RendererConfig,
     ],
@@ -749,6 +781,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "minimax-m2": MiniMaxM2RendererConfig,
     "nemotron-3": Nemotron3RendererConfig,
     "nemotron-3-ultra": Nemotron3UltraRendererConfig,
+    "nemotron-3.5": Nemotron35RendererConfig,
     "deepseek-v3": DeepSeekV3RendererConfig,
     "deepseek-r1": DeepSeekR1RendererConfig,
 }
@@ -796,6 +829,7 @@ __all__ = [
     "LagunaXS21RendererConfig",
     "Llama3RendererConfig",
     "MiniMaxM2RendererConfig",
+    "Nemotron35RendererConfig",
     "Nemotron3RendererConfig",
     "Nemotron3UltraRendererConfig",
     "PrimeQwen3RendererConfig",

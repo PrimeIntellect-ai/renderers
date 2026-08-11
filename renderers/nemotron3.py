@@ -31,7 +31,11 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
-from renderers.configs import Nemotron3RendererConfig, Nemotron3UltraRendererConfig
+from renderers.configs import (
+    Nemotron3RendererConfig,
+    Nemotron3UltraRendererConfig,
+    Nemotron35RendererConfig,
+)
 from renderers.parsing import parse_qwen35
 
 # ---------------------------------------------------------------------------
@@ -76,10 +80,12 @@ def _render_extra_keys(obj: dict[str, Any], handled_keys: set[str]) -> list[str]
     return lines
 
 
-# The Nemotron-3 family ships two chat-template variants. Nano / Super share
+# The Nemotron family ships three chat-template variants. Nano / Super share
 # one (renderer ``Nemotron3Renderer`` / config ``name="nemotron-3"``); Ultra
 # differs in the reasoning-block glue — no ``\n`` around ``</think>`` — and is
-# the ``Nemotron3UltraRenderer`` subclass (``name="nemotron-3-ultra"``). Which
+# the ``Nemotron3UltraRenderer`` subclass (``name="nemotron-3-ultra"``);
+# Nemotron 3.5 (Lightning) uses the Ultra glue but defines no effort kwarg and
+# is the ``Nemotron35Renderer`` subclass (``name="nemotron-3.5"``). Which
 # variant a checkpoint uses is carried by ``MODEL_RENDERER_MAP``, so the right
 # renderer class is constructed and the variant is encoded by the class itself.
 
@@ -851,4 +857,17 @@ class Nemotron3UltraRenderer(Nemotron3Renderer):
     """
 
     _config_cls = Nemotron3UltraRendererConfig
+    _ultra = True
+
+
+class Nemotron35Renderer(Nemotron3Renderer):
+    """Renderer for Nemotron **3.5** (Lightning).
+
+    The 3.5 chat template is the Ultra variant's minus the effort kwarg: same
+    reasoning-block glue (carried by the ``_ultra`` class hook), but its Jinja
+    defines no reasoning-effort variable, so the config exposes none and the
+    effort hint is always empty.
+    """
+
+    _config_cls = Nemotron35RendererConfig
     _ultra = True

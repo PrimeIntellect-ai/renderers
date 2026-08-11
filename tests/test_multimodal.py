@@ -123,10 +123,9 @@ def _load_processor_and_renderer(model_name: str):
                 model_name,
                 trust_remote_code=True,
                 revision=revision,
-                local_files_only=True,
             )
         else:
-            processor = AutoProcessor.from_pretrained(model_name, local_files_only=True)
+            processor = AutoProcessor.from_pretrained(model_name)
         renderer = create_renderer(tokenizer)
         # Inject processor so the renderer doesn't try to fetch it lazily.
         if hasattr(renderer, "_processor") and renderer._processor is None:

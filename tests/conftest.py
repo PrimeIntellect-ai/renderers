@@ -36,6 +36,9 @@ RENDERER_MODELS = [
     # Ultra resolves to the `nemotron-3-ultra` config variant via the model
     # name (auto → MODEL_RENDERER_MAP → nemotron-3-ultra).
     ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
+    # Nemotron 3.5 (Lightning): Ultra's template variant minus the effort
+    # kwarg (auto → MODEL_RENDERER_MAP → nemotron-3.5).
+    ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16", "auto"),
     ("poolside/Laguna-XS.2", "auto"),
     ("poolside/Laguna-M.1", "auto"),
     # XS-2.1 resolves to `LagunaXS21Renderer` via the model name — its

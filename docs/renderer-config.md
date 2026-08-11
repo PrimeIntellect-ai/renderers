@@ -43,6 +43,7 @@ chat-template kwargs. Those fields are covered by parity tests against
 | MiniMax M2 | `MiniMaxM2RendererConfig` | `model_identity` | - |
 | Nemotron-3 Nano / Super | `Nemotron3RendererConfig` | `enable_thinking`, `truncate_history_thinking`, `low_effort` | - |
 | Nemotron-3 Ultra | `Nemotron3UltraRendererConfig` | `enable_thinking`, `truncate_history_thinking`, `medium_effort` | - |
+| Nemotron-3.5 Lightning | `Nemotron35RendererConfig` | `enable_thinking`, `truncate_history_thinking` | - |
 | DeepSeek V3 | `DeepSeekV3RendererConfig` | - | - |
 | DeepSeek R1 | `DeepSeekR1RendererConfig` | - | - |
 
@@ -134,7 +135,7 @@ the knobs its template actually exposes:
 | gpt-oss | `auto_drop_analysis=False -> all`, else `tool_cycle` |
 | Hy3 | `preserved_thinking=True -> all`, else `tool_cycle` |
 | Kimi K2.5 / 2.6 | `thinking=False -> all`, else `tool_cycle` |
-| Nemotron-3 | `truncate_history_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
+| Nemotron-3 / 3.5 | `truncate_history_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | DeepSeek R1 | `template` |
 | MiniMax M2 | `tool_cycle` |
 | DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / M.1 / XS-2.1, Llama 3 | `all` |

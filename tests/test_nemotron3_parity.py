@@ -25,9 +25,10 @@ Every assertion compares ``renderer.render_ids(...)`` to
 renderer is byte-for-byte faithful for that case. Tokenizers are loaded from
 the local HF cache (offline); no network.
 
-The variants split across two configs: ``nemotron-3`` (Nano / Super, with
-``low_effort``) and ``nemotron-3-ultra`` (Ultra, with ``medium_effort``). The
-helper resolves the right config class per model from ``MODEL_RENDERER_MAP``.
+The variants split across three configs: ``nemotron-3`` (Nano / Super, with
+``low_effort``), ``nemotron-3-ultra`` (Ultra, with ``medium_effort``), and
+``nemotron-3.5`` (Lightning — Ultra's glue, no effort kwarg). The helper
+resolves the right config class per model from ``MODEL_RENDERER_MAP``.
 """
 
 from __future__ import annotations
@@ -44,7 +45,8 @@ from renderers.configs import _config_class_for
 NANO = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 SUPER = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
 ULTRA = "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16"
-MODELS = [NANO, SUPER, ULTRA]
+LIGHTNING = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
+MODELS = [NANO, SUPER, ULTRA, LIGHTNING]
 
 
 @lru_cache
@@ -107,7 +109,9 @@ def _assert_parity(
     )
 
 
-pytestmark = pytest.mark.parametrize("model", MODELS, ids=["nano", "super", "ultra"])
+pytestmark = pytest.mark.parametrize(
+    "model", MODELS, ids=["nano", "super", "ultra", "lightning"]
+)
 
 
 TOOLS = [
@@ -648,8 +652,8 @@ _EFFORT_SHAPES = [
 def test_low_effort_kwarg(model, flag, shape, extra):
     """``low_effort`` appends ``\\n\\n{reasoning effort: low}`` to the last user
     message on **Super**; it's a no-op on **Nano** (its template never defines
-    it). Ultra's config has no such field, so it's skipped."""
-    if model == ULTRA:
+    it). The Ultra / Lightning configs have no such field, so they're skipped."""
+    if model in (ULTRA, LIGHTNING):
         pytest.skip("low_effort is a nemotron-3 (Nano/Super) kwarg")
     _assert_parity(model, shape, low_effort=flag, **extra)
 
@@ -660,7 +664,7 @@ def test_low_effort_kwarg(model, flag, shape, extra):
 )
 def test_medium_effort_kwarg(model, flag, shape, extra):
     """``medium_effort`` appends ``\\n\\n{reasoning effort: efficient}`` on
-    **Ultra**. Nano/Super configs have no such field, so they're skipped."""
+    **Ultra**. The other configs have no such field, so they're skipped."""
     if model != ULTRA:
         pytest.skip("medium_effort is a nemotron-3-ultra kwarg")
     _assert_parity(model, shape, medium_effort=flag, **extra)
@@ -668,9 +672,12 @@ def test_medium_effort_kwarg(model, flag, shape, extra):
 
 def test_effort_kwarg_lives_on_the_right_variant(model):
     """Each effort kwarg is declared only on the variant whose template defines
-    it — the discriminated union rejects the wrong combination at config load."""
+    it — the discriminated union rejects the wrong combination at config load.
+    Lightning's template defines no effort variable, so its config has neither."""
     fields = _config_cls(model).template_field_names()
     if model == ULTRA:
         assert "medium_effort" in fields and "low_effort" not in fields
+    elif model == LIGHTNING:
+        assert "low_effort" not in fields and "medium_effort" not in fields
     else:
         assert "low_effort" in fields and "medium_effort" not in fields

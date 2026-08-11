@@ -1065,6 +1065,9 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nemotron-3",
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nemotron-3-ultra",
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nemotron-3-ultra",
+    # Nemotron 3.5 (Lightning). Its template is the Ultra variant's minus the
+    # effort kwarg (``nemotron-3.5``).
+    "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16": "nemotron-3.5",
     # Llama 3.2 (Instruct). Tested against the gated meta-llama repos and
     # the unrestricted unsloth/... mirror, which ships a byte-identical
     # chat template. ``Llama3Renderer`` defaults ``date_string`` to
@@ -1332,7 +1335,11 @@ def _populate_registry():
     )
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
-    from renderers.nemotron3 import Nemotron3Renderer, Nemotron3UltraRenderer
+    from renderers.nemotron3 import (
+        Nemotron3Renderer,
+        Nemotron3UltraRenderer,
+        Nemotron35Renderer,
+    )
     from renderers.prime_qwen3 import PrimeQwen3Renderer
     from renderers.qwen3 import Qwen3Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
@@ -1362,6 +1369,7 @@ def _populate_registry():
             "llama-3": Llama3Renderer,
             "nemotron-3": Nemotron3Renderer,
             "nemotron-3-ultra": Nemotron3UltraRenderer,
+            "nemotron-3.5": Nemotron35Renderer,
             "gpt-oss": GptOssRenderer,
         }
     )

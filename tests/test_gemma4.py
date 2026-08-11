@@ -126,6 +126,52 @@ def test_parser_extracts_reasoning_and_multiple_typed_tool_calls():
     ]
 
 
+def test_parser_recovers_prompt_opened_post_tool_reasoning():
+    tokenizer, _ = _gemma4()
+    renderer = Gemma4Renderer(tokenizer, Gemma4RendererConfig(enable_thinking=True))
+    tool_call = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "weather", "arguments": {"city": "Berlin"}},
+    }
+    messages = [
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "sunny"},
+    ]
+    expected_prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        enable_thinking=True,
+        return_dict=False,
+    )
+    prompt = renderer.render_ids(messages, add_generation_prompt=True)
+
+    assert prompt == list(expected_prompt)
+    assert tokenizer.decode(prompt, skip_special_tokens=False).endswith(
+        "<|channel>thought\n"
+    )
+
+    completion = tokenizer.encode(
+        "Need synthesize.\n<channel|>It is sunny.<turn|>",
+        add_special_tokens=False,
+    )
+
+    parsed = renderer.parse_response(completion)
+
+    assert parsed.reasoning_content == "Need synthesize."
+    assert parsed.content == "It is sunny."
+    assert parsed.tool_calls == []
+
+    # Initial-turn content without a channel closer remains ordinary content.
+    direct = renderer.parse_response(
+        tokenizer.encode("Direct answer.<turn|>", add_special_tokens=False)
+    )
+    assert direct.reasoning_content is None
+    assert direct.content == "Direct answer."
+
+
 def test_legacy_assistant_tool_responses_preserve_mask_contract():
     tokenizer, _ = _gemma4()
     renderer = Gemma4Renderer(tokenizer)

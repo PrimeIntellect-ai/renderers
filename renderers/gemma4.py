@@ -1076,6 +1076,19 @@ class Gemma4Renderer:
                 )
             reasoning = self._decode(ids[thought_start:channel_end]).strip()
             cursor = channel_end + 1
+        elif self.config.enable_thinking:
+            # After a tool response, the canonical generation prompt already
+            # ends with ``<|channel>thought\n``. The sampled completion therefore
+            # starts with the thought body and contains only the closing
+            # ``<channel|>`` marker. A lone closer distinguishes that continuation
+            # from a normal thinking completion, which samples its own opener.
+            channel_end = next(
+                (i for i, token_id in enumerate(ids) if token_id == self._channel_end),
+                -1,
+            )
+            if channel_end != -1:
+                reasoning = self._decode(ids[:channel_end]).strip()
+                cursor = channel_end + 1
 
         tool_calls: list[ParsedToolCall] = []
         while cursor < len(ids):

@@ -69,6 +69,7 @@ _RENDERER_MODELS = [
     ("poolside/Laguna-XS.2", "auto"),
     ("poolside/Laguna-M.1", "auto"),
     ("poolside/Laguna-XS-2.1", "auto"),
+    ("poolside/Laguna-S-2.1", "auto"),
     ("tencent/Hy3", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
 ]

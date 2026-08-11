@@ -41,6 +41,9 @@ Laguna M.1's official template (revision ``2bf8a4ab``) is served by
 :class:`LagunaM1Renderer`. It shares XS.2's byte layout, tool syntax, and
 generation prompt, but has no fallback system prompt and reads assistant
 reasoning from ``reasoning`` before falling back to ``reasoning_content``.
+
+S-2.1 subclasses :class:`LagunaXS21Renderer` from :mod:`renderers.laguna_s21`,
+overriding only the ``_render_history_reasoning`` seam.
 """
 
 from __future__ import annotations
@@ -63,6 +66,7 @@ from renderers.base import (
 )
 from renderers.configs import (
     LagunaM1RendererConfig,
+    LagunaS21RendererConfig,
     LagunaXS2RendererConfig,
     LagunaXS21RendererConfig,
 )
@@ -120,6 +124,7 @@ class LagunaXS2Renderer:
             LagunaXS2RendererConfig
             | LagunaM1RendererConfig
             | LagunaXS21RendererConfig
+            | LagunaS21RendererConfig
             | None
         ) = None,
     ):
@@ -688,9 +693,16 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        config: LagunaXS21RendererConfig | None = None,
+        config: LagunaXS21RendererConfig | LagunaS21RendererConfig | None = None,
     ):
         super().__init__(tokenizer, config or LagunaXS21RendererConfig())
+
+    def _render_history_reasoning(self) -> bool:
+        """Whether an assistant turn renders its ``<think>{reasoning}</think>``
+        block (vs opening with a bare ``</think>``). Mirrors the template's
+        reasoning-display gate; XS-2.1 gates this on ``enable_thinking`` alone.
+        """
+        return self.config.enable_thinking
 
     def render(
         self,
@@ -975,7 +987,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         # scaffolding the model never samples.
         emit_special(self._assistant, msg_idx, is_sampled=False, is_content=False)
 
-        if self.config.enable_thinking:
+        if self._render_history_reasoning():
             # ``<think>{reasoning}</think>`` renders verbatim, even when
             # the reasoning is empty; the opener is the gen-prompt
             # prefill, the rest the model sampled.

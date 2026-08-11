@@ -1076,11 +1076,12 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # construction to pin a different date.
     "meta-llama/Llama-3.2-1B-Instruct": "llama-3",
     "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
-    # Poolside Laguna. These checkpoints ship distinct chat templates,
-    # each mirrored by its own renderer class/config discriminator.
+    # Poolside Laguna. These checkpoints ship distinct chat templates, each
+    # mirrored by its own renderer class/config discriminator.
     "poolside/Laguna-XS.2": "laguna-xs.2",
     "poolside/Laguna-M.1": "laguna-m.1",
     "poolside/Laguna-XS-2.1": "laguna-xs-2.1",
+    "poolside/Laguna-S-2.1": "laguna-s-2.1",
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
@@ -1328,6 +1329,7 @@ def _populate_registry():
     from renderers.hy3 import Hy3Renderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
+    from renderers.laguna_s21 import LagunaS21Renderer
     from renderers.laguna_xs2 import (
         LagunaM1Renderer,
         LagunaXS2Renderer,
@@ -1366,6 +1368,7 @@ def _populate_registry():
             "laguna-xs.2": LagunaXS2Renderer,
             "laguna-m.1": LagunaM1Renderer,
             "laguna-xs-2.1": LagunaXS21Renderer,
+            "laguna-s-2.1": LagunaS21Renderer,
             "llama-3": Llama3Renderer,
             "nemotron-3": Nemotron3Renderer,
             "nemotron-3-ultra": Nemotron3UltraRenderer,

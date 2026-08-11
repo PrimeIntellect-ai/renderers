@@ -1093,8 +1093,10 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
-    # Thinking Machines Inkling (vision + audio; native processor in transformers >= 5.14).
+    # Thinking Machines Inkling checkpoints share byte-identical tokenizer,
+    # chat-template, and processor assets (vision + audio; transformers >= 5.14).
     "thinkingmachines/Inkling": "inkling",
+    "thinkingmachines/Inkling-Small": "inkling",
     # Tencent Hunyuan Hy3 (295B-A21B MoE). The FP8 checkpoint shares the same
     # tokenizer and chat template. Hy3-preview is deliberately unmapped: it
     # ships an older, incompatible template (un-suffixed special tokens,
@@ -1144,6 +1146,7 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     "moonshotai/Kimi-K2.5": {"image"},
     "moonshotai/Kimi-K2.6": {"image"},
     "thinkingmachines/Inkling": {"image", "audio"},
+    "thinkingmachines/Inkling-Small": {"image", "audio"},
 }
 
 

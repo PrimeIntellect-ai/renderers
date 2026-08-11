@@ -432,7 +432,7 @@ INKLING_EFFORT_MAP: dict[str, float] = {
 
 
 class InklingRendererConfig(BaseRendererConfig):
-    """Inkling renderer config (``thinkingmachines/Inkling``).
+    """Renderer config for Inkling and Inkling-Small.
 
     Inkling gates reasoning depth via a ``reasoning_effort`` knob rather
     than a boolean ``enable_thinking``. It accepts either a string label

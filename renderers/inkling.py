@@ -1,4 +1,4 @@
-"""Inkling renderer — ``thinkingmachines/Inkling`` (text + image + audio).
+"""Inkling renderer — ``thinkingmachines/Inkling`` and ``Inkling-Small``.
 
 Inkling's chat template is **token-delimited**: every structural piece is a
 single atomic special token, so there is no BOS and text between markers BPEs
@@ -141,7 +141,7 @@ def _audio_hash(wav: np.ndarray, sampling_rate: int) -> str:
 
 
 class InklingRenderer:
-    """Deterministic message → token renderer for ``thinkingmachines/Inkling``.
+    """Deterministic renderer for both Thinking Machines Inkling checkpoints.
 
     Text / tools / reasoning render to byte-parity with
     ``tokenizer.apply_chat_template``; image / audio render to byte-parity with

@@ -66,6 +66,7 @@ RENDERER_MODELS = [
     ("openai/gpt-oss-20b", "gpt-oss"),
     ("tencent/Hy3", "auto"),
     ("thinkingmachines/Inkling", "auto"),
+    ("thinkingmachines/Inkling-Small", "auto"),
     ("Qwen/Qwen2.5-0.5B-Instruct", "default"),
 ]
 

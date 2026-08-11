@@ -1,4 +1,4 @@
-"""Inkling-focused tests (``thinkingmachines/Inkling``).
+"""Focused tests for Inkling and Inkling-Small.
 
 The shared matrices (conftest render-parity, config-parity, multimodal) already
 assert byte parity on the common shapes and image/audio parity against the
@@ -26,6 +26,7 @@ from renderers.configs import InklingRendererConfig
 from renderers.inkling import InklingRenderer
 
 _MODEL = "thinkingmachines/Inkling"
+_SMALL_MODEL = "thinkingmachines/Inkling-Small"
 
 TOOLS = [
     {
@@ -75,6 +76,13 @@ def _expected(msgs, *, tools=None, add_generation_prompt=False, **template_kwarg
 
 def _decode(ids):
     return _tok().decode(ids, skip_special_tokens=False)
+
+
+@pytest.mark.parametrize("checkpoint", [_MODEL, _SMALL_MODEL])
+def test_auto_resolves_both_checkpoints_to_shared_renderer(checkpoint):
+    renderer = create_renderer(load_tokenizer(checkpoint))
+    assert isinstance(renderer, InklingRenderer)
+    assert renderer.config.name == "inkling"
 
 
 # ── Reasoning-effort line ─────────────────────────────────────────────

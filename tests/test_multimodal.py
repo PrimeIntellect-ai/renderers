@@ -179,7 +179,10 @@ def _detect_family(model_name: str) -> str:
         return "kimi_k25"
     if model_name.startswith("google/gemma-4-"):
         return "gemma4"
-    if model_name == "thinkingmachines/Inkling":
+    if model_name in {
+        "thinkingmachines/Inkling",
+        "thinkingmachines/Inkling-Small",
+    }:
         # Two-step processor call like Qwen-VL — processor(images=/audio=, text=)
         # — but different placeholder tokens and a distinct audio modality.
         return "inkling"

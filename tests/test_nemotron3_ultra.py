@@ -3,8 +3,8 @@
 Assert the model→renderer mapping, the per-variant typed-config surface, and
 the name-based ``low_effort`` gating WITHOUT loading any tokenizer (no
 network). This pins the wiring the parity matrix can't reach — in particular
-the FP8 Ultra and NVFP4 Lightning entries, which no test loads a tokenizer
-for — so it can't silently rot.
+the FP8 Ultra entry, which no test loads a tokenizer for — so it can't
+silently rot.
 
 The three variants:
 
@@ -44,7 +44,6 @@ _NANO_SUPER_REPOS = [
 ]
 _LIGHTNING_REPOS = [
     "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
-    "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
 ]
 
 

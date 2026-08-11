@@ -1066,10 +1066,8 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nemotron-3-ultra",
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nemotron-3-ultra",
     # Nemotron 3.5 (Lightning). Its template is the Ultra variant's minus the
-    # effort kwarg (``nemotron-3.5``). BF16 and NVFP4 share the same tokenizer
-    # and template.
+    # effort kwarg (``nemotron-3.5``).
     "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16": "nemotron-3.5",
-    "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4": "nemotron-3.5",
     # Llama 3.2 (Instruct). Tested against the gated meta-llama repos and
     # the unrestricted unsloth/... mirror, which ships a byte-identical
     # chat template. ``Llama3Renderer`` defaults ``date_string`` to

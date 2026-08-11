@@ -41,8 +41,7 @@ from renderers import create_renderer
 from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
 from renderers.configs import _config_class_for
 
-# BF16 / FP8 / NVFP4 share a tokenizer; only the BF16 checkpoints are cached
-# for tests.
+# BF16 / FP8 share a tokenizer; only the BF16 checkpoints are cached for tests.
 NANO = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 SUPER = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
 ULTRA = "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16"

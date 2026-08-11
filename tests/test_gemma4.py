@@ -172,6 +172,142 @@ def test_parser_recovers_prompt_opened_post_tool_reasoning():
     assert direct.content == "Direct answer."
 
 
+def _image_renderer():
+    """A Gemma 4 renderer with a live ``Gemma4Processor``, or a skip."""
+    tokenizer, _ = _gemma4()
+    renderer = Gemma4Renderer(tokenizer)
+    try:
+        renderer._get_processor()
+    except (RuntimeError, OSError) as exc:  # pragma: no cover - env dependent
+        pytest.skip(f"Gemma4Processor unavailable: {exc}")
+    return tokenizer, renderer
+
+
+def _tiny_image():
+    from PIL import Image
+
+    return Image.new("RGB", (224, 224), color=(128, 192, 255))
+
+
+def test_schema_unified_image_parts_still_expand_image_tokens():
+    """``Dataset.from_list`` unifies the Arrow schema across a content list,
+    so an image part round-tripped through a dataset carries ``text: None``
+    (and text parts carry ``image: None``). Dispatching on ``"text" in part``
+    before classifying media would route the image into the text branch,
+    emit nothing, and silently skip soft-token expansion."""
+    tokenizer, renderer = _image_renderer()
+    image = _tiny_image()
+    plain = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": "What is this?"},
+            ],
+        }
+    ]
+    schema_unified = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image, "text": None},
+                {"type": "text", "text": "What is this?", "image": None},
+            ],
+        }
+    ]
+
+    baseline = renderer.render(plain)
+    roundtripped = renderer.render(schema_unified)
+
+    image_id = tokenizer.convert_tokens_to_ids("<|image|>")
+    assert baseline.token_ids.count(image_id) > 0
+    assert roundtripped.token_ids == baseline.token_ids
+    assert (
+        roundtripped.multi_modal_data.mm_hashes == baseline.multi_modal_data.mm_hashes
+    )
+    assert (
+        roundtripped.multi_modal_data.mm_placeholders
+        == baseline.multi_modal_data.mm_placeholders
+    )
+
+
+def test_schema_unified_tool_response_image_parts_survive():
+    """Same hazard on the tool-response path, which also has to keep
+    accepting untyped text parts."""
+    tokenizer, renderer = _image_renderer()
+    image = _tiny_image()
+    messages = [
+        {"role": "user", "content": "Look it up."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "screenshot", "arguments": {}},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": [
+                {"type": "image", "image": image, "text": None},
+                {"type": "text", "text": "captured", "image": None},
+            ],
+        },
+    ]
+    rendered = renderer.render(messages)
+
+    image_id = tokenizer.convert_tokens_to_ids("<|image|>")
+    assert rendered.token_ids.count(image_id) > 0
+    assert rendered.multi_modal_data.mm_hashes["image"]
+    assert "captured" in tokenizer.decode(rendered.token_ids, skip_special_tokens=False)
+
+
+def test_untyped_text_parts_render_in_tool_responses():
+    tokenizer, _ = _gemma4()
+    renderer = Gemma4Renderer(tokenizer)
+    messages = [
+        {"role": "user", "content": "Check."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "check", "arguments": {}},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": [{"text": "all good"}],
+        },
+    ]
+    text = tokenizer.decode(renderer.render_ids(messages), skip_special_tokens=False)
+    assert "all good" in text
+
+
+def test_system_content_lists_reject_media_parts():
+    """The text-only guard must not be fooled by a schema-unified image
+    part's ``text: None`` key, which would drop the image silently."""
+    tokenizer, _ = _gemma4()
+    renderer = Gemma4Renderer(tokenizer)
+    messages = [
+        {
+            "role": "system",
+            "content": [{"type": "image", "image": object(), "text": None}],
+        },
+        {"role": "user", "content": "Hi"},
+    ]
+    with pytest.raises(ValueError, match="text parts only"):
+        renderer.render_ids(messages)
+
+
 def test_legacy_assistant_tool_responses_preserve_mask_contract():
     tokenizer, _ = _gemma4()
     renderer = Gemma4Renderer(tokenizer)

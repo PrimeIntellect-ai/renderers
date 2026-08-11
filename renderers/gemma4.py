@@ -589,22 +589,22 @@ class Gemma4Renderer:
         for item in content:
             if not isinstance(item, Mapping):
                 raise ValueError(f"Unexpected Gemma 4 content item: {item!r}")
-            if item.get("type") == "text" or "text" in item:
-                raw = str(item.get("text") or "")
-                text = _strip_thinking(raw) if is_assistant else raw.strip()
-                em.text(text, is_sampled=is_assistant, is_content=True)
-                has_content = has_content or bool(text.strip())
-            elif _is_image_part(item):
+            # Classify media before text: HF Arrow schema unification
+            # (``Dataset.from_list`` over a heterogeneous content list) adds
+            # ``text: None`` to every image part, so a key-presence check on
+            # ``text`` would swallow images and skip token expansion.
+            part = dict(item)
+            if _is_image_part(part):
                 self._emit_image(
                     em,
-                    dict(item),
+                    part,
                     mm_hashes,
                     mm_placeholders,
                     mm_items,
                     assistant_body=is_assistant,
                 )
                 has_content = True
-            elif _is_video_part(item) or item.get("type") in (
+            elif _is_video_part(part) or part.get("type") in (
                 "audio",
                 "input_audio",
             ):
@@ -612,6 +612,11 @@ class Gemma4Renderer:
                     "Gemma4Renderer currently supports image inputs; audio and "
                     "video inputs are not yet implemented."
                 )
+            elif part.get("type") == "text" or "text" in part:
+                raw = str(part.get("text") or "")
+                text = _strip_thinking(raw) if is_assistant else raw.strip()
+                em.text(text, is_sampled=is_assistant, is_content=True)
+                has_content = has_content or bool(text.strip())
         return has_content
 
     def _emit_tool_response_body(
@@ -638,13 +643,14 @@ class Gemma4Renderer:
         media: list[dict[str, Any]] = []
         if isinstance(response, list):
             text = ""
-            for part in response:
-                if not isinstance(part, Mapping):
+            for raw_part in response:
+                if not isinstance(raw_part, Mapping):
                     continue
-                if part.get("type") == "text":
-                    text += str(part.get("text") or "")
-                elif _is_image_part(part):
-                    media.append(dict(part))
+                # Media before text, for the same schema-unification reason
+                # as ``_emit_content``.
+                part = dict(raw_part)
+                if _is_image_part(part):
+                    media.append(part)
                 elif _is_video_part(part) or part.get("type") in (
                     "audio",
                     "input_audio",
@@ -652,6 +658,8 @@ class Gemma4Renderer:
                     raise NotImplementedError(
                         "Gemma4Renderer tool responses currently support images only."
                     )
+                elif part.get("type") == "text" or "text" in part:
+                    text += str(part.get("text") or "")
             response = text
 
         if isinstance(response, Mapping):
@@ -734,12 +742,21 @@ class Gemma4Renderer:
                     em.text(content.strip(), is_sampled=False, is_content=True)
                 elif isinstance(content, list):
                     for item in content:
-                        if not isinstance(item, Mapping) or "text" not in item:
+                        # ``"text" in item`` alone would accept a schema-unified
+                        # image part (which carries ``text: None``) and silently
+                        # drop the image, so reject media parts explicitly.
+                        part = dict(item) if isinstance(item, Mapping) else {}
+                        if (
+                            not part
+                            or "text" not in part
+                            or _is_image_part(part)
+                            or _is_video_part(part)
+                        ):
                             raise ValueError(
                                 "Gemma 4 system content lists may contain text parts only."
                             )
                         em.text(
-                            str(item.get("text") or "").strip() + " ",
+                            str(part.get("text") or "").strip() + " ",
                             is_sampled=False,
                             is_content=True,
                         )

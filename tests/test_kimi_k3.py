@@ -96,6 +96,24 @@ def _image_part(size: tuple[int, int] = (112, 112)) -> dict:
             ],
             TOOLS,
         ),
+        (
+            [
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": {"city": "Sydney"}},
+                        }
+                    ],
+                },
+                {"role": "tool", "name": "get_weather", "content": "sunny"},
+                {"role": "user", "content": "and tomorrow?"},
+            ],
+            TOOLS,
+        ),
     ],
     ids=[
         "user-only",
@@ -103,6 +121,7 @@ def _image_part(size: tuple[int, int] = (112, 112)) -> dict:
         "with-tools",
         "thinking-history",
         "tool-call-history",
+        "tool-result-history",
     ],
 )
 def test_text_renders_match_the_model_encoder(tokenizer, renderer, messages, tools):
@@ -417,3 +436,33 @@ def test_flags_a_call_naming_an_undeclared_tool(renderer, tokenizer):
         tokenizer.encode(text, add_special_tokens=False), tools=TOOLS
     )
     assert parsed.tool_calls[0].status is ToolCallParseStatus.UNKNOWN_TOOL
+
+
+def test_tool_results_are_bound_to_their_call_by_position(tokenizer, renderer):
+    """K3 binds a result to its call with tool= and a 1-based index that restarts each
+    assistant turn; a name= attribute leaves the result unattributable."""
+    call = lambda name: {"type": "function", "function": {"name": name, "arguments": {}}}
+    text = tokenizer.decode(
+        renderer.render_ids(
+            [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": "", "tool_calls": [call("a"), call("b")]},
+                {"role": "tool", "name": "a", "content": "1"},
+                {"role": "tool", "name": "b", "content": "2"},
+                {"role": "assistant", "content": "", "tool_calls": [call("c")]},
+                {"role": "tool", "name": "c", "content": "3"},
+            ]
+        ),
+        skip_special_tokens=False,
+    )
+    assert '<|open|>message role="tool" tool="a" index="1"<|sep|>' in text
+    assert '<|open|>message role="tool" tool="b" index="2"<|sep|>' in text
+    assert '<|open|>message role="tool" tool="c" index="1"<|sep|>' in text
+    assert 'role="tool" name=' not in text
+
+
+def test_rejects_a_tool_message_with_no_name(renderer):
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="resolvable tool name"):
+        renderer.render_ids([{"role": "tool", "content": "orphan"}])

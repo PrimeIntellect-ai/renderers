@@ -90,7 +90,10 @@ _TOOL_DECLARE_BODY = "# Tools\nHere are the available tools, described in JSONSc
 _THINK_CHANNEL = "think"
 _RESPONSE_CHANNEL = "response"
 _MESSAGE_TAG = "message"
-_TOOL_CALL_TAG = "tool_call"
+_TOOLS_CHANNEL = "tools"
+_CALL_TAG = "call"
+_ARGUMENT_TAG = "argument"
+_JSON_TAG = "json"
 
 # A render op is either literal text or an image part awaiting the processor.
 _TEXT = "text"
@@ -104,6 +107,47 @@ def _json_compact(value: Any) -> str:
 
 def _escape_attr_value(value: Any) -> str:
     return str(value).replace('"', '\\"')
+
+
+def _xtml_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, dict):
+        return "object"
+    return "array"
+
+
+def _xtml_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _xtml_parse(value: str, declared_type: str) -> Any:
+    """Inverse of ``_xtml_value``; an undeclared or malformed value stays a string."""
+    if declared_type == "string":
+        return value
+    if declared_type == "null":
+        return None
+    if declared_type == "boolean":
+        return value.strip() == "true"
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError):
+        return value
+
+
+def _attr(header: str, key: str) -> str:
+    marker = f'{key}="'
+    if marker not in header:
+        return ""
+    return header.split(marker, 1)[1].split('"', 1)[0]
 
 
 def _open_tag(tag: str, attrs: tuple[tuple[str, Any], ...] = ()) -> str:
@@ -264,16 +308,37 @@ class KimiK3Renderer:
         ]
         ops.extend(self._content_ops(message.get("content")))
         ops.append((_TEXT, _close_tag(_RESPONSE_CHANNEL)))
-        for call in message.get("tool_calls") or []:
-            function = call.get("function", call)
-            ops.append(
-                (
-                    _TEXT,
-                    _open_tag(_TOOL_CALL_TAG, (("name", function.get("name", "")),))
-                    + _json_compact(function.get("arguments") or {})
-                    + _close_tag(_TOOL_CALL_TAG),
+        calls = message.get("tool_calls") or []
+        if calls:
+            rendered = _open_tag(_TOOLS_CHANNEL)
+            for index, call in enumerate(calls, start=1):
+                function = call.get("function", call)
+                rendered += _open_tag(
+                    _CALL_TAG, (("tool", function.get("name", "")), ("index", index))
                 )
-            )
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except (ValueError, TypeError):
+                        pass
+                if isinstance(arguments, dict):
+                    for key, value in arguments.items():
+                        rendered += (
+                            _open_tag(
+                                _ARGUMENT_TAG, (("key", key), ("type", _xtml_type(value)))
+                            )
+                            + _xtml_value(value)
+                            + _close_tag(_ARGUMENT_TAG)
+                        )
+                elif arguments is not None:
+                    rendered += (
+                        _open_tag(_JSON_TAG, (("type", "object"),))
+                        + _xtml_value(arguments)
+                        + _close_tag(_JSON_TAG)
+                    )
+                rendered += _close_tag(_CALL_TAG)
+            ops.append((_TEXT, rendered + _close_tag(_TOOLS_CHANNEL)))
         return ops
 
     def _message_ops(self, message: Message) -> list[Op]:
@@ -424,26 +489,38 @@ class KimiK3Renderer:
         return rest.split(end, 1)[0] if end in rest else rest
 
     def _parse_tool_calls(self, text: str) -> list[dict[str, Any]]:
+        """Read back the ``tools`` channel: one ``call`` per invocation, typed arguments."""
         calls: list[dict[str, Any]] = []
         remaining = text
-        marker = f"{OPEN_TOKEN}{_TOOL_CALL_TAG}"
-        while marker in remaining:
-            remaining = remaining.split(marker, 1)[1]
+        call_marker = f"{OPEN_TOKEN}{_CALL_TAG} "
+        while call_marker in remaining:
+            remaining = remaining.split(call_marker, 1)[1]
             header, _, body = remaining.partition(SEP_TOKEN)
-            name = (
-                header.split('name="', 1)[1].split('"', 1)[0]
-                if 'name="' in header
-                else ""
-            )
-            raw = body.split(_close_tag(_TOOL_CALL_TAG), 1)[0]
-            try:
-                arguments = json.loads(raw)
-            except (ValueError, TypeError):
-                arguments = raw
+            name = _attr(header, "tool")
+            block = body.split(_close_tag(_CALL_TAG), 1)[0]
+            arguments: Any = {}
+            json_marker = f"{OPEN_TOKEN}{_JSON_TAG}"
+            if json_marker in block:
+                raw = block.split(SEP_TOKEN, 1)[1].split(_close_tag(_JSON_TAG), 1)[0]
+                try:
+                    arguments = json.loads(raw)
+                except (ValueError, TypeError):
+                    arguments = raw
+            else:
+                argument_marker = f"{OPEN_TOKEN}{_ARGUMENT_TAG} "
+                rest = block
+                while argument_marker in rest:
+                    rest = rest.split(argument_marker, 1)[1]
+                    arg_header, _, arg_body = rest.partition(SEP_TOKEN)
+                    value = arg_body.split(_close_tag(_ARGUMENT_TAG), 1)[0]
+                    arguments[_attr(arg_header, "key")] = _xtml_parse(
+                        value, _attr(arg_header, "type")
+                    )
+                    rest = arg_body
             calls.append(
                 {"type": "function", "function": {"name": name, "arguments": arguments}}
             )
-            remaining = body
+            remaining = block
         return calls
 
     def bridge_to_next_turn(

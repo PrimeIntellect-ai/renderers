@@ -77,8 +77,33 @@ def _image_part(size: tuple[int, int] = (112, 112)) -> dict:
             ],
             None,
         ),
+        (
+            [
+                {"role": "user", "content": "weather?"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": {"city": "Sydney", "n": 3, "ok": True},
+                            },
+                        }
+                    ],
+                },
+            ],
+            TOOLS,
+        ),
     ],
-    ids=["user-only", "multi-turn", "with-tools", "thinking-history"],
+    ids=[
+        "user-only",
+        "multi-turn",
+        "with-tools",
+        "thinking-history",
+        "tool-call-history",
+    ],
 )
 def test_text_renders_match_the_model_encoder(tokenizer, renderer, messages, tools):
     kwargs = {"tools": tools} if tools else {}
@@ -310,3 +335,57 @@ def test_parses_a_full_assistant_message_with_both_tags(tokenizer, renderer):
     parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
     assert parsed.content == "Red"
     assert parsed.reasoning_content == "reasoned"
+
+
+# Captured verbatim from the deployed model, so a rewrite of the emitted form fails here rather
+# than in a rollout. Arguments arrive as separate typed blocks, never as a JSON object.
+LIVE_TOOL_CALL_COMPLETION = (
+    '<|close|>think<|sep|><|open|>response<|sep|><|close|>response<|sep|>'
+    '<|open|>tools<|sep|><|open|>call tool="move_gripper" index="1"<|sep|>'
+    '<|open|>argument key="x" type="number"<|sep|>0<|close|>argument<|sep|>'
+    '<|open|>argument key="z" type="number"<|sep|>0.15<|close|>argument<|sep|>'
+    '<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>'
+)
+
+
+def test_parses_the_deployed_models_tool_call(tokenizer, renderer):
+    parsed = renderer.parse_response(
+        tokenizer.encode(LIVE_TOOL_CALL_COMPLETION, add_special_tokens=False)
+    )
+    assert [call["function"]["name"] for call in parsed.tool_calls] == ["move_gripper"]
+    assert parsed.tool_calls[0]["function"]["arguments"] == {"x": 0, "z": 0.15}
+
+
+def test_round_trips_every_argument_type(renderer):
+    """Types survive the render, so a re-rendered history matches what the model emitted."""
+    arguments = {"s": "text", "n": 2.5, "i": 7, "b": False, "z": None, "o": {"k": 1}, "a": [1, 2]}
+    ids = renderer.render_ids(
+        [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"type": "function", "function": {"name": "act", "arguments": arguments}}
+                ],
+            },
+        ]
+    )
+    assert renderer.parse_response(ids).tool_calls[0]["function"]["arguments"] == arguments
+
+
+def test_renders_several_calls_in_one_tools_channel(tokenizer, renderer):
+    """Each call carries its 1-based index, as the model's own enumeration does."""
+    calls = [
+        {"type": "function", "function": {"name": "a", "arguments": {"x": 1}}},
+        {"type": "function", "function": {"name": "b", "arguments": {"y": 2}}},
+    ]
+    text = tokenizer.decode(
+        renderer.render_ids(
+            [{"role": "user", "content": "go"}, {"role": "assistant", "content": "", "tool_calls": calls}]
+        ),
+        skip_special_tokens=False,
+    )
+    assert text.count('<|open|>tools<|sep|>') == 1
+    assert '<|open|>call tool="a" index="1"<|sep|>' in text
+    assert '<|open|>call tool="b" index="2"<|sep|>' in text

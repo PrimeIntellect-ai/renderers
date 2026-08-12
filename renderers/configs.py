@@ -460,7 +460,11 @@ class InklingRendererConfig(BaseRendererConfig):
     """FIFO bound on the per-renderer image-processor cache. Renderer-
     internal — not a Jinja chat-template kwarg."""
 
-    _internal_fields = frozenset({"image_cache_max"})
+    audio_cache_max: int = 256
+    """FIFO bound on the per-renderer audio-processor cache. Renderer-
+    internal — not a Jinja chat-template kwarg."""
+
+    _internal_fields = frozenset({"image_cache_max", "audio_cache_max"})
 
     @model_validator(mode="after")
     def _check_reasoning_effort(self):

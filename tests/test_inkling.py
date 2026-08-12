@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import numpy as np
 import pytest
 
 from renderers import create_renderer
@@ -216,6 +217,34 @@ def test_tool_call_invoke_json_shape():
     ) in _decode(ours)
 
 
+@pytest.mark.parametrize("arguments", ["not-json", "[]", ["not", "an", "object"]])
+def test_tool_call_rejects_non_object_arguments(arguments):
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "get_weather", "arguments": arguments}}
+            ],
+        },
+    ]
+    with pytest.raises(TypeError, match="arguments must be a JSON object"):
+        _renderer().render_ids(msgs, tools=TOOLS)
+
+
+def test_unknown_content_part_type_raises():
+    with pytest.raises(ValueError, match="Unsupported Inkling content part type"):
+        _renderer().render_ids(
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "file", "file": "notes.txt"}],
+                }
+            ]
+        )
+
+
 # ── Tool-name resolution ──────────────────────────────────────────────
 
 
@@ -407,6 +436,43 @@ def test_bridge_refuses_tool_needing_prior_name_resolution():
 def test_config_accepts_labels_and_floats():
     for eff in ("none", "minimal", "low", "medium", "high", "max", 0.0, 0.5, 0.99):
         InklingRendererConfig(reasoning_effort=eff)
+
+
+def test_audio_cache_has_an_independent_bound_and_uses_public_processor_api():
+    class FakeProcessor:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "audio_input_ids": np.zeros((1, 1, 80), dtype=np.int32),
+                "audio_input_ids_mask": np.ones((1, 1), dtype=bool),
+            }
+
+    processor = FakeProcessor()
+    renderer = InklingRenderer(
+        _tok(),
+        InklingRendererConfig(image_cache_max=1, audio_cache_max=2),
+        processor=processor,
+    )
+    renderer._process_audio(np.zeros(8, dtype=np.float32), 16_000)
+    renderer._process_audio(np.ones(8, dtype=np.float32), 16_000)
+
+    assert len(renderer._audio_cache) == 2
+    assert all(call["return_tensors"] == "pt" for call in processor.calls)
+    assert all(call["sampling_rate"] == 16_000 for call in processor.calls)
+
+
+def test_processor_unavailable_fails_lazily_with_upgrade_message(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise ValueError("unknown processor")
+
+    monkeypatch.setattr("transformers.AutoProcessor.from_pretrained", unavailable)
+    renderer = _renderer()
+
+    with pytest.raises(RuntimeError, match="Transformers >=5.14"):
+        renderer._get_processor()
 
 
 @pytest.mark.parametrize("bad", ["no_think", "bogus", 1.5, -0.1])

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -80,15 +81,17 @@ def _format_effort_number(num: float) -> str:
 def _classify_part(part: Any) -> tuple[str, Any]:
     """Classify a content-list part → ``(kind, data)``.
 
-    ``kind`` is one of ``"text"``/``"image"``/``"audio"``/``"video"``/``"skip"``.
+    ``kind`` is one of ``"text"``/``"image"``/``"audio"``/``"video"``.
     Mirrors the template's part dispatch: a bare string or an untyped/text part
-    is text; unknown part types are skipped (the template raises — we skip so a
-    stray part never crashes a render, and the parity fixtures never hit it).
+    is text; unknown part types raise just as the template does. Silently
+    dropping a part would produce a token stream that does not represent the
+    caller's conversation.
     """
     if isinstance(part, str):
         return "text", part
-    if not isinstance(part, dict):
-        return "skip", None
+    if not isinstance(part, Mapping):
+        raise ValueError(f"Unexpected Inkling content part: {part!r}")
+    part = dict(part)
     ptype = part.get("type")
     if ptype is None or ptype in _TEXT_TYPES:
         text = part.get("text")
@@ -99,7 +102,7 @@ def _classify_part(part: Any) -> tuple[str, Any]:
         return "audio", part
     if ptype in _VIDEO_TYPES:
         return "video", part
-    return "skip", None
+    raise ValueError(f"Unsupported Inkling content part type: {ptype!r}")
 
 
 def _load_audio(part: Any) -> tuple[np.ndarray, int]:
@@ -240,9 +243,18 @@ class InklingRenderer:
                 "or load the tokenizer with a known name_or_path so the "
                 "processor can be auto-loaded."
             )
-        # InklingProcessor is a native transformers class (>= 5.14), so no
-        # trust_remote_code is required.
-        self._processor = AutoProcessor.from_pretrained(name)
+        # InklingProcessor is native in transformers >=5.14, so no
+        # trust_remote_code is required. Keep text-only rendering installable
+        # with older downstream pins and fail only when multimodal processing
+        # is actually requested.
+        try:
+            self._processor = AutoProcessor.from_pretrained(name)
+        except (ImportError, KeyError, ValueError) as exc:
+            raise RuntimeError(
+                "Inkling image/audio rendering requires Transformers >=5.14 "
+                "with native InklingProcessor support. Upgrade Transformers "
+                "and retry."
+            ) from exc
         return self._processor
 
     def _process_image(self, pil, image_hash: str) -> tuple[Any, int]:
@@ -272,10 +284,10 @@ class InklingRenderer:
         cached = self._audio_cache.get(key)
         if cached is not None:
             return cached
-        processed, _ = self._get_processor()._process_audio(
-            [wav], sampling_rate=sampling_rate
+        processed = self._get_processor()(
+            audio=[wav], sampling_rate=sampling_rate, return_tensors="pt"
         )
-        if len(self._audio_cache) >= self.config.image_cache_max:
+        if len(self._audio_cache) >= self.config.audio_cache_max:
             self._audio_cache.pop(next(iter(self._audio_cache)))
         self._audio_cache[key] = processed
         return processed
@@ -621,7 +633,6 @@ class InklingRenderer:
                 raise NotImplementedError(
                     "Video parts are not supported by InklingRenderer."
                 )
-            # "skip": unknown part type — ignore (matches template's text-or-drop).
 
     def _render_tool(self, msg, msg_idx, inline_name, emit_special, emit_text) -> None:
         """Tool response: ``<|message_tool|>{name?}<|content_text|>{content}<|end_message|>``.
@@ -721,10 +732,14 @@ class InklingRenderer:
         if isinstance(args, str):
             try:
                 args = json.loads(args)
-            except (json.JSONDecodeError, ValueError):
-                args = {}
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise TypeError(
+                    "Inkling tool_calls[].function.arguments must be a JSON object."
+                ) from exc
         if not isinstance(args, dict):
-            args = {}
+            raise TypeError(
+                "Inkling tool_calls[].function.arguments must be a JSON object."
+            )
         return name, args
 
     @staticmethod

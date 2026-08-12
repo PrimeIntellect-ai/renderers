@@ -1368,7 +1368,7 @@ requires-dist = [
     { name = "openai-harmony", specifier = ">=0.0.4" },
     { name = "prime-pydantic-config", specifier = ">=0.3.0.dev83" },
     { name = "tiktoken" },
-    { name = "transformers", specifier = ">=5.14.0" },
+    { name = "transformers", specifier = ">=4.50.0" },
 ]
 
 [package.metadata.requires-dev]

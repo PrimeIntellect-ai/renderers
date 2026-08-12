@@ -8,28 +8,21 @@ flipped variant (default ``enable_thinking=false`` → empty
 hard-codes this polarity per model (``_ENABLE_THINKING_DEFAULTS``), so
 both variants render byte-identical to their own ``apply_chat_template``.
 
-These tests lock in (a) the exact set of Qwen3.5 sizes in the map and
-(b) byte parity for every one of them across representative
-conversations including the ``add_generation_prompt=True`` boundary
-where the polarity divergence shows up.
+These tests lock in the map and polarity metadata. Byte parity for every size
+lives in the unified matrix in ``test_parity.py``.
 """
 
 from __future__ import annotations
 
 import pytest
+from parity import MODEL_CATALOG
 
 from renderers import Qwen35Renderer, Qwen35RendererConfig, create_renderer
 from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
 
 
 _QWEN35_IN_MAP = {
-    "Qwen/Qwen3.5-0.8B",
-    "Qwen/Qwen3.5-2B",
-    "Qwen/Qwen3.5-4B",
-    "Qwen/Qwen3.5-9B",
-    "Qwen/Qwen3.5-35B-A3B",
-    "Qwen/Qwen3.5-122B-A10B",
-    "Qwen/Qwen3.5-397B-A17B",
+    case.model for case in MODEL_CATALOG if case.resolved_renderer == "qwen3.5"
 }
 
 
@@ -107,83 +100,3 @@ def test_construction_does_not_call_apply_chat_template():
     renderer = Qwen35Renderer(_Stub())
     # 0.8B is a small size → thinking defaults off, from the hard-coded table.
     assert renderer.config.enable_thinking is False
-
-
-# ---------------------------------------------------------------------------
-# Byte parity for each in-map Qwen3.5 size.
-# ---------------------------------------------------------------------------
-
-
-_PARITY_CASES = [
-    pytest.param(
-        [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hi."},
-        ],
-        False,
-        id="system_user",
-    ),
-    pytest.param(
-        [
-            {"role": "system", "content": "You are a math tutor."},
-            {"role": "user", "content": "2+2?"},
-            {"role": "assistant", "content": "4"},
-        ],
-        False,
-        id="single_turn",
-    ),
-    pytest.param(
-        [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hi."},
-        ],
-        True,
-        id="with_gen_prompt",
-    ),
-    pytest.param(
-        [
-            {"role": "user", "content": "Solve."},
-            {
-                "role": "assistant",
-                "content": "42",
-                "reasoning_content": "Think hard.",
-            },
-            {"role": "user", "content": "Why?"},
-            {
-                "role": "assistant",
-                "content": "Because.",
-                "reasoning_content": "More thinking.",
-            },
-        ],
-        False,
-        id="with_reasoning",
-    ),
-]
-
-
-@pytest.mark.parametrize("qwen35_model", sorted(_QWEN35_IN_MAP))
-@pytest.mark.parametrize("messages,add_gen_prompt", _PARITY_CASES)
-def test_qwen35_size_parity_with_apply_chat_template(
-    qwen35_model, messages, add_gen_prompt
-):
-    """Each in-map Qwen3.5 size renders byte-identical to its own
-    ``apply_chat_template`` output. Locks in the property that lets us
-    share ``Qwen35Renderer`` across all seven sizes — the polarity
-    flip on 0.8B / 2B is absorbed by the per-model default."""
-    tok = load_tokenizer(qwen35_model)
-    renderer = create_renderer(tok, Qwen35RendererConfig())
-    assert isinstance(renderer, Qwen35Renderer)
-
-    ours = renderer.render_ids(messages, add_generation_prompt=add_gen_prompt)
-    theirs = list(
-        tok.apply_chat_template(
-            messages,
-            tokenize=True,
-            return_dict=False,
-            add_generation_prompt=add_gen_prompt,
-        )
-    )
-    assert ours == theirs, (
-        f"{qwen35_model}: Qwen35Renderer diverges from apply_chat_template "
-        f"(add_generation_prompt={add_gen_prompt})"
-    )

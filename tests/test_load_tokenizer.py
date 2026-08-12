@@ -24,7 +24,7 @@ from renderers.base import TOKENIZER_SOURCE_OVERRIDES, TRUSTED_REVISIONS, load_t
 
 
 def test_trusted_revisions_only_kimi_family():
-    """Only the Moonshot Kimi-K2 family is allowed to run repo-supplied
+    """Only the Moonshot Kimi family is allowed to run repo-supplied
     Python at ``from_pretrained`` time. Adding a new entry here means
     the renderers package is opting into arbitrary-code execution for
     that model — should require deliberate review."""
@@ -32,6 +32,7 @@ def test_trusted_revisions_only_kimi_family():
         "moonshotai/Kimi-K2-Instruct",
         "moonshotai/Kimi-K2.5",
         "moonshotai/Kimi-K2.6",
+        "moonshotai/Kimi-K3",
     }
 
 
@@ -100,7 +101,9 @@ def test_unknown_path_falls_through_to_no_remote_code(mock_from_pretrained):
     allow-list call ``AutoTokenizer.from_pretrained`` themselves."""
     cases = [
         "some-org/random-finetune",
-        "moonshotai/Kimi-K3",  # hypothetical future, NOT in allow-list
+        # A listed model's own fine-tune is still unlisted — exact match only.
+        "moonshotai/Kimi-K3-some-finetune",
+        "moonshotai/Kimi-K4",  # hypothetical future, NOT in allow-list
         "/local/path/to/tokenizer",
     ]
     for name in cases:

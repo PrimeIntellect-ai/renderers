@@ -110,6 +110,7 @@ _loaded: dict[str, tuple] = {}
 _PROCESSOR_TRUSTED_REVISIONS: dict[str, str] = {
     "moonshotai/Kimi-K2.5": "4d01dfe0332d63057c186e0b262165819efb6611",
     "moonshotai/Kimi-K2.6": "2755962d07cb42aa2d988a35bcb65cd4a9c2de82",
+    "moonshotai/Kimi-K3": "9f62e4e9fffbd0a83ddd60e1c209d828994b3569",
 }
 
 
@@ -173,6 +174,10 @@ def _detect_family(model_name: str) -> str:
     - ``gemma4``: canonical Gemma turn grammar plus dynamic
       ``<|image>`` + N x ``<|image|>`` + ``<image|>`` expansion.
     """
+    if model_name.startswith("moonshotai/Kimi-K3"):
+        # Same ``processor(messages=...)`` contract as K2.5, but K3 accepts the
+        # ``{"type": "image", "image": ...}`` shape directly.
+        return "kimi_k3"
     if model_name.startswith("moonshotai/Kimi-K2.5") or model_name.startswith(
         "moonshotai/Kimi-K2.6"
     ):
@@ -311,6 +316,14 @@ def _sample_for(modality: str, tiny_image):
 def _modality_kit(modality: str, model_name: str):
     family = _detect_family(model_name)
     if modality == "image":
+        if family == "kimi_k3":
+            # K3 takes the plain ``image`` shape and, like K2.5, does template plus
+            # vision in one ``__call__``.
+            return {
+                "make_part": _image_content_part,
+                "placeholder_token": "<|media_pad|>",
+                "processor_input_ids": _kimi_processor_input_ids,
+            }
         if family == "kimi_k25":
             return {
                 "make_part": _kimi_image_content_part,
@@ -596,6 +609,10 @@ def _supports_tool_message_images(renderer) -> bool:
     from renderers.kimi_k25 import KimiK25Renderer
     from renderers.qwen35 import Qwen35Renderer
 
+    # KimiK3Renderer does emit them, but is excluded because this test needs a
+    # reference: K3's processor does not extract images from tool-role messages and
+    # raises "More image placeholders than image prompts" on that input. The
+    # capability is asserted directly in tests/test_kimi_k3.py instead.
     return isinstance(renderer, (Qwen35Renderer, KimiK25Renderer, Gemma4Renderer))
 
 

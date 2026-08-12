@@ -609,6 +609,26 @@ class KimiK25RendererConfig(BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
 
+class KimiK3RendererConfig(BaseRendererConfig):
+    """Kimi K3 renderer config."""
+
+    name: Literal["kimi-k3"] = "kimi-k3"
+
+    thinking: bool = True
+    """When ``True``, a ``thinking-effort`` system block precedes the conversation and
+    the generation prompt opens the ``think`` channel. K3 has no non-thinking prompt
+    shape, so disabling this only drops the effort preamble."""
+
+    thinking_effort: Literal["low", "high", "max"] = "max"
+    """Value interpolated into the ``thinking-effort`` system block. The upstream
+    encoder's prose advertises ``medium`` but its allowed set excludes it."""
+
+    image_cache_max: int = 256
+    """See :class:`Qwen35RendererConfig.image_cache_max`."""
+
+    _internal_fields = frozenset({"image_cache_max"})
+
+
 class LagunaXS2RendererConfig(BaseRendererConfig):
     """Laguna XS.2 renderer config."""
 
@@ -902,6 +922,7 @@ RendererConfig = Annotated[
         InklingRendererConfig,
         KimiK2RendererConfig,
         KimiK25RendererConfig,
+        KimiK3RendererConfig,
         LagunaXS2RendererConfig,
         LagunaM1RendererConfig,
         LagunaXS21RendererConfig,
@@ -947,6 +968,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "inkling": InklingRendererConfig,
     "kimi-k2": KimiK2RendererConfig,
     "kimi-k2.5": KimiK25RendererConfig,
+    "kimi-k3": KimiK3RendererConfig,
     "laguna-xs.2": LagunaXS2RendererConfig,
     "laguna-m.1": LagunaM1RendererConfig,
     "laguna-xs-2.1": LagunaXS21RendererConfig,
@@ -1000,6 +1022,7 @@ __all__ = [
     "INKLING_EFFORT_MAP",
     "InklingRendererConfig",
     "KimiK25RendererConfig",
+    "KimiK3RendererConfig",
     "KimiK2RendererConfig",
     "LagunaM1RendererConfig",
     "LagunaS21RendererConfig",

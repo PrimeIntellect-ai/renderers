@@ -1064,6 +1064,8 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "moonshotai/Kimi-K2-Instruct": "kimi-k2",
     "moonshotai/Kimi-K2.5": "kimi-k2.5",
     "moonshotai/Kimi-K2.6": "kimi-k2.5",
+    # K3 replaces the <|im_*|> turn markers with an XTML tag envelope.
+    "moonshotai/Kimi-K3": "kimi-k3",
     # Nemotron 3. Nano / Super share one chat-template variant (``nemotron-3``);
     # the Ultra checkpoints use the Ultra variant (``nemotron-3-ultra``, distinct
     # ``</think>`` glue). Both route to the same Nemotron3Renderer, which selects
@@ -1145,6 +1147,7 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     # ``grid_thws``.
     "moonshotai/Kimi-K2.5": {"image"},
     "moonshotai/Kimi-K2.6": {"image"},
+    "moonshotai/Kimi-K3": {"image"},
     "thinkingmachines/Inkling": {"image", "audio"},
     "thinkingmachines/Inkling-Small": {"image", "audio"},
 }
@@ -1196,6 +1199,7 @@ TRUSTED_REVISIONS: dict[str, str] = {
     "moonshotai/Kimi-K2-Instruct": "fd1984e2b7a3350dbf7305fe73a4ede25c14de50",
     "moonshotai/Kimi-K2.5": "4d01dfe0332d63057c186e0b262165819efb6611",
     "moonshotai/Kimi-K2.6": "2755962d07cb42aa2d988a35bcb65cd4a9c2de82",
+    "moonshotai/Kimi-K3": "9f62e4e9fffbd0a83ddd60e1c209d828994b3569",
 }
 
 
@@ -1349,6 +1353,7 @@ def _populate_registry():
     from renderers.inkling import InklingRenderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
+    from renderers.kimi_k3 import KimiK3Renderer
     from renderers.laguna_s21 import LagunaS21Renderer
     from renderers.laguna_xs2 import (
         LagunaM1Renderer,
@@ -1387,6 +1392,7 @@ def _populate_registry():
             "inkling": InklingRenderer,
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
+            "kimi-k3": KimiK3Renderer,
             "laguna-xs.2": LagunaXS2Renderer,
             "laguna-m.1": LagunaM1Renderer,
             "laguna-xs-2.1": LagunaXS21Renderer,

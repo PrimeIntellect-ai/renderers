@@ -471,16 +471,18 @@ def _build_tool_image_cases(make_part, image):
 
 
 def _skip_for_disabled_thinking_deviation(renderer, case_id) -> bool:
-    """With ``enable_thinking=False`` (the resolved default on the small
-    Qwen3.5 sizes) the Qwen family re-emits the empty think wrapper on
-    historical assistant turns without reasoning — a documented deviation
-    from the template for sampled-token stability (see
-    ``test_disabled_thinking_stability.py``). Cases with an assistant turn
-    before the last user query therefore diverge from the processor oracle
-    by exactly those wrapper tokens; skip them for parity purposes."""
+    """Skip processor parity where a disabled-thinking renderer deliberately
+    preserves a generation-prefilled empty thought wrapper on assistant history.
+
+    The Qwen family deviates only once the assistant is before a later user
+    query. Gemma 4's 26B/31B revision never re-emits its generation prefill in
+    the upstream template, so every media case containing an assistant turn is
+    affected. Sampled-token stability is covered separately.
+    """
+    from renderers.gemma4 import Gemma4Renderer
     from renderers.qwen35 import Qwen35Renderer
 
-    return (
+    qwen_deviation = (
         isinstance(renderer, Qwen35Renderer)
         and getattr(renderer.config, "enable_thinking", True) is False
         and case_id
@@ -489,6 +491,18 @@ def _skip_for_disabled_thinking_deviation(renderer, case_id) -> bool:
             "multi_turn_tool_response_images",
         )
     )
+    gemma4_deviation = (
+        isinstance(renderer, Gemma4Renderer)
+        and getattr(renderer.config, "enable_thinking", True) is False
+        and case_id
+        in (
+            "multi_turn_two_images",
+            "tool_response_with_image",
+            "multi_turn_tool_response_images",
+            "consecutive_tools_mixed_media",
+        )
+    )
+    return qwen_deviation or gemma4_deviation
 
 
 def _supports_tool_message_images(renderer) -> bool:

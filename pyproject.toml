@@ -19,6 +19,10 @@ dependencies = [
     "openai>=1.108.1",
     "tiktoken",
     "jinja2",
+    # Keep this floor compatible with prime-rl's transformers pin. Inkling's
+    # tokenizer and text-only renderer work on older releases; image/audio
+    # processing fails lazily with an upgrade message when InklingProcessor is
+    # unavailable (native support starts in transformers 5.14).
     "transformers>=4.50.0",
     # Used by GptOssRenderer to render and parse harmony tokens. Vendoring
     # OpenAI's reference implementation keeps us byte-identical with vLLM

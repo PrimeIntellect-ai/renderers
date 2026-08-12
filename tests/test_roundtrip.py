@@ -34,6 +34,8 @@ _ROUNDTRIP_MODELS = [
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
     ("Qwen/Qwen3-VL-4B-Instruct", "auto"),
     ("google/gemma-4-31B-it", "auto"),
+    ("thinkingmachines/Inkling", "auto"),
+    ("thinkingmachines/Inkling-Small", "auto"),
     ("zai-org/GLM-5", "auto"),
     ("zai-org/GLM-5.1", "auto"),
     ("zai-org/GLM-4.7-Flash", "auto"),

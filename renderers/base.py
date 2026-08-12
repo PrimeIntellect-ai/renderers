@@ -1093,6 +1093,10 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
+    # Thinking Machines Inkling checkpoints share byte-identical tokenizer,
+    # chat-template, and processor assets (vision + audio; transformers >= 5.14).
+    "thinkingmachines/Inkling": "inkling",
+    "thinkingmachines/Inkling-Small": "inkling",
     # Tencent Hunyuan Hy3 (295B-A21B MoE). The FP8 checkpoint shares the same
     # tokenizer and chat template. Hy3-preview is deliberately unmapped: it
     # ships an older, incompatible template (un-suffixed special tokens,
@@ -1141,6 +1145,8 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     # ``grid_thws``.
     "moonshotai/Kimi-K2.5": {"image"},
     "moonshotai/Kimi-K2.6": {"image"},
+    "thinkingmachines/Inkling": {"image", "audio"},
+    "thinkingmachines/Inkling-Small": {"image", "audio"},
 }
 
 
@@ -1340,6 +1346,7 @@ def _populate_registry():
     from renderers.gpt_oss import GptOssRenderer
     from renderers.gemma4 import Gemma4Renderer
     from renderers.hy3 import Hy3Renderer
+    from renderers.inkling import InklingRenderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
     from renderers.laguna_s21 import LagunaS21Renderer
@@ -1377,6 +1384,7 @@ def _populate_registry():
             "deepseek-v3": DeepSeekV3Renderer,
             "deepseek-r1": DeepSeekR1Renderer,
             "hy3": Hy3Renderer,
+            "inkling": InklingRenderer,
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
             "laguna-xs.2": LagunaXS2Renderer,

@@ -65,6 +65,8 @@ RENDERER_MODELS = [
     ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
     ("openai/gpt-oss-20b", "gpt-oss"),
     ("tencent/Hy3", "auto"),
+    ("thinkingmachines/Inkling", "auto"),
+    ("thinkingmachines/Inkling-Small", "auto"),
     ("Qwen/Qwen2.5-0.5B-Instruct", "default"),
 ]
 

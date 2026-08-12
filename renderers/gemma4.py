@@ -825,6 +825,7 @@ class Gemma4Renderer:
             )
             reemit_disabled_thinking_prefill = (
                 is_assistant
+                and not continues_same_model_turn
                 and not self.config.enable_thinking
                 and self._prefill_empty_thought
                 and not thinking

@@ -154,6 +154,87 @@ def test_tool_cycle_matches_canonical_template(enable_thinking):
     assert renderer.render_ids(messages, tools=tools) == list(expected)
 
 
+def test_disabled_thinking_post_tool_completion_matches_sampled_stream():
+    """A post-tool assistant message continues the existing model turn.
+
+    The 26B/31B generation prompt prefills an empty thought channel before the
+    initial completion, but the disabled-thinking post-tool prompt does not
+    insert another one. A later full rerender must preserve that exact stream.
+    """
+    tokenizer, _ = _gemma4()
+    renderer = Gemma4Renderer(tokenizer, Gemma4RendererConfig(enable_thinking=False))
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "weather",
+                "description": "Look up the weather.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }
+    ]
+    user = {"role": "user", "content": "Weather in Berlin?"}
+    tool_call = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "weather",
+                    "arguments": {"city": "Berlin"},
+                },
+            }
+        ],
+    }
+    tool_response = {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": '{"temperature": 24}',
+    }
+    final = {"role": "assistant", "content": "It is 24 C."}
+
+    initial_prompt = renderer.render_ids(
+        [user], tools=tools, add_generation_prompt=True
+    )
+    tool_call_prompt = renderer.render_ids(
+        [user, tool_call], tools=tools, add_generation_prompt=True
+    )
+    assert tool_call_prompt[: len(initial_prompt)] == initial_prompt
+    tool_call_completion = tool_call_prompt[len(initial_prompt) :]
+
+    post_tool_prompt = renderer.bridge_to_next_turn(
+        initial_prompt,
+        tool_call_completion,
+        [tool_response],
+        tools=tools,
+    )
+    assert post_tool_prompt is not None
+
+    final_completion = tokenizer.encode(final["content"], add_special_tokens=False) + [
+        renderer.get_stop_token_ids()[0]
+    ]
+    reminder = {"role": "user", "content": "Please summarize."}
+    extended_stream = renderer.bridge_to_next_turn(
+        post_tool_prompt.token_ids,
+        final_completion,
+        [reminder],
+        tools=tools,
+    )
+    assert extended_stream is not None
+    rerendered = renderer.render_ids(
+        [user, tool_call, tool_response, final, reminder],
+        tools=tools,
+        add_generation_prompt=True,
+    )
+    assert rerendered == extended_stream.token_ids
+
+
 def test_parser_extracts_reasoning_and_multiple_typed_tool_calls():
     tokenizer, renderer = _gemma4()
     text = (

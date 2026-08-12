@@ -551,3 +551,28 @@ def test_reasoning_survives_a_completion_with_no_open_tag(tokenizer, renderer):
     )
     assert parsed.reasoning_content == "weighing it up"
     assert parsed.content == "done"
+
+
+def test_bridge_names_tool_results_from_the_sampled_turn(tokenizer, renderer):
+    """Extending a chain renders only the new messages, so the calls being answered exist
+    solely as sampled ids; a result with just a tool_call_id still has to resolve."""
+    prompt_ids = renderer.render_ids(
+        [{"role": "user", "content": "go"}], tools=TOOLS, add_generation_prompt=True
+    )
+    completion_ids = tokenizer.encode(
+        'thinking<|close|>think<|sep|><|open|>response<|sep|><|close|>response<|sep|>'
+        '<|open|>tools<|sep|><|open|>call tool="get_weather" index="1"<|sep|>'
+        '<|open|>argument key="city" type="string"<|sep|>Sydney<|close|>argument<|sep|>'
+        '<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>',
+        add_special_tokens=False,
+    )
+
+    bridged = renderer.bridge_to_next_turn(
+        prompt_ids,
+        completion_ids,
+        [{"role": "tool", "tool_call_id": "call_0", "content": "sunny"}],
+    )
+
+    assert bridged is not None
+    text = tokenizer.decode(bridged.token_ids, skip_special_tokens=False)
+    assert '<|open|>message role="tool" tool="get_weather" index="1"<|sep|>' in text

@@ -671,9 +671,19 @@ class KimiK3Renderer:
         if previous_ids is None:
             return None
 
-        plan: list[tuple[list[Op], int]] = [
-            (self._message_ops(message), -1) for message in new_messages
+        # The turn being extended holds the calls these results answer, and it is only
+        # present as sampled ids here, so recover its names from the completion.
+        pending_calls = [
+            {"function": {"name": call.name}}
+            for call in self.parse_response(previous_completion_ids).tool_calls
         ]
+        plan: list[tuple[list[Op], int]] = []
+        tool_index = 0
+        for message in new_messages:
+            role = message.get("role", "user")
+            if role == "tool":
+                tool_index += 1
+            plan.append((self._message_ops(message, tool_index, pending_calls), -1))
         plan.append((self._generation_prompt_ops(), -1))
         ext_ids, _, ext_content, mm_data = self._emit(plan)
 

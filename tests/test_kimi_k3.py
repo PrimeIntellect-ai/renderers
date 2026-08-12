@@ -466,3 +466,32 @@ def test_rejects_a_tool_message_with_no_name(renderer):
 
     with _pytest.raises(ValueError, match="resolvable tool name"):
         renderer.render_ids([{"role": "tool", "content": "orphan"}])
+
+
+def test_parses_when_the_tokenizer_pads_special_tokens(tokenizer, renderer):
+    """Some model revisions decode ``<|sep|>`` with padding spaces. Parsing has to read the
+    ids, because matching decoded text yields a silently empty parse on those revisions."""
+
+    class _PaddingDecodeTokenizer:
+        """Wraps the real tokenizer, decoding specials the way a padding revision does."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def decode(self, ids, **kwargs):
+            text = self._inner.decode(ids, **kwargs)
+            for token in ("<|open|>", "<|close|>", "<|sep|>", "<|end_of_msg|>"):
+                text = text.replace(token, f" {token} ")
+            return text
+
+    padded = create_renderer(
+        _PaddingDecodeTokenizer(tokenizer), config_from_name("kimi-k3")
+    )
+    parsed = padded.parse_response(
+        tokenizer.encode(LIVE_TOOL_CALL_COMPLETION, add_special_tokens=False)
+    )
+    assert [call.name for call in parsed.tool_calls] == ["move_gripper"]
+    assert parsed.tool_calls[0].arguments == {"x": 0, "z": 0.15}

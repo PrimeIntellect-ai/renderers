@@ -184,6 +184,9 @@ class KimiK3Renderer:
         self._image_cache: dict[str, tuple[Any, tuple[int, int]]] = {}
         self._media_pad = self._token_id(MEDIA_PAD)
         self._end_of_msg = self._token_id(END_OF_MSG_TOKEN)
+        self._open_id = self._token_id(OPEN_TOKEN)
+        self._close_id = self._token_id(CLOSE_TOKEN)
+        self._sep_id = self._token_id(SEP_TOKEN)
 
     # ------------------------------------------------------------------ ids
 
@@ -477,25 +480,145 @@ class KimiK3Renderer:
         *,
         tools: list[ToolSpec] | None = None,
     ) -> ParsedResponse:
-        text = self.tokenizer.decode(token_ids, skip_special_tokens=False)
-        think_open = _open_tag(_THINK_CHANNEL)
-        think_close = _close_tag(_THINK_CHANNEL)
-        if think_open in text:
-            reasoning = self._between(text, think_open, think_close)
-        elif think_close in text:
-            # The generation prompt already opened the channel, so a sampled completion
-            # starts *inside* it — reasoning runs from the first token to the close.
-            reasoning = text.split(think_close, 1)[0]
-        else:
-            reasoning = None
-        content = self._between(
-            text, _open_tag(_RESPONSE_CHANNEL), _close_tag(_RESPONSE_CHANNEL)
-        )
+        """Read the channels back off the ids.
+
+        Decoded text is not a safe surface to match on: whether a revision renders
+        ``<|sep|>`` with padding spaces is its own choice, and a mismatch there silently
+        yields an empty parse rather than an error.
+        """
+        nodes = self._structure(token_ids)
+        reasoning = self._channel_text(nodes, _THINK_CHANNEL)
+        if reasoning is None and nodes and nodes[0].get("tag") is None:
+            # The generation prompt already opened the think channel, so a sampled
+            # completion starts inside it and its first run has no opening tag.
+            reasoning = nodes[0]["text"]
+        content = self._channel_text(nodes, _RESPONSE_CHANNEL)
+        declared = {
+            (tool.get("function", tool) or {}).get("name") for tool in tools or []
+        }
         return ParsedResponse(
             content=content or "",
             reasoning_content=reasoning or None,
-            tool_calls=self._parse_tool_calls(text, tools),
+            tool_calls=self._collect_tool_calls(nodes, declared),
         )
+
+    def _structure(self, token_ids: list[int]) -> list[dict[str, Any]]:
+        """Ids -> a shallow tree of ``{tag, attrs, text, children}`` nodes.
+
+        A tag is ``<|open|> header <|sep|>`` and ends at ``<|close|> tag <|sep|>``; anything
+        else is body text belonging to the innermost open tag.
+        """
+        root: dict[str, Any] = {"tag": None, "attrs": "", "text": "", "children": []}
+        stack = [root]
+        pending: list[int] = []
+        i = 0
+        specials = {self._open_id, self._close_id, self._sep_id, self._end_of_msg}
+
+        def flush() -> None:
+            if pending:
+                stack[-1]["text"] += self.tokenizer.decode(
+                    pending, skip_special_tokens=False
+                )
+                pending.clear()
+
+        while i < len(token_ids):
+            tid = token_ids[i]
+            if tid == self._open_id or tid == self._close_id:
+                flush()
+                header_ids = []
+                i += 1
+                while i < len(token_ids) and token_ids[i] not in specials:
+                    header_ids.append(token_ids[i])
+                    i += 1
+                if i < len(token_ids) and token_ids[i] == self._sep_id:
+                    i += 1
+                header = self.tokenizer.decode(
+                    header_ids, skip_special_tokens=False
+                ).strip()
+                tag = header.split(" ", 1)[0]
+                if tid == self._open_id:
+                    node = {
+                        "tag": tag,
+                        "attrs": header[len(tag) :].strip(),
+                        "text": "",
+                        "children": [],
+                    }
+                    stack[-1]["children"].append(node)
+                    stack.append(node)
+                elif len(stack) > 1:
+                    # An unmatched close would otherwise pop the root and lose everything.
+                    for depth in range(len(stack) - 1, 0, -1):
+                        if stack[depth]["tag"] == tag:
+                            del stack[depth:]
+                            break
+                    else:
+                        stack.pop()
+                continue
+            if tid in specials:
+                flush()
+                i += 1
+                continue
+            pending.append(tid)
+            i += 1
+        flush()
+        return [root, *root["children"]] if root["text"] else root["children"]
+
+    @staticmethod
+    def _walk(nodes: list[dict[str, Any]]):
+        """Every node, depth first. A sampled completion carries its channels at the top
+        level; a re-rendered history turn nests them under its own ``message`` tag."""
+        for node in nodes:
+            yield node
+            yield from KimiK3Renderer._walk(node.get("children") or [])
+
+    def _channel_text(
+        self, nodes: list[dict[str, Any]], channel: str
+    ) -> str | None:
+        for node in self._walk(nodes):
+            if node.get("tag") == channel:
+                return node["text"]
+        return None
+
+    def _collect_tool_calls(
+        self, nodes: list[dict[str, Any]], declared: set[str | None]
+    ) -> list[ParsedToolCall]:
+        calls: list[ParsedToolCall] = []
+        for node in self._walk(nodes):
+            if node.get("tag") != _TOOLS_CHANNEL:
+                continue
+            for call in node["children"]:
+                if call.get("tag") != _CALL_TAG:
+                    continue
+                name = _attr(call["attrs"], "tool")
+                arguments: Any = {}
+                for child in call["children"]:
+                    if child["tag"] == _JSON_TAG:
+                        try:
+                            arguments = json.loads(child["text"])
+                        except (ValueError, TypeError):
+                            arguments = child["text"]
+                    elif child["tag"] == _ARGUMENT_TAG:
+                        arguments[_attr(child["attrs"], "key")] = _xtml_parse(
+                            child["text"], _attr(child["attrs"], "type")
+                        )
+                if not name:
+                    status = ToolCallParseStatus.MISSING_NAME
+                elif isinstance(arguments, str):
+                    status = ToolCallParseStatus.INVALID_JSON
+                elif declared and name not in declared:
+                    status = ToolCallParseStatus.UNKNOWN_TOOL
+                else:
+                    status = ToolCallParseStatus.OK
+                calls.append(
+                    ParsedToolCall(
+                        raw=f'{_CALL_TAG} {call["attrs"]}',
+                        name=name or None,
+                        arguments=arguments,
+                        status=status,
+                        id=_attr(call["attrs"], "index") or None,
+                    )
+                )
+        return calls
 
     @staticmethod
     def _between(text: str, start: str, end: str) -> str | None:
@@ -503,60 +626,6 @@ class KimiK3Renderer:
             return None
         rest = text.split(start, 1)[1]
         return rest.split(end, 1)[0] if end in rest else rest
-
-    def _parse_tool_calls(
-        self, text: str, tools: list[ToolSpec] | None = None
-    ) -> list[ParsedToolCall]:
-        """Read back the ``tools`` channel: one ``call`` per invocation, typed arguments."""
-        declared = {
-            (tool.get("function", tool) or {}).get("name") for tool in tools or []
-        }
-        unknown = (lambda name: bool(declared) and name not in declared)
-        calls: list[ParsedToolCall] = []
-        remaining = text
-        call_marker = f"{OPEN_TOKEN}{_CALL_TAG} "
-        while call_marker in remaining:
-            remaining = remaining.split(call_marker, 1)[1]
-            header, _, body = remaining.partition(SEP_TOKEN)
-            name = _attr(header, "tool")
-            block = body.split(_close_tag(_CALL_TAG), 1)[0]
-            arguments: Any = {}
-            json_marker = f"{OPEN_TOKEN}{_JSON_TAG}"
-            if json_marker in block:
-                raw = block.split(SEP_TOKEN, 1)[1].split(_close_tag(_JSON_TAG), 1)[0]
-                try:
-                    arguments = json.loads(raw)
-                except (ValueError, TypeError):
-                    arguments = raw
-            else:
-                argument_marker = f"{OPEN_TOKEN}{_ARGUMENT_TAG} "
-                rest = block
-                while argument_marker in rest:
-                    rest = rest.split(argument_marker, 1)[1]
-                    arg_header, _, arg_body = rest.partition(SEP_TOKEN)
-                    value = arg_body.split(_close_tag(_ARGUMENT_TAG), 1)[0]
-                    arguments[_attr(arg_header, "key")] = _xtml_parse(
-                        value, _attr(arg_header, "type")
-                    )
-                    rest = arg_body
-            raw = call_marker + header + SEP_TOKEN + block + _close_tag(_CALL_TAG)
-            if not name:
-                status = ToolCallParseStatus.MISSING_NAME
-            elif isinstance(arguments, str):
-                status = ToolCallParseStatus.INVALID_JSON
-            else:
-                status = ToolCallParseStatus.UNKNOWN_TOOL if unknown(name) else ToolCallParseStatus.OK
-            calls.append(
-                ParsedToolCall(
-                    raw=raw,
-                    name=name or None,
-                    arguments=arguments,
-                    status=status,
-                    id=_attr(header, "index") or None,
-                )
-            )
-            remaining = block
-        return calls
 
     def bridge_to_next_turn(
         self,

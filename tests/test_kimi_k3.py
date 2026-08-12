@@ -495,3 +495,35 @@ def test_parses_when_the_tokenizer_pads_special_tokens(tokenizer, renderer):
     )
     assert [call.name for call in parsed.tool_calls] == ["move_gripper"]
     assert parsed.tool_calls[0].arguments == {"x": 0, "z": 0.15}
+
+
+def test_resolves_a_tool_name_from_the_matching_call(tokenizer, renderer):
+    """OpenAI-shaped results carry only tool_call_id; the name comes from the call at the
+    same position in the assistant turn."""
+    text = tokenizer.decode(
+        renderer.render_ids(
+            [
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"type": "function", "function": {"name": "observe", "arguments": {}}},
+                        {"type": "function", "function": {"name": "locate", "arguments": {}}},
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_0", "content": "a"},
+                {"role": "tool", "tool_call_id": "call_1", "content": "b"},
+            ]
+        ),
+        skip_special_tokens=False,
+    )
+    assert '<|open|>message role="tool" tool="observe" index="1"<|sep|>' in text
+    assert '<|open|>message role="tool" tool="locate" index="2"<|sep|>' in text
+
+
+def test_still_rejects_a_tool_result_with_no_call_to_match(renderer):
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="resolvable tool name"):
+        renderer.render_ids([{"role": "tool", "tool_call_id": "x", "content": "orphan"}])

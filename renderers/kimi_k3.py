@@ -346,14 +346,25 @@ class KimiK3Renderer:
             ops.append((_TEXT, rendered + _close_tag(_TOOLS_CHANNEL)))
         return ops
 
-    def _message_ops(self, message: Message, tool_index: int = 0) -> list[Op]:
+    def _message_ops(
+        self,
+        message: Message,
+        tool_index: int = 0,
+        pending_calls: list[dict[str, Any]] | None = None,
+    ) -> list[Op]:
         role = message.get("role", "user")
         attrs: tuple[tuple[str, Any], ...] = (("role", role),)
         if role == "tool":
             name = message.get("tool") or message.get("name")
+            if name is None and pending_calls and tool_index <= len(pending_calls):
+                # OpenAI-shaped results carry only a tool_call_id, so fall back to the
+                # position within the assistant turn, as K3's own encoder does.
+                call = pending_calls[tool_index - 1]
+                name = (call.get("function", call) or {}).get("name")
             if name is None:
                 raise ValueError(
-                    "Kimi K3 tool messages need a resolvable tool name: carry `tool` or `name`"
+                    "Kimi K3 tool messages need a resolvable tool name: carry `tool` or "
+                    "`name`, or match a preceding assistant tool_call by order"
                 )
             # The result is bound to its call by position within the assistant turn, not by id.
             attrs = (("role", role), ("tool", name), ("index", tool_index))
@@ -439,13 +450,17 @@ class KimiK3Renderer:
         if preamble:
             plan.append((preamble, -1))
         tool_index = 0
+        pending_calls: list[dict[str, Any]] = []
         for index, message in enumerate(messages):
             role = message.get("role", "user")
             if role == "tool":
                 tool_index += 1
             elif role == "assistant":
                 tool_index = 0
-            plan.append((self._message_ops(message, tool_index), index))
+                pending_calls = message.get("tool_calls") or []
+            plan.append(
+                (self._message_ops(message, tool_index, pending_calls), index)
+            )
         if add_generation_prompt:
             plan.append((self._generation_prompt_ops(), -1))
 

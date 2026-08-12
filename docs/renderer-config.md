@@ -132,7 +132,7 @@ the knobs its template actually exposes:
 | Qwen3 | `enable_thinking=False -> all`, else `tool_cycle` |
 | Qwen3.5 | `enable_thinking=False -> all`, else `tool_cycle` |
 | Qwen3.6 | `preserve_thinking=True -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
-| Gemma 4 | `enable_thinking=False -> all`, else `tool_cycle` |
+| Gemma 4 | `preserve_thinking=True -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | GLM-5 / 5.1 | `clear_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | GLM-4.5 | `enable_thinking=False -> all`, else `tool_cycle` |
 | gpt-oss | `auto_drop_analysis=False -> all`, else `tool_cycle` |

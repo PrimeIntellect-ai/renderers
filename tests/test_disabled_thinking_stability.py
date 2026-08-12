@@ -28,6 +28,7 @@ from functools import lru_cache
 from renderers import create_renderer
 from renderers.base import load_tokenizer
 from renderers.configs import (
+    Gemma4RendererConfig,
     Qwen3RendererConfig,
     Qwen35RendererConfig,
     Qwen36RendererConfig,
@@ -39,9 +40,15 @@ _MODELS = [
     ("Qwen/Qwen3-8B", Qwen3RendererConfig(enable_thinking=False)),
     ("Qwen/Qwen3.5-9B", Qwen35RendererConfig(enable_thinking=False)),
     ("Qwen/Qwen3.6-35B-A3B", Qwen36RendererConfig(enable_thinking=False)),
+    (
+        "google/gemma-4-26B-A4B-it",
+        Gemma4RendererConfig(enable_thinking=False),
+    ),
 ]
 
-_EMPTY_WRAPPER = "<think>\n\n</think>\n\n"
+_EMPTY_WRAPPERS = {
+    "google/gemma-4-26B-A4B-it": "<|channel>thought\n<channel|>",
+}
 
 
 @lru_cache(maxsize=None)
@@ -103,7 +110,8 @@ def test_wrapper_reemitted_on_historical_turn(dt_model, dt_config):
     )
     turn = [t for t, i in zip(rendered.token_ids, rendered.message_indices) if i == 1]
     text = tok.decode(turn)
-    assert _EMPTY_WRAPPER in text, (
+    expected_wrapper = _EMPTY_WRAPPERS.get(dt_model, "<think>\n\n</think>\n\n")
+    assert expected_wrapper in text, (
         f"{dt_model}: historical assistant turn rendered without the "
         f"prefilled empty think wrapper: {text!r}"
     )

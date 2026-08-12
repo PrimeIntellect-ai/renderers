@@ -9,6 +9,13 @@ Gemma 4 uses a continuation-style tool loop: the model ends a tool call by
 sampling ``<|tool_response>``; the runtime appends one or more response blocks,
 and generation resumes in the same model turn.  The bridge implementation
 preserves that boundary without re-rendering sampled history.
+
+The 26B/31B disabled-thinking template revision prefills an empty thought
+channel in every generation prompt. Historical assistant turns without
+reasoning re-emit that exact wrapper so a grown full render preserves the byte
+prefix under which each completion was sampled. This is a deliberate stability
+deviation from ``apply_chat_template``; E2B/E4B remain template-faithful because
+their revision has no such prefill.
 """
 
 from __future__ import annotations
@@ -437,13 +444,19 @@ class Gemma4Renderer:
         # The dense/MoE server checkpoints use the July template revision,
         # which pre-closes an empty thought channel when thinking is off.
         # E2B/E4B use the otherwise-identical earlier revision without that
-        # prefill. Inspecting the template also keeps explicit configs useful
-        # for renamed checkpoints that preserve the canonical template.
+        # prefill. The model-name set is the stable signal. The raw-template
+        # probe is only a compatibility fallback for renamed checkpoints and
+        # is intentionally narrow; template whitespace/reformatting may defeat it.
         self._prefill_empty_thought = (
             model_name in _EMPTY_THOUGHT_PREFILL_MODELS
             or "<|channel>thought\\n<channel|>" in chat_template
         )
-        default_retention = "tool_cycle" if self.config.enable_thinking else "all"
+        if self.config.preserve_thinking:
+            default_retention = "all"
+        elif not self.config.enable_thinking:
+            default_retention = "all"
+        else:
+            default_retention = "tool_cycle"
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config, default_retention
         )
@@ -782,10 +795,17 @@ class Gemma4Renderer:
                 last_user_pos = pos
 
         previous_non_tool_role: str | None = None
+        consumed_tool_indices: set[int] = set()
         for pos, msg_idx in enumerate(loop_indices):
             msg = messages[msg_idx]
             role = msg.get("role") or ""
             if role == "tool":
+                if msg_idx not in consumed_tool_indices:
+                    raise ValueError(
+                        f"Unconsumed tool message at index {msg_idx}; Gemma 4 tool "
+                        "messages must immediately follow an assistant message with "
+                        "matching tool_calls."
+                    )
                 continue
 
             previous_message_type = None
@@ -803,7 +823,32 @@ class Gemma4Renderer:
             thinking_gate = pos > last_user_pos or (
                 self.config.preserve_thinking and bool(msg.get("tool_calls"))
             )
-            if thinking and thinking_gate:
+            reemit_disabled_thinking_prefill = (
+                is_assistant
+                and not self.config.enable_thinking
+                and self._prefill_empty_thought
+                and not thinking
+            )
+            if reemit_disabled_thinking_prefill:
+                # The 26B/31B generation prompt already contains this empty
+                # thought channel. It is part of the byte prefix under which
+                # the completion was sampled, so preserve it in later renders.
+                em.special(
+                    self._channel_start,
+                    is_sampled=is_assistant,
+                    is_content=is_assistant,
+                )
+                em.text(
+                    "thought\n",
+                    is_sampled=is_assistant,
+                    is_content=is_assistant,
+                )
+                em.special(
+                    self._channel_end,
+                    is_sampled=is_assistant,
+                    is_content=is_assistant,
+                )
+            elif thinking and thinking_gate:
                 em.special(
                     self._channel_start,
                     is_sampled=is_assistant,
@@ -868,6 +913,7 @@ class Gemma4Renderer:
                 first_response = True
                 while scan < len(messages) and messages[scan].get("role") == "tool":
                     response_msg = messages[scan]
+                    consumed_tool_indices.add(scan)
                     name = str(response_msg.get("name") or "unknown")
                     for tool_call in tool_calls:
                         if tool_call.get("id") == response_msg.get("tool_call_id"):
@@ -1059,6 +1105,14 @@ class Gemma4Renderer:
         *,
         tools: list[ToolSpec] | None = None,
     ) -> ParsedResponse:
+        """Parse a Gemma 4 completion without access to its prompt context.
+
+        After a tool response with thinking enabled, the prompt already emits
+        ``<|channel>thought\n`` and the completion contains only the matching
+        ``<channel|>`` closer. A lone closer is therefore treated as post-tool
+        reasoning. This is necessarily heuristic: without the prompt, a
+        malformed first-turn completion with a stray closer is ambiguous.
+        """
         stop_ids = {self._turn_end, self._tool_response_start, self._eos}
         end = len(token_ids)
         for i, token_id in enumerate(token_ids):

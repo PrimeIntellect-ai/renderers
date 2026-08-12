@@ -51,6 +51,45 @@ def test_disabled_thinking_prefill_tracks_template_revision(monkeypatch):
     assert earlier_text.endswith("<|turn>model\n")
 
 
+def test_preserve_thinking_controls_derived_retention_and_rejects_conflicts():
+    tokenizer, _ = _gemma4()
+    preserved = Gemma4Renderer(
+        tokenizer,
+        Gemma4RendererConfig(enable_thinking=True, preserve_thinking=True),
+    )
+    assert preserved.effective_thinking_retention == "all"
+
+    with pytest.raises(ValueError, match="preserve_thinking=True implies"):
+        Gemma4RendererConfig(
+            preserve_thinking=True,
+            thinking_retention="tool_cycle",
+        )
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [{"role": "tool", "content": "orphan"}],
+        [
+            {"role": "assistant", "content": "No call."},
+            {"role": "tool", "content": "orphan"},
+        ],
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_responses": [{"name": "legacy", "response": "done"}],
+            },
+            {"role": "tool", "content": "still orphaned"},
+        ],
+    ],
+)
+def test_unconsumed_tool_messages_raise(messages):
+    tokenizer, renderer = _gemma4()
+    with pytest.raises(ValueError, match="Unconsumed tool message"):
+        renderer.render_ids(messages)
+
+
 @pytest.mark.parametrize("enable_thinking", [False, True])
 def test_tool_cycle_matches_canonical_template(enable_thinking):
     tokenizer, _ = _gemma4()
@@ -77,6 +116,9 @@ def test_tool_cycle_matches_canonical_template(enable_thinking):
         {"role": "user", "content": "Weather in Berlin?"},
         {
             "role": "assistant",
+            "reasoning_content": "I should call the weather tool."
+            if not enable_thinking
+            else None,
             "content": "",
             "tool_calls": [
                 {
@@ -94,7 +136,11 @@ def test_tool_cycle_matches_canonical_template(enable_thinking):
             "tool_call_id": "call-1",
             "content": '{"temperature": 24, "unit": "C"}',
         },
-        {"role": "assistant", "content": "It is 24 C."},
+        {
+            "role": "assistant",
+            "reasoning_content": "I can now answer." if not enable_thinking else None,
+            "content": "It is 24 C.",
+        },
     ]
 
     expected = tokenizer.apply_chat_template(
@@ -187,6 +233,26 @@ def _tiny_image():
     from PIL import Image
 
     return Image.new("RGB", (224, 224), color=(128, 192, 255))
+
+
+@pytest.mark.parametrize("size", [(224, 224), (448, 224), (224, 448)])
+def test_real_processor_keeps_one_batched_row_per_image(size):
+    """Guard the ``MultiModalFieldConfig.batched('image')`` contract with
+    live Gemma4Processor output rather than synthetic tensor shapes."""
+    from PIL import Image
+
+    _, renderer = _image_renderer()
+    image = Image.new("RGB", size, color=(128, 192, 255))
+    rendered = renderer.render(
+        [{"role": "user", "content": [{"type": "image", "image": image}]}]
+    )
+    item = rendered.multi_modal_data.mm_items["image"][0]
+    placeholder = rendered.multi_modal_data.mm_placeholders["image"][0]
+
+    assert item["pixel_values"].shape[0] == 1
+    assert item["image_position_ids"].shape[0] == 1
+    assert item["pixel_values"].shape[1] == item["image_position_ids"].shape[1]
+    assert placeholder.length > 0
 
 
 def test_schema_unified_image_parts_still_expand_image_tokens():

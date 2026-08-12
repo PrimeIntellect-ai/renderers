@@ -286,6 +286,16 @@ class Gemma4RendererConfig(BaseRendererConfig):
 
     _internal_fields = frozenset({"image_cache_max"})
 
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        _reject_thinking_retention_conflict(
+            self,
+            "preserve_thinking",
+            true_implies="all",
+            false_implies="tool_cycle",
+        )
+        return self
+
 
 class GLM5RendererConfig(BaseRendererConfig):
     """GLM-5 renderer config."""

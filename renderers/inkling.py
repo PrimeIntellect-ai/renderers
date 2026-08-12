@@ -105,6 +105,24 @@ def _classify_part(part: Any) -> tuple[str, Any]:
     raise ValueError(f"Unsupported Inkling content part type: {ptype!r}")
 
 
+def _load_inkling_image(part: Any):
+    """Resolve Inkling's ``input_image`` alias before shared image loading."""
+    if isinstance(part, Mapping) and part.get("type") == "input_image":
+        normalized = dict(part)
+        raw = normalized.get("input_image")
+        if isinstance(raw, Mapping):
+            for key in ("image", "image_url", "url", "path"):
+                if key in raw:
+                    normalized[key] = raw[key]
+                    break
+            else:
+                normalized["image"] = raw
+        else:
+            normalized["image"] = raw
+        part = normalized
+    return _load_pil_image(part)
+
+
 def _load_audio(part: Any) -> tuple[np.ndarray, int]:
     """Resolve an audio content part to ``(waveform, sampling_rate)``.
 
@@ -339,7 +357,7 @@ class InklingRenderer:
             is_sampled: bool,
             marker_is_content: bool,
         ) -> None:
-            pil = _load_pil_image(part)
+            pil = _load_inkling_image(part)
             h = _image_hash(pil)
             out, num_patches = self._process_image(pil, h)
             role_open()
@@ -836,7 +854,7 @@ class InklingRenderer:
         def emit_image(
             part, msg_idx, role_open, *, is_sampled, marker_is_content
         ) -> None:
-            pil = _load_pil_image(part)
+            pil = _load_inkling_image(part)
             h = _image_hash(pil)
             out, num_patches = self._process_image(pil, h)
             role_open()

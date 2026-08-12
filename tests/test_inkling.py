@@ -245,6 +245,37 @@ def test_unknown_content_part_type_raises():
         )
 
 
+def test_input_image_field_loads_during_render_and_bridge(monkeypatch):
+    from PIL import Image
+
+    renderer = _renderer()
+    image = Image.new("RGB", (2, 2), color="navy")
+    processed_images = []
+
+    def process_image(pil, _image_hash):
+        processed_images.append(pil)
+        return {"pixel_values": np.zeros((1, 1), dtype=np.float32)}, 1
+
+    monkeypatch.setattr(renderer, "_process_image", process_image)
+    part = {"type": "input_image", "input_image": image}
+
+    rendered = renderer.render([{"role": "user", "content": [part]}])
+    assert rendered.multi_modal_data is not None
+    assert len(rendered.multi_modal_data.mm_items["image"]) == 1
+
+    bridged, fresh = _bridge_case(
+        renderer,
+        [{"role": "user", "content": "Describe this later."}],
+        {"role": "assistant", "content": "Okay."},
+        [{"role": "user", "content": [part]}],
+    )
+    assert bridged is not None
+    assert bridged.token_ids == fresh
+    assert bridged.multi_modal_data is not None
+    assert len(bridged.multi_modal_data.mm_items["image"]) == 1
+    assert processed_images and all(pil is image for pil in processed_images)
+
+
 # ── Tool-name resolution ──────────────────────────────────────────────
 
 

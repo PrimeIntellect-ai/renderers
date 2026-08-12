@@ -576,7 +576,7 @@ class KimiK3Renderer:
             pending.append(tid)
             i += 1
         flush()
-        return [root, *root["children"]] if root["text"] else root["children"]
+        return [root]
 
     @staticmethod
     def _walk(nodes: list[dict[str, Any]]):

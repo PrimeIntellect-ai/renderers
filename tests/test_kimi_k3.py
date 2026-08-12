@@ -527,3 +527,27 @@ def test_still_rejects_a_tool_result_with_no_call_to_match(renderer):
 
     with _pytest.raises(ValueError, match="resolvable tool name"):
         renderer.render_ids([{"role": "tool", "tool_call_id": "x", "content": "orphan"}])
+
+
+def test_each_call_is_reported_once(tokenizer, renderer):
+    """A tree walked from more than one entry point yields the same call twice, which
+    dispatches the action twice."""
+    text = (
+        '<|open|>tools<|sep|><|open|>call tool="observe" index="1"<|sep|>'
+        '<|open|>argument key="overlay" type="string"<|sep|>grid<|close|>argument<|sep|>'
+        '<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>'
+    )
+    parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
+    assert [call.name for call in parsed.tool_calls] == ["observe"]
+
+
+def test_reasoning_survives_a_completion_with_no_open_tag(tokenizer, renderer):
+    """The generation prompt opens the think channel, so the sampled text starts inside it."""
+    parsed = renderer.parse_response(
+        tokenizer.encode(
+            "weighing it up<|close|>think<|sep|><|open|>response<|sep|>done<|close|>response<|sep|>",
+            add_special_tokens=False,
+        )
+    )
+    assert parsed.reasoning_content == "weighing it up"
+    assert parsed.content == "done"

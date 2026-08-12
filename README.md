@@ -40,7 +40,7 @@ next_prompt_ids = r.bridge_to_next_turn(
 )
 ```
 
-Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `glm-5`, `glm-5.1`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `laguna-s-2.1`, `laguna-m.1`, `nemotron-3`, `nemotron-3-ultra`, `nemotron-3.5`, `llama-3`, `gpt-oss`, `hy3`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper.
+Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `gemma4`, `glm-5`, `glm-5.1`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `laguna-s-2.1`, `laguna-m.1`, `nemotron-3`, `nemotron-3-ultra`, `nemotron-3.5`, `llama-3`, `gpt-oss`, `hy3`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper.
 
 ## API
 
@@ -159,7 +159,7 @@ Fallback for unsupported text-only models. Wraps `apply_chat_template` and accep
 
 ## Roadmap
 
-- **VLM expansion.** `ImagePart` support exists for Qwen3-VL and Qwen3.5-family multimodal templates. Remaining work: video support, broader VLM coverage, and more RL validation.
+- **VLM expansion.** `ImagePart` support exists for Qwen3-VL, Qwen3.5-family, Gemma 4, and Kimi K2.5 / K2.6 multimodal templates. Remaining work: audio/video support, broader VLM coverage, and more RL validation. Gemma 4 image preprocessing requires a Transformers release that provides `Gemma4Processor`.
 - **Patched chat templates.** Some shipped templates re-tokenize history or normalize JSON in ways that break token identity. Plan: a `use_patched` opt-in per renderer that renders the same surface form while avoiding known-bad patterns. (Auto-stripping thinking from past turns is *not* one of these — that's intended template behaviour the renderer reproduces; use `thinking_retention` to override it.)
 
 ## Testing

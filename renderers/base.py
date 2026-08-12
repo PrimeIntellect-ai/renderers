@@ -1035,6 +1035,14 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3-VL-4B-Instruct": "qwen3-vl",
     "Qwen/Qwen3-VL-8B-Instruct": "qwen3-vl",
     "Qwen/Qwen3-VL-30B-A3B-Instruct": "qwen3-vl",
+    # Gemma 4 instruction checkpoints share Google's canonical turn/tool
+    # grammar and dynamic Gemma4Processor image expansion. E2B/E4B omit the
+    # disabled-thinking empty-channel prefill used by the 26B/31B revision;
+    # Gemma4Renderer detects that small template variant per tokenizer.
+    "google/gemma-4-E2B-it": "gemma4",
+    "google/gemma-4-E4B-it": "gemma4",
+    "google/gemma-4-26B-A4B-it": "gemma4",
+    "google/gemma-4-31B-it": "gemma4",
     # GLM-5 family (GLM-4.7 reuses the GLM-5 template).
     "zai-org/GLM-5": "glm-5",
     "zai-org/GLM-5-FP8": "glm-5",
@@ -1107,6 +1115,10 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     "Qwen/Qwen3-VL-4B-Instruct": {"image"},
     "Qwen/Qwen3-VL-8B-Instruct": {"image"},
     "Qwen/Qwen3-VL-30B-A3B-Instruct": {"image"},
+    "google/gemma-4-E2B-it": {"image"},
+    "google/gemma-4-E4B-it": {"image"},
+    "google/gemma-4-26B-A4B-it": {"image"},
+    "google/gemma-4-31B-it": {"image"},
     # Qwen3.5 is itself a VLM family (HF tag ``image-text-to-text``,
     # processor class ``Qwen3VLProcessor``) — same vision tokens and
     # image-processor as Qwen3-VL, with a different tool-call format.
@@ -1326,6 +1338,7 @@ def _populate_registry():
     from renderers.glm5 import GLM5Renderer, GLM51Renderer
     from renderers.glm45 import GLM45Renderer
     from renderers.gpt_oss import GptOssRenderer
+    from renderers.gemma4 import Gemma4Renderer
     from renderers.hy3 import Hy3Renderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
@@ -1354,6 +1367,7 @@ def _populate_registry():
             "qwen3": Qwen3Renderer,
             "prime-qwen3": PrimeQwen3Renderer,
             "qwen3-vl": Qwen3VLRenderer,
+            "gemma4": Gemma4Renderer,
             "qwen3.5": Qwen35Renderer,
             "qwen3.6": Qwen36Renderer,
             "glm-5": GLM5Renderer,

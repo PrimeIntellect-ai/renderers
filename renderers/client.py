@@ -428,6 +428,7 @@ def _build_mm_features(
     (``MultiModalData``) is already framework-agnostic and does not need
     to change. Don't pre-build the abstraction with one engine in tree.
     """
+    from renderers.gemma4 import Gemma4Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
     from renderers.qwen35 import Qwen35Renderer
 
@@ -443,11 +444,76 @@ def _build_mm_features(
     # the family default and matches every Qwen-VL processor in tree.
     if issubclass(renderer_cls, (Qwen3VLRenderer, Qwen35Renderer)):
         return _build_qwen_vl_features(mm_data, spatial_merge_size=2)
+    if issubclass(renderer_cls, Gemma4Renderer):
+        return _build_gemma4_features(mm_data)
 
     raise NotImplementedError(
         f"Multimodal serialization not implemented for {renderer_cls.__name__}. "
         "Add a dispatch branch in renderers.client._build_mm_features."
     )
+
+
+def _build_gemma4_features(mm_data: MultiModalData) -> dict[str, Any]:
+    """vLLM features payload for Gemma 4 image inputs.
+
+    Hugging Face names the position field ``image_position_ids`` while
+    vLLM's Gemma 4 processor schema calls it ``pixel_position_ids``. Keep
+    renderer output faithful to the HF processor and translate at this
+    engine-specific boundary.
+    """
+    try:
+        import torch
+        from transformers.feature_extraction_utils import BatchFeature
+        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+            encode_mm_kwargs_item,
+        )
+        from vllm.multimodal.inputs import (
+            MultiModalFieldConfig,
+            MultiModalKwargsItems,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "Gemma 4 multimodal generate via /inference/v1/generate requires "
+            "a vLLM release with Gemma 4 support and `torch`."
+        ) from exc
+
+    out: dict[str, Any] = {
+        "mm_hashes": {},
+        "mm_placeholders": {},
+        "kwargs_data": {},
+    }
+    image_items = mm_data.mm_items.get("image") or []
+    if image_items:
+        pixel_values = torch.cat(
+            [torch.as_tensor(item["pixel_values"]) for item in image_items], dim=0
+        )
+        pixel_position_ids = torch.cat(
+            [torch.as_tensor(item["image_position_ids"]) for item in image_items],
+            dim=0,
+        )
+        hf_inputs = BatchFeature(
+            data={
+                "pixel_values": pixel_values,
+                "pixel_position_ids": pixel_position_ids,
+            }
+        )
+        field_config = {
+            "pixel_values": MultiModalFieldConfig.batched("image"),
+            "pixel_position_ids": MultiModalFieldConfig.batched("image"),
+        }
+        kwargs_items = MultiModalKwargsItems.from_hf_inputs(hf_inputs, field_config)
+        out["kwargs_data"]["image"] = [
+            encode_mm_kwargs_item(item) for item in kwargs_items["image"]
+        ]
+        out["mm_hashes"]["image"] = list(mm_data.mm_hashes.get("image") or [])
+        out["mm_placeholders"]["image"] = [
+            {"offset": placeholder.offset, "length": placeholder.length}
+            for placeholder in mm_data.mm_placeholders.get("image") or []
+        ]
+
+    if not any(out["kwargs_data"].values()):
+        out["kwargs_data"] = None
+    return out
 
 
 def _build_qwen_vl_features(

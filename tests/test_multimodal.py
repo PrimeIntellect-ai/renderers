@@ -120,7 +120,9 @@ def _load_processor_and_renderer(model_name: str):
         revision = _PROCESSOR_TRUSTED_REVISIONS.get(model_name)
         if revision is not None:
             processor = AutoProcessor.from_pretrained(
-                model_name, trust_remote_code=True, revision=revision
+                model_name,
+                trust_remote_code=True,
+                revision=revision,
             )
         else:
             processor = AutoProcessor.from_pretrained(model_name)
@@ -167,11 +169,15 @@ def _detect_family(model_name: str) -> str:
     - ``kimi_k25``: ``processor(messages=..., return_tensors=...)`` (does
       template + image preprocessing in one call), content parts shaped
       ``{"type": "image_url", "image_url": <PIL>}``.
+    - ``gemma4``: canonical Gemma turn grammar plus dynamic
+      ``<|image>`` + N x ``<|image|>`` + ``<image|>`` expansion.
     """
     if model_name.startswith("moonshotai/Kimi-K2.5") or model_name.startswith(
         "moonshotai/Kimi-K2.6"
     ):
         return "kimi_k25"
+    if model_name.startswith("google/gemma-4-"):
+        return "gemma4"
     return "qwen_vl"
 
 
@@ -218,6 +224,27 @@ def _kimi_processor_input_ids(processor, messages, add_gp):
     return out["input_ids"][0].tolist()
 
 
+def _gemma4_processor_input_ids(processor, messages, add_gp):
+    """Run Gemma 4's template followed by its dynamic image expansion."""
+    text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=add_gp
+    )
+    images = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") in ("image", "image_url") or "image" in item:
+                raw = item.get("image")
+                if raw is not None:
+                    images.append(raw)
+    out = processor(images=[images], text=[text], return_tensors="pt")
+    return out["input_ids"][0].tolist()
+
+
 def _modality_kit(modality: str, model_name: str):
     family = _detect_family(model_name)
     if modality == "image":
@@ -226,6 +253,12 @@ def _modality_kit(modality: str, model_name: str):
                 "make_part": _kimi_image_content_part,
                 "placeholder_token": "<|media_pad|>",
                 "processor_input_ids": _kimi_processor_input_ids,
+            }
+        if family == "gemma4":
+            return {
+                "make_part": _image_content_part,
+                "placeholder_token": "<|image|>",
+                "processor_input_ids": _gemma4_processor_input_ids,
             }
         # Default: Qwen-VL family (Qwen3-VL, Qwen3.5, Qwen3.6).
         return {
@@ -438,17 +471,38 @@ def _build_tool_image_cases(make_part, image):
 
 
 def _skip_for_disabled_thinking_deviation(renderer, case_id) -> bool:
-    """With ``enable_thinking=False`` (the resolved default on the small
-    Qwen3.5 sizes) the Qwen family re-emits the empty think wrapper on
-    historical assistant turns without reasoning — a documented deviation
-    from the template for sampled-token stability (see
-    ``test_disabled_thinking_stability.py``). Cases with an assistant turn
-    before the last user query therefore diverge from the processor oracle
-    by exactly those wrapper tokens; skip them for parity purposes."""
-    return getattr(renderer.config, "enable_thinking", True) is False and case_id in (
-        "multi_turn_two_images",
-        "multi_turn_tool_response_images",
+    """Skip processor parity where a disabled-thinking renderer deliberately
+    preserves a generation-prefilled empty thought wrapper on assistant history.
+
+    The Qwen family deviates only once the assistant is before a later user
+    query. Gemma 4's 26B/31B revision never re-emits its generation prefill in
+    the upstream template, so every media case containing an assistant turn is
+    affected. Sampled-token stability is covered separately.
+    """
+    from renderers.gemma4 import Gemma4Renderer
+    from renderers.qwen35 import Qwen35Renderer
+
+    qwen_deviation = (
+        isinstance(renderer, Qwen35Renderer)
+        and getattr(renderer.config, "enable_thinking", True) is False
+        and case_id
+        in (
+            "multi_turn_two_images",
+            "multi_turn_tool_response_images",
+        )
     )
+    gemma4_deviation = (
+        isinstance(renderer, Gemma4Renderer)
+        and getattr(renderer.config, "enable_thinking", True) is False
+        and case_id
+        in (
+            "multi_turn_two_images",
+            "tool_response_with_image",
+            "multi_turn_tool_response_images",
+            "consecutive_tools_mixed_media",
+        )
+    )
+    return qwen_deviation or gemma4_deviation
 
 
 def _supports_tool_message_images(renderer) -> bool:
@@ -456,10 +510,11 @@ def _supports_tool_message_images(renderer) -> bool:
     content. Renderers without the feature silently drop image parts in tool
     content; as they grow the feature they get added here and the test starts
     asserting against them."""
+    from renderers.gemma4 import Gemma4Renderer
     from renderers.kimi_k25 import KimiK25Renderer
     from renderers.qwen35 import Qwen35Renderer
 
-    return isinstance(renderer, (Qwen35Renderer, KimiK25Renderer))
+    return isinstance(renderer, (Qwen35Renderer, KimiK25Renderer, Gemma4Renderer))
 
 
 @pytest.mark.parametrize(
@@ -608,8 +663,8 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     # ``previous_completion_ids`` mirrors what a sampler would emit
     # starting AFTER the prompt's assistant role opener — i.e. the
     # response text followed by ``<|im_end|>``.
-    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    completion_ids = tokenizer.encode("Saw it.", add_special_tokens=False) + [im_end_id]
+    close_id = renderer.get_stop_token_ids()[0]
+    completion_ids = tokenizer.encode("Saw it.", add_special_tokens=False) + [close_id]
 
     bridged_raw = renderer.bridge_to_next_turn(
         previous_prompt_ids=initial_rendered.token_ids,

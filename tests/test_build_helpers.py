@@ -3,6 +3,8 @@
 Runs against every (model, renderer) pair.
 """
 
+import pytest
+
 from renderers import build_training_sample, build_trajectory_step
 from renderers.base import PlaceholderRange, _build_mm_token_type_ids
 
@@ -35,6 +37,18 @@ def _expected(tokenizer, messages, **kwargs):
 
 def test_build_training_sample_ids_match(model_name, tokenizer, renderer):
     """Token IDs must match apply_chat_template."""
+    if (
+        model_name
+        in {
+            "google/gemma-4-26B-A4B-it",
+            "google/gemma-4-31B-it",
+        }
+        and not renderer.config.enable_thinking
+    ):
+        pytest.skip(
+            "Gemma 4 26B/31B deliberately keeps the disabled-thinking prefill "
+            "on assistant history; stability is covered separately"
+        )
     msgs = [
         {"role": "system", "content": "You are helpful."},
         {"role": "user", "content": "Hi"},

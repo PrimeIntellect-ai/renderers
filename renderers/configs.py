@@ -270,6 +270,33 @@ class Qwen3VLRendererConfig(BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
 
+class Gemma4RendererConfig(BaseRendererConfig):
+    """Gemma 4 renderer config."""
+
+    name: Literal["gemma4"] = "gemma4"
+
+    enable_thinking: bool = False
+    """Enable Gemma 4's thinking mode. Mirrors the canonical template kwarg."""
+
+    preserve_thinking: bool = False
+    """Keep thinking on historical tool-call turns when the template permits it."""
+
+    image_cache_max: int = 256
+    """FIFO bound on processed image entries. Renderer-internal."""
+
+    _internal_fields = frozenset({"image_cache_max"})
+
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        _reject_thinking_retention_conflict(
+            self,
+            "preserve_thinking",
+            true_implies="all",
+            false_implies="tool_cycle",
+        )
+        return self
+
+
 class GLM5RendererConfig(BaseRendererConfig):
     """GLM-5 renderer config."""
 
@@ -756,6 +783,7 @@ RendererConfig = Annotated[
         Qwen35RendererConfig,
         Qwen36RendererConfig,
         Qwen3VLRendererConfig,
+        Gemma4RendererConfig,
         GLM5RendererConfig,
         GLM51RendererConfig,
         GLM45RendererConfig,
@@ -799,6 +827,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "qwen3.5": Qwen35RendererConfig,
     "qwen3.6": Qwen36RendererConfig,
     "qwen3-vl": Qwen3VLRendererConfig,
+    "gemma4": Gemma4RendererConfig,
     "glm-5": GLM5RendererConfig,
     "glm-5.1": GLM51RendererConfig,
     "glm-4.5": GLM45RendererConfig,
@@ -853,6 +882,7 @@ __all__ = [
     "GLM45RendererConfig",
     "GLM51RendererConfig",
     "GLM5RendererConfig",
+    "Gemma4RendererConfig",
     "GptOssRendererConfig",
     "Hy3RendererConfig",
     "KimiK25RendererConfig",

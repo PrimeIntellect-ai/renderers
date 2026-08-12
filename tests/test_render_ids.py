@@ -10,11 +10,31 @@ template. See ``test_gpt_oss_harmony_parity.py`` for harmony parity coverage.
 
 from functools import lru_cache
 
+import pytest
+
 from renderers import create_renderer
 from renderers.base import load_tokenizer
 
+_GEMMA4_EMPTY_THOUGHT_MODELS = {
+    "google/gemma-4-26B-A4B-it",
+    "google/gemma-4-31B-it",
+}
+
 
 def _expected(tokenizer, messages, **kwargs):
+    if (
+        getattr(tokenizer, "name_or_path", "") in _GEMMA4_EMPTY_THOUGHT_MODELS
+        and kwargs.get("enable_thinking", False) is False
+        and any(
+            message.get("role") == "assistant"
+            and not (message.get("reasoning") or message.get("reasoning_content"))
+            for message in messages
+        )
+    ):
+        pytest.skip(
+            "Gemma 4 26B/31B deliberately re-emits the disabled-thinking "
+            "generation prefill on assistant history for sampled-token stability"
+        )
     # Match the Renderer Protocol's default for add_generation_prompt (False)
     # — some tokenizers (e.g. Kimi's) default it to True in their config,
     # which would otherwise make this parity check fail on the flag alone.

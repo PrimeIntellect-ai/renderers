@@ -33,6 +33,7 @@ _ROUNDTRIP_MODELS = [
     ("Qwen/Qwen3.5-9B", "auto"),
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
     ("Qwen/Qwen3-VL-4B-Instruct", "auto"),
+    ("google/gemma-4-31B-it", "auto"),
     ("zai-org/GLM-5", "auto"),
     ("zai-org/GLM-5.1", "auto"),
     ("zai-org/GLM-4.7-Flash", "auto"),

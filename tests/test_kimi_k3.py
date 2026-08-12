@@ -261,8 +261,8 @@ def test_round_trips_a_tool_call(tokenizer, renderer):
         [{"role": "user", "content": "weather?"}, message], tools=TOOLS
     )
     parsed = renderer.parse_response(ids, tools=TOOLS)
-    assert [call["function"]["name"] for call in parsed.tool_calls] == ["get_weather"]
-    assert parsed.tool_calls[0]["function"]["arguments"] == {"city": "Sydney"}
+    assert [call.name for call in parsed.tool_calls] == ["get_weather"]
+    assert parsed.tool_calls[0].arguments == {"city": "Sydney"}
 
 
 def test_rejects_an_unsupported_thinking_effort(tokenizer):
@@ -352,8 +352,8 @@ def test_parses_the_deployed_models_tool_call(tokenizer, renderer):
     parsed = renderer.parse_response(
         tokenizer.encode(LIVE_TOOL_CALL_COMPLETION, add_special_tokens=False)
     )
-    assert [call["function"]["name"] for call in parsed.tool_calls] == ["move_gripper"]
-    assert parsed.tool_calls[0]["function"]["arguments"] == {"x": 0, "z": 0.15}
+    assert [call.name for call in parsed.tool_calls] == ["move_gripper"]
+    assert parsed.tool_calls[0].arguments == {"x": 0, "z": 0.15}
 
 
 def test_round_trips_every_argument_type(renderer):
@@ -371,7 +371,7 @@ def test_round_trips_every_argument_type(renderer):
             },
         ]
     )
-    assert renderer.parse_response(ids).tool_calls[0]["function"]["arguments"] == arguments
+    assert renderer.parse_response(ids).tool_calls[0].arguments == arguments
 
 
 def test_renders_several_calls_in_one_tools_channel(tokenizer, renderer):
@@ -389,3 +389,31 @@ def test_renders_several_calls_in_one_tools_channel(tokenizer, renderer):
     assert text.count('<|open|>tools<|sep|>') == 1
     assert '<|open|>call tool="a" index="1"<|sep|>' in text
     assert '<|open|>call tool="b" index="2"<|sep|>' in text
+
+
+def test_tool_calls_use_the_packages_record_type(renderer, tokenizer):
+    """The agent harness reads name and arguments off the record, so a bare dict is dropped
+    silently rather than rejected."""
+    from renderers.base import ParsedToolCall, ToolCallParseStatus
+
+    parsed = renderer.parse_response(
+        tokenizer.encode(LIVE_TOOL_CALL_COMPLETION, add_special_tokens=False)
+    )
+    call = parsed.tool_calls[0]
+    assert isinstance(call, ParsedToolCall)
+    assert call.status is ToolCallParseStatus.OK
+    assert call.raw
+
+
+def test_flags_a_call_naming_an_undeclared_tool(renderer, tokenizer):
+    from renderers.base import ToolCallParseStatus
+
+    text = (
+        '<|open|>tools<|sep|><|open|>call tool="nope" index="1"<|sep|>'
+        '<|open|>argument key="x" type="number"<|sep|>1<|close|>argument<|sep|>'
+        '<|close|>call<|sep|><|close|>tools<|sep|>'
+    )
+    parsed = renderer.parse_response(
+        tokenizer.encode(text, add_special_tokens=False), tools=TOOLS
+    )
+    assert parsed.tool_calls[0].status is ToolCallParseStatus.UNKNOWN_TOOL

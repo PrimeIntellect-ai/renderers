@@ -50,6 +50,7 @@ from renderers.base import (
     Message,
     MultiModalData,
     ParsedResponse,
+    ParsedToolCall,
     PlaceholderRange,
     RenderedTokens,
     ToolSpec,
@@ -58,6 +59,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
+    ToolCallParseStatus,
 )
 from renderers.configs import KimiK3RendererConfig
 from renderers.kimi_k25 import _image_hash, _is_image_part, _load_pil_image
@@ -478,7 +480,7 @@ class KimiK3Renderer:
         return ParsedResponse(
             content=content or "",
             reasoning_content=reasoning or None,
-            tool_calls=self._parse_tool_calls(text),
+            tool_calls=self._parse_tool_calls(text, tools),
         )
 
     @staticmethod
@@ -488,9 +490,15 @@ class KimiK3Renderer:
         rest = text.split(start, 1)[1]
         return rest.split(end, 1)[0] if end in rest else rest
 
-    def _parse_tool_calls(self, text: str) -> list[dict[str, Any]]:
+    def _parse_tool_calls(
+        self, text: str, tools: list[ToolSpec] | None = None
+    ) -> list[ParsedToolCall]:
         """Read back the ``tools`` channel: one ``call`` per invocation, typed arguments."""
-        calls: list[dict[str, Any]] = []
+        declared = {
+            (tool.get("function", tool) or {}).get("name") for tool in tools or []
+        }
+        unknown = (lambda name: bool(declared) and name not in declared)
+        calls: list[ParsedToolCall] = []
         remaining = text
         call_marker = f"{OPEN_TOKEN}{_CALL_TAG} "
         while call_marker in remaining:
@@ -517,8 +525,21 @@ class KimiK3Renderer:
                         value, _attr(arg_header, "type")
                     )
                     rest = arg_body
+            raw = call_marker + header + SEP_TOKEN + block + _close_tag(_CALL_TAG)
+            if not name:
+                status = ToolCallParseStatus.MISSING_NAME
+            elif isinstance(arguments, str):
+                status = ToolCallParseStatus.INVALID_JSON
+            else:
+                status = ToolCallParseStatus.UNKNOWN_TOOL if unknown(name) else ToolCallParseStatus.OK
             calls.append(
-                {"type": "function", "function": {"name": name, "arguments": arguments}}
+                ParsedToolCall(
+                    raw=raw,
+                    name=name or None,
+                    arguments=arguments,
+                    status=status,
+                    id=_attr(header, "index") or None,
+                )
             )
             remaining = block
         return calls

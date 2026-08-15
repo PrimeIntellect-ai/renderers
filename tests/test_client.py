@@ -12,7 +12,7 @@ from renderers.base import (
     RenderedTokens,
     ToolCallParseStatus,
 )
-from renderers.client import generate
+from renderers.client import generate, parse_generate_response
 
 
 class _FakeRenderer:
@@ -147,7 +147,7 @@ def test_generate_builds_request_body_and_parses_response():
             "max_tokens": 7,
             "min_tokens": 2,
             "stop_token_ids": [99],
-            "logprobs": 1,
+            "logprobs": 0,
             "skip_special_tokens": False,
         },
     }
@@ -160,8 +160,8 @@ def test_generate_builds_request_body_and_parses_response():
     assert result["completion_ids"] == [7, 8]
     assert result["completion_logprobs"] == [-0.1, -0.2]
     assert result["routed_experts"]["shape"] == [2, 1, 1]
-    assert isinstance(result["routed_experts"]["data"], memoryview)
-    assert result["routed_experts"]["data"].tobytes() == base64.b64encode(b"\x01\x02")
+    assert type(result["routed_experts"]["data"]) is bytes
+    assert result["routed_experts"]["data"] == base64.b64encode(b"\x01\x02")
     assert result["multi_modal_data"] is None
     assert result["request_id"] == "gen-test"
     # Per-token attribution from the renderer surfaces on the result so
@@ -180,6 +180,25 @@ def test_generate_builds_request_body_and_parses_response():
     assert tc.name == "echo"
     assert tc.arguments == {"text": "hello"}
     assert tc.status == ToolCallParseStatus.OK
+
+
+def test_parse_generate_response_copies_all_large_base64_fields():
+    routed_data = base64.b64encode(b"routing")
+    kept_ids = base64.b64encode(b"kept")
+    raw = (
+        b'{"choices":[{"routed_experts":{"data":"'
+        + routed_data
+        + b'","shape":[1]},"kept_tokens":{"ids":"'
+        + kept_ids
+        + b'","counts":"AAAAAA=="}}]}'
+    )
+
+    payload = parse_generate_response(raw)
+
+    assert payload["choices"][0]["routed_experts"]["data"] == routed_data
+    assert payload["choices"][0]["kept_tokens"]["ids"] == kept_ids
+    assert type(payload["choices"][0]["routed_experts"]["data"]) is bytes
+    assert type(payload["choices"][0]["kept_tokens"]["ids"]) is bytes
 
 
 def test_generate_rejects_missing_completion_logprobs_before_parsing():

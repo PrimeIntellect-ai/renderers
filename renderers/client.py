@@ -129,31 +129,46 @@ async def _maybe_offload(renderer: Renderer | RendererPool, fn):
     return fn()
 
 
-def _strip_base64_field(raw: bytes, prefix: bytes) -> tuple[bytes, memoryview | None]:
-    """Splice a large base64 string field out of raw JSON bytes.
+def _extract_base64_fields(
+    raw: bytes, fields: Mapping[str, bytes]
+) -> tuple[bytes, dict[str, bytes]]:
+    """Copy large base64 values out and remove them from JSON in one pass."""
+    spans: list[tuple[int, int]] = []
+    extracted: dict[str, bytes] = {}
+    for name, prefix in fields.items():
+        data_start = raw.find(prefix)
+        if data_start < 0:
+            continue
+        data_start += len(prefix)
+        data_end = raw.index(b'"', data_start)
+        extracted[name] = raw[data_start:data_end]
+        spans.append((data_start, data_end))
 
-    Avoids json-decoding megabytes of base64; the returned memoryview
-    references ``raw`` and is re-inserted into the parsed payload.
-    """
-    data_start = raw.find(prefix)
-    if data_start < 0:
-        return raw, None
+    if not spans:
+        return raw, extracted
 
-    data_start += len(prefix)
-    data_end = raw.index(b'"', data_start)
-    data = memoryview(raw)[data_start:data_end]
-    stripped = raw[:data_start] + raw[data_end:]
-    return stripped, data
+    chunks: list[bytes] = []
+    cursor = 0
+    for data_start, data_end in sorted(spans):
+        chunks.append(raw[cursor:data_start])
+        cursor = data_end
+    chunks.append(raw[cursor:])
+    return b"".join(chunks), extracted
 
 
 def parse_generate_response(raw: bytes) -> dict[str, Any]:
-    stripped, routed_data = _strip_base64_field(raw, ROUTED_EXPERTS_DATA_PREFIX)
-    stripped, kept_ids_data = _strip_base64_field(stripped, KEPT_TOKENS_IDS_PREFIX)
+    stripped, extracted = _extract_base64_fields(
+        raw,
+        {
+            "routed_experts": ROUTED_EXPERTS_DATA_PREFIX,
+            "kept_tokens": KEPT_TOKENS_IDS_PREFIX,
+        },
+    )
     payload: dict[str, Any] = json.loads(stripped)
-    if routed_data is not None:
-        payload["choices"][0]["routed_experts"]["data"] = routed_data
-    if kept_ids_data is not None:
-        payload["choices"][0]["kept_tokens"]["ids"] = kept_ids_data
+    if "routed_experts" in extracted:
+        payload["choices"][0]["routed_experts"]["data"] = extracted["routed_experts"]
+    if "kept_tokens" in extracted:
+        payload["choices"][0]["kept_tokens"]["ids"] = extracted["kept_tokens"]
     return payload
 
 
@@ -231,7 +246,7 @@ async def generate(
 
     ``sampling_params`` is forwarded to vLLM verbatim. Two fields are always
     set by us and override caller values: ``stop_token_ids`` (from the
-    renderer) and ``logprobs=1`` (we always emit completion_logprobs). Pass
+    renderer) and ``logprobs=0`` (sampled-token completion logprobs). Pass
     ``prompt_ids`` to skip rendering and use a prebuilt token sequence —
     pair it with ``multi_modal_data`` when the prebuilt prompt has image /
     video placeholders that need engine-side mm payload, and with
@@ -310,7 +325,7 @@ async def generate(
 
     sp: dict[str, Any] = dict(sampling_params or {})
     sp["stop_token_ids"] = stop_token_ids
-    sp["logprobs"] = 1
+    sp["logprobs"] = 0
     sp.setdefault("skip_special_tokens", False)
 
     body: dict[str, Any] = {

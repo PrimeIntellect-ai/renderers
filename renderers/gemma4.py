@@ -10,7 +10,7 @@ sampling ``<|tool_response>``; the runtime appends one or more response blocks,
 and generation resumes in the same model turn.  The bridge implementation
 preserves that boundary without re-rendering sampled history.
 
-The 26B/31B disabled-thinking template revision prefills an empty thought
+The 12B/26B/31B disabled-thinking template revision prefills an empty thought
 channel in every generation prompt. Historical assistant turns without
 reasoning re-emit that exact wrapper so a grown full render preserves the byte
 prefix under which each completion was sampled. This is a deliberate stability
@@ -52,6 +52,7 @@ from renderers.qwen3_vl import (
 
 _ESCAPE = '<|"|>'
 _EMPTY_THOUGHT_PREFILL_MODELS = {
+    "google/gemma-4-12B-it",
     "google/gemma-4-26B-A4B-it",
     "google/gemma-4-31B-it",
 }

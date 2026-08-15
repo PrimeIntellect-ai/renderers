@@ -12,6 +12,7 @@ from renderers.configs import Gemma4RendererConfig
 _MODELS = (
     "google/gemma-4-E2B-it",
     "google/gemma-4-E4B-it",
+    "google/gemma-4-12B-it",
     "google/gemma-4-26B-A4B-it",
     "google/gemma-4-31B-it",
 )
@@ -29,9 +30,16 @@ def test_all_instruction_checkpoints_are_registered_as_image_renderers():
         assert MULTIMODAL_MODELS[model] == {"image"}
 
 
-def test_disabled_thinking_prefill_tracks_template_revision(monkeypatch):
+@pytest.mark.parametrize(
+    "current_model",
+    ["google/gemma-4-12B-it", "google/gemma-4-31B-it"],
+)
+def test_disabled_thinking_prefill_tracks_template_revision(monkeypatch, current_model):
     tokenizer, current_renderer = _gemma4()
     messages = [{"role": "user", "content": "Hello"}]
+
+    monkeypatch.setattr(tokenizer, "name_or_path", current_model)
+    current_renderer = Gemma4Renderer(tokenizer)
 
     current_text = tokenizer.decode(
         current_renderer.render_ids(messages, add_generation_prompt=True),

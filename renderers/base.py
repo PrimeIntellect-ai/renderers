@@ -1037,10 +1037,11 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3-VL-30B-A3B-Instruct": "qwen3-vl",
     # Gemma 4 instruction checkpoints share Google's canonical turn/tool
     # grammar and dynamic Gemma4Processor image expansion. E2B/E4B omit the
-    # disabled-thinking empty-channel prefill used by the 26B/31B revision;
+    # disabled-thinking empty-channel prefill used by the 12B/26B/31B revision;
     # Gemma4Renderer detects that small template variant per tokenizer.
     "google/gemma-4-E2B-it": "gemma4",
     "google/gemma-4-E4B-it": "gemma4",
+    "google/gemma-4-12B-it": "gemma4",
     "google/gemma-4-26B-A4B-it": "gemma4",
     "google/gemma-4-31B-it": "gemma4",
     # GLM-5 family (GLM-4.7 reuses the GLM-5 template).
@@ -1121,6 +1122,7 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     "Qwen/Qwen3-VL-30B-A3B-Instruct": {"image"},
     "google/gemma-4-E2B-it": {"image"},
     "google/gemma-4-E4B-it": {"image"},
+    "google/gemma-4-12B-it": {"image"},
     "google/gemma-4-26B-A4B-it": {"image"},
     "google/gemma-4-31B-it": {"image"},
     # Qwen3.5 is itself a VLM family (HF tag ``image-text-to-text``,

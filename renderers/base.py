@@ -1076,6 +1076,11 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # construction to pin a different date.
     "meta-llama/Llama-3.2-1B-Instruct": "llama-3",
     "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
+    # RLM chat format (minimal role tags, rlm harness). One template repo per
+    # Nemotron family; the old unqualified name redirects to the Super repo.
+    "PrimeIntellect/RLM-Chat-Template": "rlm",
+    "PrimeIntellect/Nemotron-3-Super-RLM-Chat-Template": "rlm",
+    "PrimeIntellect/Nemotron-3-Nano-RLM-Chat-Template": "rlm",
     # Poolside Laguna. These checkpoints ship distinct chat templates,
     # each mirrored by its own renderer class/config discriminator.
     "poolside/Laguna-XS.2": "laguna-xs.2",
@@ -1345,6 +1350,7 @@ def _populate_registry():
     from renderers.qwen3_vl import Qwen3VLRenderer
     from renderers.qwen35 import Qwen35Renderer
     from renderers.qwen36 import Qwen36Renderer
+    from renderers.rlm import RlmRenderer
 
     RENDERER_REGISTRY.update(
         {
@@ -1370,6 +1376,7 @@ def _populate_registry():
             "nemotron-3": Nemotron3Renderer,
             "nemotron-3-ultra": Nemotron3UltraRenderer,
             "nemotron-3.5": Nemotron35Renderer,
+            "rlm": RlmRenderer,
             "gpt-oss": GptOssRenderer,
         }
     )

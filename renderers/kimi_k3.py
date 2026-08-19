@@ -331,7 +331,8 @@ class KimiK3Renderer:
                     for key, value in arguments.items():
                         rendered += (
                             _open_tag(
-                                _ARGUMENT_TAG, (("key", key), ("type", _xtml_type(value)))
+                                _ARGUMENT_TAG,
+                                (("key", key), ("type", _xtml_type(value))),
                             )
                             + _xtml_value(value)
                             + _close_tag(_ARGUMENT_TAG)
@@ -458,9 +459,7 @@ class KimiK3Renderer:
             elif role == "assistant":
                 tool_index = 0
                 pending_calls = message.get("tool_calls") or []
-            plan.append(
-                (self._message_ops(message, tool_index, pending_calls), index)
-            )
+            plan.append((self._message_ops(message, tool_index, pending_calls), index))
         if add_generation_prompt:
             plan.append((self._generation_prompt_ops(), -1))
 
@@ -586,9 +585,7 @@ class KimiK3Renderer:
             yield node
             yield from KimiK3Renderer._walk(node.get("children") or [])
 
-    def _channel_text(
-        self, nodes: list[dict[str, Any]], channel: str
-    ) -> str | None:
+    def _channel_text(self, nodes: list[dict[str, Any]], channel: str) -> str | None:
         for node in self._walk(nodes):
             if node.get("tag") == channel:
                 return node["text"]
@@ -626,7 +623,7 @@ class KimiK3Renderer:
                     status = ToolCallParseStatus.OK
                 calls.append(
                     ParsedToolCall(
-                        raw=f'{_CALL_TAG} {call["attrs"]}',
+                        raw=f"{_CALL_TAG} {call['attrs']}",
                         name=name or None,
                         arguments=arguments,
                         status=status,

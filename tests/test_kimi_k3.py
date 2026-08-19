@@ -105,7 +105,10 @@ def _image_part(size: tuple[int, int] = (112, 112)) -> dict:
                     "tool_calls": [
                         {
                             "type": "function",
-                            "function": {"name": "get_weather", "arguments": {"city": "Sydney"}},
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": {"city": "Sydney"},
+                            },
                         }
                     ],
                 },
@@ -317,7 +320,7 @@ def test_emits_images_inside_tool_responses(tokenizer, processor):
         add_generation_prompt=True,
     )
     text = tokenizer.decode(rendered.token_ids, skip_special_tokens=False)
-    assert '<|open|>message role="tool" name="camera"<|sep|>' in text
+    assert '<|open|>message role="tool" tool="camera" index="1"<|sep|>' in text
     assert (
         "<|media_begin|>image 100x50<|media_content|><|media_pad|><|media_end|>" in text
     )
@@ -359,11 +362,11 @@ def test_parses_a_full_assistant_message_with_both_tags(tokenizer, renderer):
 # Captured verbatim from the deployed model, so a rewrite of the emitted form fails here rather
 # than in a rollout. Arguments arrive as separate typed blocks, never as a JSON object.
 LIVE_TOOL_CALL_COMPLETION = (
-    '<|close|>think<|sep|><|open|>response<|sep|><|close|>response<|sep|>'
+    "<|close|>think<|sep|><|open|>response<|sep|><|close|>response<|sep|>"
     '<|open|>tools<|sep|><|open|>call tool="move_gripper" index="1"<|sep|>'
     '<|open|>argument key="x" type="number"<|sep|>0<|close|>argument<|sep|>'
     '<|open|>argument key="z" type="number"<|sep|>0.15<|close|>argument<|sep|>'
-    '<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>'
+    "<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>"
 )
 
 
@@ -377,7 +380,15 @@ def test_parses_the_deployed_models_tool_call(tokenizer, renderer):
 
 def test_round_trips_every_argument_type(renderer):
     """Types survive the render, so a re-rendered history matches what the model emitted."""
-    arguments = {"s": "text", "n": 2.5, "i": 7, "b": False, "z": None, "o": {"k": 1}, "a": [1, 2]}
+    arguments = {
+        "s": "text",
+        "n": 2.5,
+        "i": 7,
+        "b": False,
+        "z": None,
+        "o": {"k": 1},
+        "a": [1, 2],
+    }
     ids = renderer.render_ids(
         [
             {"role": "user", "content": "go"},
@@ -385,7 +396,10 @@ def test_round_trips_every_argument_type(renderer):
                 "role": "assistant",
                 "content": "",
                 "tool_calls": [
-                    {"type": "function", "function": {"name": "act", "arguments": arguments}}
+                    {
+                        "type": "function",
+                        "function": {"name": "act", "arguments": arguments},
+                    }
                 ],
             },
         ]
@@ -401,11 +415,14 @@ def test_renders_several_calls_in_one_tools_channel(tokenizer, renderer):
     ]
     text = tokenizer.decode(
         renderer.render_ids(
-            [{"role": "user", "content": "go"}, {"role": "assistant", "content": "", "tool_calls": calls}]
+            [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": "", "tool_calls": calls},
+            ]
         ),
         skip_special_tokens=False,
     )
-    assert text.count('<|open|>tools<|sep|>') == 1
+    assert text.count("<|open|>tools<|sep|>") == 1
     assert '<|open|>call tool="a" index="1"<|sep|>' in text
     assert '<|open|>call tool="b" index="2"<|sep|>' in text
 
@@ -430,7 +447,7 @@ def test_flags_a_call_naming_an_undeclared_tool(renderer, tokenizer):
     text = (
         '<|open|>tools<|sep|><|open|>call tool="nope" index="1"<|sep|>'
         '<|open|>argument key="x" type="number"<|sep|>1<|close|>argument<|sep|>'
-        '<|close|>call<|sep|><|close|>tools<|sep|>'
+        "<|close|>call<|sep|><|close|>tools<|sep|>"
     )
     parsed = renderer.parse_response(
         tokenizer.encode(text, add_special_tokens=False), tools=TOOLS
@@ -441,12 +458,19 @@ def test_flags_a_call_naming_an_undeclared_tool(renderer, tokenizer):
 def test_tool_results_are_bound_to_their_call_by_position(tokenizer, renderer):
     """K3 binds a result to its call with tool= and a 1-based index that restarts each
     assistant turn; a name= attribute leaves the result unattributable."""
-    call = lambda name: {"type": "function", "function": {"name": name, "arguments": {}}}
+
+    def call(name):
+        return {"type": "function", "function": {"name": name, "arguments": {}}}
+
     text = tokenizer.decode(
         renderer.render_ids(
             [
                 {"role": "user", "content": "go"},
-                {"role": "assistant", "content": "", "tool_calls": [call("a"), call("b")]},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [call("a"), call("b")],
+                },
                 {"role": "tool", "name": "a", "content": "1"},
                 {"role": "tool", "name": "b", "content": "2"},
                 {"role": "assistant", "content": "", "tool_calls": [call("c")]},
@@ -508,8 +532,14 @@ def test_resolves_a_tool_name_from_the_matching_call(tokenizer, renderer):
                     "role": "assistant",
                     "content": "",
                     "tool_calls": [
-                        {"type": "function", "function": {"name": "observe", "arguments": {}}},
-                        {"type": "function", "function": {"name": "locate", "arguments": {}}},
+                        {
+                            "type": "function",
+                            "function": {"name": "observe", "arguments": {}},
+                        },
+                        {
+                            "type": "function",
+                            "function": {"name": "locate", "arguments": {}},
+                        },
                     ],
                 },
                 {"role": "tool", "tool_call_id": "call_0", "content": "a"},
@@ -526,7 +556,9 @@ def test_still_rejects_a_tool_result_with_no_call_to_match(renderer):
     import pytest as _pytest
 
     with _pytest.raises(ValueError, match="resolvable tool name"):
-        renderer.render_ids([{"role": "tool", "tool_call_id": "x", "content": "orphan"}])
+        renderer.render_ids(
+            [{"role": "tool", "tool_call_id": "x", "content": "orphan"}]
+        )
 
 
 def test_each_call_is_reported_once(tokenizer, renderer):
@@ -535,7 +567,7 @@ def test_each_call_is_reported_once(tokenizer, renderer):
     text = (
         '<|open|>tools<|sep|><|open|>call tool="observe" index="1"<|sep|>'
         '<|open|>argument key="overlay" type="string"<|sep|>grid<|close|>argument<|sep|>'
-        '<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>'
+        "<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>"
     )
     parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
     assert [call.name for call in parsed.tool_calls] == ["observe"]
@@ -560,10 +592,10 @@ def test_bridge_names_tool_results_from_the_sampled_turn(tokenizer, renderer):
         [{"role": "user", "content": "go"}], tools=TOOLS, add_generation_prompt=True
     )
     completion_ids = tokenizer.encode(
-        'thinking<|close|>think<|sep|><|open|>response<|sep|><|close|>response<|sep|>'
+        "thinking<|close|>think<|sep|><|open|>response<|sep|><|close|>response<|sep|>"
         '<|open|>tools<|sep|><|open|>call tool="get_weather" index="1"<|sep|>'
         '<|open|>argument key="city" type="string"<|sep|>Sydney<|close|>argument<|sep|>'
-        '<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>',
+        "<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>",
         add_special_tokens=False,
     )
 

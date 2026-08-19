@@ -613,6 +613,7 @@ class KimiK3RendererConfig(BaseRendererConfig):
     """Kimi K3 renderer config."""
 
     name: Literal["kimi-k3"] = "kimi-k3"
+    _template_fields = frozenset({"thinking", "thinking_effort"})
 
     thinking: bool = True
     """When ``True``, a ``thinking-effort`` system block precedes the conversation and

@@ -188,6 +188,11 @@ def test_tool_call_with_content(model_name, tokenizer, renderer):
 
 
 def test_tool_call_no_content(model_name, tokenizer, renderer):
+    """Null content renders as empty. Templates that handle ``None`` sanely
+    keep byte parity as usual; templates that mishandle it — GLM-4.5/5 and
+    MiniMax-M2 Jinja-print the literal string "None", Qwen3-VL crashes
+    iterating it — get the intended divergence instead: the renderer output
+    must match the template fed ``content=""``."""
     msgs = [
         {"role": "user", "content": "Weather in Paris?"},
         {
@@ -198,29 +203,15 @@ def test_tool_call_no_content(model_name, tokenizer, renderer):
             ],
         },
     ]
+    rendered = renderer.render_ids(msgs, tools=TOOLS)
     try:
         expected = _expected(tokenizer, msgs, tools=TOOLS)
-    except TypeError as exc:
-        # Qwen3-VL upstream chat-template bug. The assistant branch only
-        # checks `is string` and then unconditionally iterates the else,
-        # so `content=None` raises TypeError on `for x in None`:
-        #
-        #   {%- if message.content is string %}
-        #       {{- message.content }}
-        #   {%- else %}
-        #       {%- for content_item in message.content %}   ← crash
-        #           {%- if 'text' in content_item %}
-        #               {{- content_item.text }}
-        #           ...
-        #
-        # Same pattern in the user-role branch. The fix upstream would be
-        # `{%- elif message.content %}` to skip iteration on falsy content.
-        # Until Qwen ships a fixed template this is xfail; the imperative
-        # xfail auto-promotes to xpass when upstream is fixed.
-        import pytest
-
-        pytest.xfail(f"{model_name}: apply_chat_template raised {exc!r}")
-    assert renderer.render_ids(msgs, tools=TOOLS) == expected
+    except TypeError:
+        expected = None  # template crashes on None content (Qwen3-VL)
+    if expected is not None and rendered == expected:
+        return
+    normalized = [dict(m, content=m["content"] or "") for m in msgs]
+    assert rendered == _expected(tokenizer, normalized, tools=TOOLS)
 
 
 def test_multiple_tool_calls(model_name, tokenizer, renderer):

@@ -113,7 +113,7 @@ class GLM5Renderer:
     @staticmethod
     def _visible_text(content: Any) -> str:
         if content is None:
-            return "None"
+            return ""
         if isinstance(content, str):
             return content
         if isinstance(content, list):

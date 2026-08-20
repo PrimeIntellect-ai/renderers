@@ -121,6 +121,7 @@ def _default_enable_thinking(tokenizer) -> bool:
 class Qwen35Renderer:
     """Deterministic message → token renderer for Qwen3.5 models."""
 
+    supports_raw_multimodal = True
     _config_cls: type = Qwen35RendererConfig
 
     def __init__(
@@ -352,6 +353,7 @@ class Qwen35Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
+        process_multimodal: bool = True,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
@@ -423,7 +425,11 @@ class Qwen35Renderer:
             # image data, so they ARE body content (is_content=True);
             # the surrounding ``<|vision_start|>`` / ``<|vision_end|>``
             # specials are template scaffold.
-            _, out, n, h = self._process_image(part)
+            if process_multimodal:
+                _, out, n, h = self._process_image(part)
+            else:
+                out = h = None
+                n = 1
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(
@@ -441,16 +447,18 @@ class Qwen35Renderer:
                     self._image_pad, msg_idx, is_sampled=False, is_content=True
                 )
             emit_special(self._vision_end, msg_idx, is_sampled=False, is_content=False)
-            mm_hashes.setdefault("image", []).append(h)
-            mm_placeholders.setdefault("image", []).append(
-                PlaceholderRange(offset=offset, length=n)
-            )
-            mm_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            if process_multimodal:
+                assert out is not None and h is not None
+                mm_hashes.setdefault("image", []).append(h)
+                mm_placeholders.setdefault("image", []).append(
+                    PlaceholderRange(offset=offset, length=n)
+                )
+                mm_items.setdefault("image", []).append(
+                    {
+                        "pixel_values": out["pixel_values"],
+                        "image_grid_thw": out["image_grid_thw"],
+                    }
+                )
 
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             """Emit a user message whose content list contains image parts.
@@ -684,6 +692,7 @@ class Qwen35Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         previous_multi_modal_data: MultiModalData | None = None,
+        process_multimodal: bool = True,
     ) -> "RenderedTokens | None":
         if (
             not previous_prompt_ids
@@ -720,6 +729,7 @@ class Qwen35Renderer:
         # scratch correctly.
         if (
             self.config.add_vision_id
+            and process_multimodal
             and previous_multi_modal_data is None
             and self._vision_start in previous_ids
         ):
@@ -750,9 +760,11 @@ class Qwen35Renderer:
         # ``add_vision_id`` parity across turns.
         prev_image_count = 0
         prev_video_count = 0
-        if previous_multi_modal_data is not None:
+        if process_multimodal and previous_multi_modal_data is not None:
             prev_image_count = len(previous_multi_modal_data.mm_items.get("image", []))
             prev_video_count = len(previous_multi_modal_data.mm_items.get("video", []))
+        elif not process_multimodal:
+            prev_image_count = previous_ids.count(self._image_pad)
         vision_counts = {"image": prev_image_count, "video": prev_video_count}
 
         def emit_special(
@@ -795,7 +807,11 @@ class Qwen35Renderer:
                 content_mask.append(is_content)
 
         def emit_image(part: dict[str, Any], msg_idx: int = -1) -> None:
-            _, out, n, h = self._process_image(part)
+            if process_multimodal:
+                _, out, n, h = self._process_image(part)
+            else:
+                out = h = None
+                n = 1
             vision_counts["image"] += 1
             if self.config.add_vision_id:
                 emit_text(f"Picture {vision_counts['image']}: ", msg_idx)
@@ -804,16 +820,18 @@ class Qwen35Renderer:
             for _ in range(n):
                 emit_special(self._image_pad, msg_idx, is_content=True)
             emit_special(self._vision_end, msg_idx)
-            new_hashes.setdefault("image", []).append(h)
-            new_placeholders.setdefault("image", []).append(
-                PlaceholderRange(offset=offset, length=n)
-            )
-            new_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "image_grid_thw": out["image_grid_thw"],
-                }
-            )
+            if process_multimodal:
+                assert out is not None and h is not None
+                new_hashes.setdefault("image", []).append(h)
+                new_placeholders.setdefault("image", []).append(
+                    PlaceholderRange(offset=offset, length=n)
+                )
+                new_items.setdefault("image", []).append(
+                    {
+                        "pixel_values": out["pixel_values"],
+                        "image_grid_thw": out["image_grid_thw"],
+                    }
+                )
 
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             emit_special(self._im_start, msg_idx)
@@ -904,17 +922,17 @@ class Qwen35Renderer:
         # below never mutates the caller's previous_multi_modal_data.
         merged_hashes: dict[str, list[str]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
-            if previous_multi_modal_data
+            if process_multimodal and previous_multi_modal_data
             else {}
         )
         merged_placeholders: dict[str, list[PlaceholderRange]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
-            if previous_multi_modal_data
+            if process_multimodal and previous_multi_modal_data
             else {}
         )
         merged_items: dict[str, list[dict[str, Any]]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
-            if previous_multi_modal_data
+            if process_multimodal and previous_multi_modal_data
             else {}
         )
         for modality, vals in new_hashes.items():

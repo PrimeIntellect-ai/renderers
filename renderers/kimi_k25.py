@@ -590,6 +590,8 @@ class KimiK25Renderer:
     The tokenizer should be ``moonshotai/Kimi-K2-Instruct`` (same as K2).
     """
 
+    supports_raw_multimodal = True
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
@@ -733,6 +735,7 @@ class KimiK25Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
+        process_multimodal: bool = True,
     ) -> RenderedTokens:
         """Render messages to tokens, matching the K2.5 chat template.
 
@@ -820,7 +823,10 @@ class KimiK25Renderer:
             ``<|media_content|>``, ``<|media_end|>``, the trailing
             ``\\n``) are template-injected scaffold.
             """
-            _, out, _num_patches, h = self._process_image(part)
+            if process_multimodal:
+                _, out, _num_patches, h = self._process_image(part)
+            else:
+                out = h = None
             emit_special(
                 self._media_begin, msg_idx, is_sampled=is_sampled, is_content=False
             )
@@ -839,6 +845,9 @@ class KimiK25Renderer:
                 self._media_end, msg_idx, is_sampled=is_sampled, is_content=False
             )
             emit_text("\n", msg_idx, is_sampled=is_sampled, is_content=False)
+            if not process_multimodal:
+                return
+            assert out is not None and h is not None
             mm_hashes.setdefault("image", []).append(h)
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=1)
@@ -1026,6 +1035,7 @@ class KimiK25Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         previous_multi_modal_data: MultiModalData | None = None,
+        process_multimodal: bool = True,
     ) -> "RenderedTokens | None":
         if (
             not previous_prompt_ids
@@ -1114,7 +1124,10 @@ class KimiK25Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            _, out, _num_patches, h = self._process_image(part)
+            if process_multimodal:
+                _, out, _num_patches, h = self._process_image(part)
+            else:
+                out = h = None
             emit_special(self._media_begin, msg_idx)
             emit_text("image", msg_idx)
             emit_special(self._media_content, msg_idx)
@@ -1124,6 +1137,9 @@ class KimiK25Renderer:
             emit_special(self._media_pad, msg_idx, is_content=is_content)
             emit_special(self._media_end, msg_idx)
             emit_text("\n", msg_idx)
+            if not process_multimodal:
+                return
+            assert out is not None and h is not None
             new_hashes.setdefault("image", []).append(h)
             new_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=1)
@@ -1187,17 +1203,17 @@ class KimiK25Renderer:
         # below never mutates the caller's previous_multi_modal_data.
         merged_hashes: dict[str, list[str]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
-            if previous_multi_modal_data
+            if process_multimodal and previous_multi_modal_data
             else {}
         )
         merged_placeholders: dict[str, list[PlaceholderRange]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
-            if previous_multi_modal_data
+            if process_multimodal and previous_multi_modal_data
             else {}
         )
         merged_items: dict[str, list[dict[str, Any]]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
-            if previous_multi_modal_data
+            if process_multimodal and previous_multi_modal_data
             else {}
         )
         for modality, vals in new_hashes.items():

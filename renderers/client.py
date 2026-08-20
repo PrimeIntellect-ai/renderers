@@ -226,6 +226,7 @@ async def generate(
     priority: int | None = None,
     extra_headers: dict[str, str] | None = None,
     max_prompt_len: int | None = None,
+    raw_multimodal: bool = False,
 ) -> dict[str, Any]:
     """Tokenize messages, call vLLM /inference/v1/generate, parse the response.
 
@@ -245,6 +246,9 @@ async def generate(
     sidecar, then serializes it to vLLM's ``features`` schema (mm_hashes,
     mm_placeholders, kwargs_data) before POSTing. The serializer imports
     ``vllm.*`` lazily so text-only consumers never pay for the import.
+    With ``raw_multimodal=True``, rendering skips image processing and the
+    request carries raw ``content_parts`` instead; vLLM must return the
+    expanded prompt as ``prompt_token_ids``.
 
     ``max_prompt_len`` controls the pre-flight overflow check. When the
     rendered prompt is strictly longer than the cap, the request is never
@@ -255,10 +259,14 @@ async def generate(
     cache a ``None`` cap and the pre-flight silently disables. Engine 4xx
     that still slip through propagate raw — converting them into a domain
     error is the calling client's job (its error shape is engine-specific).
+    Raw multimodal calls skip this pre-flight because only vLLM knows the
+    expanded prompt length.
 
-    Returns a dict with: request_id, prompt_ids, completion_ids,
-    completion_logprobs, content, reasoning_content, tool_calls,
-    finish_reason, routed_experts, multi_modal_data, prompt_attribution.
+    Returns a dict with: request_id, prompt_ids, renderer_prompt_ids,
+    completion_ids, completion_logprobs, content, reasoning_content,
+    tool_calls, finish_reason, routed_experts, multi_modal_data,
+    prompt_attribution. ``renderer_prompt_ids`` is the unexpanded logical
+    prompt on raw multimodal calls and ``None`` otherwise.
 
     ``prompt_attribution`` is the renderer's :class:`RenderedTokens` for
     the prompt — either the one this call computed via
@@ -289,7 +297,15 @@ async def generate(
                 multi_modal_data,
                 prompt_attribution,
             )
-        rendered = renderer.render(messages, tools=tools, add_generation_prompt=True)
+        render_kwargs: dict[str, Any] = {}
+        if raw_multimodal:
+            render_kwargs["process_multimodal"] = False
+        rendered = renderer.render(
+            messages,
+            tools=tools,
+            add_generation_prompt=True,
+            **render_kwargs,
+        )
         return (
             rendered.token_ids,
             renderer.get_stop_token_ids(),
@@ -301,12 +317,13 @@ async def generate(
         renderer, _prepare
     )
 
-    if max_prompt_len is None:
-        max_prompt_len = await _resolve_max_prompt_len(client, model)
-    if max_prompt_len is not None and len(prompt_ids) > max_prompt_len:
-        raise OverlongPromptError(
-            prompt_len=len(prompt_ids), max_prompt_len=max_prompt_len
-        )
+    if not raw_multimodal:
+        if max_prompt_len is None:
+            max_prompt_len = await _resolve_max_prompt_len(client, model)
+        if max_prompt_len is not None and len(prompt_ids) > max_prompt_len:
+            raise OverlongPromptError(
+                prompt_len=len(prompt_ids), max_prompt_len=max_prompt_len
+            )
 
     sp: dict[str, Any] = dict(sampling_params or {})
     sp["stop_token_ids"] = stop_token_ids
@@ -318,11 +335,14 @@ async def generate(
         "token_ids": prompt_ids,
         "sampling_params": sp,
     }
+    content_parts = _content_parts(messages) if raw_multimodal else None
     features = (
         _build_mm_features(renderer, mm_data)
-        if mm_data and not mm_data.is_empty()
+        if not raw_multimodal and mm_data and not mm_data.is_empty()
         else None
     )
+    if content_parts:
+        body["content_parts"] = content_parts
     if features is not None:
         body["features"] = features
     if cache_salt is not None:
@@ -352,6 +372,11 @@ async def generate(
 
     choice = (data.get("choices") or [{}])[0]
     completion_ids = choice.get("token_ids") or []
+    effective_prompt_ids = data.get("prompt_token_ids")
+    if content_parts and not isinstance(effective_prompt_ids, list):
+        raise MalformedGenerateResponseError(
+            "Engine response must include prompt_token_ids for raw multimodal input."
+        )
 
     completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
 
@@ -379,7 +404,8 @@ async def generate(
 
     return {
         "request_id": data.get("request_id") or "",
-        "prompt_ids": list(prompt_ids),
+        "prompt_ids": list(effective_prompt_ids or prompt_ids),
+        "renderer_prompt_ids": list(prompt_ids) if content_parts else None,
         "completion_ids": list(completion_ids),
         "completion_logprobs": completion_logprobs,
         "content": parsed.content,
@@ -401,6 +427,27 @@ async def generate(
         # when the caller passed prompt_ids without attribution.
         "prompt_attribution": prompt_attr,
     }
+
+
+def _content_parts(messages: list[Message]) -> list[dict[str, Any]]:
+    """Flatten raw media in prompt order for vLLM's token generate endpoint."""
+    parts: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, Mapping):
+                continue
+            part_type = part.get("type")
+            if part_type not in ("image_url", "audio_url", "video_url"):
+                continue
+            source = part.get(part_type)
+            url = source.get("url") if isinstance(source, Mapping) else part.get("url")
+            if not isinstance(url, str) or not url:
+                raise ValueError(f"{part_type} content part is missing a URL")
+            parts.append({"type": part_type, "url": url})
+    return parts
 
 
 def _build_mm_features(

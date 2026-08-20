@@ -276,6 +276,9 @@ class Qwen38RendererConfig(BaseRendererConfig):
     reasoning-effort instructions and thinking-preservation defaults."""
 
     name: Literal["qwen3.8"] = "qwen3.8"
+    _template_fields = frozenset(
+        {"enable_thinking", "add_vision_id", "preserve_thinking", "reasoning_effort"}
+    )
 
     enable_thinking: bool | None = None
     """See :class:`Qwen35RendererConfig.enable_thinking`."""

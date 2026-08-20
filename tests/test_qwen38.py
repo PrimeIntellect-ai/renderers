@@ -99,6 +99,13 @@ def test_qwen38_text_and_tool_parity(config_kwargs):
         ),
         (
             [
+                {"role": "system", "content": ""},
+                {"role": "user", "content": "Hello."},
+            ],
+            {"add_generation_prompt": True},
+        ),
+        (
+            [
                 {"role": "user", "content": "First question."},
                 {
                     "role": "assistant",

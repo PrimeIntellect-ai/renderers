@@ -541,7 +541,8 @@ class Qwen35Renderer:
                 emit_special(self._im_start, 0, is_sampled=False, is_content=False)
                 sys_segments: list[tuple[str, bool]] = [("system\n", False)]
                 if reasoning_instructions:
-                    sys_segments.append((reasoning_instructions + "\n\n", False))
+                    separator = "\n\n" if sys_content else ""
+                    sys_segments.append((reasoning_instructions + separator, False))
                 if sys_content:
                     sys_segments.append((sys_content, True))
                 emit_text_segments(sys_segments, 0, is_sampled=False)

@@ -102,6 +102,8 @@ _ENABLE_THINKING_DEFAULTS: dict[str, bool] = {
     "Qwen/Qwen3.5-397B-A17B": True,
     # Qwen3.6 extends the Qwen3.5 template; same big-size polarity.
     "Qwen/Qwen3.6-35B-A3B": True,
+    # Qwen3.8 keeps thinking enabled by default.
+    "Qwen/Qwen3.8-27B": True,
 }
 
 
@@ -305,6 +307,41 @@ class Qwen35Renderer:
                 return i
         return len(messages)
 
+    def _reasoning_instructions(self) -> str:
+        """Optional synthetic system instruction for reasoning control.
+
+        Qwen3.5 and Qwen3.6 do not inject one. Newer family members can
+        override this hook without duplicating the full render path.
+        """
+        return ""
+
+    def _omit_empty_system_message(self) -> bool:
+        """Whether an empty caller-provided system message emits no tokens."""
+        return False
+
+    @staticmethod
+    def _extract_assistant_parts(msg: Message, content: str) -> tuple[str, str]:
+        """Return ``(reasoning_content, visible_content)`` for an assistant.
+
+        Qwen3.5 and Qwen3.6 accept the legacy inline
+        ``<think>...</think>content`` shape when ``reasoning_content`` is
+        absent. Qwen3.8 removes that compatibility branch and overrides this
+        hook to keep inline markers in visible content.
+        """
+        reasoning_content = ""
+        if isinstance(msg.get("reasoning_content"), str):
+            reasoning_content = msg["reasoning_content"]
+        elif "</think>" in content:
+            before_think_end, after_think_end = content.split("</think>", 1)
+            if "<think>" in before_think_end:
+                reasoning_content = before_think_end.split("<think>")[-1].lstrip("\n")
+            else:
+                reasoning_content = before_think_end.lstrip("\n")
+            reasoning_content = reasoning_content.rstrip("\n")
+            content = after_think_end.lstrip("\n")
+
+        return reasoning_content.strip(), content
+
     # ------------------------------------------------------------------
     # Core render method
     # ------------------------------------------------------------------
@@ -466,6 +503,7 @@ class Qwen35Renderer:
 
         # ── 1. System message + optional tools ──────────────────────
         first_is_system = messages[0].get("role") == "system"
+        reasoning_instructions = self._reasoning_instructions()
 
         if tools:
             # System message index for attribution
@@ -477,10 +515,10 @@ class Qwen35Renderer:
             # JSON tool specs — is scaffold. The tools dict is
             # recoverable from the ``tools`` argument; don't re-attribute
             # its embedded JSON as message body.
-            segments: list[tuple[str, bool]] = [
-                ("system\n", False),
-                (_TOOLS_HEADER, False),
-            ]
+            segments: list[tuple[str, bool]] = [("system\n", False)]
+            if reasoning_instructions:
+                segments.append((reasoning_instructions + "\n\n", False))
+            segments.append((_TOOLS_HEADER, False))
             for tool in tools:
                 segments.append(("\n" + json.dumps(tool, ensure_ascii=False), False))
             segments.append((_TOOLS_FOOTER, False))
@@ -495,13 +533,33 @@ class Qwen35Renderer:
             emit_text("\n", sys_idx, is_sampled=False, is_content=False)
         elif first_is_system:
             sys_content = self._render_content(messages[0].get("content")).strip()
-            emit_special(self._im_start, 0, is_sampled=False, is_content=False)
-            sys_segments: list[tuple[str, bool]] = [("system\n", False)]
-            if sys_content:
-                sys_segments.append((sys_content, True))
-            emit_text_segments(sys_segments, 0, is_sampled=False)
-            emit_special(self._im_end, 0, is_sampled=False, is_content=False)
-            emit_text("\n", 0, is_sampled=False, is_content=False)
+            if (
+                sys_content
+                or reasoning_instructions
+                or not self._omit_empty_system_message()
+            ):
+                emit_special(self._im_start, 0, is_sampled=False, is_content=False)
+                sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+                if reasoning_instructions:
+                    separator = "\n\n" if sys_content else ""
+                    sys_segments.append((reasoning_instructions + separator, False))
+                if sys_content:
+                    sys_segments.append((sys_content, True))
+                emit_text_segments(sys_segments, 0, is_sampled=False)
+                emit_special(self._im_end, 0, is_sampled=False, is_content=False)
+                emit_text("\n", 0, is_sampled=False, is_content=False)
+        elif reasoning_instructions:
+            # Qwen3.8 injects reasoning guidance even when the caller did
+            # not provide a system message. It is renderer scaffold, so use
+            # the synthetic ``-1`` attribution bucket.
+            emit_special(self._im_start, -1, is_sampled=False, is_content=False)
+            emit_text_segments(
+                [("system\n", False), (reasoning_instructions, False)],
+                -1,
+                is_sampled=False,
+            )
+            emit_special(self._im_end, -1, is_sampled=False, is_content=False)
+            emit_text("\n", -1, is_sampled=False, is_content=False)
 
         # ── 2. Compute last_query_index ─────────────────────────────
         last_qi = self._last_query_index(messages)
@@ -932,22 +990,7 @@ class Qwen35Renderer:
         emit_ids,
         emit_text_segments,
     ) -> None:
-        # Extract reasoning_content
-        reasoning_content = ""
-        if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-        elif "</think>" in content:
-            # Split on </think> to separate reasoning from content
-            before_think_end, after_think_end = content.split("</think>", 1)
-            # Extract text after <think> (if present)
-            if "<think>" in before_think_end:
-                reasoning_content = before_think_end.split("<think>")[-1].lstrip("\n")
-            else:
-                reasoning_content = before_think_end.lstrip("\n")
-            reasoning_content = reasoning_content.rstrip("\n")
-            content = after_think_end.lstrip("\n")
-
-        reasoning_content = reasoning_content.strip()
+        reasoning_content, content = self._extract_assistant_parts(msg, content)
 
         # ``<|im_start|>assistant\n`` is template-injected scaffolding —
         # at inference the chat template emits these as the generation

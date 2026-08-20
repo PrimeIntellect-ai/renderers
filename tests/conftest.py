@@ -22,6 +22,7 @@ RENDERER_MODELS = [
     ("PrimeIntellect/Qwen3-0.6B", "auto"),
     ("Qwen/Qwen3.5-9B", "auto"),
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
+    ("Qwen/Qwen3.8-27B", "auto"),
     ("Qwen/Qwen3-VL-4B-Instruct", "auto"),
     ("google/gemma-4-31B-it", "auto"),
     ("zai-org/GLM-5", "auto"),

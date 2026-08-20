@@ -47,6 +47,7 @@ _RENDERER_MODELS = [
     ("Qwen/Qwen3-8B", "auto"),
     ("Qwen/Qwen3.5-9B", "auto"),
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
+    ("Qwen/Qwen3.8-27B", "auto"),
     ("google/gemma-4-31B-it", "auto"),
     ("zai-org/GLM-5", "auto"),
     ("zai-org/GLM-5.1", "auto"),
@@ -93,7 +94,7 @@ _KWARG_VALUES: dict[str, list[Any]] = {
     # gpt-oss accepts low/medium/high; Hy3 accepts no_think/low/high. The
     # union is listed here and the matrix builder drops values a given
     # renderer's typed config rejects (see ``_value_valid_for``).
-    "reasoning_effort": ["no_think", "low", "medium", "high"],
+    "reasoning_effort": ["no_think", "low", "medium", "high", "xhigh"],
     # Hy3 — keep <think>{reasoning}</think> on historical assistant turns
     # (True) vs collapse past-cycle reasoning to <think></think> (False).
     "preserved_thinking": [True, False],
@@ -131,10 +132,11 @@ _KWARG_VALUES: dict[str, list[Any]] = {
     # passthrough mode. The renderer paths diverge significantly under
     # this flag, so both values are exercised.
     "render_assistant_messages_raw": [True, False],
-    # Qwen3.5 / Qwen3.6 / Qwen3-VL — when True, prefix each image /
-    # video placeholder with ``Picture N: `` / ``Video N: ``.
+    # Qwen3.5 / Qwen3.6 / Qwen3.8 / Qwen3-VL — when True, prefix each
+    # image / video placeholder with ``Picture N: `` / ``Video N: ``.
     "add_vision_id": [True, False],
-    # Qwen3.6 — keep historical think blocks before the last real user query.
+    # Qwen3.6 / Qwen3.8 — keep historical think blocks before the last real
+    # user query. Qwen3.8 defaults this to True.
     "preserve_thinking": [True, False],
     # gpt-oss — pin to a fixed date so the renderer's preamble matches
     # the harmony oracle built with the same date. The default

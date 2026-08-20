@@ -32,6 +32,7 @@ from renderers.configs import (
     Qwen3RendererConfig,
     Qwen35RendererConfig,
     Qwen36RendererConfig,
+    Qwen38RendererConfig,
 )
 
 # One representative model per affected renderer family, each with
@@ -40,6 +41,10 @@ _MODELS = [
     ("Qwen/Qwen3-8B", Qwen3RendererConfig(enable_thinking=False)),
     ("Qwen/Qwen3.5-9B", Qwen35RendererConfig(enable_thinking=False)),
     ("Qwen/Qwen3.6-35B-A3B", Qwen36RendererConfig(enable_thinking=False)),
+    (
+        "Qwen/Qwen3.8-27B",
+        Qwen38RendererConfig(enable_thinking=False),
+    ),
     (
         "google/gemma-4-26B-A4B-it",
         Gemma4RendererConfig(enable_thinking=False),

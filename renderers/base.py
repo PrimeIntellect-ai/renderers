@@ -1031,6 +1031,11 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3.5-397B-A17B": "qwen3.5",
     # Qwen3.6.
     "Qwen/Qwen3.6-35B-A3B": "qwen3.6",
+    # Qwen3.8. Dense 27B, built on the Qwen3.5 architecture. Its template
+    # additionally injects reasoning-effort instructions into the system
+    # message and preserves thinking by default (hard-coded per model in
+    # ``Qwen38Renderer`` / ``_ENABLE_THINKING_DEFAULTS``).
+    "Qwen/Qwen3.8-27B": "qwen3.8",
     # Qwen3-VL.
     "Qwen/Qwen3-VL-4B-Instruct": "qwen3-vl",
     "Qwen/Qwen3-VL-8B-Instruct": "qwen3-vl",
@@ -1136,6 +1141,9 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     # Qwen3.6 extends Qwen3.5's chat template; same VL bits, only
     # tool-call argument serialization differs.
     "Qwen/Qwen3.6-35B-A3B": {"image"},
+    # Qwen3.8 (dense 27B) is a Qwen3.5-architecture VLM with the same vision
+    # tokens / processor; its renderer shares Qwen35Renderer's image path.
+    "Qwen/Qwen3.8-27B": {"image"},
     # Kimi K2.5 / K2.6 are unified VLMs (HF tag ``image-text-to-text``)
     # with custom processor (``KimiK25Processor`` + ``KimiK25VisionProcessor``).
     # Vision wrap is different from Qwen-VL:
@@ -1367,6 +1375,7 @@ def _populate_registry():
     from renderers.qwen3_vl import Qwen3VLRenderer
     from renderers.qwen35 import Qwen35Renderer
     from renderers.qwen36 import Qwen36Renderer
+    from renderers.qwen38 import Qwen38Renderer
 
     RENDERER_REGISTRY.update(
         {
@@ -1377,6 +1386,7 @@ def _populate_registry():
             "gemma4": Gemma4Renderer,
             "qwen3.5": Qwen35Renderer,
             "qwen3.6": Qwen36Renderer,
+            "qwen3.8": Qwen38Renderer,
             "glm-5": GLM5Renderer,
             "glm-5.1": GLM51Renderer,
             "glm-4.5": GLM45Renderer,

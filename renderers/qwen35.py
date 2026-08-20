@@ -102,6 +102,8 @@ _ENABLE_THINKING_DEFAULTS: dict[str, bool] = {
     "Qwen/Qwen3.5-397B-A17B": True,
     # Qwen3.6 extends the Qwen3.5 template; same big-size polarity.
     "Qwen/Qwen3.6-35B-A3B": True,
+    # Qwen3.8 (dense 27B) — thinking on by default.
+    "Qwen/Qwen3.8-27B": True,
 }
 
 
@@ -306,6 +308,64 @@ class Qwen35Renderer:
         return len(messages)
 
     # ------------------------------------------------------------------
+    # System message + optional tools
+    # ------------------------------------------------------------------
+
+    def _emit_system_and_tools(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec] | None,
+        *,
+        emit_special,
+        emit_text,
+        emit_text_segments,
+    ) -> None:
+        """Emit the leading system message and (optionally) the tools block.
+
+        Qwen3.5 emits a system message only when the caller supplied one.
+        Subclasses (Qwen3.8) override this to inject reasoning-effort
+        instructions and to emit a standalone system message when the
+        template's reasoning instructions are non-empty.
+        """
+        first_is_system = messages[0].get("role") == "system"
+
+        if tools:
+            # System message index for attribution
+            sys_idx = 0 if first_is_system else -1
+
+            emit_special(self._im_start, sys_idx, is_sampled=False, is_content=False)
+            # Body = system content (if any). Everything else in this
+            # block — role tag, tools header / footer / instructions, the
+            # JSON tool specs — is scaffold. The tools dict is
+            # recoverable from the ``tools`` argument; don't re-attribute
+            # its embedded JSON as message body.
+            segments: list[tuple[str, bool]] = [
+                ("system\n", False),
+                (_TOOLS_HEADER, False),
+            ]
+            for tool in tools:
+                segments.append(("\n" + json.dumps(tool, ensure_ascii=False), False))
+            segments.append((_TOOLS_FOOTER, False))
+            segments.append((_TOOLS_INSTRUCTIONS, False))
+            if first_is_system:
+                sys_content = self._render_content(messages[0].get("content")).strip()
+                if sys_content:
+                    segments.append(("\n\n", False))
+                    segments.append((sys_content, True))
+            emit_text_segments(segments, sys_idx, is_sampled=False)
+            emit_special(self._im_end, sys_idx, is_sampled=False, is_content=False)
+            emit_text("\n", sys_idx, is_sampled=False, is_content=False)
+        elif first_is_system:
+            sys_content = self._render_content(messages[0].get("content")).strip()
+            emit_special(self._im_start, 0, is_sampled=False, is_content=False)
+            sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+            if sys_content:
+                sys_segments.append((sys_content, True))
+            emit_text_segments(sys_segments, 0, is_sampled=False)
+            emit_special(self._im_end, 0, is_sampled=False, is_content=False)
+            emit_text("\n", 0, is_sampled=False, is_content=False)
+
+    # ------------------------------------------------------------------
     # Core render method
     # ------------------------------------------------------------------
 
@@ -465,43 +525,13 @@ class Qwen35Renderer:
             emit_text("\n", msg_idx, is_sampled=False, is_content=False)
 
         # ── 1. System message + optional tools ──────────────────────
-        first_is_system = messages[0].get("role") == "system"
-
-        if tools:
-            # System message index for attribution
-            sys_idx = 0 if first_is_system else -1
-
-            emit_special(self._im_start, sys_idx, is_sampled=False, is_content=False)
-            # Body = system content (if any). Everything else in this
-            # block — role tag, tools header / footer / instructions, the
-            # JSON tool specs — is scaffold. The tools dict is
-            # recoverable from the ``tools`` argument; don't re-attribute
-            # its embedded JSON as message body.
-            segments: list[tuple[str, bool]] = [
-                ("system\n", False),
-                (_TOOLS_HEADER, False),
-            ]
-            for tool in tools:
-                segments.append(("\n" + json.dumps(tool, ensure_ascii=False), False))
-            segments.append((_TOOLS_FOOTER, False))
-            segments.append((_TOOLS_INSTRUCTIONS, False))
-            if first_is_system:
-                sys_content = self._render_content(messages[0].get("content")).strip()
-                if sys_content:
-                    segments.append(("\n\n", False))
-                    segments.append((sys_content, True))
-            emit_text_segments(segments, sys_idx, is_sampled=False)
-            emit_special(self._im_end, sys_idx, is_sampled=False, is_content=False)
-            emit_text("\n", sys_idx, is_sampled=False, is_content=False)
-        elif first_is_system:
-            sys_content = self._render_content(messages[0].get("content")).strip()
-            emit_special(self._im_start, 0, is_sampled=False, is_content=False)
-            sys_segments: list[tuple[str, bool]] = [("system\n", False)]
-            if sys_content:
-                sys_segments.append((sys_content, True))
-            emit_text_segments(sys_segments, 0, is_sampled=False)
-            emit_special(self._im_end, 0, is_sampled=False, is_content=False)
-            emit_text("\n", 0, is_sampled=False, is_content=False)
+        self._emit_system_and_tools(
+            messages,
+            tools,
+            emit_special=emit_special,
+            emit_text=emit_text,
+            emit_text_segments=emit_text_segments,
+        )
 
         # ── 2. Compute last_query_index ─────────────────────────────
         last_qi = self._last_query_index(messages)
@@ -920,6 +950,30 @@ class Qwen35Renderer:
             return json.dumps(arg_value, ensure_ascii=False)
         return str(arg_value)
 
+    def _extract_reasoning(self, msg: Message, content: str) -> tuple[str, str]:
+        """Return ``(reasoning_content, content)`` for an assistant message.
+
+        Qwen3.5 falls back to splitting `` response`` out of ``content`` when
+        the message has no explicit ``reasoning_content`` field. Qwen3.8
+        dropped that fallback (it relies solely on ``reasoning_content``), so
+        subclasses override this to skip the content split.
+        """
+        reasoning_content = ""
+        if isinstance(msg.get("reasoning_content"), str):
+            reasoning_content = msg["reasoning_content"]
+        elif " response" in content:
+            # Split on  response to separate reasoning from content
+            before_think_end, after_think_end = content.split(" response", 1)
+            # Extract text after  thinking (if present)
+            if " thinking" in before_think_end:
+                reasoning_content = before_think_end.split(" thinking")[-1].lstrip("\n")
+            else:
+                reasoning_content = before_think_end.lstrip("\n")
+            reasoning_content = reasoning_content.rstrip("\n")
+            content = after_think_end.lstrip("\n")
+
+        return reasoning_content.strip(), content
+
     def _render_assistant(
         self,
         msg: Message,
@@ -933,21 +987,7 @@ class Qwen35Renderer:
         emit_text_segments,
     ) -> None:
         # Extract reasoning_content
-        reasoning_content = ""
-        if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-        elif "</think>" in content:
-            # Split on </think> to separate reasoning from content
-            before_think_end, after_think_end = content.split("</think>", 1)
-            # Extract text after <think> (if present)
-            if "<think>" in before_think_end:
-                reasoning_content = before_think_end.split("<think>")[-1].lstrip("\n")
-            else:
-                reasoning_content = before_think_end.lstrip("\n")
-            reasoning_content = reasoning_content.rstrip("\n")
-            content = after_think_end.lstrip("\n")
-
-        reasoning_content = reasoning_content.strip()
+        reasoning_content, content = self._extract_reasoning(msg, content)
 
         # ``<|im_start|>assistant\n`` is template-injected scaffolding —
         # at inference the chat template emits these as the generation

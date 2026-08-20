@@ -47,6 +47,7 @@ _RENDERER_MODELS = [
     ("Qwen/Qwen3-8B", "auto"),
     ("Qwen/Qwen3.5-9B", "auto"),
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
+    ("Qwen/Qwen3.8-27B", "auto"),
     ("google/gemma-4-31B-it", "auto"),
     ("zai-org/GLM-5", "auto"),
     ("zai-org/GLM-5.1", "auto"),
@@ -93,7 +94,7 @@ _KWARG_VALUES: dict[str, list[Any]] = {
     # gpt-oss accepts low/medium/high; Hy3 accepts no_think/low/high. The
     # union is listed here and the matrix builder drops values a given
     # renderer's typed config rejects (see ``_value_valid_for``).
-    "reasoning_effort": ["no_think", "low", "medium", "high"],
+    "reasoning_effort": ["no_think", "low", "medium", "high", "xhigh"],
     # Hy3 — keep <think>{reasoning}</think> on historical assistant turns
     # (True) vs collapse past-cycle reasoning to <think></think> (False).
     "preserved_thinking": [True, False],
@@ -442,7 +443,7 @@ def test_chat_template_kwarg_parity_hf(
         ("multi_turn", "tool_cycle") if resolved == "qwen3" else ("multi_turn",)
     )
     qwen_deviation = (
-        resolved in ("qwen3", "qwen3.5", "qwen3.6")
+        resolved in ("qwen3", "qwen3.5", "qwen3.6", "qwen3.8")
         and kwarg == "enable_thinking"
         and value is False
         and shape_id in qwen_deviating_shapes

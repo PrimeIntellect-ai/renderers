@@ -31,6 +31,7 @@ definition time. Template fields are covered by parity tests against
 | PrimeIntellect Qwen3 | `PrimeQwen3RendererConfig` | - | - |
 | Qwen3.5 | `Qwen35RendererConfig` | `enable_thinking`, `add_vision_id` | `image_cache_max` |
 | Qwen3.6 | `Qwen36RendererConfig` | `enable_thinking`, `add_vision_id`, `preserve_thinking` | `image_cache_max` |
+| Qwen3.8 | `Qwen38RendererConfig` | `enable_thinking`, `add_vision_id`, `preserve_thinking`, `reasoning_effort` | `image_cache_max` |
 | Qwen3-VL | `Qwen3VLRendererConfig` | `add_vision_id` | `image_cache_max` |
 | Gemma 4 | `Gemma4RendererConfig` | `enable_thinking`, `preserve_thinking` | `image_cache_max` |
 | GLM-5 / 5.1 | `GLM5RendererConfig` / `GLM51RendererConfig` | `enable_thinking`, `clear_thinking` | - |
@@ -140,6 +141,7 @@ the knobs its template actually exposes:
 | Qwen3 | `enable_thinking=False -> all`, else `tool_cycle` |
 | Qwen3.5 | `enable_thinking=False -> all`, else `tool_cycle` |
 | Qwen3.6 | `preserve_thinking=True -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
+| Qwen3.8 | `preserve_thinking=True -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | Gemma 4 | `preserve_thinking=True -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | GLM-5 / 5.1 | `clear_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | GLM-4.5 | `enable_thinking=False -> all`, else `tool_cycle` |

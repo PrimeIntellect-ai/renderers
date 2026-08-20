@@ -271,6 +271,52 @@ class Qwen36RendererConfig(BaseRendererConfig):
         return self
 
 
+class Qwen38RendererConfig(BaseRendererConfig):
+    """Qwen3.8 renderer config.
+
+    Qwen3.8 keeps Qwen3.6's multimodal/tool template and adds native
+    reasoning-effort instructions. Historical thinking is preserved by
+    default in the upstream template.
+    """
+
+    name: Literal["qwen3.8"] = "qwen3.8"
+    _template_fields = frozenset(
+        {
+            "enable_thinking",
+            "add_vision_id",
+            "preserve_thinking",
+            "reasoning_effort",
+        }
+    )
+
+    enable_thinking: bool | None = None
+    """See :class:`Qwen35RendererConfig.enable_thinking`."""
+
+    add_vision_id: bool = False
+    """See :class:`Qwen35RendererConfig.add_vision_id`."""
+
+    preserve_thinking: bool = True
+    """Keep historical ``<think>`` blocks. Mirrors Qwen3.8's default."""
+
+    reasoning_effort: Literal["xhigh", "medium", "low"] = "xhigh"
+    """Reasoning depth hint injected into the system prompt when enabled."""
+
+    image_cache_max: int = 256
+    """See :class:`Qwen35RendererConfig.image_cache_max`."""
+
+    _internal_fields = frozenset({"image_cache_max"})
+
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        _reject_thinking_retention_conflict(
+            self,
+            "preserve_thinking",
+            true_implies="all",
+            false_implies="tool_cycle",
+        )
+        return self
+
+
 class Qwen3VLRendererConfig(BaseRendererConfig):
     """Qwen3-VL renderer config."""
 
@@ -892,6 +938,7 @@ RendererConfig = Annotated[
         PrimeQwen3RendererConfig,
         Qwen35RendererConfig,
         Qwen36RendererConfig,
+        Qwen38RendererConfig,
         Qwen3VLRendererConfig,
         Gemma4RendererConfig,
         GLM5RendererConfig,
@@ -937,6 +984,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "prime-qwen3": PrimeQwen3RendererConfig,
     "qwen3.5": Qwen35RendererConfig,
     "qwen3.6": Qwen36RendererConfig,
+    "qwen3.8": Qwen38RendererConfig,
     "qwen3-vl": Qwen3VLRendererConfig,
     "gemma4": Gemma4RendererConfig,
     "glm-5": GLM5RendererConfig,
@@ -1013,6 +1061,7 @@ __all__ = [
     "PrimeQwen3RendererConfig",
     "Qwen35RendererConfig",
     "Qwen36RendererConfig",
+    "Qwen38RendererConfig",
     "Qwen3RendererConfig",
     "Qwen3VLRendererConfig",
     "RendererConfig",

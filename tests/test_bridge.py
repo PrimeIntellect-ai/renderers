@@ -26,6 +26,7 @@ _BRIDGE_MODELS = [
     ("PrimeIntellect/Qwen3-0.6B", "auto"),
     ("Qwen/Qwen3.5-9B", "auto"),
     ("Qwen/Qwen3.6-35B-A3B", "auto"),
+    ("Qwen/Qwen3.8-27B", "auto"),
     ("google/gemma-4-31B-it", "auto"),
     ("thinkingmachines/Inkling", "auto"),
     ("thinkingmachines/Inkling-Small", "auto"),

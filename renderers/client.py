@@ -382,6 +382,10 @@ async def generate(
         "prompt_ids": list(prompt_ids),
         "completion_ids": list(completion_ids),
         "completion_logprobs": completion_logprobs,
+        # Prefill scores for the prompt tokens, present only when the caller
+        # asked (`sampling_params["prompt_logprobs"]`): one
+        # `{token_id: {"logprob": ...}} | None` entry per prompt position.
+        "prompt_logprobs": data.get("prompt_logprobs"),
         "content": parsed.content,
         "reasoning_content": parsed.reasoning_content,
         "tool_calls": parsed.tool_calls,

@@ -91,6 +91,7 @@ class _FakeClient:
         )
         payload = {
             "request_id": "gen-test",
+            "prompt_logprobs": [None, {"2": {"logprob": -0.5}}, {"3": {"logprob": -1.25}}],
             "choices": [self.choice],
         }
         return httpx.Response(
@@ -159,6 +160,11 @@ def test_generate_builds_request_body_and_parses_response():
     assert result["prompt_ids"] == [1, 2, 3]
     assert result["completion_ids"] == [7, 8]
     assert result["completion_logprobs"] == [-0.1, -0.2]
+    assert result["prompt_logprobs"] == [
+        None,
+        {"2": {"logprob": -0.5}},
+        {"3": {"logprob": -1.25}},
+    ]
     assert result["routed_experts"]["shape"] == [2, 1, 1]
     assert isinstance(result["routed_experts"]["data"], memoryview)
     assert result["routed_experts"]["data"].tobytes() == base64.b64encode(b"\x01\x02")

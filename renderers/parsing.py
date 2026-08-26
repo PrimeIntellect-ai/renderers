@@ -305,6 +305,7 @@ def parse_qwen35(
     tool_call_id: int,
     tool_call_end_id: int,
     tools: list[ToolSpec] | None = None,
+    prefilled_think: bool = False,
 ) -> ParsedResponse:
     """Parse Qwen3.5 completion tokens. XML-style tool calls, token-level thinking.
 
@@ -333,6 +334,12 @@ def parse_qwen35(
         # opening tag.
         think_start = _find(ids, think_id)
         reasoning = _decode(tokenizer, ids[think_start + 1 :]).strip()
+        return ParsedResponse(content="", reasoning_content=reasoning, tool_calls=[])
+    elif prefilled_think:
+        # The generation prompt supplied <think>, so it is not part of the
+        # completion token IDs. Without a closing tag, every sampled token is
+        # still inside that reasoning block.
+        reasoning = _decode(tokenizer, ids).strip()
         return ParsedResponse(content="", reasoning_content=reasoning, tool_calls=[])
 
     tc_start = _find(ids, tool_call_id)
@@ -988,6 +995,7 @@ def parse_deepseek_v3(
     tool_call_begin_id: int,
     tool_call_end_id: int,
     tool_sep_id: int,
+    prefilled_think: bool = False,
 ) -> ParsedResponse:
     """Parse DeepSeek V3 completion tokens.
 
@@ -1006,6 +1014,12 @@ def parse_deepseek_v3(
     # DeepSeek-V3 renders </think> as multi-token text, hence the decode-based
     # boundary finder rather than a token-id anchor.
     reasoning_end = _reasoning_end_token_index(tokenizer, ids)
+    if prefilled_think and reasoning_end == 0:
+        # DeepSeek-R1's generation prompt supplies <think> outside the
+        # completion. If the model is cut off before </think>, every sampled
+        # token remains reasoning — including any draft tool-call markers.
+        reasoning = _decode(tokenizer, ids).strip()
+        return ParsedResponse(content="", reasoning_content=reasoning, tool_calls=[])
 
     tc_section_start = _find(ids, tool_calls_begin_id, reasoning_end)
     tool_calls: list[ParsedToolCall] = []

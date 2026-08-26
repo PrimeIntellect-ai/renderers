@@ -293,6 +293,7 @@ class DeepSeekV3Renderer:
             tool_call_begin_id=self._tool_call_begin,
             tool_call_end_id=self._tool_call_end,
             tool_sep_id=self._tool_sep,
+            prefilled_think=bool(self._GEN_THINK_PREFILL),
         )
 
     def get_stop_token_ids(self) -> list[int]:

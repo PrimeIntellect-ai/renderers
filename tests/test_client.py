@@ -385,8 +385,9 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
         ("Qwen/Qwen3-VL-4B-Instruct", "renderers.qwen3_vl:Qwen3VLRenderer"),
         ("Qwen/Qwen3.5-2B", "renderers.qwen35:Qwen35Renderer"),
         ("Qwen/Qwen3.8-27B", "renderers.qwen38:Qwen38Renderer"),
+        ("Qwen/Qwen3.8-Flash-Next", "renderers.qwen38:Qwen38Renderer"),
     ],
-    ids=["qwen3_vl", "qwen35", "qwen38"],
+    ids=["qwen3_vl", "qwen35", "qwen38", "qwen38_flash_next"],
 )
 def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     model_id, renderer_class_path

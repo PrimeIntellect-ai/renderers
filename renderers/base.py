@@ -1033,6 +1033,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3.6-35B-A3B": "qwen3.6",
     # Qwen3.8.
     "Qwen/Qwen3.8-27B": "qwen3.8",
+    "Qwen/Qwen3.8-Flash-Next": "qwen3.8",
     # Qwen3-VL.
     "Qwen/Qwen3-VL-4B-Instruct": "qwen3-vl",
     "Qwen/Qwen3-VL-8B-Instruct": "qwen3-vl",
@@ -1140,6 +1141,7 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     "Qwen/Qwen3.6-35B-A3B": {"image"},
     # Qwen3.8 adds reasoning-effort control and preserves thinking by default.
     "Qwen/Qwen3.8-27B": {"image"},
+    "Qwen/Qwen3.8-Flash-Next": {"image"},
     # Kimi K2.5 / K2.6 are unified VLMs (HF tag ``image-text-to-text``)
     # with custom processor (``KimiK25Processor`` + ``KimiK25VisionProcessor``).
     # Vision wrap is different from Qwen-VL:

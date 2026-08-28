@@ -1809,6 +1809,76 @@ def _get_offset_tokenizer(tokenizer: Tokenizer) -> OffsetTokenizer | None:
     return cast(OffsetTokenizer, tokenizer)
 
 
+def _infer_offsets_from_decode(
+    tokenizer: Tokenizer,
+    token_ids: list[int],
+    text: str,
+) -> list[tuple[int, int]] | None:
+    """Recover token character spans from an exact decoder round-trip.
+
+    This is a narrow fallback for metadata that does not require exposing
+    content attribution. Some renderers join text from multiple messages in a
+    single BPE pass, so they still need to associate the resulting tokens with
+    the right message when a BYO tokenizer has no native offset mapping.
+
+    Decoding individual tokens is linear and exact for the common BPE/SentencePiece
+    backends. Byte-fallback tokenizers can require multiple tokens before text
+    becomes valid, so a validated cumulative-prefix pass handles that case.
+    If either strategy cannot reconstruct ``text`` exactly, callers must use a
+    conservative renderer-specific message-index fallback. This helper never
+    upgrades the tokenizer's content-attribution capability: ``is_content``
+    remains unavailable without native offsets.
+    """
+
+    def decode(ids: list[int]) -> str | None:
+        variants = (
+            {"skip_special_tokens": False, "clean_up_tokenization_spaces": False},
+            {"skip_special_tokens": False},
+            {},
+        )
+        for kwargs in variants:
+            try:
+                decoded = tokenizer.decode(ids, **kwargs)
+            except TypeError:
+                continue
+            except (KeyError, NotImplementedError, UnicodeError, ValueError):
+                return None
+            return decoded if isinstance(decoded, str) else None
+        return None
+
+    pieces: list[str] = []
+    for token_id in token_ids:
+        piece = decode([token_id])
+        if piece is None:
+            break
+        pieces.append(piece)
+    if len(pieces) == len(token_ids) and "".join(pieces) == text:
+        offsets: list[tuple[int, int]] = []
+        position = 0
+        for piece in pieces:
+            end = position + len(piece)
+            offsets.append((position, end))
+            position = end
+        return offsets
+
+    offsets = []
+    previous_end = 0
+    for end_index in range(1, len(token_ids) + 1):
+        prefix = decode(token_ids[:end_index])
+        if (
+            prefix is None
+            or len(prefix) < previous_end
+            or not text.startswith(prefix)
+        ):
+            return None
+        current_end = len(prefix)
+        offsets.append((previous_end, current_end))
+        previous_end = current_end
+    if previous_end != len(text):
+        return None
+    return offsets
+
+
 def _content_mask_or_empty(
     tokenizer: Tokenizer, content_mask: list[bool]
 ) -> list[bool]:

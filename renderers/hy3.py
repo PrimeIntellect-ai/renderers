@@ -35,6 +35,7 @@ from renderers.base import (
     Tokenizer,
     _content_mask_or_empty,
     _get_offset_tokenizer,
+    _infer_offsets_from_decode,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -242,14 +243,32 @@ class Hy3Renderer:
         full_text = "".join(text for text, _, _ in segments)
         offset_tokenizer = _get_offset_tokenizer(self._tokenizer)
         if offset_tokenizer is None:
-            return [(token_id, False, -1) for token_id in self._encode(full_text)]
-        encoding = offset_tokenizer(
-            full_text,
-            add_special_tokens=False,
-            return_offsets_mapping=True,
-        )
-        token_ids = list(encoding["input_ids"])
-        offsets = list(encoding["offset_mapping"])
+            token_ids = self._encode(full_text)
+            offsets = _infer_offsets_from_decode(
+                self._tokenizer,
+                token_ids,
+                full_text,
+            )
+            if offsets is None:
+                # Token IDs remain exact even when a lossy decoder prevents
+                # reconstructing boundaries. Associate the opaque joined run
+                # with a contributing caller system message rather than
+                # silently classifying its body as global scaffold.
+                fallback_idx = next(
+                    (msg_idx for text, _, msg_idx in segments if text and msg_idx >= 0),
+                    -1,
+                )
+                return [(token_id, False, fallback_idx) for token_id in token_ids]
+            has_content_attribution = False
+        else:
+            encoding = offset_tokenizer(
+                full_text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+            token_ids = list(encoding["input_ids"])
+            offsets = list(encoding["offset_mapping"])
+            has_content_attribution = True
 
         spans: list[tuple[int, int, bool, int]] = []
         pos = 0
@@ -259,13 +278,19 @@ class Hy3Renderer:
         total_len = pos
 
         out: list[tuple[int, bool, int]] = []
-        last = (spans[-1][2], spans[-1][3])
+        last = (
+            spans[-1][2] if has_content_attribution else False,
+            spans[-1][3],
+        )
         for tok_id, (start, _end) in zip(token_ids, offsets):
             attr = last
             if start < total_len:
                 for seg_start, seg_end, seg_is_content, seg_idx in spans:
                     if seg_start <= start < seg_end:
-                        attr = (seg_is_content, seg_idx)
+                        attr = (
+                            seg_is_content if has_content_attribution else False,
+                            seg_idx,
+                        )
                         break
             out.append((tok_id, attr[0], attr[1]))
         return out

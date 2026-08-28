@@ -278,8 +278,8 @@ class _Emitter:
             self.is_content.extend([first_ic] * len(ids))
             return
         # Mixed body/scaffold flush — encode once and attribute back to
-        # each segment via the fast tokenizer's offset_mapping. Requires
-        # a tokenizer (not just the encode fn) to look up offsets.
+        # each segment via offset_mapping when available. A basic tokenizer
+        # still preserves the joined token IDs but leaves attribution empty.
         assert self._tokenizer is not None, (
             "_Emitter mixed-is_content flush requires a tokenizer; "
             "pass one to the constructor."

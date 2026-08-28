@@ -707,10 +707,9 @@ class Renderer(Protocol):
         Behaviour around historical ``reasoning_content`` is owned by the
         renderer instance — the ``thinking_retention`` level is resolved at
         construction, not passed per call. To render with a different
-        configuration, build a different renderer (or different pool). When
-        ``thinking_retention`` is left unset, full renders follow the model's
-        chat template and bridge policy is derived from that template's own
-        history-retention knobs.
+        configuration, build a different renderer. When ``thinking_retention``
+        is left unset, full renders follow the model's chat template and bridge
+        policy is derived from that template's own history-retention knobs.
         """
         ...
 

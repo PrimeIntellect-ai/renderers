@@ -42,6 +42,22 @@ class FakeTokenizer:
             "<|vision_end|>",
             "<|image_pad|>",
             "<|video_pad|>",
+            "<|message_user|>",
+            "<|message_model|>",
+            "<|message_system|>",
+            "<|message_tool|>",
+            "<|content_text|>",
+            "<|content_thinking|>",
+            "<|content_image|>",
+            "<|content_audio_input|>",
+            "<|content_xml|>",
+            "<|content_invoke_tool_json|>",
+            "<|content_invoke_tool_text|>",
+            "<|content_model_end_sampling|>",
+            "<|end_message|>",
+            "<|audio_end|>",
+            "<|unused_200054|>",
+            "<|unused_200053|>",
         ]
         self.specials = {token: index + 100 for index, token in enumerate(specials)}
         self.reverse = {value: key for key, value in self.specials.items()}
@@ -123,6 +139,33 @@ def test_byo_text_tokenizer_create_render_parse_without_transformers():
             tokenizer.encode("world") + [tokenizer.eos_token_id]
         )
         assert parsed.content == "world"
+        """
+    )
+    _assert_ok(result)
+
+
+def test_text_only_inkling_works_without_transformers_or_processor():
+    result = _run(
+        """
+        from renderers import InklingRenderer, create_renderer
+
+        tokenizer = FakeTokenizer()
+        tokenizer.name_or_path = "thinkingmachines/Inkling"
+        renderer = create_renderer(tokenizer)
+        assert isinstance(renderer, InklingRenderer)
+        assert renderer._processor is None
+
+        rendered = renderer.render(
+            [{"role": "user", "content": "text only"}],
+            add_generation_prompt=True,
+        )
+        assert rendered.token_ids
+        assert rendered.multi_modal_data is None
+        assert renderer._processor is None
+        assert not any(
+            name == "transformers" or name.startswith("transformers.")
+            for name in sys.modules
+        )
         """
     )
     _assert_ok(result)

@@ -9,8 +9,7 @@ reasoning-display gate to ``enable_thinking or preserve_thinking``.
 
 from __future__ import annotations
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
+from renderers.base import Tokenizer
 from renderers.configs import LagunaS21RendererConfig
 from renderers.laguna_xs2 import LagunaXS21Renderer
 
@@ -24,7 +23,7 @@ class LagunaS21Renderer(LagunaXS21Renderer):
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: LagunaS21RendererConfig | None = None,
     ):
         super().__init__(tokenizer, config or LagunaS21RendererConfig())

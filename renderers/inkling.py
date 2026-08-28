@@ -39,8 +39,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Content,
     Message,
@@ -49,6 +47,8 @@ from renderers.base import (
     PlaceholderRange,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
+    _require_transformers,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -172,7 +172,7 @@ class InklingRenderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: InklingRendererConfig | None = None,
         *,
         processor: Any = None,
@@ -251,8 +251,6 @@ class InklingRenderer:
     def _get_processor(self):
         if self._processor is not None:
             return self._processor
-        from transformers import AutoProcessor
-
         name = getattr(self._tokenizer, "name_or_path", None)
         if not name:
             raise RuntimeError(
@@ -265,8 +263,9 @@ class InklingRenderer:
         # trust_remote_code is required. Keep text-only rendering installable
         # with older downstream pins and fail only when multimodal processing
         # is actually requested.
+        transformers = _require_transformers("Auto-loading an Inkling processor")
         try:
-            self._processor = AutoProcessor.from_pretrained(name)
+            self._processor = transformers.AutoProcessor.from_pretrained(name)
         except (ImportError, KeyError, ValueError) as exc:
             raise RuntimeError(
                 "Inkling image/audio rendering requires Transformers >=5.14 "

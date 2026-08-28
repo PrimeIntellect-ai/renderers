@@ -21,7 +21,6 @@ from renderers import (
     RendererConfig,
     base,
     create_renderer,
-    create_renderer_pool,
 )
 
 
@@ -139,31 +138,6 @@ def test_create_renderer_auto_applies_chat_template_kwargs(monkeypatch):
 
     assert isinstance(renderer.config, Qwen3RendererConfig)
     assert renderer.config.enable_thinking is False
-
-
-def test_create_renderer_pool_forwards_chat_template_kwargs(monkeypatch):
-    """Pool construction uses the same renderer-owned config resolution."""
-
-    class _FakeQwen3:
-        def __init__(self, tokenizer, config):
-            self.config = config
-
-    monkeypatch.setitem(base.RENDERER_REGISTRY, "qwen3", _FakeQwen3)
-    monkeypatch.setitem(base.MODEL_RENDERER_MAP, "fake/qwen3", "qwen3")
-    monkeypatch.setattr(
-        base,
-        "load_tokenizer",
-        lambda name: SimpleNamespace(name_or_path=name),
-    )
-
-    pool = create_renderer_pool(
-        "fake/qwen3",
-        size=1,
-        chat_template_kwargs={"enable_thinking": False},
-    )
-
-    assert isinstance(pool._sole.config, Qwen3RendererConfig)
-    assert pool._sole.config.enable_thinking is False
 
 
 def test_auto_unknown_model_rejects_chat_template_kwargs():

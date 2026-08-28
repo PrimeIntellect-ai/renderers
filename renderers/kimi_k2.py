@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import json
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -47,7 +46,7 @@ class KimiK2Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: KimiK2RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer

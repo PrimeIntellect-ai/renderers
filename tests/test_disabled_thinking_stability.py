@@ -46,6 +46,10 @@ _MODELS = [
         Qwen38RendererConfig(enable_thinking=False),
     ),
     (
+        "Qwen/Qwen3.8-Flash-Next",
+        Qwen38RendererConfig(enable_thinking=False),
+    ),
+    (
         "google/gemma-4-26B-A4B-it",
         Gemma4RendererConfig(enable_thinking=False),
     ),

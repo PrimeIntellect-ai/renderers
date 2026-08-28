@@ -1,13 +1,11 @@
-"""Parity for typed-config template fields against the upstream chat
-template.
+"""Parity for typed-config template fields against the upstream reference.
 
 Each renderer's typed config (see ``renderers.configs``) declares the
 fields that mirror chat-template kwargs via
 ``Config.template_field_names()``. ``test_renderer_config.py`` covers
 the typed-config wiring; this file covers the only thing that matters
 downstream: that flipping a template field on the typed config produces
-token streams byte-identical to
-``tokenizer.apply_chat_template(messages, **{field: value})``.
+token streams byte-identical to the model-aware reference renderer.
 
 Without this, the typed surface is a promise the renderer doesn't keep.
 
@@ -37,6 +35,7 @@ from renderers.base import (
     load_tokenizer,
 )
 from renderers.configs import _config_class_for
+from tests.reference_rendering import render_reference
 
 
 # Models exercised by the parity tests. Mirrors ``conftest.RENDERER_MODELS``
@@ -57,6 +56,7 @@ _RENDERER_MODELS = [
     ("moonshotai/Kimi-K2.6", "auto"),
     ("deepseek-ai/DeepSeek-V3", "auto"),
     ("deepseek-ai/DeepSeek-R1", "auto"),
+    ("deepseek-ai/DeepSeek-V4-Flash-0731", "auto"),
     # Nano + Super share the ``nemotron-3`` config (incl. ``low_effort``, which
     # fires only on Super); both are exercised so the kwarg is checked where it
     # no-ops (Nano) AND where it appends (Super).
@@ -94,7 +94,10 @@ _KWARG_VALUES: dict[str, list[Any]] = {
     # gpt-oss accepts low/medium/high; Hy3 accepts no_think/low/high. The
     # union is listed here and the matrix builder drops values a given
     # renderer's typed config rejects (see ``_value_valid_for``).
-    "reasoning_effort": ["no_think", "low", "medium", "high", "xhigh"],
+    "reasoning_effort": ["no_think", "low", "medium", "high", "xhigh", "max"],
+    # DeepSeek V4 — evict reasoning before the latest user query when tools
+    # are absent. Tools force preservation in the official Python encoder.
+    "drop_thinking": [True, False],
     # Hy3 — keep <think>{reasoning}</think> on historical assistant turns
     # (True) vs collapse past-cycle reasoning to <think></think> (False).
     "preserved_thinking": [True, False],
@@ -303,9 +306,9 @@ def _value_valid_for(model: str, renderer_name: str, kwarg: str, value: Any) -> 
         return False
 
 
-def _hf_parity_matrix() -> list[Any]:
+def _reference_parity_matrix() -> list[Any]:
     """Auto-derived ``(model, renderer_name, kwarg, value)`` matrix for
-    every renderer with template fields, minus gpt-oss (handled
+    every renderer with reference-controlled fields, minus gpt-oss (handled
     separately against harmony).
     """
     out = []
@@ -375,9 +378,10 @@ def _renderer_with_kwarg(model_name: str, renderer_name: str, kwarg: str, value:
     return create_renderer(tok, config)
 
 
-def _expected_hf(tokenizer, messages, *, kwarg: str, value: Any, **render_kwargs):
-    """Render via ``apply_chat_template`` with the kwarg spread as a
-    top-level argument.
+def _expected_reference(
+    tokenizer, messages, *, kwarg: str, value: Any, **render_kwargs
+):
+    """Render through the model-aware oracle with one config field changed.
 
     transformers v5.x silently drops ``chat_template_kwargs={...}`` —
     only direct kwargs propagate into the Jinja environment. The two
@@ -387,31 +391,24 @@ def _expected_hf(tokenizer, messages, *, kwarg: str, value: Any, **render_kwargs
     in OpenAI-compatible servers; we translate it to constructor kwargs
     on our side.)
     """
-    render_kwargs.setdefault("add_generation_prompt", False)
-    result = tokenizer.apply_chat_template(
+    return render_reference(
+        tokenizer,
         messages,
-        tokenize=True,
-        return_dict=False,
         **{kwarg: value},
         **render_kwargs,
     )
-    if isinstance(result, dict):
-        return list(result["input_ids"])
-    if isinstance(result, str):
-        return list(tokenizer.encode(result, add_special_tokens=False))
-    return list(result)
 
 
-# ── HF-Jinja parity (every renderer except gpt-oss) ────────────────────
+# ── Reference parity (every renderer except gpt-oss) ──────────────────
 
 
-@pytest.mark.parametrize("model,renderer_name,kwarg,value", _hf_parity_matrix())
+@pytest.mark.parametrize("model,renderer_name,kwarg,value", _reference_parity_matrix())
 @pytest.mark.parametrize(
     "shape_id,messages,render_kwargs",
     _MESSAGE_SHAPES,
     ids=[s[0] for s in _MESSAGE_SHAPES],
 )
-def test_chat_template_kwarg_parity_hf(
+def test_chat_template_kwarg_parity_reference(
     model,
     renderer_name,
     kwarg,
@@ -461,19 +458,18 @@ def test_chat_template_kwarg_parity_hf(
         )
 
     try:
-        expected = _expected_hf(
+        expected = _expected_reference(
             tokenizer, messages, kwarg=kwarg, value=value, **render_kwargs
         )
     except Exception as exc:
         pytest.xfail(
-            f"{model}: apply_chat_template raised {type(exc).__name__}: "
-            f"{str(exc)[:160]}"
+            f"{model}: reference renderer raised {type(exc).__name__}: {str(exc)[:160]}"
         )
 
     got = renderer.render_ids(messages, **render_kwargs)
     assert got == expected, (
         f"{model} / shape={shape_id} / {kwarg}={value}: renderer diverged "
-        f"from apply_chat_template (len got={len(got)}, expected={len(expected)})"
+        f"from its reference renderer (len got={len(got)}, expected={len(expected)})"
     )
 
 

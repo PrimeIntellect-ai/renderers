@@ -1219,14 +1219,10 @@ def _decoded_char_to_token_index(tokenizer, ids: list[int], char_index: int) -> 
     """Return the first token boundary at or beyond a decoded char offset."""
     if char_index <= 0:
         return 0
-    lo, hi = 0, len(ids)
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if len(_decode(tokenizer, ids[:mid])) < char_index:
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo
+    for boundary in range(1, len(ids) + 1):
+        if len(_decode(tokenizer, ids[:boundary])) >= char_index:
+            return boundary
+    return len(ids)
 
 
 def _parse_deepseek_v4_tool_calls(
@@ -1249,11 +1245,10 @@ def _parse_deepseek_v4_tool_calls(
     )
 
     tool_calls: list[ParsedToolCall] = []
-    cursor = section_text.find(">") + 1
-    while cursor > 0 and cursor < len(section_text):
-        start = section_text.find("<｜DSML｜invoke", cursor)
-        outer_end = section_text.find(section_end, cursor)
-        if start == -1 or (outer_end != -1 and outer_end < start):
+    outer_end = section_text.find(section_end)
+    for invoke_match in re.finditer(r"<｜DSML｜invoke", section_text):
+        start = invoke_match.start()
+        if outer_end != -1 and outer_end < start:
             break
 
         close = section_text.find(invoke_end, start + len(invoke_start))
@@ -1340,7 +1335,6 @@ def _parse_deepseek_v4_tool_calls(
         )
         if unclosed:
             break
-        cursor = block_end
 
     return tool_calls
 

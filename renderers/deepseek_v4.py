@@ -293,7 +293,11 @@ class DeepSeekV4Renderer:
     ):
         self._tokenizer = tokenizer
         self.config = config or DeepSeekV4RendererConfig()
-        implied_retention = "tool_cycle" if self.config.drop_thinking else "all"
+        implied_retention = (
+            "tool_cycle"
+            if self.config.enable_thinking and self.config.drop_thinking
+            else "all"
+        )
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config,
             implied_retention,
@@ -316,11 +320,6 @@ class DeepSeekV4Renderer:
         if len(ids) != 1:
             raise ValueError(f"Expected one token for {token!r}, got {ids}")
         return ids[0]
-
-    def _encode(self, text: str) -> list[int]:
-        if not text:
-            return []
-        return list(self._tokenizer.encode(text, add_special_tokens=False))
 
     @staticmethod
     def _render_tools(tools: list[ToolSpec]) -> str:
@@ -414,6 +413,7 @@ class DeepSeekV4Renderer:
         message_indices: list[int] = []
         sampled_mask: list[bool] = []
         is_content: list[bool] = []
+        pending_text: list[tuple[str, int, bool, bool]] = []
 
         def emit_ids(
             ids: list[int],
@@ -427,6 +427,76 @@ class DeepSeekV4Renderer:
             sampled_mask.extend([sampled] * len(ids))
             is_content.extend([content] * len(ids))
 
+        def flush_text() -> None:
+            """Tokenize contiguous text once, preserving source metadata.
+
+            The official encoder builds one prompt string. Encoding renderer
+            fragments independently can therefore change BPE merges at their
+            boundaries even when the decoded text is identical. Offset maps
+            let us recover message/sample/content attribution after the
+            required single encoding pass.
+            """
+            if not pending_text:
+                return
+
+            full_text = "".join(text for text, *_ in pending_text)
+            if not full_text:
+                pending_text.clear()
+                return
+
+            encoding = self._tokenizer(
+                full_text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+            text_ids = list(encoding["input_ids"])
+            offsets = list(encoding["offset_mapping"])
+
+            spans: list[tuple[int, int, int, bool, bool]] = []
+            position = 0
+            for text, message_index, sampled, content in pending_text:
+                end = position + len(text)
+                if end > position:
+                    spans.append((position, end, message_index, sampled, content))
+                position = end
+
+            fallback = spans[-1][2:] if spans else (-1, False, False)
+            for token_id, (start, end) in zip(text_ids, offsets):
+                metadata: tuple[int, bool, bool] = fallback
+                for (
+                    span_start,
+                    span_end,
+                    span_message_index,
+                    span_sampled,
+                    span_content,
+                ) in spans:
+                    if span_start <= start < span_end:
+                        metadata = (
+                            span_message_index,
+                            span_sampled,
+                            span_content,
+                        )
+                        break
+
+                message_index, sampled, content = metadata
+                if end > start:
+                    # Preserve every body byte when a BPE token straddles a
+                    # scaffold/content boundary. This intentionally permits a
+                    # few adjacent scaffold bytes to share the content bit.
+                    content = any(
+                        span_content
+                        for span_start, span_end, _, _, span_content in spans
+                        if span_start < end and start < span_end
+                    )
+                emit_ids(
+                    [token_id],
+                    message_index,
+                    sampled=sampled,
+                    content=content,
+                )
+
+            pending_text.clear()
+
         def emit_special(
             token_id: int,
             message_index: int,
@@ -434,6 +504,7 @@ class DeepSeekV4Renderer:
             sampled: bool = False,
             content: bool = False,
         ) -> None:
+            flush_text()
             emit_ids(
                 [token_id],
                 message_index,
@@ -448,12 +519,8 @@ class DeepSeekV4Renderer:
             sampled: bool = False,
             content: bool = False,
         ) -> None:
-            emit_ids(
-                self._encode(text),
-                message_index,
-                sampled=sampled,
-                content=content,
-            )
+            if text:
+                pending_text.append((text, message_index, sampled, content))
 
         if add_bos:
             emit_special(self._bos, -1)
@@ -640,6 +707,7 @@ class DeepSeekV4Renderer:
                 transition_msg_idx,
             )
 
+        flush_text()
         return RenderedTokens(
             token_ids=token_ids,
             message_indices=message_indices,

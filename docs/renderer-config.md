@@ -151,7 +151,7 @@ the knobs its template actually exposes:
 | Kimi K2.5 / 2.6 | `thinking=False -> all`, else `tool_cycle` |
 | Nemotron-3 / 3.5 | `truncate_history_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | DeepSeek R1 | `template` |
-| DeepSeek V4 Flash 0731 | `drop_thinking=False -> all`, else `tool_cycle` |
+| DeepSeek V4 Flash 0731 | `enable_thinking=False` or `drop_thinking=False -> all`, else `tool_cycle` |
 | MiniMax M2 | `tool_cycle` |
 | DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / M.1 / XS-2.1 / S-2.1, Llama 3, Inkling | `all` |
 | PrimeIntellect Qwen3 | `all` |

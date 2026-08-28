@@ -71,7 +71,7 @@ def test_registration_and_native_defaults():
     assert renderer.config.enable_thinking is False
     assert renderer.config.drop_thinking is True
     assert renderer.config.reasoning_effort == "low"
-    assert renderer.effective_thinking_retention == "tool_cycle"
+    assert renderer.effective_thinking_retention == "all"
 
 
 def test_config_discriminator_and_template_kwarg_contract():

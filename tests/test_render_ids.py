@@ -1,7 +1,10 @@
-"""Barrage test: renderer.render_ids() must match tokenizer.apply_chat_template().
+"""Barrage test: renderer.render_ids() must match its reference renderer.
 
 Every test case runs against every (model, renderer) pair from conftest.
 If a test passes, the renderer is token-for-token correct for that case.
+
+The shared reference helper uses Hugging Face ``apply_chat_template`` for Jinja
+models and the official Python encoding contract for DeepSeek V4.
 
 GPT-OSS is auto-skipped here by ``conftest._skip_gpt_oss_for_hf_parity_tests``
 since our GptOssRenderer matches openai-harmony / vLLM, not the HF Jinja
@@ -14,6 +17,7 @@ import pytest
 
 from renderers import create_renderer
 from renderers.base import load_tokenizer
+from tests.reference_rendering import render_reference
 
 _GEMMA4_EMPTY_THOUGHT_MODELS = {
     "google/gemma-4-26B-A4B-it",
@@ -35,20 +39,7 @@ def _expected(tokenizer, messages, **kwargs):
             "Gemma 4 26B/31B deliberately re-emits the disabled-thinking "
             "generation prefill on assistant history for sampled-token stability"
         )
-    # Match the Renderer Protocol's default for add_generation_prompt (False)
-    # — some tokenizers (e.g. Kimi's) default it to True in their config,
-    # which would otherwise make this parity check fail on the flag alone.
-    # Callers that explicitly want the gen prompt still pass it through.
-    kwargs.setdefault("add_generation_prompt", False)
-    result = tokenizer.apply_chat_template(
-        messages, tokenize=True, return_dict=False, **kwargs
-    )
-    if isinstance(result, dict):
-        return list(result["input_ids"])
-    if isinstance(result, str):
-        # Some tokenizers return str even with tokenize=True; force encode
-        return list(tokenizer.encode(result, add_special_tokens=False))
-    return list(result)
+    return render_reference(tokenizer, messages, **kwargs)
 
 
 # ── Basic messages ───────────────────────────────────────────────────

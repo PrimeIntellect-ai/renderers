@@ -50,14 +50,13 @@ from __future__ import annotations
 
 import json
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Content,
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -119,7 +118,7 @@ _TOOLS_HEADER_XS21 = (
 class LagunaXS2Renderer:
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: (
             LagunaXS2RendererConfig
             | LagunaM1RendererConfig
@@ -652,7 +651,7 @@ class LagunaM1Renderer(LagunaXS2Renderer):
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: LagunaM1RendererConfig | None = None,
     ):
         super().__init__(tokenizer, config or LagunaM1RendererConfig())
@@ -692,7 +691,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: LagunaXS21RendererConfig | LagunaS21RendererConfig | None = None,
     ):
         super().__init__(tokenizer, config or LagunaXS21RendererConfig())

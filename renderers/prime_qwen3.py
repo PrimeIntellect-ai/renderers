@@ -6,13 +6,12 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -120,7 +119,7 @@ def _tool_definition(tool: ToolSpec) -> str:
 
 
 class _TokenBuilder:
-    def __init__(self, tokenizer: PreTrainedTokenizer):
+    def __init__(self, tokenizer: Tokenizer):
         self.tokenizer = tokenizer
         self.token_ids: list[int] = []
         self.message_indices: list[int] = []
@@ -192,7 +191,7 @@ class PrimeQwen3Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: PrimeQwen3RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer

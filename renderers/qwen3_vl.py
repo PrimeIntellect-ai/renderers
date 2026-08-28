@@ -33,8 +33,6 @@ import json
 from typing import Any
 from urllib.parse import urlparse
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Message,
     MultiModalData,
@@ -42,6 +40,8 @@ from renderers.base import (
     PlaceholderRange,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
+    _require_transformers,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -313,7 +313,7 @@ class Qwen3VLRenderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: Qwen3VLRendererConfig | None = None,
         *,
         processor: Any = None,
@@ -377,8 +377,6 @@ class Qwen3VLRenderer:
     def _get_processor(self):
         if self._processor is not None:
             return self._processor
-        from transformers import AutoProcessor
-
         name = getattr(self._tokenizer, "name_or_path", None)
         if not name:
             raise RuntimeError(
@@ -387,7 +385,8 @@ class Qwen3VLRenderer:
                 "constructor, or load the tokenizer with a known name_or_path "
                 "so the processor can be auto-loaded."
             )
-        self._processor = AutoProcessor.from_pretrained(name)
+        transformers = _require_transformers("Auto-loading a Qwen3-VL processor")
+        self._processor = transformers.AutoProcessor.from_pretrained(name)
         return self._processor
 
     @staticmethod

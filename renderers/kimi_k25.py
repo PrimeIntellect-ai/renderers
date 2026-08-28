@@ -25,8 +25,6 @@ import json
 import re
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Message,
     MultiModalData,
@@ -36,6 +34,8 @@ from renderers.base import (
     RenderedTokens,
     ToolCallParseStatus,
     ToolSpec,
+    Tokenizer,
+    _require_transformers,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -594,7 +594,7 @@ class KimiK25Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: KimiK25RendererConfig | None = None,
         *,
         processor: Any = None,
@@ -657,8 +657,6 @@ class KimiK25Renderer:
     def _get_processor(self):
         if self._processor is not None:
             return self._processor
-        from transformers import AutoProcessor
-
         name = getattr(self._tokenizer, "name_or_path", None)
         if not name:
             raise RuntimeError(
@@ -668,10 +666,12 @@ class KimiK25Renderer:
                 "known name_or_path so the processor can be auto-loaded."
             )
         # Kimi's processor is custom Python in the model repo and requires
-        # trust_remote_code=True. Callers using ``create_renderer_pool`` go
-        # through ``load_tokenizer`` which already pins the revision; for
-        # auto-load here, we delegate to AutoProcessor with the same flag.
-        self._processor = AutoProcessor.from_pretrained(name, trust_remote_code=True)
+        # trust_remote_code=True, so auto-loading delegates to AutoProcessor
+        # with that flag.
+        transformers = _require_transformers("Auto-loading a Kimi K2.5 processor")
+        self._processor = transformers.AutoProcessor.from_pretrained(
+            name, trust_remote_code=True
+        )
         return self._processor
 
     def _process_image(self, part: dict[str, Any]):

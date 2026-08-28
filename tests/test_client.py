@@ -184,9 +184,9 @@ def test_generate_builds_request_body_and_parses_response():
     assert tc.status == ToolCallParseStatus.OK
 
 
-def test_generate_sends_unprocessed_content_parts_and_returns_effective_prompt_ids():
+def test_generate_process_multimodal_false_sends_content_parts():
     class DeferredMultimodalRenderer(_FakeRenderer):
-        supports_deferred_multimodal_processing = True
+        supports_process_multimodal = True
 
         def render(
             self,

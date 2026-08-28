@@ -590,7 +590,7 @@ class KimiK25Renderer:
     The tokenizer should be ``moonshotai/Kimi-K2-Instruct`` (same as K2).
     """
 
-    supports_deferred_multimodal_processing = True
+    supports_process_multimodal = True
 
     def __init__(
         self,

@@ -240,14 +240,14 @@ async def generate(
     cache a ``None`` cap and the pre-flight silently disables. Engine 4xx
     that still slip through propagate raw — converting them into a domain
     error is the calling client's job (its error shape is engine-specific).
-    Unprocessed multimodal calls skip this pre-flight because only vLLM knows
-    the expanded prompt length.
+    Calls with ``process_multimodal=False`` skip this pre-flight because only
+    vLLM knows the expanded prompt length.
 
     Returns a dict with: request_id, prompt_ids, renderer_prompt_ids,
     completion_ids, completion_logprobs, content, reasoning_content,
     tool_calls, finish_reason, routed_experts, multi_modal_data,
     prompt_attribution. ``renderer_prompt_ids`` is the unexpanded logical
-    prompt on raw multimodal calls and ``None`` otherwise.
+    prompt when ``process_multimodal=False`` and ``None`` otherwise.
 
     ``prompt_attribution`` is the renderer's :class:`RenderedTokens` for
     the prompt — either the one this call computed via
@@ -267,10 +267,10 @@ async def generate(
             "Choose a model-specific renderer instead of the default fallback."
         )
     if not process_multimodal and not getattr(
-        renderer, "supports_deferred_multimodal_processing", False
+        renderer, "supports_process_multimodal", False
     ):
         raise NotImplementedError(
-            f"{type(renderer).__name__} does not support deferred multimodal processing"
+            f"{type(renderer).__name__} does not support process_multimodal=False"
         )
 
     def _prepare():
@@ -360,7 +360,7 @@ async def generate(
     effective_prompt_ids = data.get("prompt_token_ids")
     if content_parts and not isinstance(effective_prompt_ids, list):
         raise MalformedGenerateResponseError(
-            "Engine response must include prompt_token_ids for unprocessed multimodal input."
+            "Engine response must include prompt_token_ids when process_multimodal=False."
         )
 
     completion_logprobs = _parse_completion_logprobs(choice, completion_ids)

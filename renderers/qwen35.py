@@ -122,7 +122,7 @@ def _default_enable_thinking(tokenizer) -> bool:
 class Qwen35Renderer:
     """Deterministic message → token renderer for Qwen3.5 models."""
 
-    supports_deferred_multimodal_processing = True
+    supports_process_multimodal = True
     _config_cls: type = Qwen35RendererConfig
 
     def __init__(

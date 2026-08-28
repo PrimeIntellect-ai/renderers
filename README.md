@@ -96,14 +96,6 @@ auto-resolve. For an unknown name, renderers cannot safely probe `AutoConfig`
 to distinguish a text model from an unknown VLM; pass an explicit typed config
 such as `DefaultRendererConfig()` for a known text-only model.
 
-### Concurrency
-
-`RendererPool` and `create_renderer_pool` are deprecated. Construct renderers
-with `create_renderer` and manage concurrency in the calling application—for
-example, by creating one renderer per worker or serializing access to a shared
-renderer. The deprecated APIs remain temporarily for compatibility and require
-`renderers[transformers]` because they load their own tokenizer copies.
-
 ## Why use a renderer
 
 For RL the trainer must see the exact token ids the sampler saw. The standard alternative — let the inference engine apply the chat template, parse tool calls, parse reasoning, and re-render full history every turn — silently breaks token identity. These are the failure modes a renderer's `bridge_to_next_turn` sidesteps by never re-rendering prior turns:

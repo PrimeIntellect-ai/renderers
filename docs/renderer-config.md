@@ -1,9 +1,7 @@
 # Renderer config
 
 `renderers.RendererConfig` is the typed input to `create_renderer`. It pins the
-renderer choice and its config at construction time. `RendererPool` and
-`create_renderer_pool` are deprecated; applications should own their
-concurrency strategy.
+renderer choice and its config at construction time.
 
 ```python
 from renderers import create_renderer, Qwen35RendererConfig

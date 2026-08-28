@@ -902,11 +902,7 @@ def is_multimodal(r: object) -> bool:
 
 
 class RendererPool:
-    """Deprecated pool of renderers satisfying the :class:`Renderer` protocol.
-
-    Use :func:`create_renderer` and manage concurrency in the calling
-    application instead. This compatibility implementation remains temporarily
-    for downstream callers migrating away from the old pool API.
+    """Pool of Renderer instances that itself satisfies the Renderer protocol.
 
     Callers treat a pool like a single renderer — ``pool.render_ids(...)``,
     ``pool.bridge_to_next_turn(...)``, ``isinstance(pool, MultimodalRenderer)``
@@ -1504,10 +1500,7 @@ def create_renderer_pool(
     size: int = 16,
     chat_template_kwargs: Mapping[str, Any] | None = None,
 ) -> RendererPool:
-    """Create a deprecated RendererPool with *size* tokenizer copies.
-
-    Use :func:`create_renderer` and manage concurrency in the calling
-    application instead.
+    """Create a RendererPool with *size* independent tokenizer copies.
 
     Each slot loads its own tokenizer so threads never share mutable
     state. HuggingFace fast tokenizers release the GIL during Rust

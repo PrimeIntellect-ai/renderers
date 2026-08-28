@@ -88,7 +88,9 @@ class Qwen3Renderer:
     def _encode(self, text: str) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return self._tokenizer.encode(
+            text, add_special_tokens=False, split_special_tokens=True
+        )
 
     @staticmethod
     def _query_boundary_text(content) -> str:

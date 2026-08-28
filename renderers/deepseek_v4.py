@@ -212,7 +212,7 @@ def _prepare_messages(messages: list[Message]) -> list[_LogicalMessage]:
                 message_index=index,
                 tool_call_id=str(message.get("tool_call_id") or ""),
             )
-            if merged and merged[-1].role == "user" and merged[-1].task is None:
+            if merged and merged[-1].role == "user":
                 merged[-1].blocks.append(block)
             else:
                 merged.append(

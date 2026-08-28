@@ -346,6 +346,31 @@ def test_task_before_nonassistant_does_not_emit_task_token():
     )
 
 
+def test_tool_result_merges_into_tasked_user_like_reference_encoder():
+    messages = [
+        {"role": "user", "content": "Classify", "task": "action"},
+        {"role": "tool", "tool_call_id": "call-1", "content": "done"},
+        {
+            "role": "assistant",
+            "reasoning_content": "must not render",
+            "content": "result",
+        },
+    ]
+    renderer = _renderer(enable_thinking=True)
+
+    rendered = renderer.render_ids(messages)
+
+    assert rendered == render_reference(
+        _tokenizer(),
+        messages,
+        enable_thinking=True,
+    )
+    assert _tokenizer().decode(rendered, skip_special_tokens=False) == (
+        f"{BOS}{USER}Classify\n\n<tool_result>done</tool_result>"
+        f"{ASSISTANT}<think><｜action｜>result{EOS}"
+    )
+
+
 def test_merged_followup_task_is_dropped_like_reference_encoder():
     messages = [
         {"role": "tool", "tool_call_id": "call-1", "content": "done"},

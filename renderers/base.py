@@ -1865,11 +1865,7 @@ def _infer_offsets_from_decode(
     previous_end = 0
     for end_index in range(1, len(token_ids) + 1):
         prefix = decode(token_ids[:end_index])
-        if (
-            prefix is None
-            or len(prefix) < previous_end
-            or not text.startswith(prefix)
-        ):
+        if prefix is None or len(prefix) < previous_end or not text.startswith(prefix):
             return None
         current_end = len(prefix)
         offsets.append((previous_end, current_end))

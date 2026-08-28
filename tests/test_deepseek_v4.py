@@ -233,6 +233,44 @@ def test_dsml_roundtrip_preserves_string_and_json_argument_types():
     assert call.token_span is not None
 
 
+@pytest.mark.parametrize(
+    "arguments, decoded_type",
+    [
+        ("[]", "list"),
+        ('"value"', "str"),
+        ("1", "int"),
+        ("null", "NoneType"),
+    ],
+)
+def test_json_nonobject_tool_arguments_raise_like_reference_encoder(
+    arguments,
+    decoded_type,
+):
+    messages = [
+        {"role": "user", "content": "Call it"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "weather",
+                        "arguments": arguments,
+                    }
+                }
+            ],
+        },
+    ]
+
+    with pytest.raises(AttributeError) as reference_error:
+        render_reference(_tokenizer(), messages)
+    with pytest.raises(AttributeError) as renderer_error:
+        _renderer().render_ids(messages)
+
+    expected = f"'{decoded_type}' object has no attribute 'items'"
+    assert str(reference_error.value) == expected
+    assert str(renderer_error.value) == expected
+
+
 def test_reasoning_effort_prefix_is_after_bos_and_thinking_only():
     messages = [{"role": "user", "content": "Think"}]
     high = _decode(

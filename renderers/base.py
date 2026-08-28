@@ -4,6 +4,7 @@ import enum
 import logging
 import queue
 import threading
+import warnings
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -25,6 +26,12 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger("renderers.base")
+
+_RENDERER_POOL_DEPRECATION = (
+    "RendererPool and create_renderer_pool() are deprecated and will be removed "
+    "in a future release. Construct renderers with create_renderer() and manage "
+    "concurrency in the calling application instead."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -895,7 +902,11 @@ def is_multimodal(r: object) -> bool:
 
 
 class RendererPool:
-    """Pool of Renderer instances that itself satisfies the Renderer protocol.
+    """Deprecated pool of renderers satisfying the :class:`Renderer` protocol.
+
+    Use :func:`create_renderer` and manage concurrency in the calling
+    application instead. This compatibility implementation remains temporarily
+    for downstream callers migrating away from the old pool API.
 
     Callers treat a pool like a single renderer — ``pool.render_ids(...)``,
     ``pool.bridge_to_next_turn(...)``, ``isinstance(pool, MultimodalRenderer)``
@@ -917,8 +928,21 @@ class RendererPool:
     scaling past ~8 workers, so we clamp there.
     """
 
-    def __init__(self, factory: Callable[[], Renderer], size: int):
+    def __init__(
+        self,
+        factory: Callable[[], Renderer],
+        size: int,
+        *,
+        _warn_deprecated: bool = True,
+    ):
         from concurrent.futures import ThreadPoolExecutor
+
+        if _warn_deprecated:
+            warnings.warn(
+                _RENDERER_POOL_DEPRECATION,
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         self._factory = factory
         self._size = size
@@ -1480,7 +1504,10 @@ def create_renderer_pool(
     size: int = 16,
     chat_template_kwargs: Mapping[str, Any] | None = None,
 ) -> RendererPool:
-    """Create a RendererPool with *size* independent tokenizer copies.
+    """Create a deprecated RendererPool with *size* tokenizer copies.
+
+    Use :func:`create_renderer` and manage concurrency in the calling
+    application instead.
 
     Each slot loads its own tokenizer so threads never share mutable
     state. HuggingFace fast tokenizers release the GIL during Rust
@@ -1501,6 +1528,12 @@ def create_renderer_pool(
     in with a pinned ``revision``).
     """
 
+    warnings.warn(
+        _RENDERER_POOL_DEPRECATION,
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     def factory() -> Renderer:
         tokenizer = load_tokenizer(tokenizer_name_or_path)
         return create_renderer(
@@ -1509,7 +1542,7 @@ def create_renderer_pool(
             chat_template_kwargs=chat_template_kwargs,
         )
 
-    return RendererPool(factory, size=size)
+    return RendererPool(factory, size=size, _warn_deprecated=False)
 
 
 def create_renderer(

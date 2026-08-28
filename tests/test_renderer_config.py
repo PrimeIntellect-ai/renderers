@@ -3,7 +3,7 @@ auto-resolution, and ``extra="forbid"`` enforcement on per-renderer
 configs."""
 
 from types import SimpleNamespace
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -142,7 +142,7 @@ def test_create_renderer_auto_applies_chat_template_kwargs(monkeypatch):
 
 
 def test_create_renderer_pool_forwards_chat_template_kwargs(monkeypatch):
-    """Pool construction uses the same renderer-owned config resolution."""
+    """The deprecated pool keeps its renderer-owned config resolution."""
 
     class _FakeQwen3:
         def __init__(self, tokenizer, config):
@@ -156,14 +156,25 @@ def test_create_renderer_pool_forwards_chat_template_kwargs(monkeypatch):
         lambda name: SimpleNamespace(name_or_path=name),
     )
 
-    pool = create_renderer_pool(
-        "fake/qwen3",
-        size=1,
-        chat_template_kwargs={"enable_thinking": False},
-    )
+    with pytest.warns(DeprecationWarning, match="create_renderer_pool"):
+        pool = create_renderer_pool(
+            "fake/qwen3",
+            size=1,
+            chat_template_kwargs={"enable_thinking": False},
+        )
 
     assert isinstance(pool._sole.config, Qwen3RendererConfig)
     assert pool._sole.config.enable_thinking is False
+
+
+def test_renderer_pool_constructor_is_deprecated():
+    class _FakeRenderer:
+        supports_tools = True
+
+    with pytest.warns(DeprecationWarning, match="RendererPool"):
+        pool = base.RendererPool(lambda: cast(base.Renderer, _FakeRenderer()), size=1)
+
+    assert pool.size == 1
 
 
 def test_auto_unknown_model_rejects_chat_template_kwargs():

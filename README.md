@@ -11,8 +11,8 @@ uv add renderers
 ```
 
 The base install supports text renderers with a bring-your-own tokenizer. Add
-the Hugging Face integration for the tokenizer-loading helpers and renderer
-pools, or the complete media stack for image/audio rendering:
+the Hugging Face integration for the tokenizer-loading helpers, or the complete
+media stack for image/audio rendering:
 
 ```bash
 uv add 'renderers[transformers]'
@@ -96,19 +96,13 @@ auto-resolve. For an unknown name, renderers cannot safely probe `AutoConfig`
 to distinguish a text model from an unknown VLM; pass an explicit typed config
 such as `DefaultRendererConfig()` for a known text-only model.
 
-### Pools
+### Concurrency
 
-```python
-from renderers import create_renderer_pool
-
-pool = create_renderer_pool("Qwen/Qwen3-8B", size=16)
-with pool.checkout() as r:
-    ids = r.render_ids(messages)
-```
-
-Each slot owns its own tokenizer copy. Construction fans out across a thread pool so a 32-slot pool doesn't serially eat ~10–15s of `from_pretrained` calls at startup.
-Pools load those copies through Hugging Face and therefore require
-`renderers[transformers]`.
+`RendererPool` and `create_renderer_pool` are deprecated. Construct renderers
+with `create_renderer` and manage concurrency in the calling application—for
+example, by creating one renderer per worker or serializing access to a shared
+renderer. The deprecated APIs remain temporarily for compatibility and require
+`renderers[transformers]` because they load their own tokenizer copies.
 
 ## Why use a renderer
 
@@ -131,7 +125,7 @@ Each break fragments a rollout into multiple training samples — every fragment
 
 ## Typed renderer configs
 
-Each renderer accepts a typed pydantic config at construction. Some fields mirror chat-template kwargs; others configure renderer-only behavior such as image caching, parsers, or Harmony preamble construction. `create_renderer` and `create_renderer_pool` take one positional `config` argument and an optional keyword-only `chat_template_kwargs` mapping:
+Each renderer accepts a typed pydantic config at construction. Some fields mirror chat-template kwargs; others configure renderer-only behavior such as image caching, parsers, or Harmony preamble construction. `create_renderer` takes one positional `config` argument and an optional keyword-only `chat_template_kwargs` mapping:
 
 ```python
 from renderers import (

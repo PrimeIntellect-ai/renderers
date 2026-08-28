@@ -1,8 +1,9 @@
 # Renderer config
 
-`renderers.RendererConfig` is the typed input to `create_renderer` and
-`create_renderer_pool`. It pins the renderer choice and its config at
-construction time.
+`renderers.RendererConfig` is the typed input to `create_renderer`. It pins the
+renderer choice and its config at construction time. `RendererPool` and
+`create_renderer_pool` are deprecated; applications should own their
+concurrency strategy.
 
 ```python
 from renderers import create_renderer, Qwen35RendererConfig
@@ -75,10 +76,6 @@ Callers that receive run-scoped chat-template kwargs can pass them separately:
 ```python
 r = create_renderer(
     tokenizer,
-    chat_template_kwargs={"enable_thinking": False},
-)
-pool = create_renderer_pool(
-    "Qwen/Qwen3-8B",
     chat_template_kwargs={"enable_thinking": False},
 )
 ```

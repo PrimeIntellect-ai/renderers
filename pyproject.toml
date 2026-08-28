@@ -38,9 +38,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Tokenizer loading and renderer pools use Hugging Face. Text-only renderers
-# can instead be constructed with an offset-capable BYO tokenizer and do not
-# import this dependency.
+# Tokenizer loading uses Hugging Face. Text-only renderers can instead be
+# constructed with an offset-capable BYO tokenizer and do not import this
+# dependency. Deprecated renderer pools also load tokenizers through this extra.
 transformers = [
     # Keep this floor compatible with prime-rl's transformers pin. Inkling's
     # tokenizer and text-only renderer work on older releases; image/audio

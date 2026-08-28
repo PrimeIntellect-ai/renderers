@@ -29,6 +29,7 @@ from renderers.base import (
     RendererPool,
     ToolCallParseStatus,
     ToolSpec,
+    _require_transformers,
 )
 
 _request_logger = logging.getLogger("renderers.client")
@@ -461,6 +462,7 @@ def _build_gemma4_features(mm_data: MultiModalData) -> dict[str, Any]:
     renderer output faithful to the HF processor and translate at this
     engine-specific boundary.
     """
+    _require_transformers("Encoding Gemma 4 multimodal features for vLLM")
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature
@@ -529,6 +531,7 @@ def _build_qwen_vl_features(
     Returns ``None`` semantics live one level up — this helper assumes
     the caller already verified ``mm_data`` is non-empty.
     """
+    _require_transformers("Encoding Qwen-VL multimodal features for vLLM")
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature

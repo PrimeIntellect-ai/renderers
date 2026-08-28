@@ -664,6 +664,37 @@ class RenderedConversation:
 
 
 @runtime_checkable
+class Tokenizer(Protocol):
+    """Structural tokenizer surface used by hand-coded renderers.
+
+    Hugging Face tokenizers satisfy this protocol, as can lightweight BYO
+    adapters around ``tokenizers.Tokenizer`` or another tokenizer backend.
+    Keeping the renderer-facing contract here makes ``transformers`` optional
+    for text rendering. Offset-capable ``__call__`` behavior is required by
+    :func:`attribute_text_segments` to preserve BPE boundary attribution.
+    """
+
+    name_or_path: str
+    unk_token_id: int | None
+    eos_token_id: int | None
+
+    def encode(self, text: str, *args: Any, **kwargs: Any) -> list[int]: ...
+
+    def decode(self, token_ids: Any, *args: Any, **kwargs: Any) -> str: ...
+
+    def convert_tokens_to_ids(self, tokens: Any) -> Any: ...
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
+class ChatTemplateTokenizer(Tokenizer, Protocol):
+    """Tokenizer surface required by :class:`DefaultRenderer`."""
+
+    def apply_chat_template(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
 class Renderer(Protocol):
     """Owns message ↔ token conversion for a specific model family."""
 
@@ -1156,6 +1187,25 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
 }
 
 
+_TRANSFORMERS_INSTALL_HINT = (
+    "Install the optional dependency with "
+    "`pip install 'renderers[transformers]'` (or "
+    "`uv add 'renderers[transformers]'`). Text-only renderers work without "
+    "it when constructed with an offset-capable tokenizer object."
+)
+
+
+def _require_transformers(feature: str) -> Any:
+    """Return ``transformers`` or raise an actionable optional-extra error."""
+    try:
+        import transformers
+    except ImportError as exc:
+        raise ImportError(
+            f"{feature} requires Transformers. {_TRANSFORMERS_INSTALL_HINT}"
+        ) from exc
+    return transformers
+
+
 def _model_has_vision_config(model_name: str) -> bool:
     """Return True if the HF config for ``model_name`` declares vision inputs.
 
@@ -1166,13 +1216,26 @@ def _model_has_vision_config(model_name: str) -> bool:
     match what the trainer reconstructs — a class of bug the renderer
     abstraction exists to prevent.
 
-    Returns False on any AutoConfig failure (offline, gated, missing) so
-    a flaky HF probe never blocks a legitimate text-only fine-tune.
+    Returns False on remote/config failures so a flaky HF probe never blocks a
+    legitimate text-only fine-tune. When Transformers itself is unavailable,
+    however, auto-resolution cannot safely distinguish an unknown text model
+    from an unknown VLM; callers must install the extra or choose an explicit
+    renderer config.
     """
     try:
-        from transformers import AutoConfig
-
-        cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=False)
+        transformers = _require_transformers("Auto-resolving an unregistered model")
+    except ImportError as exc:
+        raise ImportError(
+            f"Cannot auto-resolve unregistered model {model_name!r} without "
+            "checking whether it is multimodal. Install "
+            "`renderers[transformers]`, or pass an explicit typed renderer "
+            "config such as `DefaultRendererConfig()` for a known text-only "
+            "model."
+        ) from exc
+    try:
+        cfg = transformers.AutoConfig.from_pretrained(
+            model_name, trust_remote_code=False
+        )
     except Exception:
         return False
     # Most VLM configs nest a vision tower as ``vision_config`` (Qwen-VL,
@@ -1330,7 +1393,9 @@ def load_tokenizer(model_name_or_path: str):
     those exact IDs we load tokenizer files from the audited unrestricted
     ``unsloth`` mirrors instead, then restore ``tokenizer.name_or_path`` to
     the requested Meta ID so auto-resolution still selects ``Llama3Renderer``.
+    Requires the ``renderers[transformers]`` extra.
     """
+    _require_transformers("Loading a tokenizer")
     load_name_or_path = _tokenizer_source_for(model_name_or_path)
     kwargs = _tokenizer_load_kwargs(load_name_or_path)
     tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
@@ -1430,9 +1495,10 @@ def create_renderer_pool(
     Every slot in the pool shares the same config; to run a different
     config, build a different pool.
 
-    Tokenizers load via ``load_tokenizer`` — see its docstring for the
-    ``trust_remote_code`` policy (default off; Moonshot Kimi-K2 family
-    opts in with a pinned ``revision``).
+    Tokenizers load via ``load_tokenizer`` and therefore require the optional
+    ``renderers[transformers]`` dependency — see that function's docstring for
+    the ``trust_remote_code`` policy (default off; Moonshot Kimi-K2 family opts
+    in with a pinned ``revision``).
     """
 
     def factory() -> Renderer:
@@ -1455,7 +1521,8 @@ def create_renderer(
     """Create a Renderer from a typed config.
 
     Args:
-        tokenizer: HuggingFace tokenizer instance.
+        tokenizer: An object satisfying :class:`Tokenizer`; the generic
+            fallback additionally requires :class:`ChatTemplateTokenizer`.
         config: Typed renderer config — one of the variants of
             :data:`renderers.RendererConfig`. ``None`` defaults to
             :class:`AutoRendererConfig`, which resolves to a concrete
@@ -1471,10 +1538,11 @@ def create_renderer(
             config from ``tokenizer.name_or_path`` and then validates these
             kwargs against that config.
 
-    Selecting the auto-renderer for a model without a registered
-    renderer falls back to :class:`DefaultRenderer` for text-only models
-    and raises for VLMs (where ``apply_chat_template`` would silently
-    drop images).
+    Selecting the auto-renderer for a model without a registered renderer
+    probes Hugging Face ``AutoConfig`` before falling back to
+    :class:`DefaultRenderer`, so unknown VLMs fail instead of silently dropping
+    media. Without the ``transformers`` extra, pass an explicit renderer config
+    for unregistered model names.
     """
     _populate_registry()
 

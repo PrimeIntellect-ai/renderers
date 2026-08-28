@@ -14,13 +14,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -57,7 +56,7 @@ class MiniMaxM2Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: MiniMaxM2RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer

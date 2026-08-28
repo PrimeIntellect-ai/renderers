@@ -207,7 +207,7 @@ async def generate(
     priority: int | None = None,
     extra_headers: dict[str, str] | None = None,
     max_prompt_len: int | None = None,
-    raw_multimodal: bool = False,
+    process_multimodal: bool = True,
 ) -> dict[str, Any]:
     """Tokenize messages, call vLLM /inference/v1/generate, parse the response.
 
@@ -227,8 +227,8 @@ async def generate(
     sidecar, then serializes it to vLLM's ``features`` schema (mm_hashes,
     mm_placeholders, kwargs_data) before POSTing. The serializer imports
     ``vllm.*`` lazily so text-only consumers never pay for the import.
-    With ``raw_multimodal=True``, rendering skips image processing and the
-    request carries raw ``content_parts`` instead; vLLM must return the
+    With ``process_multimodal=False``, rendering skips image processing and
+    the request carries ``content_parts`` instead; vLLM must return the
     expanded prompt as ``prompt_token_ids``.
 
     ``max_prompt_len`` controls the pre-flight overflow check. When the
@@ -240,8 +240,8 @@ async def generate(
     cache a ``None`` cap and the pre-flight silently disables. Engine 4xx
     that still slip through propagate raw — converting them into a domain
     error is the calling client's job (its error shape is engine-specific).
-    Raw multimodal calls skip this pre-flight because only vLLM knows the
-    expanded prompt length.
+    Unprocessed multimodal calls skip this pre-flight because only vLLM knows
+    the expanded prompt length.
 
     Returns a dict with: request_id, prompt_ids, renderer_prompt_ids,
     completion_ids, completion_logprobs, content, reasoning_content,
@@ -266,6 +266,12 @@ async def generate(
             f"{type(renderer).__name__} does not support tools. "
             "Choose a model-specific renderer instead of the default fallback."
         )
+    if not process_multimodal and not getattr(
+        renderer, "supports_deferred_multimodal_processing", False
+    ):
+        raise NotImplementedError(
+            f"{type(renderer).__name__} does not support deferred multimodal processing"
+        )
 
     def _prepare():
         if prompt_ids is not None:
@@ -279,7 +285,7 @@ async def generate(
                 prompt_attribution,
             )
         render_kwargs: dict[str, Any] = {}
-        if raw_multimodal:
+        if not process_multimodal:
             render_kwargs["process_multimodal"] = False
         rendered = renderer.render(
             messages,
@@ -296,7 +302,7 @@ async def generate(
 
     prompt_ids, stop_token_ids, mm_data, prompt_attr = _prepare()
 
-    if not raw_multimodal:
+    if process_multimodal:
         if max_prompt_len is None:
             max_prompt_len = await _resolve_max_prompt_len(client, model)
         if max_prompt_len is not None and len(prompt_ids) > max_prompt_len:
@@ -314,10 +320,10 @@ async def generate(
         "token_ids": prompt_ids,
         "sampling_params": sp,
     }
-    content_parts = _content_parts(messages) if raw_multimodal else None
+    content_parts = _content_parts(messages) if not process_multimodal else None
     features = (
         _build_mm_features(renderer, mm_data)
-        if not raw_multimodal and mm_data and not mm_data.is_empty()
+        if process_multimodal and mm_data and not mm_data.is_empty()
         else None
     )
     if content_parts:
@@ -354,7 +360,7 @@ async def generate(
     effective_prompt_ids = data.get("prompt_token_ids")
     if content_parts and not isinstance(effective_prompt_ids, list):
         raise MalformedGenerateResponseError(
-            "Engine response must include prompt_token_ids for raw multimodal input."
+            "Engine response must include prompt_token_ids for unprocessed multimodal input."
         )
 
     completion_logprobs = _parse_completion_logprobs(choice, completion_ids)

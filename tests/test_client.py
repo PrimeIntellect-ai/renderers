@@ -184,8 +184,10 @@ def test_generate_builds_request_body_and_parses_response():
     assert tc.status == ToolCallParseStatus.OK
 
 
-def test_generate_sends_raw_content_parts_and_returns_effective_prompt_ids():
-    class RawRenderer(_FakeRenderer):
+def test_generate_sends_unprocessed_content_parts_and_returns_effective_prompt_ids():
+    class DeferredMultimodalRenderer(_FakeRenderer):
+        supports_deferred_multimodal_processing = True
+
         def render(
             self,
             messages,
@@ -202,7 +204,7 @@ def test_generate_sends_raw_content_parts_and_returns_effective_prompt_ids():
     result = asyncio.run(
         generate(
             client=client,
-            renderer=RawRenderer(),
+            renderer=DeferredMultimodalRenderer(),
             messages=[
                 {
                     "role": "user",
@@ -213,7 +215,7 @@ def test_generate_sends_raw_content_parts_and_returns_effective_prompt_ids():
                 }
             ],
             model="test-model",
-            raw_multimodal=True,
+            process_multimodal=False,
         )
     )
 

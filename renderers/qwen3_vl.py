@@ -309,7 +309,7 @@ class Qwen3VLRenderer:
     ``thinking_retention`` still controls whether the bridge is attempted.
     """
 
-    supports_raw_multimodal = True
+    supports_deferred_multimodal_processing = True
 
     def __init__(
         self,

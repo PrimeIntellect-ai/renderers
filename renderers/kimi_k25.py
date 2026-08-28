@@ -664,9 +664,8 @@ class KimiK25Renderer:
                 "known name_or_path so the processor can be auto-loaded."
             )
         # Kimi's processor is custom Python in the model repo and requires
-        # trust_remote_code=True. Callers using ``create_renderer_pool`` go
-        # through ``load_tokenizer`` which already pins the revision; for
-        # auto-load here, we delegate to AutoProcessor with the same flag.
+        # trust_remote_code=True, so auto-loading delegates to AutoProcessor
+        # with that flag.
         transformers = _require_transformers("Auto-loading a Kimi K2.5 processor")
         self._processor = transformers.AutoProcessor.from_pretrained(
             name, trust_remote_code=True

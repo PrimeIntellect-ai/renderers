@@ -2,11 +2,7 @@ from __future__ import annotations
 
 import enum
 import logging
-import queue
-import threading
-import warnings
 from collections.abc import Mapping
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -26,12 +22,6 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger("renderers.base")
-
-_RENDERER_POOL_DEPRECATION = (
-    "RendererPool and create_renderer_pool() are deprecated and will be removed "
-    "in a future release. Construct renderers with create_renderer() and manage "
-    "concurrency in the calling application instead."
-)
 
 
 # ---------------------------------------------------------------------------
@@ -877,9 +867,7 @@ class MultimodalRenderer(Renderer, Protocol):
 # Per-type cache for ``is_multimodal``. The ``runtime_checkable`` Protocol
 # isinstance check walks every protocol member via ``hasattr`` on each
 # call; per-type caching collapses that to a single dict lookup on the
-# hot path (e.g. per-bridge dispatch). Pools expose ``is_multimodal``
-# directly as a snapshot attribute (different pools share a class but
-# wrap different renderer types), so we don't need to special-case them.
+# hot path (e.g. per-bridge dispatch).
 _IS_MULTIMODAL_BY_TYPE: dict[type, bool] = {}
 
 
@@ -899,140 +887,6 @@ def is_multimodal(r: object) -> bool:
         cached = isinstance(r, MultimodalRenderer)
         _IS_MULTIMODAL_BY_TYPE[cls] = cached
     return cached
-
-
-class RendererPool:
-    """Pool of Renderer instances that itself satisfies the Renderer protocol.
-
-    Callers treat a pool like a single renderer — ``pool.render_ids(...)``,
-    ``pool.bridge_to_next_turn(...)``, ``isinstance(pool, MultimodalRenderer)``
-    all work via structural delegation. The pool internally serializes
-    access to its inner renderers (each wraps its own tokenizer copy).
-
-    Concurrency model:
-    - ``size == 1``: a single inner renderer guarded by a ``threading.Lock``.
-      Avoids the queue's per-call overhead on the common default config.
-    - ``size > 1``: a ``queue.Queue`` of independent renderers, checked out
-      one at a time. HuggingFace fast tokenizers release the GIL during
-      Rust encoding, so threads achieve real parallelism.
-
-    Construction parallelism for ``size > 1``: ``AutoTokenizer.from_pretrained``
-    takes hundreds of ms per call (JSON parse + Rust tokenizer build + HF
-    cache lookup), so populating a 32-slot pool serially costs ~10-15s on
-    startup and shows up directly as a step-0 stall. We fan the factory out
-    across a short-lived thread pool; the GIL-bound Python portion stops
-    scaling past ~8 workers, so we clamp there.
-    """
-
-    def __init__(
-        self,
-        factory: Callable[[], Renderer],
-        size: int,
-        *,
-        _warn_deprecated: bool = True,
-    ):
-        from concurrent.futures import ThreadPoolExecutor
-
-        if _warn_deprecated:
-            warnings.warn(
-                _RENDERER_POOL_DEPRECATION,
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-        self._factory = factory
-        self._size = size
-
-        if size == 1:
-            renderer = factory()
-            self._sole: Renderer | None = renderer
-            self._lock: threading.Lock | None = threading.Lock()
-            self._pool: queue.Queue[Renderer] | None = None
-            sample: Renderer = renderer
-        else:
-            self._sole = None
-            self._lock = None
-            self._pool = queue.Queue(maxsize=size)
-            workers = min(size, 8)
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                for renderer in executor.map(lambda _: factory(), range(size)):
-                    self._pool.put(renderer)
-            # Peek without removing — safe at construction time before any
-            # checkout has been served.
-            sample = self._pool.queue[0]
-
-        # Snapshot the protocol-shaped attributes from a sample renderer.
-        # They are constant per renderer class, so resolving them once at
-        # construction (a) eliminates per-call ``getattr``/``isinstance``
-        # overhead and (b) lets a future out-of-process pool variant skip
-        # holding a live tokenizer in the parent process.
-        self._renderer_cls: type[Renderer] = type(sample)
-        self.supports_tools: bool = getattr(sample, "supports_tools", True)
-        self.is_multimodal: bool = is_multimodal(sample)
-        # ``mm_token_type_id_map`` is set ONLY on pools wrapping a
-        # ``MultimodalRenderer``. We deliberately don't expose this as a
-        # class-level property: ``runtime_checkable`` Protocol's
-        # isinstance check uses ``inspect.getattr_static``, which finds
-        # property descriptors on the class regardless of whether their
-        # fget raises. Conditional instance attributes (present in
-        # ``self.__dict__`` only when applicable) are the only way to
-        # make ``isinstance(pool, MultimodalRenderer)`` reflect the
-        # inner renderer's actual protocol conformance.
-        if isinstance(sample, MultimodalRenderer):
-            self.mm_token_type_id_map: dict[int, int] = sample.mm_token_type_id_map
-
-    @contextmanager
-    def checkout(self):
-        if self._sole is not None:
-            assert self._lock is not None
-            with self._lock:
-                yield self._sole
-            return
-        assert self._pool is not None
-        renderer = self._pool.get()
-        try:
-            yield renderer
-        finally:
-            self._pool.put(renderer)
-
-    @property
-    def size(self) -> int:
-        return self._size
-
-    @property
-    def renderer_cls(self) -> type[Renderer]:
-        """Class of the renderers in this pool (uniform across all slots)."""
-        return self._renderer_cls
-
-    # ── Renderer protocol delegation ────────────────────────────────────
-    # Pool structurally satisfies ``Renderer`` (and ``MultimodalRenderer``
-    # when its slots wrap multimodal renderers). Callers can call methods
-    # directly and dispatch with ``isinstance(pool, MultimodalRenderer)``
-    # without reaching into ``checkout()``.
-
-    def render(self, *args: Any, **kwargs: Any) -> "RenderedTokens":
-        with self.checkout() as r:
-            return r.render(*args, **kwargs)
-
-    def render_ids(self, *args: Any, **kwargs: Any) -> list[int]:
-        with self.checkout() as r:
-            return r.render_ids(*args, **kwargs)
-
-    def parse_response(self, *args: Any, **kwargs: Any) -> "ParsedResponse":
-        with self.checkout() as r:
-            return r.parse_response(*args, **kwargs)
-
-    def get_stop_token_ids(self) -> list[int]:
-        with self.checkout() as r:
-            return r.get_stop_token_ids()
-
-    def bridge_to_next_turn(self, *args: Any, **kwargs: Any) -> "RenderedTokens | None":
-        with self.checkout() as r:
-            return r.bridge_to_next_turn(*args, **kwargs)
-
-    # ``mm_token_type_id_map`` (the MultimodalRenderer protocol attribute)
-    # is set in ``__init__`` only for pools wrapping multimodal renderers;
-    # see the comment there for why this isn't a class-level property.
 
 
 RENDERER_REGISTRY: dict[str, type] = {}
@@ -1279,8 +1133,8 @@ def _model_has_vision_config(model_name: str) -> bool:
 # Pinning the revision keeps the trust narrow: even with
 # ``trust_remote_code=True``, transformers downloads / executes the
 # tokenizer Python from this exact commit only. A future malicious push
-# to the Moonshot HF repo doesn't auto-propagate to anyone using
-# ``create_renderer_pool``. Bump these SHAs deliberately, with review.
+# to the Moonshot HF repo doesn't auto-propagate to callers of
+# ``load_tokenizer``. Bump these SHAs deliberately, with review.
 TRUSTED_REVISIONS: dict[str, str] = {
     "moonshotai/Kimi-K2-Instruct": "fd1984e2b7a3350dbf7305fe73a4ede25c14de50",
     "moonshotai/Kimi-K2.5": "4d01dfe0332d63057c186e0b262165819efb6611",
@@ -1491,51 +1345,6 @@ def _populate_registry():
             "gpt-oss": GptOssRenderer,
         }
     )
-
-
-def create_renderer_pool(
-    tokenizer_name_or_path: str,
-    config: RendererConfig | None = None,
-    *,
-    size: int = 16,
-    chat_template_kwargs: Mapping[str, Any] | None = None,
-) -> RendererPool:
-    """Create a RendererPool with *size* independent tokenizer copies.
-
-    Each slot loads its own tokenizer so threads never share mutable
-    state. HuggingFace fast tokenizers release the GIL during Rust
-    encoding, so threads achieve real parallelism.
-
-    ``config`` is the typed renderer config (one of the variants of
-    :data:`renderers.RendererConfig`). Defaults to
-    :class:`AutoRendererConfig`, which resolves to a concrete renderer
-    via ``MODEL_RENDERER_MAP`` at construction time using the loaded
-    tokenizer's name. ``chat_template_kwargs`` are merged into the
-    resolved concrete config and validated before renderer construction.
-    Every slot in the pool shares the same config; to run a different
-    config, build a different pool.
-
-    Tokenizers load via ``load_tokenizer`` and therefore require the optional
-    ``renderers[transformers]`` dependency — see that function's docstring for
-    the ``trust_remote_code`` policy (default off; Moonshot Kimi-K2 family opts
-    in with a pinned ``revision``).
-    """
-
-    warnings.warn(
-        _RENDERER_POOL_DEPRECATION,
-        DeprecationWarning,
-        stacklevel=2,
-    )
-
-    def factory() -> Renderer:
-        tokenizer = load_tokenizer(tokenizer_name_or_path)
-        return create_renderer(
-            tokenizer,
-            config,
-            chat_template_kwargs=chat_template_kwargs,
-        )
-
-    return RendererPool(factory, size=size, _warn_deprecated=False)
 
 
 def create_renderer(

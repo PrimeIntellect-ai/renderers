@@ -597,8 +597,13 @@ class DeepSeekV4Renderer:
                 emit_text(message.content, msg_idx, content=True)
 
             elif role == "assistant":
-                keep_reasoning = self.config.enable_thinking and (
-                    not effective_drop_thinking or index > last_user_index
+                previous_has_task = (
+                    index > 0 and logical_messages[index - 1].task is not None
+                )
+                keep_reasoning = (
+                    self.config.enable_thinking
+                    and not previous_has_task
+                    and (not effective_drop_thinking or index > last_user_index)
                 )
                 if keep_reasoning:
                     emit_text(
@@ -660,12 +665,9 @@ class DeepSeekV4Renderer:
                 if index + 1 < len(logical_messages)
                 else None
             )
-            transition_needed = message.task is not None or next_role in {
-                "assistant",
-                "latest_reminder",
-            }
+            transition_needed = next_role in {"assistant", "latest_reminder"}
             if next_role is None:
-                transition_needed = transition_needed or add_generation_prompt
+                transition_needed = message.task is not None or add_generation_prompt
             if not transition_needed:
                 continue
 

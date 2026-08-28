@@ -31,6 +31,15 @@ _THINK_START = "<think>"
 _THINK_END = "</think>"
 _DSML = "｜DSML｜"
 
+_TASK_TOKENS = {
+    "action": "<｜action｜>",
+    "query": "<｜query｜>",
+    "authority": "<｜authority｜>",
+    "domain": "<｜domain｜>",
+    "title": "<｜title｜>",
+    "read_url": "<｜read_url｜>",
+}
+
 _REASONING_EFFORT_PROMPTS = {
     "low": "",
     "high": (
@@ -290,6 +299,12 @@ def _render_deepseek_v4_reference(
             prompt += _USER + _text(content)
             if message.get("tools"):
                 prompt += "\n\n" + _render_tools(message["tools"])
+            if message.get("response_format") is not None:
+                prompt += (
+                    "\n\n## Response Format:\n\n"
+                    "You MUST strictly adhere to the following schema to reply:\n"
+                    + _json(message["response_format"])
+                )
         elif role == "user":
             prompt += _USER
             rendered_blocks = []
@@ -304,8 +319,13 @@ def _render_deepseek_v4_reference(
         elif role == "latest_reminder":
             prompt += _LATEST_REMINDER + _text(content)
         elif role == "assistant":
-            keep_reasoning = enable_thinking and (
-                not effective_drop or index > last_user
+            previous_has_task = (
+                index > 0 and messages[index - 1].get("task") is not None
+            )
+            keep_reasoning = (
+                enable_thinking
+                and not previous_has_task
+                and (not effective_drop or index > last_user)
             )
             if keep_reasoning:
                 prompt += str(message.get("reasoning_content") or "") + _THINK_END
@@ -325,10 +345,28 @@ def _render_deepseek_v4_reference(
         next_role = (
             messages[index + 1].get("role") if index + 1 < len(messages) else None
         )
-        should_transition = next_role in {"assistant", "latest_reminder"}
-        if next_role is None:
-            should_transition = add_generation_prompt
-        if not should_transition or role not in {"user", "developer"}:
+        if next_role is not None and next_role not in {
+            "assistant",
+            "latest_reminder",
+        }:
+            continue
+
+        task = message.get("task")
+        if task is not None:
+            if task not in _TASK_TOKENS:
+                raise ValueError(f"Invalid DeepSeek V4 reference task: {task!r}")
+            if task != "action":
+                prompt += _TASK_TOKENS[task]
+            else:
+                prompt += _ASSISTANT
+                prompt += _THINK_START if enable_thinking else _THINK_END
+                prompt += _TASK_TOKENS[task]
+            continue
+
+        if (next_role is None and not add_generation_prompt) or role not in {
+            "user",
+            "developer",
+        }:
             continue
         prompt += _ASSISTANT
         if enable_thinking and (not effective_drop or index >= last_user):

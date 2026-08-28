@@ -15,6 +15,7 @@ from renderers import (
     create_renderer,
 )
 from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from tests.reference_rendering import render_reference
 
 
 MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
@@ -269,9 +270,116 @@ def test_reference_encoder_drops_stale_developer_messages_without_tools():
 def test_quick_task_token_renders_without_normal_generation_prompt():
     messages = [{"role": "user", "content": "Search?", "task": "action"}]
 
-    assert _decode(_renderer(), messages) == (
+    renderer = _renderer()
+    assert renderer.render_ids(messages) == render_reference(
+        _tokenizer(),
+        messages,
+    )
+    assert _decode(renderer, messages) == (
         f"{BOS}{USER}Search?{ASSISTANT}</think><｜action｜>"
     )
+
+
+def test_action_task_assistant_suppresses_thinking_like_reference_encoder():
+    messages = [
+        {"role": "user", "content": "Classify", "task": "action"},
+        {
+            "role": "assistant",
+            "reasoning_content": "must not render",
+            "content": "result",
+        },
+    ]
+    renderer = _renderer(enable_thinking=True)
+
+    rendered = renderer.render_ids(messages)
+
+    assert rendered == render_reference(
+        _tokenizer(),
+        messages,
+        enable_thinking=True,
+    )
+    assert _tokenizer().decode(rendered, skip_special_tokens=False) == (
+        f"{BOS}{USER}Classify{ASSISTANT}<think><｜action｜>result{EOS}"
+    )
+
+
+def test_historical_action_task_keeps_reference_encoders_unclosed_think():
+    messages = [
+        {"role": "user", "content": "Classify", "task": "action"},
+        {"role": "assistant", "content": "result"},
+        {"role": "user", "content": "Continue"},
+    ]
+    renderer = _renderer(enable_thinking=True)
+
+    rendered = renderer.render_ids(messages, add_generation_prompt=True)
+
+    assert rendered == render_reference(
+        _tokenizer(),
+        messages,
+        add_generation_prompt=True,
+        enable_thinking=True,
+    )
+    assert _tokenizer().decode(rendered, skip_special_tokens=False) == (
+        f"{BOS}{USER}Classify{ASSISTANT}<think><｜action｜>result{EOS}"
+        f"{USER}Continue{ASSISTANT}<think>"
+    )
+
+
+def test_task_before_nonassistant_does_not_emit_task_token():
+    messages = [
+        {"role": "user", "content": "First", "task": "query"},
+        {"role": "user", "content": "Second"},
+    ]
+    renderer = _renderer(enable_thinking=True)
+
+    rendered = renderer.render_ids(messages, add_generation_prompt=True)
+
+    assert rendered == render_reference(
+        _tokenizer(),
+        messages,
+        add_generation_prompt=True,
+        enable_thinking=True,
+    )
+    assert "<｜query｜>" not in _tokenizer().decode(
+        rendered,
+        skip_special_tokens=False,
+    )
+
+
+def test_merged_followup_task_is_dropped_like_reference_encoder():
+    messages = [
+        {"role": "tool", "tool_call_id": "call-1", "content": "done"},
+        {"role": "user", "content": "Classify", "task": "action"},
+    ]
+    renderer = _renderer(enable_thinking=True)
+
+    rendered = renderer.render_ids(messages, add_generation_prompt=True)
+
+    assert rendered == render_reference(
+        _tokenizer(),
+        messages,
+        add_generation_prompt=True,
+        enable_thinking=True,
+    )
+    text = _tokenizer().decode(rendered, skip_special_tokens=False)
+    assert "<｜action｜>" not in text
+    assert text.endswith(f"{ASSISTANT}<think>")
+
+
+@pytest.mark.parametrize("prefix", ["", "\n"])
+def test_dsml_parser_requires_reference_encoders_two_newlines(prefix):
+    text = (
+        f"{prefix}<｜DSML｜tool_calls>\n"
+        '<｜DSML｜invoke name="weather">\n\n</｜DSML｜invoke>\n'
+        "</｜DSML｜tool_calls>"
+    )
+
+    parsed = _renderer().parse_response(
+        _tokenizer().encode(text, add_special_tokens=False)
+    )
+
+    assert parsed.content == text
+    assert parsed.tool_calls == []
 
 
 def test_rendered_masks_keep_dsml_sampled_and_tool_wrappers_scaffolded():

@@ -12,6 +12,8 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     Tokenizer,
+    _content_mask_or_empty,
+    _get_offset_tokenizer,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -315,8 +317,12 @@ class PrimeQwen3Renderer:
         return RenderedTokens(
             token_ids=builder.token_ids,
             message_indices=builder.message_indices,
-            sampled_mask=builder.sampled_mask,
-            is_content=builder.is_content,
+            sampled_mask=(
+                builder.sampled_mask
+                if _get_offset_tokenizer(self._tokenizer) is not None
+                else []
+            ),
+            is_content=_content_mask_or_empty(self._tokenizer, builder.is_content),
             message_roles=[message.get("role") or "" for message in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
@@ -683,8 +689,12 @@ class PrimeQwen3Renderer:
         return RenderedTokens(
             token_ids=builder.token_ids,
             message_indices=builder.message_indices,
-            sampled_mask=builder.sampled_mask,
-            is_content=builder.is_content,
+            sampled_mask=(
+                builder.sampled_mask
+                if _get_offset_tokenizer(self._tokenizer) is not None
+                else []
+            ),
+            is_content=_content_mask_or_empty(self._tokenizer, builder.is_content),
             message_roles=[message.get("role") or "" for message in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
         )

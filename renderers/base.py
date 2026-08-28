@@ -11,6 +11,7 @@ from typing import (
     Literal,
     Protocol,
     TypedDict,
+    cast,
     runtime_checkable,
 )
 
@@ -243,7 +244,9 @@ class RenderedTokens:
     Empty ``sampled_mask`` (``[]``) means the renderer doesn't provide
     this signal — consumers should fall back to attribution-only
     masking. ``DefaultRenderer`` leaves it empty because the Jinja
-    template is opaque; hand-coded renderers populate it.
+    template is opaque. Hand-coded renderers normally populate it; a
+    renderer whose sampled/scaffold boundary depends on character
+    attribution may leave it empty for an offsetless tokenizer.
 
     ``is_content`` is a per-token signal generalizing the "scaffold vs
     body" distinction across all roles: ``True`` iff the token was
@@ -269,7 +272,8 @@ class RenderedTokens:
 
     Empty ``is_content`` (``[]``) — like ``sampled_mask`` — means the
     renderer doesn't provide the signal. ``DefaultRenderer`` leaves it
-    empty for the same reason.
+    empty because its Jinja template is opaque; all renderers leave it
+    empty when the supplied tokenizer cannot return character offsets.
 
     ``message_tool_names`` is the per-message tool function name list,
     parallel to ``message_roles`` (same length). For tool-role
@@ -476,7 +480,7 @@ class RenderedTokens:
 
         Returns an empty dict when :attr:`is_content` or
         :attr:`message_roles` is empty (renderer didn't populate the
-        signal — e.g. ``DefaultRenderer``).
+        signal — e.g. ``DefaultRenderer`` or an offsetless tokenizer).
 
         Intended for selective loss masking: SFT on tool response
         bodies while RL acts only on assistant turns is the canonical
@@ -667,8 +671,8 @@ class Tokenizer(Protocol):
     Hugging Face tokenizers satisfy this protocol, as can lightweight BYO
     adapters around ``tokenizers.Tokenizer`` or another tokenizer backend.
     Keeping the renderer-facing contract here makes ``transformers`` optional
-    for text rendering. Offset-capable ``__call__`` behavior is required by
-    :func:`attribute_text_segments` to preserve BPE boundary attribution.
+    for text rendering. Character offsets are a separate optional capability;
+    see :class:`OffsetTokenizer`.
     """
 
     name_or_path: str
@@ -680,6 +684,17 @@ class Tokenizer(Protocol):
     def decode(self, token_ids: Any, *args: Any, **kwargs: Any) -> str: ...
 
     def convert_tokens_to_ids(self, tokens: Any) -> Any: ...
+
+
+@runtime_checkable
+class OffsetTokenizer(Tokenizer, Protocol):
+    """Tokenizer that can return character offsets alongside token IDs.
+
+    Hand-coded renderers use this optional capability to distinguish caller
+    content from adjacent template scaffold without changing the underlying
+    BPE pass. A basic :class:`Tokenizer` remains sufficient for rendering token
+    IDs; when offsets are unavailable, renderers leave ``is_content`` empty.
+    """
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
@@ -1064,7 +1079,7 @@ _TRANSFORMERS_INSTALL_HINT = (
     "Install the optional dependency with "
     "`pip install 'renderers[transformers]'` (or "
     "`uv add 'renderers[transformers]'`). Text-only renderers work without "
-    "it when constructed with an offset-capable tokenizer object."
+    "it when constructed with a compatible tokenizer object."
 )
 
 
@@ -1759,36 +1774,56 @@ def trim_to_turn_close(
     return previous_ids
 
 
-def _get_offset_tokenizer(tokenizer):
-    """Assert ``tokenizer`` supports ``return_offsets_mapping=True``.
+class AttributedTextSegments(list[tuple[int, bool]]):
+    """Token/content pairs with an explicit attribution-availability flag."""
+
+    def __init__(
+        self,
+        values=(),
+        *,
+        has_content_attribution: bool,
+    ) -> None:
+        super().__init__(values)
+        self.has_content_attribution = has_content_attribution
+
+
+def _get_offset_tokenizer(tokenizer: Tokenizer) -> OffsetTokenizer | None:
+    """Return ``tokenizer`` when it supports character offsets, else ``None``.
 
     Hand-coded renderers concatenate scaffold + body in one BPE pass to
     preserve cross-boundary merges, then attribute each resulting token
     back to its source segment via the fast tokenizer's
-    ``offset_mapping`` (see :func:`attribute_text_segments`). The
-    contract: every BYO tokenizer must be a fast tokenizer with offset
-    support. Tokenizers loaded via :func:`load_tokenizer` are
-    ``PreTrainedTokenizerFast`` instances that satisfy this trivially.
+    ``offset_mapping`` (see :func:`attribute_text_segments`). Tokenizers
+    loaded via :func:`load_tokenizer` are ``PreTrainedTokenizerFast``
+    instances that satisfy this capability, but BYO tokenizers need not.
     """
+    call = getattr(tokenizer, "__call__", None)
+    if not callable(call):
+        return None
     try:
-        tokenizer("a", add_special_tokens=False, return_offsets_mapping=True)
-    except (NotImplementedError, ValueError, TypeError) as exc:
-        raise RuntimeError(
-            "Hand-coded renderers require a fast tokenizer with "
-            "``return_offsets_mapping=True`` support for body/scaffold "
-            "attribution. Pass a tokenizer loaded via "
-            "``renderers.base.load_tokenizer``, or any "
-            "``transformers.PreTrainedTokenizerFast`` instance."
-        ) from exc
-    return tokenizer
+        encoding = call("a", add_special_tokens=False, return_offsets_mapping=True)
+        encoding["input_ids"]
+        encoding["offset_mapping"]
+    except (KeyError, NotImplementedError, TypeError, ValueError):
+        return None
+    return cast(OffsetTokenizer, tokenizer)
+
+
+def _content_mask_or_empty(
+    tokenizer: Tokenizer, content_mask: list[bool]
+) -> list[bool]:
+    """Return exact content attribution, or the empty-list unavailable sentinel."""
+    if _get_offset_tokenizer(tokenizer) is None:
+        return []
+    return content_mask
 
 
 def attribute_text_segments(
-    tokenizer,
+    tokenizer: Tokenizer,
     segments: "list[tuple[str, bool]]",
     *,
     overlap_is_content: bool = False,
-) -> "list[tuple[int, bool]]":
+) -> AttributedTextSegments:
     """Tokenize concatenated segments as a single BPE pass and return
     ``(token_id, is_content)`` pairs.
 
@@ -1816,23 +1851,29 @@ def attribute_text_segments(
     every body byte inside the ``is_content=True`` run at the cost of a
     few adjacent wrap bytes.
 
-    Requires a HuggingFace fast tokenizer with offset tracking. Every
-    model in ``MODEL_RENDERER_MAP`` ships one, so the offset lookup
-    always succeeds for tokenizers obtained via :func:`load_tokenizer`.
-    BYO tokenizers must be a ``PreTrainedTokenizerFast`` (or anything
-    else exposing ``return_offsets_mapping=True``); slow tokenizers
-    aren't supported — BPE drift at the wrap/body boundary would
-    defeat the whole point.
+    When ``tokenizer`` implements :class:`OffsetTokenizer`, the result's
+    ``has_content_attribution`` flag is true and each bool is exact. For a
+    basic :class:`Tokenizer`, the joined text is still encoded in one pass so
+    token IDs remain identical, but the bools are placeholders and
+    ``has_content_attribution`` is false. Renderers propagate that state as an
+    empty ``RenderedTokens.is_content`` list rather than exposing a partial or
+    inaccurate mask.
 
     Empty input or empty joined text returns an empty list.
     """
     if not segments:
-        return []
+        return AttributedTextSegments([], has_content_attribution=True)
     full_text = "".join(text for text, _ in segments)
     if not full_text:
-        return []
+        return AttributedTextSegments([], has_content_attribution=True)
 
     offset_tokenizer = _get_offset_tokenizer(tokenizer)
+    if offset_tokenizer is None:
+        token_ids = tokenizer.encode(full_text, add_special_tokens=False)
+        return AttributedTextSegments(
+            ((token_id, False) for token_id in token_ids),
+            has_content_attribution=False,
+        )
     encoding = offset_tokenizer(
         full_text,
         add_special_tokens=False,
@@ -1887,7 +1928,7 @@ def attribute_text_segments(
             # the last non-empty segment's bit.
             pass
         out.append((tok_id, is_content))
-    return out
+    return AttributedTextSegments(out, has_content_attribution=True)
 
 
 def reject_assistant_in_extension(new_messages: list[Message]) -> bool:

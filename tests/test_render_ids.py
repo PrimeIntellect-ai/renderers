@@ -21,6 +21,30 @@ _GEMMA4_EMPTY_THOUGHT_MODELS = {
 }
 
 
+class _OffsetlessTokenizer:
+    """Delegate every basic tokenizer operation without exposing ``__call__``."""
+
+    def __init__(self, tokenizer):
+        self._tokenizer = tokenizer
+
+    def __getattr__(self, name):
+        if name == "__call__":
+            raise AttributeError(name)
+        return getattr(self._tokenizer, name)
+
+    def encode(self, *args, **kwargs):
+        return self._tokenizer.encode(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        return self._tokenizer.decode(*args, **kwargs)
+
+    def convert_tokens_to_ids(self, *args, **kwargs):
+        return self._tokenizer.convert_tokens_to_ids(*args, **kwargs)
+
+    def apply_chat_template(self, *args, **kwargs):
+        return self._tokenizer.apply_chat_template(*args, **kwargs)
+
+
 def _expected(tokenizer, messages, **kwargs):
     if (
         getattr(tokenizer, "name_or_path", "") in _GEMMA4_EMPTY_THOUGHT_MODELS
@@ -77,6 +101,19 @@ def test_no_system_message(model_name, tokenizer, renderer):
         {"role": "assistant", "content": "Hi there!"},
     ]
     assert renderer.render_ids(msgs) == _expected(tokenizer, msgs)
+
+
+def test_offsetless_byo_preserves_rendered_ids(model_name, tokenizer, renderer):
+    msgs = [{"role": "user", "content": "Hello!"}]
+    expected = renderer.render(msgs, add_generation_prompt=True)
+    offsetless = _OffsetlessTokenizer(tokenizer)
+    offsetless_renderer = type(renderer)(offsetless, renderer.config)
+
+    rendered = offsetless_renderer.render(msgs, add_generation_prompt=True)
+
+    assert rendered.token_ids == expected.token_ids
+    assert rendered.is_content == []
+    assert len(rendered.message_indices) == len(rendered.token_ids)
 
 
 def test_multi_turn(model_name, tokenizer, renderer):

@@ -26,6 +26,7 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     Tokenizer,
+    _content_mask_or_empty,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -268,7 +269,7 @@ class Qwen3Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
@@ -433,7 +434,9 @@ class Qwen3Renderer:
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=[False] * len(previous_ids) + ext_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer, [False] * len(previous_ids) + ext_content
+            ),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
         )

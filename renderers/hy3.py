@@ -33,6 +33,8 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     Tokenizer,
+    _content_mask_or_empty,
+    _get_offset_tokenizer,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -238,7 +240,10 @@ class Hy3Renderer:
         if not segments:
             return []
         full_text = "".join(text for text, _, _ in segments)
-        encoding = self._tokenizer(
+        offset_tokenizer = _get_offset_tokenizer(self._tokenizer)
+        if offset_tokenizer is None:
+            return [(token_id, False, -1) for token_id in self._encode(full_text)]
+        encoding = offset_tokenizer(
             full_text,
             add_special_tokens=False,
             return_offsets_mapping=True,
@@ -431,7 +436,7 @@ class Hy3Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
@@ -699,7 +704,9 @@ class Hy3Renderer:
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=[False] * len(previous_ids) + ext_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer, [False] * len(previous_ids) + ext_content
+            ),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
         )

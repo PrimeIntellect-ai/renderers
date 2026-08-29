@@ -12,8 +12,6 @@ import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
-
 from renderers import base
 from renderers.base import TOKENIZER_SOURCE_OVERRIDES, TRUSTED_REVISIONS, load_tokenizer
 
@@ -122,22 +120,29 @@ def test_tokenizer_source_overrides_are_exact_llama_mirrors():
     }
 
 
-def test_get_offset_tokenizer_rejects_offsetless_byo():
-    """BYO tokenizers without ``return_offsets_mapping`` support raise a
-    clear error. Hand-coded renderers concatenate scaffold + body in one
-    BPE pass and attribute tokens via the fast tokenizer's offset map;
-    no transparent reload-from-name_or_path fallback exists. The
-    contract is: pass a fast tokenizer or get a loud error at construct
-    time, not silent BPE drift at the wrap/body boundary."""
+def test_offsetless_byo_preserves_ids_without_content_attribution():
+    """Offsetless BYO tokenizers keep the joined BPE pass but omit attribution."""
 
     class _NoOffsets:
         name_or_path = "anywhere/anything"
 
+        def encode(self, text, *, add_special_tokens=False):
+            assert add_special_tokens is False
+            return [len(text)]
+
         def __call__(self, *args, **kwargs):
             raise NotImplementedError("BYO tokenizer has no offsets")
 
-    with pytest.raises(RuntimeError, match="fast tokenizer.*offsets"):
-        base._get_offset_tokenizer(_NoOffsets())
+    tokenizer = _NoOffsets()
+    assert base._get_offset_tokenizer(tokenizer) is None
+
+    attributed = base.attribute_text_segments(
+        tokenizer,
+        [("user\n", False), ("hello", True)],
+    )
+
+    assert attributed == [(10, False)]
+    assert attributed.has_content_attribution is False
 
 
 # ---------------------------------------------------------------------------

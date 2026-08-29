@@ -41,6 +41,7 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     Tokenizer,
+    _content_mask_or_empty,
     _require_transformers,
     attribute_text_segments,
     extract_message_tool_names,
@@ -277,8 +278,8 @@ class _Emitter:
             self.is_content.extend([first_ic] * len(ids))
             return
         # Mixed body/scaffold flush — encode once and attribute back to
-        # each segment via the fast tokenizer's offset_mapping. Requires
-        # a tokenizer (not just the encode fn) to look up offsets.
+        # each segment via offset_mapping when available. A basic tokenizer
+        # still preserves the joined token IDs but leaves attribution empty.
         assert self._tokenizer is not None, (
             "_Emitter mixed-is_content flush requires a tokenizer; "
             "pass one to the constructor."
@@ -619,7 +620,7 @@ class Qwen3VLRenderer:
             token_ids=em.token_ids,
             message_indices=em.message_indices,
             sampled_mask=em.sampled,
-            is_content=em.is_content,
+            is_content=_content_mask_or_empty(self._tokenizer, em.is_content),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=mm_data,
@@ -864,7 +865,7 @@ class Qwen3VLRenderer:
             token_ids=em.token_ids,
             message_indices=em.message_indices,
             sampled_mask=em.sampled,
-            is_content=em.is_content,
+            is_content=_content_mask_or_empty(self._tokenizer, em.is_content),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
             multi_modal_data=mm_data,

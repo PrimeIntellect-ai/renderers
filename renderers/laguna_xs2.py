@@ -57,6 +57,8 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     Tokenizer,
+    _content_mask_or_empty,
+    _infer_offsets_from_decode,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -327,7 +329,7 @@ class LagunaXS2Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
@@ -484,7 +486,9 @@ class LagunaXS2Renderer:
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=[False] * len(previous_ids) + ext_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer, [False] * len(previous_ids) + ext_content
+            ),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
         )
@@ -781,12 +785,52 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
                 tool_text += "</available_tools>"
                 header_segs.append((tool_text, False))
             header_segs.append(("</system>\n", False))
-            for tok_id, is_content in attribute_text_segments(
+            attributed = attribute_text_segments(
                 self._tokenizer, header_segs, overlap_is_content=True
-            ):
+            )
+            fallback_indices: list[int] | None = None
+            if not attributed.has_content_attribution:
+                full_header = "".join(text for text, _ in header_segs)
+                offsets = _infer_offsets_from_decode(
+                    self._tokenizer,
+                    [token_id for token_id, _ in attributed],
+                    full_header,
+                )
+                if offsets is None:
+                    fallback_index = 0 if caller_has_system and has_sys_content else -1
+                    fallback_indices = [fallback_index] * len(attributed)
+                else:
+                    content_spans: list[tuple[int, int]] = []
+                    position = 0
+                    for text, is_content in header_segs:
+                        end = position + len(text)
+                        if is_content:
+                            content_spans.append((position, end))
+                        position = end
+                    fallback_indices = [
+                        0
+                        if (
+                            any(
+                                span_start < end and start < span_end
+                                for span_start, span_end in content_spans
+                            )
+                            if end > start
+                            else any(
+                                span_start <= start < span_end
+                                for span_start, span_end in content_spans
+                            )
+                        )
+                        else -1
+                        for start, end in offsets
+                    ]
+            for position, (tok_id, is_content) in enumerate(attributed):
+                if fallback_indices is not None:
+                    message_index = fallback_indices[position]
+                else:
+                    message_index = 0 if is_content else -1
                 emit_special(
                     tok_id,
-                    0 if is_content else -1,
+                    message_index,
                     is_sampled=False,
                     is_content=is_content,
                 )
@@ -840,7 +884,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
@@ -958,7 +1002,9 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=[False] * len(previous_ids) + ext_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer, [False] * len(previous_ids) + ext_content
+            ),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
         )

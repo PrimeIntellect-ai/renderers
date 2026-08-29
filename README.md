@@ -19,11 +19,13 @@ uv add 'renderers[transformers]'
 uv add 'renderers[multimodal]'
 ```
 
-A BYO tokenizer must expose `encode`, `decode`, `convert_tokens_to_ids`, token
-IDs such as `eos_token_id`, and `return_offsets_mapping=True` through its call
-interface. `DefaultRenderer` additionally requires `apply_chat_template`.
-This includes text-only Inkling training: `InklingRenderer` loads its
-Transformers processor only when image or audio content is actually rendered.
+A BYO tokenizer must expose `encode`, `decode`, `convert_tokens_to_ids`, and
+token IDs such as `eos_token_id`. Character offsets are optional: tokenizers
+supporting `return_offsets_mapping=True` also receive precise per-token
+`is_content` attribution; without offsets, renderers return `is_content=[]`.
+`DefaultRenderer` additionally requires `apply_chat_template`. This includes
+text-only Inkling training: `InklingRenderer` loads its Transformers processor
+only when image or audio content is actually rendered.
 
 ## At a glance
 

@@ -737,7 +737,7 @@ def scenario_is_valid(
         and case.model in {"Qwen/Qwen3.5-0.8B", "Qwen/Qwen3.5-2B"}
     )
     if (
-        case.resolved_renderer in {"qwen3", "qwen3.5", "qwen3.6"}
+        case.resolved_renderer in {"qwen3", "qwen3.5", "qwen3.6", "qwen3.8"}
         and thinking_disabled
         and scenario.id
         in (

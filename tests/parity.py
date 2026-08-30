@@ -666,6 +666,7 @@ KWARG_VALUES: Mapping[str, tuple[Any, ...]] = {
         "low",
         "medium",
         "high",
+        "xhigh",
         "none",
         "minimal",
         "max",

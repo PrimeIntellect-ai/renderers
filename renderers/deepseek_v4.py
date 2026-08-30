@@ -22,13 +22,15 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
+    Tokenizer,
     ToolSpec,
+    _content_mask_or_empty,
+    _get_offset_tokenizer,
+    _infer_offsets_from_decode,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -288,7 +290,7 @@ class DeepSeekV4Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: DeepSeekV4RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
@@ -444,14 +446,6 @@ class DeepSeekV4Renderer:
                 pending_text.clear()
                 return
 
-            encoding = self._tokenizer(
-                full_text,
-                add_special_tokens=False,
-                return_offsets_mapping=True,
-            )
-            text_ids = list(encoding["input_ids"])
-            offsets = list(encoding["offset_mapping"])
-
             spans: list[tuple[int, int, int, bool, bool]] = []
             position = 0
             for text, message_index, sampled, content in pending_text:
@@ -459,6 +453,50 @@ class DeepSeekV4Renderer:
                 if end > position:
                     spans.append((position, end, message_index, sampled, content))
                 position = end
+
+            offset_tokenizer = _get_offset_tokenizer(self._tokenizer)
+            if offset_tokenizer is None:
+                text_ids = self._tokenizer.encode(
+                    full_text,
+                    add_special_tokens=False,
+                )
+                offsets = _infer_offsets_from_decode(
+                    self._tokenizer,
+                    text_ids,
+                    full_text,
+                )
+                has_content_attribution = False
+                if offsets is None:
+                    # Token IDs remain exact even when a lossy decoder makes
+                    # source boundaries unrecoverable. Text runs separated by
+                    # special tokens have one sampled state, so retain that
+                    # signal and associate the opaque run with a contributing
+                    # caller message.
+                    fallback_message_index = next(
+                        (
+                            span_message_index
+                            for _, _, span_message_index, _, _ in spans
+                            if span_message_index >= 0
+                        ),
+                        spans[-1][2] if spans else -1,
+                    )
+                    fallback_sampled = spans[-1][3] if spans else False
+                    emit_ids(
+                        text_ids,
+                        fallback_message_index,
+                        sampled=fallback_sampled,
+                    )
+                    pending_text.clear()
+                    return
+            else:
+                encoding = offset_tokenizer(
+                    full_text,
+                    add_special_tokens=False,
+                    return_offsets_mapping=True,
+                )
+                text_ids = list(encoding["input_ids"])
+                offsets = list(encoding["offset_mapping"])
+                has_content_attribution = True
 
             fallback = spans[-1][2:] if spans else (-1, False, False)
             for token_id, (start, end) in zip(text_ids, offsets):
@@ -479,7 +517,7 @@ class DeepSeekV4Renderer:
                         break
 
                 message_index, sampled, content = metadata
-                if end > start:
+                if has_content_attribution and end > start:
                     # Preserve every body byte when a BPE token straddles a
                     # scaffold/content boundary. This intentionally permits a
                     # few adjacent scaffold bytes to share the content bit.
@@ -488,6 +526,8 @@ class DeepSeekV4Renderer:
                         for span_start, span_end, _, _, span_content in spans
                         if span_start < end and start < span_end
                     )
+                elif not has_content_attribution:
+                    content = False
                 emit_ids(
                     [token_id],
                     message_index,
@@ -714,7 +754,7 @@ class DeepSeekV4Renderer:
             token_ids=token_ids,
             message_indices=message_indices,
             sampled_mask=sampled_mask,
-            is_content=is_content,
+            is_content=_content_mask_or_empty(self._tokenizer, is_content),
             message_roles=[message.get("role") or "" for message in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
@@ -800,7 +840,10 @@ class DeepSeekV4Renderer:
             token_ids=previous_ids + extension.token_ids,
             message_indices=[-1] * prior_length + extension.message_indices,
             sampled_mask=[False] * (prior_length + len(extension.token_ids)),
-            is_content=[False] * prior_length + extension.is_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer,
+                [False] * prior_length + extension.is_content,
+            ),
             message_roles=extension.message_roles,
             message_tool_names=extension.message_tool_names,
         )

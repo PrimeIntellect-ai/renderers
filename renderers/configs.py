@@ -954,7 +954,11 @@ class DeepSeekV4RendererConfig(BaseRendererConfig):
     """
 
     reasoning_effort: Literal["low", "high", "max"] = "low"
-    """Thinking-only effort prefix; ``low`` adds no text."""
+    """Thinking-only effort prefix; ``low`` adds no text.
+
+    ``low`` is the checkpoint Python encoder's default. DeepSeek's hosted API
+    independently defaults its thinking effort to ``high``.
+    """
 
     @model_validator(mode="after")
     def _check_thinking_retention(self):

@@ -1,12 +1,7 @@
 """Renderer-based generate client for vLLM's /inference/v1/generate.
 
-    messages → Renderer.render_ids() → token IDs → POST /inference/v1/generate
-    → completion tokens → Renderer.parse_response() → structured message
-
-When a RendererPool is passed instead of a single Renderer, the sync tokenization
-and parsing work is offloaded to threads for parallel execution across rollouts.
-HuggingFace fast tokenizers release the GIL during Rust encoding, so threads
-achieve real parallelism.
+messages → Renderer.render_ids() → token IDs → POST /inference/v1/generate
+→ completion tokens → Renderer.parse_response() → structured message
 """
 
 from __future__ import annotations
@@ -26,9 +21,9 @@ from renderers.base import (
     MultiModalData,
     RenderedTokens,
     Renderer,
-    RendererPool,
     ToolCallParseStatus,
     ToolSpec,
+    _require_transformers,
 )
 
 _request_logger = logging.getLogger("renderers.client")
@@ -113,20 +108,6 @@ async def _resolve_max_prompt_len(client: AsyncOpenAI, model: str) -> int | None
             break
         _max_prompt_len_cache[key] = value
         return value
-
-
-async def _maybe_offload(renderer: Renderer | RendererPool, fn):
-    """Run sync renderer work on a thread iff ``renderer`` is a pool.
-
-    A pool's methods can block on its internal queue/lock (size>1 / size=1
-    fast path respectively), so we ``asyncio.to_thread`` to avoid stalling
-    the event loop. A bare ``Renderer`` runs inline — used in tests where
-    event-loop responsiveness isn't a concern and the thread hop would
-    be pure overhead.
-    """
-    if isinstance(renderer, RendererPool):
-        return await asyncio.to_thread(fn)
-    return fn()
 
 
 def _strip_base64_field(raw: bytes, prefix: bytes) -> tuple[bytes, memoryview | None]:
@@ -214,7 +195,7 @@ def _parse_completion_logprobs(
 async def generate(
     *,
     client: AsyncOpenAI,
-    renderer: Renderer | RendererPool,
+    renderer: Renderer,
     messages: list[Message],
     model: str,
     prompt_ids: list[int] | None = None,
@@ -297,9 +278,7 @@ async def generate(
             rendered,
         )
 
-    prompt_ids, stop_token_ids, mm_data, prompt_attr = await _maybe_offload(
-        renderer, _prepare
-    )
+    prompt_ids, stop_token_ids, mm_data, prompt_attr = _prepare()
 
     if max_prompt_len is None:
         max_prompt_len = await _resolve_max_prompt_len(client, model)
@@ -355,9 +334,7 @@ async def generate(
 
     completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
 
-    parsed = await _maybe_offload(
-        renderer, lambda: renderer.parse_response(completion_ids, tools=tools)
-    )
+    parsed = renderer.parse_response(completion_ids, tools=tools)
 
     routed_experts = choice.get("routed_experts")
     kept_tokens = choice.get("kept_tokens")
@@ -404,7 +381,7 @@ async def generate(
 
 
 def _build_mm_features(
-    renderer: Renderer | RendererPool,
+    renderer: Renderer,
     mm_data: MultiModalData,
 ) -> dict[str, Any] | None:
     """Serialize ``MultiModalData`` to vLLM's ``/inference/v1/generate`` features payload.
@@ -432,12 +409,7 @@ def _build_mm_features(
     from renderers.qwen3_vl import Qwen3VLRenderer
     from renderers.qwen35 import Qwen35Renderer
 
-    # Type dispatch only needs the renderer class. Pools expose
-    # ``renderer_cls`` as a snapshot attribute, so we don't have to check
-    # out a slot just to read ``type(r)``.
-    renderer_cls = (
-        renderer.renderer_cls if isinstance(renderer, RendererPool) else type(renderer)
-    )
+    renderer_cls = type(renderer)
 
     # Qwen3-VL and Qwen3.5 both ship ``pixel_values`` + ``image_grid_thw``
     # via the shared Qwen2-VL field factory. ``spatial_merge_size=2`` is
@@ -461,6 +433,7 @@ def _build_gemma4_features(mm_data: MultiModalData) -> dict[str, Any]:
     renderer output faithful to the HF processor and translate at this
     engine-specific boundary.
     """
+    _require_transformers("Encoding Gemma 4 multimodal features for vLLM")
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature
@@ -529,6 +502,7 @@ def _build_qwen_vl_features(
     Returns ``None`` semantics live one level up — this helper assumes
     the caller already verified ``mm_data`` is non-empty.
     """
+    _require_transformers("Encoding Qwen-VL multimodal features for vLLM")
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature

@@ -11,9 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
+    ChatTemplateTokenizer,
     Message,
     ParsedResponse,
     RenderedTokens,
@@ -92,7 +91,7 @@ class DefaultRenderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: ChatTemplateTokenizer,
         config: DefaultRendererConfig | None = None,
     ):
         cfg = config or DefaultRendererConfig()

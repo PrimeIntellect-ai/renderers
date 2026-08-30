@@ -24,8 +24,6 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Message,
     MultiModalData,
@@ -35,6 +33,9 @@ from renderers.base import (
     RenderedTokens,
     ToolCallParseStatus,
     ToolSpec,
+    Tokenizer,
+    _content_mask_or_empty,
+    _require_transformers,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -431,7 +432,7 @@ class Gemma4Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: Gemma4RendererConfig | None = None,
         *,
         processor: Any = None,
@@ -500,8 +501,6 @@ class Gemma4Renderer:
     def _get_processor(self):
         if self._processor is not None:
             return self._processor
-        from transformers import AutoProcessor
-
         name = getattr(self._tokenizer, "name_or_path", None)
         if not name:
             raise RuntimeError(
@@ -509,8 +508,9 @@ class Gemma4Renderer:
                 "processor=AutoProcessor.from_pretrained(...) or use a tokenizer "
                 "with a known name_or_path."
             )
+        transformers = _require_transformers("Auto-loading a Gemma 4 processor")
         try:
-            self._processor = AutoProcessor.from_pretrained(name)
+            self._processor = transformers.AutoProcessor.from_pretrained(name)
         except (ImportError, ValueError) as exc:
             raise RuntimeError(
                 "Gemma 4 image rendering requires a Transformers release with "
@@ -1026,7 +1026,7 @@ class Gemma4Renderer:
             token_ids=em.token_ids,
             message_indices=em.message_indices,
             sampled_mask=em.sampled,
-            is_content=em.is_content,
+            is_content=_content_mask_or_empty(self._tokenizer, em.is_content),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=multi_modal_data,
@@ -1357,7 +1357,7 @@ class Gemma4Renderer:
             token_ids=em.token_ids,
             message_indices=em.message_indices,
             sampled_mask=em.sampled,
-            is_content=em.is_content,
+            is_content=_content_mask_or_empty(self._tokenizer, em.is_content),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
             multi_modal_data=self._merge_multi_modal_data(

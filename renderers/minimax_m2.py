@@ -14,13 +14,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
+    _content_mask_or_empty,
+    _get_offset_tokenizer,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -57,7 +58,7 @@ class MiniMaxM2Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: MiniMaxM2RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
@@ -165,9 +166,14 @@ class MiniMaxM2Renderer:
             BPE merges it with the wrap's trailing byte (``>The`` →
             single token).
             """
-            from renderers.base import _get_offset_tokenizer
-
             offset_tok = _get_offset_tokenizer(self._tokenizer)
+            if offset_tok is None:
+                ids = self._encode(full_text)
+                tokens.extend(ids)
+                indices.extend([msg_idx] * len(ids))
+                sampled.extend([is_sampled] * len(ids))
+                content_mask.extend([False] * len(ids))
+                return
             encoding = offset_tok(
                 full_text, add_special_tokens=False, return_offsets_mapping=True
             )
@@ -275,7 +281,7 @@ class MiniMaxM2Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
@@ -401,9 +407,14 @@ class MiniMaxM2Renderer:
             *,
             is_sampled: bool,
         ) -> None:
-            from renderers.base import _get_offset_tokenizer
-
             offset_tok = _get_offset_tokenizer(self._tokenizer)
+            if offset_tok is None:
+                ids = self._encode(full_text)
+                ext.extend(ids)
+                ext_indices.extend([msg_idx] * len(ids))
+                ext_sampled.extend([is_sampled] * len(ids))
+                ext_content.extend([False] * len(ids))
+                return
             encoding = offset_tok(
                 full_text, add_special_tokens=False, return_offsets_mapping=True
             )
@@ -463,7 +474,9 @@ class MiniMaxM2Renderer:
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=[False] * len(previous_ids) + ext_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer, [False] * len(previous_ids) + ext_content
+            ),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
         )

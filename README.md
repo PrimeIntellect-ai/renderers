@@ -10,13 +10,30 @@ Standalone on PyPI, and portable across training and inference stacks (transform
 uv add renderers
 ```
 
+The base install supports text renderers with a bring-your-own tokenizer. Add
+the Hugging Face integration for the tokenizer-loading helpers, or the complete
+media stack for image/audio rendering:
+
+```bash
+uv add 'renderers[transformers]'
+uv add 'renderers[multimodal]'
+```
+
+A BYO tokenizer must expose `encode`, `decode`, `convert_tokens_to_ids`, and
+token IDs such as `eos_token_id`. Character offsets are optional: tokenizers
+supporting `return_offsets_mapping=True` also receive precise per-token
+`is_content` attribution; without offsets, renderers return `is_content=[]`.
+`DefaultRenderer` additionally requires `apply_chat_template`. This includes
+text-only Inkling training: `InklingRenderer` loads its Transformers processor
+only when image or audio content is actually rendered.
+
 ## At a glance
 
 ```python
-from transformers import AutoTokenizer
 from renderers import create_renderer
+from renderers.base import load_tokenizer
 
-tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
+tok = load_tokenizer("Qwen/Qwen3-8B")              # renderers[transformers]
 r = create_renderer(tok)                            # → Qwen3Renderer (auto-resolved)
 
 prompt_ids = r.render_ids(
@@ -76,17 +93,10 @@ r = create_renderer(tok)                # AutoRendererConfig is the implicit def
 
 Auto-detect matches `tokenizer.name_or_path` against `MODEL_RENDERER_MAP` by **exact match**. Prefix matching is intentionally off — same architecture can ship different chat templates (base vs instruct, fine-tune renames). Fine-tunes must pass an explicit typed config (e.g. `Qwen3RendererConfig()`). Unknown text-only names fall back to `DefaultRenderer`, unless `AutoRendererConfig(thinking_retention=...)` was set; the default renderer cannot implement that bridge policy.
 
-### Pools
-
-```python
-from renderers import create_renderer_pool
-
-pool = create_renderer_pool("Qwen/Qwen3-8B", size=16)
-with pool.checkout() as r:
-    ids = r.render_ids(messages)
-```
-
-Each slot owns its own tokenizer copy. Construction fans out across a thread pool so a 32-slot pool doesn't serially eat ~10–15s of `from_pretrained` calls at startup.
+Without the `transformers` extra, exact-match registered models still
+auto-resolve. For an unknown name, renderers cannot safely probe `AutoConfig`
+to distinguish a text model from an unknown VLM; pass an explicit typed config
+such as `DefaultRendererConfig()` for a known text-only model.
 
 ## Why use a renderer
 
@@ -109,7 +119,7 @@ Each break fragments a rollout into multiple training samples — every fragment
 
 ## Typed renderer configs
 
-Each renderer accepts a typed pydantic config at construction. Some fields mirror chat-template kwargs; others configure renderer-only behavior such as image caching, parsers, or Harmony preamble construction. `create_renderer` and `create_renderer_pool` take one positional `config` argument and an optional keyword-only `chat_template_kwargs` mapping:
+Each renderer accepts a typed pydantic config at construction. Some fields mirror chat-template kwargs; others configure renderer-only behavior such as image caching, parsers, or Harmony preamble construction. `create_renderer` takes one positional `config` argument and an optional keyword-only `chat_template_kwargs` mapping:
 
 ```python
 from renderers import (
@@ -159,7 +169,7 @@ Fallback for unsupported text-only models. Wraps `apply_chat_template` and accep
 
 ## Roadmap
 
-- **VLM expansion.** `ImagePart` support exists for Qwen3-VL, Qwen3.5-family, Gemma 4, and Kimi K2.5 / K2.6 multimodal templates. Remaining work: audio/video support, broader VLM coverage, and more RL validation. Gemma 4 image preprocessing requires a Transformers release that provides `Gemma4Processor`.
+- **VLM expansion.** `ImagePart` support exists for Qwen3-VL, Qwen3.5-family, Gemma 4, and Kimi K2.5 / K2.6 multimodal templates. Install `renderers[multimodal]` for Pillow and the Hugging Face processors. Remaining work: audio/video support, broader VLM coverage, and more RL validation. Gemma 4 image preprocessing requires a Transformers release that provides `Gemma4Processor`.
 - **Patched chat templates.** Some shipped templates re-tokenize history or normalize JSON in ways that break token identity. Plan: a `use_patched` opt-in per renderer that renders the same surface form while avoiding known-bad patterns. (Auto-stripping thinking from past turns is *not* one of these — that's intended template behaviour the renderer reproduces; use `thinking_retention` to override it.)
 
 ## Testing

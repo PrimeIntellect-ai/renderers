@@ -110,6 +110,16 @@ MODEL_CATALOG = (
         extra_suites={"disabled-thinking"},
     ),
     _model(
+        "Qwen/Qwen3.8-27B",
+        bridge=True,
+        extra_suites={"disabled-thinking"},
+    ),
+    _model(
+        "Qwen/Qwen3.8-Flash-Next",
+        bridge=True,
+        extra_suites={"disabled-thinking"},
+    ),
+    _model(
         "Qwen/Qwen3-VL-4B-Instruct",
         bridge=False,
         excluded={"tool-call-none"},

@@ -33,8 +33,6 @@ import json
 from typing import Any
 from urllib.parse import urlparse
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Message,
     MultiModalData,
@@ -42,6 +40,9 @@ from renderers.base import (
     PlaceholderRange,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
+    _content_mask_or_empty,
+    _require_transformers,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -277,8 +278,8 @@ class _Emitter:
             self.is_content.extend([first_ic] * len(ids))
             return
         # Mixed body/scaffold flush — encode once and attribute back to
-        # each segment via the fast tokenizer's offset_mapping. Requires
-        # a tokenizer (not just the encode fn) to look up offsets.
+        # each segment via offset_mapping when available. A basic tokenizer
+        # still preserves the joined token IDs but leaves attribution empty.
         assert self._tokenizer is not None, (
             "_Emitter mixed-is_content flush requires a tokenizer; "
             "pass one to the constructor."
@@ -311,7 +312,7 @@ class Qwen3VLRenderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: Qwen3VLRendererConfig | None = None,
         *,
         processor: Any = None,
@@ -375,8 +376,6 @@ class Qwen3VLRenderer:
     def _get_processor(self):
         if self._processor is not None:
             return self._processor
-        from transformers import AutoProcessor
-
         name = getattr(self._tokenizer, "name_or_path", None)
         if not name:
             raise RuntimeError(
@@ -385,7 +384,8 @@ class Qwen3VLRenderer:
                 "constructor, or load the tokenizer with a known name_or_path "
                 "so the processor can be auto-loaded."
             )
-        self._processor = AutoProcessor.from_pretrained(name)
+        transformers = _require_transformers("Auto-loading a Qwen3-VL processor")
+        self._processor = transformers.AutoProcessor.from_pretrained(name)
         return self._processor
 
     @staticmethod
@@ -620,7 +620,7 @@ class Qwen3VLRenderer:
             token_ids=em.token_ids,
             message_indices=em.message_indices,
             sampled_mask=em.sampled,
-            is_content=em.is_content,
+            is_content=_content_mask_or_empty(self._tokenizer, em.is_content),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=mm_data,
@@ -865,7 +865,7 @@ class Qwen3VLRenderer:
             token_ids=em.token_ids,
             message_indices=em.message_indices,
             sampled_mask=em.sampled,
-            is_content=em.is_content,
+            is_content=_content_mask_or_empty(self._tokenizer, em.is_content),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
             multi_modal_data=mm_data,

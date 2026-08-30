@@ -558,6 +558,31 @@ class InklingRendererConfig(BaseRendererConfig):
         return self
 
 
+class MuseGlimmerRendererConfig(BaseRendererConfig):
+    """Text-only renderer config for ``meta-models/Muse-Glimmer-30B``.
+
+    The checkpoint's Jinja template exposes four knobs.  Keeping them typed
+    here makes auto resolution deterministic and prevents unrelated template
+    kwargs from being silently accepted.  Muse preserves historical reasoning
+    verbatim, so its natural bridge policy is ``"all"``.
+    """
+
+    name: Literal["muse-glimmer"] = "muse-glimmer"
+    _template_fields = frozenset(
+        {
+            "reasoning_strength",
+            "knowledge_cutoff",
+            "current_date",
+            "tool_namespace_descriptions",
+        }
+    )
+
+    reasoning_strength: str = "high"
+    knowledge_cutoff: str = "2026-01-04"
+    current_date: str | None = None
+    tool_namespace_descriptions: dict[str, str] = Field(default_factory=dict)
+
+
 class GptOssRendererConfig(BaseRendererConfig):
     """OpenAI gpt-oss (harmony) renderer config.
 
@@ -947,6 +972,7 @@ RendererConfig = Annotated[
         GptOssRendererConfig,
         Hy3RendererConfig,
         InklingRendererConfig,
+        MuseGlimmerRendererConfig,
         KimiK2RendererConfig,
         KimiK25RendererConfig,
         LagunaXS2RendererConfig,
@@ -993,6 +1019,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "gpt-oss": GptOssRendererConfig,
     "hy3": Hy3RendererConfig,
     "inkling": InklingRendererConfig,
+    "muse-glimmer": MuseGlimmerRendererConfig,
     "kimi-k2": KimiK2RendererConfig,
     "kimi-k2.5": KimiK25RendererConfig,
     "laguna-xs.2": LagunaXS2RendererConfig,
@@ -1013,8 +1040,7 @@ def _config_class_for(name: str) -> type[BaseRendererConfig]:
     cls = _CONFIG_BY_NAME.get(name)
     if cls is None:
         raise ValueError(
-            f"No renderer config registered for name={name!r}. "
-            f"Known: {sorted(_CONFIG_BY_NAME)}"
+            f"No renderer config registered for name={name!r}. Known: {sorted(_CONFIG_BY_NAME)}"
         )
     return cls
 
@@ -1047,6 +1073,7 @@ __all__ = [
     "Hy3RendererConfig",
     "INKLING_EFFORT_MAP",
     "InklingRendererConfig",
+    "MuseGlimmerRendererConfig",
     "KimiK25RendererConfig",
     "KimiK2RendererConfig",
     "LagunaM1RendererConfig",

@@ -995,6 +995,10 @@ RENDERER_REGISTRY: dict[str, type] = {}
 # ``DefaultRenderer`` (which uses ``apply_chat_template`` verbatim) and
 # logs a loud INFO line with the chosen fallback.
 MODEL_RENDERER_MAP: dict[str, str] = {
+    # Muse Glimmer ATEM text protocol.  The checkpoint also advertises media
+    # placeholders, but this renderer intentionally rejects them: prime-rl's
+    # custom model implementation is text-only.
+    "meta-models/Muse-Glimmer-30B": "muse-glimmer",
     # Qwen3 — base and Instruct variants share the same chat template.
     "Qwen/Qwen3-0.6B": "qwen3",
     "Qwen/Qwen3-1.7B": "qwen3",
@@ -1345,10 +1349,10 @@ def _populate_registry():
     from renderers.deepseek_r1 import DeepSeekR1Renderer
     from renderers.deepseek_v3 import DeepSeekV3Renderer
     from renderers.default import DefaultRenderer
+    from renderers.gemma4 import Gemma4Renderer
     from renderers.glm5 import GLM5Renderer, GLM51Renderer
     from renderers.glm45 import GLM45Renderer
     from renderers.gpt_oss import GptOssRenderer
-    from renderers.gemma4 import Gemma4Renderer
     from renderers.hy3 import Hy3Renderer
     from renderers.inkling import InklingRenderer
     from renderers.kimi_k2 import KimiK2Renderer
@@ -1361,6 +1365,7 @@ def _populate_registry():
     )
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
+    from renderers.muse_glimmer import MuseGlimmerRenderer
     from renderers.nemotron3 import (
         Nemotron3Renderer,
         Nemotron3UltraRenderer,
@@ -1391,6 +1396,7 @@ def _populate_registry():
             "deepseek-r1": DeepSeekR1Renderer,
             "hy3": Hy3Renderer,
             "inkling": InklingRenderer,
+            "muse-glimmer": MuseGlimmerRenderer,
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
             "laguna-xs.2": LagunaXS2Renderer,

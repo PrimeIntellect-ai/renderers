@@ -412,6 +412,16 @@ async def generate(
     }
 
 
+_MEDIA_URL_TYPES = {
+    "image": "image_url",
+    "image_url": "image_url",
+    "audio": "audio_url",
+    "audio_url": "audio_url",
+    "video": "video_url",
+    "video_url": "video_url",
+}
+
+
 def _content_parts(messages: list[Message]) -> list[dict[str, Any]]:
     """Flatten raw media in prompt order for vLLM's token generate endpoint."""
     parts: list[dict[str, Any]] = []
@@ -423,13 +433,19 @@ def _content_parts(messages: list[Message]) -> list[dict[str, Any]]:
             if not isinstance(part, Mapping):
                 continue
             part_type = part.get("type")
-            if part_type not in ("image_url", "audio_url", "video_url"):
+            if part_type is None:
+                part_type = next(
+                    (key for key in _MEDIA_URL_TYPES if part.get(key)), None
+                )
+            if not isinstance(part_type, str) or part_type not in _MEDIA_URL_TYPES:
                 continue
             source = part.get(part_type)
-            url = source.get("url") if isinstance(source, Mapping) else part.get("url")
+            if source is None:
+                source = part.get(_MEDIA_URL_TYPES[part_type]) or part.get("url")
+            url = source.get("url") if isinstance(source, Mapping) else source
             if not isinstance(url, str) or not url:
                 raise ValueError(f"{part_type} content part is missing a URL")
-            parts.append({"type": part_type, "url": url})
+            parts.append({"type": _MEDIA_URL_TYPES[part_type], "url": url})
     return parts
 
 

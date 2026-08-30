@@ -514,3 +514,52 @@ def test_bridge_extends_a_single_tool_result_exactly():
         tools=TOOLS,
         add_generation_prompt=True,
     )
+
+
+def test_bridge_declines_at_developer_query_boundary_when_dropping_thinking():
+    renderer = _renderer(enable_thinking=True)
+    prior_messages = [{"role": "user", "content": "Q1"}]
+    answer = {
+        "role": "assistant",
+        "reasoning_content": "old reasoning",
+        "content": "A1",
+    }
+    new_messages = [{"role": "developer", "content": "Q2"}]
+    prompt = renderer.render_ids(prior_messages, add_generation_prompt=True)
+    completed = renderer.render_ids([*prior_messages, answer])
+    completion = completed[len(prompt) :]
+
+    assert renderer.bridge_to_next_turn(prompt, completion, new_messages) is None
+
+    full_messages = [*prior_messages, answer, *new_messages]
+    assert renderer.render_ids(
+        full_messages,
+        add_generation_prompt=True,
+    ) == render_reference(
+        _tokenizer(),
+        full_messages,
+        enable_thinking=True,
+        add_generation_prompt=True,
+    )
+
+
+def test_bridge_extends_developer_query_when_preserving_all_thinking():
+    renderer = _renderer(enable_thinking=True, drop_thinking=False)
+    prior_messages = [{"role": "user", "content": "Q1"}]
+    answer = {
+        "role": "assistant",
+        "reasoning_content": "retained reasoning",
+        "content": "A1",
+    }
+    new_messages = [{"role": "developer", "content": "Q2"}]
+    prompt = renderer.render_ids(prior_messages, add_generation_prompt=True)
+    completed = renderer.render_ids([*prior_messages, answer])
+    completion = completed[len(prompt) :]
+
+    bridged = renderer.bridge_to_next_turn(prompt, completion, new_messages)
+
+    assert bridged is not None
+    assert bridged.token_ids == renderer.render_ids(
+        [*prior_messages, answer, *new_messages],
+        add_generation_prompt=True,
+    )

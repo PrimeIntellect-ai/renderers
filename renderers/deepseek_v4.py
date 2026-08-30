@@ -49,6 +49,7 @@ _LATEST_REMINDER = "<｜latest_reminder｜>"
 _THINK_START = "<think>"
 _THINK_END = "</think>"
 _DSML = "｜DSML｜"
+_QUERY_ROLES = frozenset({"user", "developer"})
 
 _TASK_TOKENS = {
     "action": "<｜action｜>",
@@ -199,6 +200,11 @@ def _tool_function(tool: Mapping[str, Any]) -> Mapping[str, Any]:
 def _tool_call_function(tool_call: Mapping[str, Any]) -> Mapping[str, Any]:
     function = tool_call.get("function")
     return function if isinstance(function, Mapping) else tool_call
+
+
+def _is_query_message(message: Message) -> bool:
+    """Match the reference encoder's user/developer query boundary."""
+    return message.get("role") in _QUERY_ROLES
 
 
 def _prepare_messages(messages: list[Message]) -> list[_LogicalMessage]:
@@ -397,7 +403,7 @@ class DeepSeekV4Renderer:
                 (
                     index
                     for index, message in enumerate(logical_messages)
-                    if message.role in {"user", "developer"}
+                    if message.role in _QUERY_ROLES
                 ),
                 default=-1,
             )
@@ -570,10 +576,10 @@ class DeepSeekV4Renderer:
                 -1,
             )
 
-        last_user_index = -1
+        last_query_index = -1
         for index, message in enumerate(logical_messages):
-            if message.role in {"user", "developer"}:
-                last_user_index = index
+            if message.role in _QUERY_ROLES:
+                last_query_index = index
 
         tool_target: int | None = None
         if tools:
@@ -643,7 +649,7 @@ class DeepSeekV4Renderer:
                 keep_reasoning = (
                     self.config.enable_thinking
                     and not previous_has_task
-                    and (not effective_drop_thinking or index > last_user_index)
+                    and (not effective_drop_thinking or index > last_query_index)
                 )
                 if keep_reasoning:
                     emit_text(
@@ -738,11 +744,11 @@ class DeepSeekV4Renderer:
                 emit_special(self._task_ids[task], transition_msg_idx)
                 continue
 
-            if role not in {"user", "developer"}:
+            if role not in _QUERY_ROLES:
                 continue
             emit_special(self._assistant, transition_msg_idx)
             open_thinking = self.config.enable_thinking and (
-                not effective_drop_thinking or index >= last_user_index
+                not effective_drop_thinking or index >= last_query_index
             )
             emit_special(
                 self._think_start if open_thinking else self._think_end,
@@ -807,6 +813,7 @@ class DeepSeekV4Renderer:
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
             new_messages,
+            is_user_query=_is_query_message,
         ):
             return None
         # Full rendering sorts parallel tool results by IDs from the issuing

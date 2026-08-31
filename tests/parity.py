@@ -748,6 +748,7 @@ def scenario_is_valid(
     if (
         case.resolved_renderer in {"qwen3", "qwen3.5", "qwen3.6", "qwen3.8"}
         and thinking_disabled
+        and kwargs.get("preserve_thinking") is not True
         and scenario.id
         in (
             {

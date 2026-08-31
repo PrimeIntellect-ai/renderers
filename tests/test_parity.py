@@ -164,6 +164,30 @@ def test_catalog_routes_every_auto_model_to_its_declared_renderer():
             assert case.model in MODEL_RENDERER_MAP
 
 
+@pytest.mark.parametrize(
+    "model",
+    (
+        "Qwen/Qwen3.6-35B-A3B",
+        "Qwen/Qwen3.8-27B",
+        "Qwen/Qwen3.8-Flash-Next",
+    ),
+)
+def test_preserved_disabled_thinking_history_remains_in_parity_matrix(model: str):
+    case = next(case for case in MODEL_CATALOG if case.model == model)
+    scenario = next(scenario for scenario in SCENARIOS if scenario.id == "multi-turn")
+
+    assert scenario_is_valid(
+        case,
+        scenario,
+        {"enable_thinking": False, "preserve_thinking": True},
+    )
+    assert not scenario_is_valid(
+        case,
+        scenario,
+        {"enable_thinking": False, "preserve_thinking": False},
+    )
+
+
 @pytest.mark.parametrize("case,scenario,kwargs", tuple(_matrix()))
 def test_renderer_matches_reference(
     case: ModelCase,

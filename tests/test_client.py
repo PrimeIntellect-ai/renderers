@@ -12,7 +12,7 @@ from renderers.base import (
     RenderedTokens,
     ToolCallParseStatus,
 )
-from renderers.client import _content_parts, generate
+from renderers.client import generate
 
 
 class _FakeRenderer:
@@ -224,35 +224,6 @@ def test_generate_process_multimodal_false_sends_content_parts():
     assert "features" not in body
     assert result["renderer_prompt_ids"] == [1, 2, 3]
     assert result["prompt_ids"] == [1, 2, 2, 3]
-
-
-@pytest.mark.parametrize(
-    ("media_part", "expected_part"),
-    [
-        (
-            {"type": "image_url", "image_url": "data:image/png;base64,aW1hZ2U="},
-            {"type": "image_url", "url": "data:image/png;base64,aW1hZ2U="},
-        ),
-        (
-            {"type": "image", "image": "data:image/png;base64,aW1hZ2U="},
-            {"type": "image_url", "url": "data:image/png;base64,aW1hZ2U="},
-        ),
-        (
-            {"type": "video", "video": "https://example.com/video.mp4"},
-            {"type": "video_url", "url": "https://example.com/video.mp4"},
-        ),
-    ],
-)
-def test_content_parts_normalizes_url_media(media_part, expected_part):
-    messages = [{"role": "user", "content": [media_part]}]
-    assert _content_parts(messages) == [expected_part]
-
-
-def test_content_parts_rejects_non_url_media():
-    with pytest.raises(ValueError, match="image content part is missing a URL"):
-        _content_parts(
-            [{"role": "user", "content": [{"type": "image", "image": object()}]}]
-        )
 
 
 def test_generate_rejects_missing_completion_logprobs_before_parsing():

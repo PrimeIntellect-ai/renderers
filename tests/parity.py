@@ -8,6 +8,7 @@ from typing import Any, Iterable, Mapping
 
 from renderers.base import MODEL_RENDERER_MAP
 from renderers.configs import _config_class_for
+from tests.reference_rendering import reference_oracle_for_renderer
 
 
 TOOLS = [
@@ -32,7 +33,6 @@ TOOLS = [
 class ModelCase:
     model: str
     renderer: str = "auto"
-    oracle: str = "reference"
     suites: frozenset[str] = frozenset({"parity"})
     excluded_scenarios: frozenset[str] = frozenset()
     oracle_defaults: tuple[tuple[str, Any], ...] = ()
@@ -43,12 +43,15 @@ class ModelCase:
             return self.renderer
         return MODEL_RENDERER_MAP.get(self.model, "default")
 
+    @property
+    def oracle(self) -> str:
+        return reference_oracle_for_renderer(self.resolved_renderer)
+
 
 def _model(
     model: str,
     *,
     renderer: str = "auto",
-    oracle: str = "reference",
     shared: bool = True,
     roundtrip: bool = True,
     bridge: bool = False,
@@ -63,7 +66,10 @@ def _model(
         suites.add("roundtrip")
     if bridge:
         suites.add("bridge")
-    if oracle == "harmony":
+    resolved_renderer = (
+        MODEL_RENDERER_MAP.get(model, "default") if renderer == "auto" else renderer
+    )
+    if reference_oracle_for_renderer(resolved_renderer) == "harmony":
         suites.discard("plain-parser")
         suites.discard("build-helpers")
     if model.startswith("meta-llama/"):
@@ -72,7 +78,6 @@ def _model(
     return ModelCase(
         model=model,
         renderer=renderer,
-        oracle=oracle,
         suites=frozenset(suites),
         excluded_scenarios=frozenset(excluded),
         oracle_defaults=tuple((oracle_defaults or {}).items()),
@@ -246,7 +251,6 @@ MODEL_CATALOG = (
     _model(
         "openai/gpt-oss-20b",
         renderer="gpt-oss",
-        oracle="harmony",
         bridge=True,
         excluded={"multi-step-tool-cycle"},
     ),
@@ -693,7 +697,7 @@ KWARG_VALUES: Mapping[str, tuple[Any, ...]] = {
     "render_assistant_messages_raw": (True, False),
     "add_vision_id": (True, False),
     "preserve_thinking": (True, False),
-    "conversation_start_date": ("2025-01-15",),
+    "conversation_start_date": ("2025-01-15", None),
     "date_string": ("26 Jul 2024", "01 Jan 2030"),
     "tools_in_user_message": (True, False),
 }

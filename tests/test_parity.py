@@ -10,10 +10,10 @@ its shipped Python encoder, and GPT-OSS uses Harmony.
 
 from __future__ import annotations
 
-import json
-from datetime import datetime
+from enum import Enum
 from functools import lru_cache
-from typing import Any, Mapping, cast
+from types import UnionType
+from typing import Annotated, Any, Literal, Mapping, Union, cast, get_args, get_origin
 
 import pytest
 
@@ -29,7 +29,14 @@ from parity import (
 from renderers import create_renderer
 from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
 from renderers.configs import RendererConfig, _config_class_for
-from tests.reference_rendering import render_reference
+from tests.reference_rendering import (
+    DEFAULT_REFERENCE_ORACLE,
+    REFERENCE_ORACLES,
+    RENDERER_ORACLE_ROUTES,
+    reference_oracle_for_model,
+    reference_oracle_for_renderer,
+    render_reference,
+)
 
 
 def _id(case: ModelCase, scenario: Scenario, kwargs: Mapping[str, Any]) -> str:
@@ -69,159 +76,33 @@ def _renderer(model: str, renderer_name: str, items: tuple[tuple[str, Any], ...]
     return create_renderer(tokenizer, config, chat_template_kwargs=kwargs or None)
 
 
-def _expected_reference(
-    tokenizer,
-    scenario: Scenario,
-    kwargs: Mapping[str, Any],
-) -> list[int]:
-    # Config ``None`` values mean "defer to the reference default"; omission
-    # expresses the same state for each model-aware oracle.
-    explicit_kwargs = {key: value for key, value in kwargs.items() if value is not None}
-    return render_reference(
-        tokenizer,
-        [dict(message) for message in scenario.messages],
-        **explicit_kwargs,
-        **scenario.render_kwargs,
-    )
+def _required_annotation_values(annotation: Any) -> tuple[Any, ...]:
+    """Return every finite value explicitly declared by a field annotation.
 
-
-def _harmony_tool_description(tool):
-    from openai_harmony import ToolDescription
-
-    fn = tool.get("function", tool)
-    return ToolDescription.new(
-        name=fn.get("name", ""),
-        description=fn.get("description", ""),
-        parameters=fn.get("parameters") or {},
-    )
-
-
-def _harmony_messages(scenario: Scenario, kwargs: Mapping[str, Any]):
-    from openai_harmony import (
-        Author,
-        DeveloperContent,
-        Message,
-        ReasoningEffort,
-        Role,
-        SystemContent,
-    )
-
-    effort = {
-        "low": ReasoningEffort.LOW,
-        "medium": ReasoningEffort.MEDIUM,
-        "high": ReasoningEffort.HIGH,
-    }[kwargs.get("reasoning_effort", "medium")]
-    system = (
-        SystemContent.new()
-        .with_reasoning_effort(effort)
-        .with_conversation_start_date(
-            kwargs.get("conversation_start_date") or datetime.now().strftime("%Y-%m-%d")
+    Open domains such as ``str`` and ``float`` intentionally contribute no
+    values; ``KWARG_VALUES`` still supplies representative samples for them.
+    Finite branches (``Literal``, ``Enum``, ``bool``, and ``None``) are
+    exhaustive, even when nested inside ``Annotated`` or a union with an open
+    domain.
+    """
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return _required_annotation_values(get_args(annotation)[0])
+    if origin is Literal:
+        return get_args(annotation)
+    if annotation is bool:
+        return (True, False)
+    if annotation is type(None):
+        return (None,)
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        return tuple(member.value for member in annotation)
+    if origin in {Union, UnionType}:
+        return tuple(
+            value
+            for member in get_args(annotation)
+            for value in _required_annotation_values(member)
         )
-    )
-    out = [Message.from_role_and_content(Role.SYSTEM, system)]
-    messages = list(scenario.messages)
-    first_system = next(
-        (
-            index
-            for index, message in enumerate(messages)
-            if message["role"] == "system"
-        ),
-        None,
-    )
-    if first_system is not None or scenario.tools:
-        developer = DeveloperContent.new()
-        if first_system is not None and messages[first_system].get("content"):
-            developer = developer.with_instructions(messages[first_system]["content"])
-        if scenario.tools:
-            developer = developer.with_function_tools(
-                [_harmony_tool_description(tool) for tool in scenario.tools]
-            )
-        out.append(Message.from_role_and_content(Role.DEVELOPER, developer))
-
-    for index, message in enumerate(messages):
-        if index == first_system:
-            continue
-        role = message["role"]
-        content = message.get("content") or ""
-        if role == "user":
-            out.append(Message.from_role_and_content(Role.USER, content))
-            continue
-        if role in {"system", "developer"}:
-            developer = DeveloperContent.new().with_instructions(content)
-            out.append(Message.from_role_and_content(Role.DEVELOPER, developer))
-            continue
-        if role == "tool":
-            name = message.get("name") or "unknown"
-            if not name.startswith("functions."):
-                name = f"functions.{name}"
-            tool_message = Message.from_author_and_content(
-                Author.new(Role.TOOL, name), content
-            )
-            out.append(
-                tool_message.with_recipient("assistant").with_channel("commentary")
-            )
-            continue
-        if role != "assistant":
-            raise AssertionError(f"Harmony oracle does not support role={role!r}")
-
-        tool_calls = message.get("tool_calls") or []
-        later_final = any(
-            later.get("role") == "assistant"
-            and not later.get("tool_calls")
-            and bool(later.get("content"))
-            for later in messages[index + 1 :]
-        )
-        reasoning = message.get("reasoning_content")
-        if reasoning and tool_calls and not later_final:
-            out.append(
-                Message.from_role_and_content(Role.ASSISTANT, reasoning).with_channel(
-                    "analysis"
-                )
-            )
-        if content:
-            out.append(
-                Message.from_role_and_content(Role.ASSISTANT, content).with_channel(
-                    "final"
-                )
-            )
-        for tool_call in tool_calls:
-            fn = tool_call.get("function", tool_call)
-            arguments = fn.get("arguments", {})
-            if not isinstance(arguments, str):
-                arguments = json.dumps(arguments, ensure_ascii=False)
-            name = fn.get("name", "")
-            if not name.startswith("functions."):
-                name = f"functions.{name}"
-            out.append(
-                Message.from_role_and_content(Role.ASSISTANT, arguments)
-                .with_channel("commentary")
-                .with_recipient(name)
-            )
-        if not content and not tool_calls and not reasoning:
-            out.append(
-                Message.from_role_and_content(Role.ASSISTANT, "").with_channel("final")
-            )
-    return out
-
-
-def _expected_harmony(scenario: Scenario, kwargs: Mapping[str, Any]) -> list[int]:
-    from openai_harmony import (
-        Conversation,
-        HarmonyEncodingName,
-        Role,
-        load_harmony_encoding,
-    )
-
-    encoder = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
-    conversation = Conversation.from_messages(_harmony_messages(scenario, kwargs))
-    if scenario.add_generation_prompt:
-        prompt = encoder.render_conversation_for_completion(
-            conversation, next_turn_role=Role.ASSISTANT
-        )
-        return prompt + encoder.encode(
-            "<|channel|>analysis<|message|>", allowed_special="all"
-        )
-    return encoder.render_conversation_for_training(conversation)
+    return ()
 
 
 def test_catalog_covers_every_declared_kwarg():
@@ -231,6 +112,50 @@ def test_catalog_covers_every_declared_kwarg():
         for field in _config_class_for(case.resolved_renderer).template_field_names()
     }
     assert declared <= KWARG_VALUES.keys()
+
+
+def test_catalog_covers_every_finite_declared_kwarg_value():
+    missing = []
+    config_classes = {
+        _config_class_for(case.resolved_renderer) for case in MODEL_CATALOG
+    }
+    for config_cls in sorted(config_classes, key=lambda cls: cls.__name__):
+        for field in sorted(config_cls.template_field_names()):
+            annotation = config_cls.model_fields[field].annotation
+            absent = tuple(
+                value
+                for value in _required_annotation_values(annotation)
+                if value not in KWARG_VALUES[field]
+            )
+            if absent:
+                missing.append(f"{config_cls.__name__}.{field}: {absent!r}")
+
+    assert not missing, "KWARG_VALUES omits declared finite values:\n" + "\n".join(
+        missing
+    )
+
+
+def test_oracle_routes_resolve_to_registered_adapters():
+    assert DEFAULT_REFERENCE_ORACLE in REFERENCE_ORACLES
+    assert set(RENDERER_ORACLE_ROUTES.values()) <= REFERENCE_ORACLES.keys()
+    assert all(name == oracle.name for name, oracle in REFERENCE_ORACLES.items())
+    for renderer_name in RENDERER_ORACLE_ROUTES:
+        _config_class_for(renderer_name)
+    for case in MODEL_CATALOG:
+        assert case.oracle == reference_oracle_for_renderer(case.resolved_renderer)
+
+
+@pytest.mark.parametrize(
+    ("model", "oracle"),
+    (
+        ("deepseek-ai/DeepSeek-V4-Flash-0731", "deepseek-v4"),
+        ("openai/gpt-oss-20b", "harmony"),
+        ("openai/gpt-oss-120b", "harmony"),
+        ("unmapped/example", DEFAULT_REFERENCE_ORACLE),
+    ),
+)
+def test_model_oracle_routing(model: str, oracle: str):
+    assert reference_oracle_for_model(model) == oracle
 
 
 def test_catalog_routes_every_auto_model_to_its_declared_renderer():
@@ -251,14 +176,20 @@ def test_renderer_matches_reference(
         if value is not None:
             assert getattr(renderer.config, key) == value
 
-    if case.oracle == "harmony":
-        expected = _expected_harmony(scenario, kwargs)
-    elif case.oracle == "reference":
-        oracle_kwargs = dict(case.oracle_defaults)
-        oracle_kwargs.update(kwargs)
-        expected = _expected_reference(tokenizer, scenario, oracle_kwargs)
-    else:
-        raise AssertionError(f"Unknown reference oracle: {case.oracle!r}")
+    oracle_kwargs = dict(case.oracle_defaults)
+    oracle_kwargs.update(kwargs)
+    # Config ``None`` values mean "defer to the oracle default"; omission
+    # expresses the same state for every registered adapter.
+    oracle_kwargs = {
+        key: value for key, value in oracle_kwargs.items() if value is not None
+    }
+    expected = render_reference(
+        tokenizer,
+        [dict(message) for message in scenario.messages],
+        oracle=case.oracle,
+        **oracle_kwargs,
+        **scenario.render_kwargs,
+    )
     got = renderer.render_ids(list(scenario.messages), **scenario.render_kwargs)
     assert got == expected, (
         f"{case.model} / {scenario.id} / {dict(kwargs)!r}: renderer diverged "

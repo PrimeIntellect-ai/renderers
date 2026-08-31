@@ -1149,6 +1149,196 @@ def _parse_deepseek_tool_calls(
     return tool_calls
 
 
+# ── DeepSeek V4: DSML tool calls + single-token </think> ────────────
+
+
+def parse_deepseek_v4(
+    tokenizer,
+    token_ids: list[int],
+    *,
+    stop_ids: set[int],
+    thinking_enabled: bool,
+    think_end_id: int,
+    dsml_id: int,
+) -> ParsedResponse:
+    """Parse a DeepSeek V4 completion.
+
+    Thinking mode prefills ``<think>`` in the prompt, so the completion starts
+    with reasoning and closes it with the single-token ``</think>``.  Tool
+    calls use DSML markup; the ``｜DSML｜`` marker is a special token, and the
+    decoded grammar carries an explicit ``string=`` flag for lossless argument
+    type recovery.
+    """
+    ids = _strip_stop_tokens(token_ids, stop_ids)
+
+    reasoning: str | None = None
+    content_offset = 0
+    if thinking_enabled:
+        think_end = _find(ids, think_end_id)
+        if think_end == -1:
+            return ParsedResponse(
+                content="",
+                reasoning_content=_decode(tokenizer, ids) or None,
+                tool_calls=[],
+            )
+        reasoning = _decode(tokenizer, ids[:think_end])
+        content_offset = think_end + 1
+
+    content_ids = ids[content_offset:]
+    decoded = _decode(tokenizer, content_ids)
+    section_marker = "\n\n<｜DSML｜tool_calls>"
+    section_pos = decoded.find(section_marker)
+    if section_pos == -1 or dsml_id not in content_ids:
+        return ParsedResponse(
+            content=decoded,
+            reasoning_content=reasoning or None,
+            tool_calls=[],
+        )
+
+    content = decoded[:section_pos]
+    section_text = decoded[section_pos:]
+    section_token_offset = content_offset + _decoded_char_to_token_index(
+        tokenizer,
+        content_ids,
+        section_pos,
+    )
+    tool_calls = _parse_deepseek_v4_tool_calls(
+        tokenizer,
+        section_text,
+        ids[section_token_offset:],
+        section_offset=section_token_offset,
+    )
+    return ParsedResponse(
+        content=content,
+        reasoning_content=reasoning or None,
+        tool_calls=tool_calls,
+    )
+
+
+def _decoded_char_to_token_index(tokenizer, ids: list[int], char_index: int) -> int:
+    """Return the first token boundary at or beyond a decoded char offset."""
+    if char_index <= 0:
+        return 0
+    for boundary in range(1, len(ids) + 1):
+        if len(_decode(tokenizer, ids[:boundary])) >= char_index:
+            return boundary
+    return len(ids)
+
+
+def _parse_deepseek_v4_tool_calls(
+    tokenizer,
+    section_text: str,
+    section_ids: list[int],
+    *,
+    section_offset: int,
+) -> list[ParsedToolCall]:
+    """Parse every DSML ``invoke`` attempt from one tool-calls section."""
+    import re
+
+    invoke_start = '<｜DSML｜invoke name="'
+    invoke_end = "</｜DSML｜invoke>"
+    section_end = "</｜DSML｜tool_calls>"
+    parameter_pattern = re.compile(
+        r'<｜DSML｜parameter name="(.*?)" string="(true|false)">'
+        r"(.*?)</｜DSML｜parameter>",
+        re.DOTALL,
+    )
+
+    tool_calls: list[ParsedToolCall] = []
+    outer_end = section_text.find(section_end)
+    for invoke_match in re.finditer(r"<｜DSML｜invoke", section_text):
+        start = invoke_match.start()
+        if outer_end != -1 and outer_end < start:
+            break
+
+        close = section_text.find(invoke_end, start + len(invoke_start))
+        unclosed = close == -1 or (outer_end != -1 and outer_end < close)
+        block_end = outer_end if unclosed and outer_end != -1 else len(section_text)
+        if not unclosed:
+            block_end = close + len(invoke_end)
+        raw = section_text[start:block_end]
+
+        token_start = _decoded_char_to_token_index(tokenizer, section_ids, start)
+        token_end = _decoded_char_to_token_index(tokenizer, section_ids, block_end)
+        span = (section_offset + token_start, section_offset + token_end)
+
+        header_end = section_text.find(">\n", start, block_end)
+        name: str | None = None
+        malformed = False
+        if header_end == -1:
+            malformed = True
+            body = ""
+        else:
+            header = section_text[start : header_end + 2]
+            name_match = re.fullmatch(
+                r'<｜DSML｜invoke name="(.*?)">\n',
+                header,
+                flags=re.DOTALL,
+            )
+            if name_match:
+                name = name_match.group(1)
+            else:
+                malformed = True
+            body_end = close if not unclosed else block_end
+            body = section_text[header_end + 2 : body_end]
+
+        arguments: dict[str, Any] = {}
+        invalid_json = False
+        matched_ranges: list[tuple[int, int]] = []
+        for match in parameter_pattern.finditer(body):
+            key, is_string, raw_value = match.groups()
+            matched_ranges.append(match.span())
+            if key in arguments:
+                malformed = True
+                continue
+            if is_string == "true":
+                arguments[key] = raw_value
+            else:
+                try:
+                    arguments[key] = json.loads(raw_value)
+                except (json.JSONDecodeError, ValueError):
+                    arguments[key] = raw_value
+                    invalid_json = True
+
+        remainder_parts: list[str] = []
+        previous_end = 0
+        for match_start, match_end in matched_ranges:
+            remainder_parts.append(body[previous_end:match_start])
+            previous_end = match_end
+        remainder_parts.append(body[previous_end:])
+        remainder = "".join(remainder_parts)
+        # The canonical form has one newline before ``</invoke>`` and newlines
+        # between parameters.  Anything else left after removing parameter
+        # blocks is structural debris.
+        if remainder.strip("\n"):
+            malformed = True
+
+        if unclosed:
+            status = ToolCallParseStatus.UNCLOSED_BLOCK
+        elif not name:
+            status = ToolCallParseStatus.MISSING_NAME
+        elif malformed:
+            status = ToolCallParseStatus.MALFORMED_STRUCTURE
+        elif invalid_json:
+            status = ToolCallParseStatus.INVALID_JSON
+        else:
+            status = ToolCallParseStatus.OK
+
+        tool_calls.append(
+            ParsedToolCall(
+                raw=raw,
+                name=name,
+                arguments=arguments,
+                token_span=span,
+                status=status,
+            )
+        )
+        if unclosed:
+            break
+
+    return tool_calls
+
+
 # ── MiniMax: <minimax:tool_call> ... </minimax:tool_call> ────────────
 
 

@@ -42,6 +42,7 @@ _ROUNDTRIP_MODELS = [
     ("zai-org/GLM-5.1", "auto"),
     ("zai-org/GLM-4.7-Flash", "auto"),
     ("THUDM/GLM-4.5-Air", "auto"),
+    ("deepseek-ai/DeepSeek-V4-Flash-0731", "auto"),
     ("MiniMaxAI/MiniMax-M2.5", "auto"),
     ("moonshotai/Kimi-K2-Instruct", "auto"),
     ("moonshotai/Kimi-K2.5", "auto"),

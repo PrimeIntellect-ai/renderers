@@ -61,6 +61,11 @@ RENDERER_MODELS = [
     # there's just no byte-output to parity-check against. Split-specific
     # parity (V3 bare prompt vs R1 <think>+history-strip) is covered in
     # tests/test_deepseek_r1.py.
+    # DeepSeek V4 *is* in the shared barrage: unlike V3/R1, its official
+    # Python encoder covers every shared tool shape. The model-aware oracle in
+    # tests/reference_rendering.py routes it through that encoder instead of
+    # tokenizer.apply_chat_template (the V4 tokenizer intentionally has none).
+    ("deepseek-ai/DeepSeek-V4-Flash-0731", "auto"),
     # Llama-3 uses the canonical Meta ID for renderer auto-resolution, while
     # load_tokenizer fetches the tokenizer/chat_template from the unrestricted
     # unsloth mirror so CI needs no Meta-gated HF token.

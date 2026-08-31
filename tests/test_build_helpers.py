@@ -7,6 +7,7 @@ import pytest
 
 from renderers import build_training_sample, build_trajectory_step
 from renderers.base import PlaceholderRange, _build_mm_token_type_ids
+from tests.reference_rendering import render_reference
 
 
 def test_build_mm_token_type_ids_marks_ranges():
@@ -20,23 +21,11 @@ def test_build_mm_token_type_ids_marks_ranges():
 
 
 def _expected(tokenizer, messages, **kwargs):
-    # Match the Renderer Protocol's default for add_generation_prompt
-    # (False); some tokenizers default it to True in their config
-    # (e.g. Kimi) which would otherwise flip the parity check on the flag
-    # alone. Callers wanting the gen prompt still pass it through.
-    kwargs.setdefault("add_generation_prompt", False)
-    result = tokenizer.apply_chat_template(
-        messages, tokenize=True, return_dict=False, **kwargs
-    )
-    if isinstance(result, dict):
-        return list(result["input_ids"])
-    if isinstance(result, str):
-        return list(tokenizer.encode(result, add_special_tokens=False))
-    return list(result)
+    return render_reference(tokenizer, messages, **kwargs)
 
 
 def test_build_training_sample_ids_match(model_name, tokenizer, renderer):
-    """Token IDs must match apply_chat_template."""
+    """Token IDs must match the model-aware reference renderer."""
     if (
         model_name
         in {

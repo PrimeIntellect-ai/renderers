@@ -104,6 +104,7 @@ _ENABLE_THINKING_DEFAULTS: dict[str, bool] = {
     "Qwen/Qwen3.6-35B-A3B": True,
     # Qwen3.8 keeps thinking enabled by default.
     "Qwen/Qwen3.8-27B": True,
+    "Qwen/Qwen3.8-Flash-Next": True,
 }
 
 

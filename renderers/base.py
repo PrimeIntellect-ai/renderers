@@ -1033,6 +1033,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3.6-35B-A3B": "qwen3.6",
     # Qwen3.8.
     "Qwen/Qwen3.8-27B": "qwen3.8",
+    "Qwen/Qwen3.8-Flash-Next": "qwen3.8",
     # Qwen3-VL.
     "Qwen/Qwen3-VL-4B-Instruct": "qwen3-vl",
     "Qwen/Qwen3-VL-8B-Instruct": "qwen3-vl",

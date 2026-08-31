@@ -15,6 +15,8 @@ from typing import (
     runtime_checkable,
 )
 
+from renderers.registry import RENDERER_SPECS
+
 if TYPE_CHECKING:
     from renderers.configs import (
         AutoRendererConfig,
@@ -914,120 +916,10 @@ RENDERER_REGISTRY: dict[str, type] = {}
 # ``DefaultRenderer`` (which uses ``apply_chat_template`` verbatim) and
 # logs a loud INFO line with the chosen fallback.
 MODEL_RENDERER_MAP: dict[str, str] = {
-    # Qwen3 — base and Instruct variants share the same chat template.
-    "Qwen/Qwen3-0.6B": "qwen3",
-    "Qwen/Qwen3-1.7B": "qwen3",
-    "Qwen/Qwen3-4B": "qwen3",
-    "Qwen/Qwen3-4B-Instruct-2507": "qwen3",
-    "Qwen/Qwen3-4B-Thinking-2507": "qwen3",
-    "Qwen/Qwen3-8B": "qwen3",
-    "Qwen/Qwen3-14B": "qwen3",
-    "Qwen/Qwen3-32B": "qwen3",
-    "Qwen/Qwen3-30B-A3B": "qwen3",
-    "Qwen/Qwen3-30B-A3B-Instruct-2507": "qwen3",
-    "Qwen/Qwen3-30B-A3B-Thinking-2507": "qwen3",
-    "Qwen/Qwen3-235B-A22B": "qwen3",
-    # PrimeIntellect Qwen3 — both sizes share the same Qwen3-Coder-style
-    # template with XML tool definitions and calls.
-    "PrimeIntellect/Qwen3-0.6B": "prime-qwen3",
-    "PrimeIntellect/Qwen3-1.7B": "prime-qwen3",
-    # Qwen3.5. All seven sizes share the same renderer. The 4B / 9B /
-    # 35B-A3B / 122B-A10B / 397B-A17B chat template defaults
-    # ``enable_thinking=true`` (open ``<think>\n`` at the gen prompt);
-    # the smaller 0.8B / 2B variants flip the polarity (default
-    # ``enable_thinking=false``, empty ``<think>\n\n</think>\n\n``).
-    # ``Qwen35Renderer`` hard-codes this polarity per model
-    # (``_ENABLE_THINKING_DEFAULTS``), so all seven sizes are
-    # token-for-token parity-tested against their own
-    # ``apply_chat_template`` — including with
-    # ``add_generation_prompt=True``.
-    "Qwen/Qwen3.5-0.8B": "qwen3.5",
-    "Qwen/Qwen3.5-2B": "qwen3.5",
-    "Qwen/Qwen3.5-4B": "qwen3.5",
-    "Qwen/Qwen3.5-9B": "qwen3.5",
-    "Qwen/Qwen3.5-35B-A3B": "qwen3.5",
-    "Qwen/Qwen3.5-122B-A10B": "qwen3.5",
-    "Qwen/Qwen3.5-397B-A17B": "qwen3.5",
-    # Qwen3.6.
-    "Qwen/Qwen3.6-35B-A3B": "qwen3.6",
-    # Qwen3.8.
-    "Qwen/Qwen3.8-27B": "qwen3.8",
-    "Qwen/Qwen3.8-Flash-Next": "qwen3.8",
-    # Qwen3-VL.
-    "Qwen/Qwen3-VL-4B-Instruct": "qwen3-vl",
-    "Qwen/Qwen3-VL-8B-Instruct": "qwen3-vl",
-    "Qwen/Qwen3-VL-30B-A3B-Instruct": "qwen3-vl",
-    # Gemma 4 instruction checkpoints share Google's canonical turn/tool
-    # grammar and dynamic Gemma4Processor image expansion. E2B/E4B omit the
-    # disabled-thinking empty-channel prefill used by the 26B/31B revision;
-    # Gemma4Renderer detects that small template variant per tokenizer.
-    "google/gemma-4-E2B-it": "gemma4",
-    "google/gemma-4-E4B-it": "gemma4",
-    "google/gemma-4-26B-A4B-it": "gemma4",
-    "google/gemma-4-31B-it": "gemma4",
-    # GLM-5 family (GLM-4.7 reuses the GLM-5 template).
-    "zai-org/GLM-5": "glm-5",
-    "zai-org/GLM-5-FP8": "glm-5",
-    "zai-org/GLM-4.7-Flash": "glm-5",
-    "zai-org/GLM-5.1": "glm-5.1",
-    # GLM-4.5.
-    "THUDM/GLM-4.5-Air": "glm-4.5",
-    "zai-org/GLM-4.5-Air": "glm-4.5",
-    # MiniMax.
-    "MiniMaxAI/MiniMax-M2": "minimax-m2",
-    "MiniMaxAI/MiniMax-M2.5": "minimax-m2",
-    # DeepSeek V3 (non-reasoning).
-    "deepseek-ai/DeepSeek-V3": "deepseek-v3",
-    "deepseek-ai/DeepSeek-V3-Base": "deepseek-v3",
-    # DeepSeek R1 (reasoning).
-    "deepseek-ai/DeepSeek-R1": "deepseek-r1",
-    "deepseek-ai/DeepSeek-R1-0528": "deepseek-r1",
-    # DeepSeek V4 Flash 0731 uses the repository's Python DSML encoder (the
-    # tokenizer intentionally ships no Jinja chat_template).
-    "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek-v4",
-    # Kimi K2 (K2.5 and K2.6 share the K2.5 template, distinct from K2).
-    "moonshotai/Kimi-K2-Instruct": "kimi-k2",
-    "moonshotai/Kimi-K2.5": "kimi-k2.5",
-    "moonshotai/Kimi-K2.6": "kimi-k2.5",
-    # Nemotron 3. Nano / Super share one chat-template variant (``nemotron-3``);
-    # the Ultra checkpoints use the Ultra variant (``nemotron-3-ultra``, distinct
-    # ``</think>`` glue). Both route to the same Nemotron3Renderer, which selects
-    # the variant from the resolved config's ``name``. BF16 and FP8 share the
-    # same tokenizer and template.
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nemotron-3",
-    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nemotron-3",
-    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nemotron-3-ultra",
-    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nemotron-3-ultra",
-    # Nemotron 3.5 (Lightning). Its template is the Ultra variant's minus the
-    # effort kwarg (``nemotron-3.5``).
-    "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16": "nemotron-3.5",
-    # Llama 3.2 (Instruct). Tested against the gated meta-llama repos and
-    # the unrestricted unsloth/... mirror, which ships a byte-identical
-    # chat template. ``Llama3Renderer`` defaults ``date_string`` to
-    # "26 Jul 2024" — matching the chat template's strftime fallback —
-    # so the renderer is reproducible. Pass ``date_string=...`` at
-    # construction to pin a different date.
-    "meta-llama/Llama-3.2-1B-Instruct": "llama-3",
-    "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
-    # Poolside Laguna. These checkpoints ship distinct chat templates, each
-    # mirrored by its own renderer class/config discriminator.
-    "poolside/Laguna-XS.2": "laguna-xs.2",
-    "poolside/Laguna-M.1": "laguna-m.1",
-    "poolside/Laguna-XS-2.1": "laguna-xs-2.1",
-    "poolside/Laguna-S-2.1": "laguna-s-2.1",
-    # GPT-OSS.
-    "openai/gpt-oss-20b": "gpt-oss",
-    "openai/gpt-oss-120b": "gpt-oss",
-    # Thinking Machines Inkling checkpoints share byte-identical tokenizer,
-    # chat-template, and processor assets (vision + audio; transformers >= 5.14).
-    "thinkingmachines/Inkling": "inkling",
-    "thinkingmachines/Inkling-Small": "inkling",
-    # Tencent Hunyuan Hy3 (295B-A21B MoE). The FP8 checkpoint shares the same
-    # tokenizer and chat template. Hy3-preview is deliberately unmapped: it
-    # ships an older, incompatible template (un-suffixed special tokens,
-    # ``interleaved_thinking`` instead of ``preserved_thinking``).
-    "tencent/Hy3": "hy3",
-    "tencent/Hy3-FP8": "hy3",
+    model_id: renderer.name
+    for renderer in RENDERER_SPECS
+    for model in renderer.models
+    for model_id in model.model_ids
 }
 
 
@@ -1035,46 +927,17 @@ MODEL_RENDERER_MAP: dict[str, str] = {
 # multimodal parity test matrix in ``tests/test_multimodal.py`` — each
 # ``(model, modality)`` pair gets a parity test against
 # ``processor.apply_chat_template`` + ``processor(...)``. Add a model
-# here when its renderer supports a new modality; the test matrix
-# picks it up automatically.
+# here when its renderer supports a new modality; the test matrix picks it up
+# automatically. Aliases inherit their representative's modalities.
 #
 # Modality values: ``"image"``, ``"video"``, ``"audio"``. Text is implicit
 # (every model supports it), so it doesn't appear in the set.
 MULTIMODAL_MODELS: dict[str, set[str]] = {
-    "Qwen/Qwen3-VL-4B-Instruct": {"image"},
-    "Qwen/Qwen3-VL-8B-Instruct": {"image"},
-    "Qwen/Qwen3-VL-30B-A3B-Instruct": {"image"},
-    "google/gemma-4-E2B-it": {"image"},
-    "google/gemma-4-E4B-it": {"image"},
-    "google/gemma-4-26B-A4B-it": {"image"},
-    "google/gemma-4-31B-it": {"image"},
-    # Qwen3.5 is itself a VLM family (HF tag ``image-text-to-text``,
-    # processor class ``Qwen3VLProcessor``) — same vision tokens and
-    # image-processor as Qwen3-VL, with a different tool-call format.
-    "Qwen/Qwen3.5-0.8B": {"image"},
-    "Qwen/Qwen3.5-2B": {"image"},
-    "Qwen/Qwen3.5-4B": {"image"},
-    "Qwen/Qwen3.5-9B": {"image"},
-    "Qwen/Qwen3.5-35B-A3B": {"image"},
-    "Qwen/Qwen3.5-122B-A10B": {"image"},
-    "Qwen/Qwen3.5-397B-A17B": {"image"},
-    # Qwen3.6 extends Qwen3.5's chat template; same VL bits, only
-    # tool-call argument serialization differs.
-    "Qwen/Qwen3.6-35B-A3B": {"image"},
-    # Qwen3.8 adds reasoning-effort control and preserves thinking by default.
-    "Qwen/Qwen3.8-27B": {"image"},
-    "Qwen/Qwen3.8-Flash-Next": {"image"},
-    # Kimi K2.5 / K2.6 are unified VLMs (HF tag ``image-text-to-text``)
-    # with custom processor (``KimiK25Processor`` + ``KimiK25VisionProcessor``).
-    # Vision wrap is different from Qwen-VL:
-    # ``<|media_begin|>image<|media_content|><|media_pad|><|media_end|>`` —
-    # only ONE ``<|media_pad|>`` per image in ``input_ids``; per-patch
-    # expansion happens internally in the model from ``pixel_values`` /
-    # ``grid_thws``.
-    "moonshotai/Kimi-K2.5": {"image"},
-    "moonshotai/Kimi-K2.6": {"image"},
-    "thinkingmachines/Inkling": {"image", "audio"},
-    "thinkingmachines/Inkling-Small": {"image", "audio"},
+    model_id: set(model.modalities)
+    for renderer in RENDERER_SPECS
+    for model in renderer.models
+    if model.modalities
+    for model_id in model.model_ids
 }
 
 
@@ -1300,70 +1163,11 @@ def load_tokenizer(model_name_or_path: str):
 def _populate_registry():
     if RENDERER_REGISTRY:
         return
-    from renderers.deepseek_r1 import DeepSeekR1Renderer
-    from renderers.deepseek_v3 import DeepSeekV3Renderer
-    from renderers.deepseek_v4 import DeepSeekV4Renderer
-    from renderers.default import DefaultRenderer
-    from renderers.glm5 import GLM5Renderer, GLM51Renderer
-    from renderers.glm45 import GLM45Renderer
-    from renderers.gpt_oss import GptOssRenderer
-    from renderers.gemma4 import Gemma4Renderer
-    from renderers.hy3 import Hy3Renderer
-    from renderers.inkling import InklingRenderer
-    from renderers.kimi_k2 import KimiK2Renderer
-    from renderers.kimi_k25 import KimiK25Renderer
-    from renderers.laguna_s21 import LagunaS21Renderer
-    from renderers.laguna_xs2 import (
-        LagunaM1Renderer,
-        LagunaXS2Renderer,
-        LagunaXS21Renderer,
-    )
-    from renderers.llama_3 import Llama3Renderer
-    from renderers.minimax_m2 import MiniMaxM2Renderer
-    from renderers.nemotron3 import (
-        Nemotron3Renderer,
-        Nemotron3UltraRenderer,
-        Nemotron35Renderer,
-    )
-    from renderers.prime_qwen3 import PrimeQwen3Renderer
-    from renderers.qwen3 import Qwen3Renderer
-    from renderers.qwen3_vl import Qwen3VLRenderer
-    from renderers.qwen35 import Qwen35Renderer
-    from renderers.qwen36 import Qwen36Renderer
-    from renderers.qwen38 import Qwen38Renderer
+    import importlib
 
-    RENDERER_REGISTRY.update(
-        {
-            "default": DefaultRenderer,
-            "qwen3": Qwen3Renderer,
-            "prime-qwen3": PrimeQwen3Renderer,
-            "qwen3-vl": Qwen3VLRenderer,
-            "gemma4": Gemma4Renderer,
-            "qwen3.5": Qwen35Renderer,
-            "qwen3.6": Qwen36Renderer,
-            "qwen3.8": Qwen38Renderer,
-            "glm-5": GLM5Renderer,
-            "glm-5.1": GLM51Renderer,
-            "glm-4.5": GLM45Renderer,
-            "minimax-m2": MiniMaxM2Renderer,
-            "deepseek-v3": DeepSeekV3Renderer,
-            "deepseek-r1": DeepSeekR1Renderer,
-            "deepseek-v4": DeepSeekV4Renderer,
-            "hy3": Hy3Renderer,
-            "inkling": InklingRenderer,
-            "kimi-k2": KimiK2Renderer,
-            "kimi-k2.5": KimiK25Renderer,
-            "laguna-xs.2": LagunaXS2Renderer,
-            "laguna-m.1": LagunaM1Renderer,
-            "laguna-xs-2.1": LagunaXS21Renderer,
-            "laguna-s-2.1": LagunaS21Renderer,
-            "llama-3": Llama3Renderer,
-            "nemotron-3": Nemotron3Renderer,
-            "nemotron-3-ultra": Nemotron3UltraRenderer,
-            "nemotron-3.5": Nemotron35Renderer,
-            "gpt-oss": GptOssRenderer,
-        }
-    )
+    for spec in RENDERER_SPECS:
+        module = importlib.import_module(spec.module)
+        RENDERER_REGISTRY[spec.name] = getattr(module, spec.renderer_class)
 
 
 def create_renderer(

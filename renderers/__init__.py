@@ -75,6 +75,7 @@ from renderers.configs import (
     Qwen3VLRendererConfig,
     RendererConfig,
 )
+from renderers.registry import RENDERER_SPECS
 
 # Concrete renderer classes are lazy-loaded so that consumers needing only the
 # config layer (``RendererConfig`` discriminated union) don't import every
@@ -84,34 +85,7 @@ from renderers.configs import (
 # names on first attribute access, while ``renderers.base._populate_registry``
 # handles lazy registration for ``create_renderer``.
 _LAZY_RENDERERS: dict[str, str] = {
-    "DeepSeekR1Renderer": "renderers.deepseek_r1",
-    "DeepSeekV3Renderer": "renderers.deepseek_v3",
-    "DeepSeekV4Renderer": "renderers.deepseek_v4",
-    "DefaultRenderer": "renderers.default",
-    "GLM45Renderer": "renderers.glm45",
-    "GLM51Renderer": "renderers.glm5",
-    "GLM5Renderer": "renderers.glm5",
-    "GptOssRenderer": "renderers.gpt_oss",
-    "Gemma4Renderer": "renderers.gemma4",
-    "Hy3Renderer": "renderers.hy3",
-    "InklingRenderer": "renderers.inkling",
-    "KimiK25Renderer": "renderers.kimi_k25",
-    "KimiK2Renderer": "renderers.kimi_k2",
-    "LagunaM1Renderer": "renderers.laguna_xs2",
-    "LagunaS21Renderer": "renderers.laguna_s21",
-    "LagunaXS21Renderer": "renderers.laguna_xs2",
-    "LagunaXS2Renderer": "renderers.laguna_xs2",
-    "Llama3Renderer": "renderers.llama_3",
-    "MiniMaxM2Renderer": "renderers.minimax_m2",
-    "Nemotron35Renderer": "renderers.nemotron3",
-    "Nemotron3Renderer": "renderers.nemotron3",
-    "Nemotron3UltraRenderer": "renderers.nemotron3",
-    "PrimeQwen3Renderer": "renderers.prime_qwen3",
-    "Qwen35Renderer": "renderers.qwen35",
-    "Qwen36Renderer": "renderers.qwen36",
-    "Qwen38Renderer": "renderers.qwen38",
-    "Qwen3Renderer": "renderers.qwen3",
-    "Qwen3VLRenderer": "renderers.qwen3_vl",
+    spec.renderer_class: spec.module for spec in RENDERER_SPECS
 }
 
 

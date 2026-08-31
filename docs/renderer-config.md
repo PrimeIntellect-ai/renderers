@@ -21,8 +21,8 @@ construction.
 Use `type(config).template_field_names()` to inspect the explicit allowlist of
 fields accepted through `chat_template_kwargs`. Every renderer-specific field
 is classified as either a template field or a renderer-only field at class
-definition time. Template fields are covered by parity tests against
-`apply_chat_template` in `tests/test_renderer_config_parity.py`.
+definition time. Template fields are covered by the model/scenario/kwarg
+product in `tests/test_parity.py`.
 
 | Renderer | Config class | Template fields | Renderer-only fields |
 | --- | --- | --- | --- |

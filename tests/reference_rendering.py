@@ -1,10 +1,9 @@
-"""Model-aware reference rendering for the shared test barrage.
+"""Reference-oracle registry for the shared test barrage.
 
-Most checkpoints use Hugging Face ``apply_chat_template`` as their source of
-truth.  DeepSeek V4 Flash 0731 intentionally ships no Jinja template; its model
-repository defines the prompt contract in ``encoding/encoding_dsv4.py``.
-``render_reference`` hides that distinction so every renderer can run through
-the same parity cases.
+The oracle is selected from the resolved renderer, not assumed to be Hugging
+Face ``apply_chat_template``. Most checkpoints currently route to that adapter,
+DeepSeek V4 routes to its shipped Python-encoder contract, and GPT-OSS routes to
+Harmony. ``render_reference`` is the single invocation path for all three.
 
 The compact DSV4 implementation below is deliberately test-side and independent
 of ``renderers.deepseek_v4``.  It mirrors the public chat/tool branches of the
@@ -17,10 +16,35 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Mapping
-from typing import Any
+from dataclasses import dataclass
+from datetime import datetime
+from types import MappingProxyType
+from typing import Any, Protocol
+
+from renderers.base import MODEL_RENDERER_MAP
 
 
 DEEPSEEK_V4_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+
+class OracleRenderer(Protocol):
+    """Common callable contract implemented by every reference oracle."""
+
+    def __call__(
+        self,
+        tokenizer: Any,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> list[int]: ...
+
+
+@dataclass(frozen=True)
+class ReferenceOracle:
+    """Named adapter that renders one conversation to reference token IDs."""
+
+    name: str
+    render: OracleRenderer
+
 
 _BOS = "<｜begin▁of▁sentence｜>"
 _EOS = "<｜end▁of▁sentence｜>"
@@ -377,27 +401,11 @@ def _render_deepseek_v4_reference(
     return prompt
 
 
-def render_reference(tokenizer, messages: list[dict[str, Any]], **kwargs) -> list[int]:
-    """Render ``messages`` through the model's independent reference oracle."""
-    kwargs = dict(kwargs)
-    kwargs.setdefault("add_generation_prompt", False)
-    model_name = getattr(tokenizer, "name_or_path", "")
-
-    if model_name == DEEPSEEK_V4_MODEL:
-        text = _render_deepseek_v4_reference(
-            messages,
-            tools=kwargs.pop("tools", None),
-            add_generation_prompt=kwargs.pop("add_generation_prompt"),
-            enable_thinking=kwargs.pop("enable_thinking", False),
-            drop_thinking=kwargs.pop("drop_thinking", True),
-            reasoning_effort=kwargs.pop("reasoning_effort", "low"),
-        )
-        if kwargs:
-            raise TypeError(
-                f"Unsupported DeepSeek V4 reference kwargs: {sorted(kwargs)}"
-            )
-        return list(tokenizer.encode(text, add_special_tokens=False))
-
+def _render_hugging_face(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    **kwargs: Any,
+) -> list[int]:
     result = tokenizer.apply_chat_template(
         messages,
         tokenize=True,
@@ -411,4 +419,250 @@ def render_reference(tokenizer, messages: list[dict[str, Any]], **kwargs) -> lis
     return list(result)
 
 
-__all__ = ["DEEPSEEK_V4_MODEL", "render_reference"]
+def _render_deepseek_v4(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    **kwargs: Any,
+) -> list[int]:
+    kwargs = dict(kwargs)
+    text = _render_deepseek_v4_reference(
+        messages,
+        tools=kwargs.pop("tools", None),
+        add_generation_prompt=kwargs.pop("add_generation_prompt"),
+        enable_thinking=kwargs.pop("enable_thinking", False),
+        drop_thinking=kwargs.pop("drop_thinking", True),
+        reasoning_effort=kwargs.pop("reasoning_effort", "low"),
+    )
+    if kwargs:
+        raise TypeError(f"Unsupported DeepSeek V4 reference kwargs: {sorted(kwargs)}")
+    return list(tokenizer.encode(text, add_special_tokens=False))
+
+
+def _harmony_tool_description(tool: Mapping[str, Any]):
+    from openai_harmony import ToolDescription
+
+    fn = tool.get("function", tool)
+    return ToolDescription.new(
+        name=fn.get("name", ""),
+        description=fn.get("description", ""),
+        parameters=fn.get("parameters") or {},
+    )
+
+
+def _harmony_messages(
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]] | None,
+    reasoning_effort: str,
+    conversation_start_date: str | None,
+):
+    from openai_harmony import (
+        Author,
+        DeveloperContent,
+        Message,
+        ReasoningEffort,
+        Role,
+        SystemContent,
+    )
+
+    effort = {
+        "low": ReasoningEffort.LOW,
+        "medium": ReasoningEffort.MEDIUM,
+        "high": ReasoningEffort.HIGH,
+    }[reasoning_effort]
+    system = (
+        SystemContent.new()
+        .with_reasoning_effort(effort)
+        .with_conversation_start_date(
+            conversation_start_date or datetime.now().strftime("%Y-%m-%d")
+        )
+    )
+    out = [Message.from_role_and_content(Role.SYSTEM, system)]
+    first_system = next(
+        (
+            index
+            for index, message in enumerate(messages)
+            if message["role"] == "system"
+        ),
+        None,
+    )
+    if first_system is not None or tools:
+        developer = DeveloperContent.new()
+        if first_system is not None and messages[first_system].get("content"):
+            developer = developer.with_instructions(messages[first_system]["content"])
+        if tools:
+            developer = developer.with_function_tools(
+                [_harmony_tool_description(tool) for tool in tools]
+            )
+        out.append(Message.from_role_and_content(Role.DEVELOPER, developer))
+
+    for index, message in enumerate(messages):
+        if index == first_system:
+            continue
+        role = message["role"]
+        content = message.get("content") or ""
+        if role == "user":
+            out.append(Message.from_role_and_content(Role.USER, content))
+            continue
+        if role in {"system", "developer"}:
+            developer = DeveloperContent.new().with_instructions(content)
+            out.append(Message.from_role_and_content(Role.DEVELOPER, developer))
+            continue
+        if role == "tool":
+            name = message.get("name") or "unknown"
+            if not name.startswith("functions."):
+                name = f"functions.{name}"
+            tool_message = Message.from_author_and_content(
+                Author.new(Role.TOOL, name), content
+            )
+            out.append(
+                tool_message.with_recipient("assistant").with_channel("commentary")
+            )
+            continue
+        if role != "assistant":
+            raise AssertionError(f"Harmony oracle does not support role={role!r}")
+
+        tool_calls = message.get("tool_calls") or []
+        later_final = any(
+            later.get("role") == "assistant"
+            and not later.get("tool_calls")
+            and bool(later.get("content"))
+            for later in messages[index + 1 :]
+        )
+        reasoning = message.get("reasoning_content")
+        if reasoning and tool_calls and not later_final:
+            out.append(
+                Message.from_role_and_content(Role.ASSISTANT, reasoning).with_channel(
+                    "analysis"
+                )
+            )
+        if content:
+            out.append(
+                Message.from_role_and_content(Role.ASSISTANT, content).with_channel(
+                    "final"
+                )
+            )
+        for tool_call in tool_calls:
+            fn = tool_call.get("function", tool_call)
+            arguments = fn.get("arguments", {})
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            name = fn.get("name", "")
+            if not name.startswith("functions."):
+                name = f"functions.{name}"
+            out.append(
+                Message.from_role_and_content(Role.ASSISTANT, arguments)
+                .with_channel("commentary")
+                .with_recipient(name)
+            )
+        if not content and not tool_calls and not reasoning:
+            out.append(
+                Message.from_role_and_content(Role.ASSISTANT, "").with_channel("final")
+            )
+    return out
+
+
+def _render_harmony(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    **kwargs: Any,
+) -> list[int]:
+    del tokenizer
+    from openai_harmony import (
+        Conversation,
+        HarmonyEncodingName,
+        Role,
+        load_harmony_encoding,
+    )
+
+    kwargs = dict(kwargs)
+    add_generation_prompt = kwargs.pop("add_generation_prompt")
+    tools = kwargs.pop("tools", None)
+    reasoning_effort = kwargs.pop("reasoning_effort", "medium")
+    conversation_start_date = kwargs.pop("conversation_start_date", None)
+    if kwargs:
+        raise TypeError(f"Unsupported Harmony reference kwargs: {sorted(kwargs)}")
+
+    encoder = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    conversation = Conversation.from_messages(
+        _harmony_messages(
+            messages,
+            tools=tools,
+            reasoning_effort=reasoning_effort,
+            conversation_start_date=conversation_start_date,
+        )
+    )
+    if add_generation_prompt:
+        prompt = encoder.render_conversation_for_completion(
+            conversation, next_turn_role=Role.ASSISTANT
+        )
+        return prompt + encoder.encode(
+            "<|channel|>analysis<|message|>", allowed_special="all"
+        )
+    return encoder.render_conversation_for_training(conversation)
+
+
+REFERENCE_ORACLES: Mapping[str, ReferenceOracle] = MappingProxyType(
+    {
+        "hugging-face": ReferenceOracle("hugging-face", _render_hugging_face),
+        "deepseek-v4": ReferenceOracle("deepseek-v4", _render_deepseek_v4),
+        "harmony": ReferenceOracle("harmony", _render_harmony),
+    }
+)
+"""All available reference implementations, keyed by stable oracle name."""
+
+DEFAULT_REFERENCE_ORACLE = "hugging-face"
+
+RENDERER_ORACLE_ROUTES: Mapping[str, str] = MappingProxyType(
+    {
+        "deepseek-v4": "deepseek-v4",
+        "gpt-oss": "harmony",
+    }
+)
+"""Renderer families whose canonical reference is not a Jinja template."""
+
+
+def reference_oracle_for_renderer(renderer_name: str) -> str:
+    """Return the oracle registered for a resolved renderer name."""
+    return RENDERER_ORACLE_ROUTES.get(renderer_name, DEFAULT_REFERENCE_ORACLE)
+
+
+def reference_oracle_for_model(model_name: str) -> str:
+    """Resolve a canonical model through the production renderer routing map."""
+    renderer_name = MODEL_RENDERER_MAP.get(model_name, "default")
+    return reference_oracle_for_renderer(renderer_name)
+
+
+def render_reference(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    *,
+    oracle: str | None = None,
+    **kwargs: Any,
+) -> list[int]:
+    """Render ``messages`` through one resolved reference-oracle adapter."""
+    oracle_name = oracle or reference_oracle_for_model(
+        getattr(tokenizer, "name_or_path", "")
+    )
+    try:
+        adapter = REFERENCE_ORACLES[oracle_name]
+    except KeyError as error:
+        raise ValueError(
+            f"Unknown reference oracle {oracle_name!r}; "
+            f"registered oracles: {sorted(REFERENCE_ORACLES)}"
+        ) from error
+
+    kwargs.setdefault("add_generation_prompt", False)
+    return adapter.render(tokenizer, messages, **kwargs)
+
+
+__all__ = [
+    "DEFAULT_REFERENCE_ORACLE",
+    "DEEPSEEK_V4_MODEL",
+    "REFERENCE_ORACLES",
+    "RENDERER_ORACLE_ROUTES",
+    "ReferenceOracle",
+    "reference_oracle_for_model",
+    "reference_oracle_for_renderer",
+    "render_reference",
+]

@@ -179,7 +179,7 @@ uv sync --group dev
 uv run pytest
 ```
 
-Round-trip parity (render → parse → original) and token-level parity against `apply_chat_template` are tested per renderer. End-to-end validation runs against Reverse-Text, Wordle, OpenCode-Math, and RLM-SWE environments.
+Round-trip parity (render → parse → original) and token-level parity against each model's independent reference encoder are tested per renderer. Most references use `apply_chat_template`; DeepSeek V4 uses its shipped Python encoder, and GPT-OSS uses Harmony.
 
 ## License
 

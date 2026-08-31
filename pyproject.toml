@@ -27,7 +27,7 @@ dependencies = [
     # release through 0.5.12.post1 hard-pins ``openai-harmony==0.0.4``, so a
     # higher floor makes ``renderers`` uninstallable alongside SGLang. The
     # GptOssRenderer renders byte-identically on 0.0.4 (verified token-for-token
-    # against 0.0.8) and ``tests/test_gpt_oss_harmony_parity.py`` passes on it,
+    # against 0.0.8) and the Harmony cells in ``tests/test_parity.py`` pass,
     # so the older harmony is safe.
     "openai-harmony>=0.0.4",
     # ``BaseRendererConfig`` inherits from ``pydantic_config.BaseConfig`` so

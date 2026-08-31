@@ -2,7 +2,7 @@
 
 Why this file exists
 --------------------
-The test barrage in ``test_render_ids`` checks token-id parity against
+The matrix in ``test_parity`` checks token-id parity against
 ``apply_chat_template`` — useful, but only for token *bytes*. The
 per-token attribution (``RenderedTokens.message_indices``) was never
 covered, even though it directly drives the loss mask in

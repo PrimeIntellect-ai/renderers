@@ -3,18 +3,14 @@
 from functools import lru_cache
 
 import pytest
+from parity import models_for
 
 from renderers import Gemma4Renderer, create_renderer
 from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS, load_tokenizer
 from renderers.configs import Gemma4RendererConfig
 
 
-_MODELS = (
-    "google/gemma-4-E2B-it",
-    "google/gemma-4-E4B-it",
-    "google/gemma-4-26B-A4B-it",
-    "google/gemma-4-31B-it",
-)
+_MODELS = tuple(case.model for case in models_for("gemma-checkpoints"))
 
 
 @lru_cache

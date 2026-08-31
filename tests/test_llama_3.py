@@ -10,11 +10,13 @@ with Meta license access.
 from __future__ import annotations
 
 import pytest
+from parity import models_for
 
 from renderers import Llama3Renderer, Llama3RendererConfig, create_renderer
 from renderers.base import (
     MODEL_RENDERER_MAP,
     ParsedResponse,
+    TOKENIZER_SOURCE_OVERRIDES,
     ToolCallParseStatus,
     load_tokenizer,
 )
@@ -24,10 +26,8 @@ from renderers.base import (
 _PINNED_DATE = "26 Jul 2024"
 
 _MODEL_PAIRS = [
-    # (canonical meta-llama id used by MODEL_RENDERER_MAP, unrestricted
-    # mirror used to actually load the tokenizer in tests)
-    ("meta-llama/Llama-3.2-1B-Instruct", "unsloth/Llama-3.2-1B-Instruct"),
-    ("meta-llama/Llama-3.2-3B-Instruct", "unsloth/Llama-3.2-3B-Instruct"),
+    (case.model, TOKENIZER_SOURCE_OVERRIDES[case.model])
+    for case in models_for("llama-checkpoints")
 ]
 
 
@@ -113,149 +113,6 @@ def _expected(tok, messages, **kwargs):
     return list(
         tok.apply_chat_template(messages, tokenize=True, return_dict=False, **kwargs)
     )
-
-
-def test_parity_minimal_user(llama_pair):
-    _, _, tok, r = llama_pair
-    msgs = [{"role": "user", "content": "Hi."}]
-    assert r.render_ids(msgs) == _expected(tok, msgs)
-
-
-def test_parity_system_and_user(llama_pair):
-    _, _, tok, r = llama_pair
-    msgs = [
-        {"role": "system", "content": "You are helpful."},
-        {"role": "user", "content": "Hi."},
-    ]
-    assert r.render_ids(msgs) == _expected(tok, msgs)
-
-
-def test_parity_system_user_assistant(llama_pair):
-    _, _, tok, r = llama_pair
-    msgs = [
-        {"role": "system", "content": "You are helpful."},
-        {"role": "user", "content": "Hi."},
-        {"role": "assistant", "content": "Hello!"},
-    ]
-    assert r.render_ids(msgs) == _expected(tok, msgs)
-
-
-def test_parity_no_system_with_gen_prompt(llama_pair):
-    _, _, tok, r = llama_pair
-    msgs = [{"role": "user", "content": "Hi."}]
-    assert r.render_ids(msgs, add_generation_prompt=True) == _expected(
-        tok, msgs, add_generation_prompt=True
-    )
-
-
-def test_parity_multi_turn(llama_pair):
-    _, _, tok, r = llama_pair
-    msgs = [
-        {"role": "user", "content": "A"},
-        {"role": "assistant", "content": "B"},
-        {"role": "user", "content": "C"},
-        {"role": "assistant", "content": "D"},
-    ]
-    assert r.render_ids(msgs) == _expected(tok, msgs)
-
-
-def test_parity_trims_whitespace(llama_pair):
-    _, _, tok, r = llama_pair
-    msgs = [
-        {"role": "user", "content": "  hello  "},
-        {"role": "assistant", "content": "\n\nworld\n"},
-    ]
-    assert r.render_ids(msgs) == _expected(tok, msgs)
-
-
-def test_parity_custom_date(llama_pair):
-    """``date_string`` constructor override changes both sides identically."""
-    _, _, tok, _ = llama_pair
-    r = Llama3Renderer(tok, Llama3RendererConfig(date_string="01 Jan 2026"))
-    msgs = [{"role": "user", "content": "Hi."}]
-    expected = list(
-        tok.apply_chat_template(
-            msgs, tokenize=True, return_dict=False, date_string="01 Jan 2026"
-        )
-    )
-    assert r.render_ids(msgs) == expected
-
-
-def test_parity_tools_in_user_default(llama_pair):
-    _, _, tok, r = llama_pair
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get weather",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"city": {"type": "string"}},
-                },
-            },
-        }
-    ]
-    msgs = [
-        {"role": "system", "content": "Be terse."},
-        {"role": "user", "content": "Weather?"},
-    ]
-    assert r.render_ids(msgs, tools=tools) == _expected(tok, msgs, tools=tools)
-
-
-def test_parity_tools_in_system_mode(llama_pair):
-    """When constructed with ``tools_in_user_message=False``, the renderer
-    matches ``apply_chat_template(... tools_in_user_message=False)``."""
-    _, _, tok, _ = llama_pair
-    r = Llama3Renderer(
-        tok,
-        Llama3RendererConfig(date_string=_PINNED_DATE, tools_in_user_message=False),
-    )
-    tools = [
-        {
-            "type": "function",
-            "function": {"name": "get_weather", "parameters": {}},
-        }
-    ]
-    msgs = [
-        {"role": "system", "content": "Be terse."},
-        {"role": "user", "content": "Weather?"},
-    ]
-    expected = list(
-        tok.apply_chat_template(
-            msgs,
-            tokenize=True,
-            return_dict=False,
-            tools=tools,
-            tools_in_user_message=False,
-            date_string=_PINNED_DATE,
-        )
-    )
-    assert r.render_ids(msgs, tools=tools) == expected
-
-
-def test_parity_tool_call_round_trip(llama_pair):
-    """Assistant tool_calls + tool response + final assistant — covers
-    the JSON tool-call body emission and the ``ipython`` response role."""
-    _, _, tok, r = llama_pair
-    msgs = [
-        {"role": "user", "content": "Weather?"},
-        {
-            "role": "assistant",
-            "tool_calls": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "arguments": {"city": "NYC"},
-                    },
-                }
-            ],
-        },
-        {"role": "tool", "content": '{"temp": 72}'},
-        {"role": "assistant", "content": "It's 72."},
-    ]
-    assert r.render_ids(msgs) == _expected(tok, msgs)
 
 
 def test_parity_tool_response_dict_content(llama_pair):

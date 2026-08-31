@@ -95,6 +95,7 @@ class _FakeClient:
         }
         if body and body.get("content_parts"):
             payload["prompt_token_ids"] = [1, 2, 2, 3]
+            payload["mm_placeholders"] = {"image": [{"offset": 1, "length": 2}]}
         return httpx.Response(
             200,
             content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
@@ -224,6 +225,7 @@ def test_generate_process_multimodal_false_sends_content_parts():
     assert "features" not in body
     assert result["renderer_prompt_ids"] == [1, 2, 3]
     assert result["prompt_ids"] == [1, 2, 2, 3]
+    assert result["mm_placeholders"] == {"image": [{"offset": 1, "length": 2}]}
 
 
 def test_generate_rejects_missing_completion_logprobs_before_parsing():

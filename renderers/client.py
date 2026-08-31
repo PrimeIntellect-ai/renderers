@@ -244,10 +244,11 @@ async def generate(
     vLLM knows the expanded prompt length.
 
     Returns a dict with: request_id, prompt_ids, renderer_prompt_ids,
-    completion_ids, completion_logprobs, content, reasoning_content,
-    tool_calls, finish_reason, routed_experts, multi_modal_data,
-    prompt_attribution. ``renderer_prompt_ids`` is the unexpanded logical
-    prompt when ``process_multimodal=False`` and ``None`` otherwise.
+    mm_placeholders, completion_ids, completion_logprobs, content,
+    reasoning_content, tool_calls, finish_reason, routed_experts,
+    multi_modal_data, prompt_attribution. ``renderer_prompt_ids`` is the
+    unexpanded logical prompt when ``process_multimodal=False`` and ``None``
+    otherwise.
 
     ``prompt_attribution`` is the renderer's :class:`RenderedTokens` for
     the prompt — either the one this call computed via
@@ -362,6 +363,11 @@ async def generate(
         raise MalformedGenerateResponseError(
             "Engine response must include prompt_token_ids when process_multimodal=False."
         )
+    mm_placeholders = data.get("mm_placeholders")
+    if content_parts and not isinstance(mm_placeholders, dict):
+        raise MalformedGenerateResponseError(
+            "Engine response must include mm_placeholders when process_multimodal=False."
+        )
 
     completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
 
@@ -389,6 +395,7 @@ async def generate(
         "request_id": data.get("request_id") or "",
         "prompt_ids": list(effective_prompt_ids or prompt_ids),
         "renderer_prompt_ids": list(prompt_ids) if content_parts else None,
+        "mm_placeholders": mm_placeholders,
         "completion_ids": list(completion_ids),
         "completion_logprobs": completion_logprobs,
         "content": parsed.content,

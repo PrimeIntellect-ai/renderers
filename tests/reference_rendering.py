@@ -1,0 +1,414 @@
+"""Model-aware reference rendering for the shared test barrage.
+
+Most checkpoints use Hugging Face ``apply_chat_template`` as their source of
+truth.  DeepSeek V4 Flash 0731 intentionally ships no Jinja template; its model
+repository defines the prompt contract in ``encoding/encoding_dsv4.py``.
+``render_reference`` hides that distinction so every renderer can run through
+the same parity cases.
+
+The compact DSV4 implementation below is deliberately test-side and independent
+of ``renderers.deepseek_v4``.  It mirrors the public chat/tool branches of the
+official encoder needed by the shared barrage; the official repository fixtures
+remain covered separately in ``test_deepseek_v4.py``.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+from collections.abc import Mapping
+from typing import Any
+
+
+DEEPSEEK_V4_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+_BOS = "<｜begin▁of▁sentence｜>"
+_EOS = "<｜end▁of▁sentence｜>"
+_USER = "<｜User｜>"
+_ASSISTANT = "<｜Assistant｜>"
+_LATEST_REMINDER = "<｜latest_reminder｜>"
+_THINK_START = "<think>"
+_THINK_END = "</think>"
+_DSML = "｜DSML｜"
+
+_TASK_TOKENS = {
+    "action": "<｜action｜>",
+    "query": "<｜query｜>",
+    "authority": "<｜authority｜>",
+    "domain": "<｜domain｜>",
+    "title": "<｜title｜>",
+    "read_url": "<｜read_url｜>",
+}
+
+_REASONING_EFFORT_PROMPTS = {
+    "low": "",
+    "high": (
+        "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
+        "You MUST be very thorough in your thinking and comprehensively "
+        "decompose the problem to resolve the root cause, rigorously "
+        "stress-testing your logic against all potential paths, edge cases, "
+        "and adversarial scenarios.\n"
+        "Explicitly write out your entire deliberation process, documenting "
+        "every intermediate step, considered alternative, and rejected "
+        "hypothesis to ensure absolutely no assumption is left unchecked.\n\n"
+    ),
+    "max": (
+        "Reasoning Effort: Beyond maximum — exhaustive, relentless, and "
+        "uncompromising.\n"
+        "You MUST reason with the utmost depth and rigor, leaving absolutely "
+        "nothing to chance: exhaustively decompose the problem into its most "
+        "fundamental components, trace every causal chain to its root, and "
+        "resolve the underlying cause rather than any surface symptom.\n"
+        "Do not stop reasoning until you have independently verified the "
+        "solution from multiple angles and are certain that no assumption "
+        "remains unchecked and no error remains undiscovered.\n\n"
+    ),
+}
+
+_TOOLS_TEMPLATE = """## Tools
+
+You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<{dsml}tool_calls>" block like the following:
+
+<{dsml}tool_calls>
+<{dsml}invoke name="$TOOL_NAME">
+<{dsml}parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{dsml}parameter>
+...
+</{dsml}invoke>
+<{dsml}invoke name="$TOOL_NAME2">
+...
+</{dsml}invoke>
+</{dsml}tool_calls>
+
+String parameters should be specified as is and set `string="true"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string="false"`.
+
+If thinking_mode is enabled (triggered by {think_start}), you MUST output your complete reasoning inside {think_start}...{think_end} BEFORE any tool calls or final response.
+
+Otherwise, output directly after {think_end} with tool calls or final response.
+
+### Available Tool Schemas
+
+{tool_schemas}
+
+You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
+"""
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _function(spec: Mapping[str, Any]) -> Mapping[str, Any]:
+    function = spec.get("function")
+    return function if isinstance(function, Mapping) else spec
+
+
+def _text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return str(value)
+    return "\n\n".join(
+        str(part.get("text", ""))
+        for part in value
+        if isinstance(part, Mapping) and part.get("type") == "text"
+    )
+
+
+def _render_tools(tools: list[dict[str, Any]]) -> str:
+    return _TOOLS_TEMPLATE.format(
+        dsml=_DSML,
+        think_start=_THINK_START,
+        think_end=_THINK_END,
+        tool_schemas="\n".join(_json(dict(_function(tool))) for tool in tools),
+    )
+
+
+def _render_tool_call(tool_call: Mapping[str, Any]) -> str:
+    function = _function(tool_call)
+    raw_arguments = function.get("arguments", {})
+    if isinstance(raw_arguments, str):
+        try:
+            arguments = json.loads(raw_arguments)
+        except (json.JSONDecodeError, TypeError):
+            arguments = {"arguments": raw_arguments}
+    elif isinstance(raw_arguments, Mapping):
+        # Renderer inputs allow decoded dictionaries even though the OpenAI
+        # wire format normally carries a JSON string.
+        arguments = dict(raw_arguments)
+    else:
+        arguments = {"arguments": raw_arguments}
+
+    parameters = []
+    for key, value in arguments.items():
+        is_string = isinstance(value, str)
+        encoded = value if is_string else _json(value)
+        parameters.append(
+            f'<{_DSML}parameter name="{key}" '
+            f'string="{str(is_string).lower()}">{encoded}'
+            f"</{_DSML}parameter>"
+        )
+    return (
+        f'<{_DSML}invoke name="{function.get("name")}">\n'
+        + "\n".join(parameters)
+        + f"\n</{_DSML}invoke>"
+    )
+
+
+def _merge_tool_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    for original in messages:
+        message = copy.deepcopy(original)
+        role = message.get("role")
+        if role == "tool":
+            block = {
+                "type": "tool_result",
+                "tool_use_id": message.get("tool_call_id", ""),
+                "content": message.get("content", ""),
+            }
+            if (
+                merged
+                and merged[-1].get("role") == "user"
+                and "content_blocks" in merged[-1]
+            ):
+                merged[-1]["content_blocks"].append(block)
+            else:
+                merged.append({"role": "user", "content_blocks": [block]})
+        elif role == "user":
+            block = {"type": "text", "text": _text(message.get("content"))}
+            if (
+                merged
+                and merged[-1].get("role") == "user"
+                and "content_blocks" in merged[-1]
+                and merged[-1].get("task") is None
+            ):
+                merged[-1]["content_blocks"].append(block)
+            else:
+                message["content"] = block["text"]
+                message["content_blocks"] = [block]
+                merged.append(message)
+        else:
+            merged.append(message)
+
+    call_order: dict[str, int] = {}
+    for message in merged:
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            call_order = {}
+            for index, tool_call in enumerate(message["tool_calls"]):
+                function = _function(tool_call)
+                call_id = tool_call.get("id") or function.get("id")
+                if call_id:
+                    call_order[str(call_id)] = index
+        elif message.get("role") == "user" and message.get("content_blocks"):
+            blocks = message["content_blocks"]
+            results = [b for b in blocks if b.get("type") == "tool_result"]
+            if len(results) > 1 and call_order:
+                results.sort(
+                    key=lambda block: call_order.get(block.get("tool_use_id", ""), 0)
+                )
+                ordered = iter(results)
+                message["content_blocks"] = [
+                    next(ordered) if block.get("type") == "tool_result" else block
+                    for block in blocks
+                ]
+    return merged
+
+
+def _drop_historical_thinking(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    last_user = max(
+        (
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") in {"user", "developer"}
+        ),
+        default=-1,
+    )
+    kept = []
+    for index, original in enumerate(messages):
+        role = original.get("role")
+        if role in {"user", "system", "tool", "latest_reminder"} or index >= last_user:
+            kept.append(original)
+        elif role == "assistant":
+            message = copy.copy(original)
+            message.pop("reasoning_content", None)
+            kept.append(message)
+    return kept
+
+
+def _render_deepseek_v4_reference(
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]] | None,
+    add_generation_prompt: bool,
+    enable_thinking: bool,
+    drop_thinking: bool,
+    reasoning_effort: str,
+) -> str:
+    messages = copy.deepcopy(messages)
+
+    if tools:
+        target: dict[str, Any] | None = next(
+            (m for m in messages if m.get("role") == "developer"),
+            None,
+        )
+        if target is None:
+            target = next(
+                (m for m in messages if m.get("role") == "system"),
+                None,
+            )
+        if target is None:
+            target = {"role": "system", "content": ""}
+            messages.insert(0, target)
+        target["tools"] = copy.deepcopy(tools)
+
+    messages = _merge_tool_messages(messages)
+    effective_drop = drop_thinking and not any(m.get("tools") for m in messages)
+    if enable_thinking and effective_drop:
+        messages = _drop_historical_thinking(messages)
+
+    last_user = max(
+        (
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") in {"user", "developer"}
+        ),
+        default=-1,
+    )
+    prompt = _BOS
+    if enable_thinking:
+        prompt += _REASONING_EFFORT_PROMPTS[reasoning_effort]
+
+    for index, message in enumerate(messages):
+        role = message.get("role")
+        content = message.get("content")
+
+        if role == "system":
+            prompt += _text(content)
+            if message.get("tools"):
+                prompt += "\n\n" + _render_tools(message["tools"])
+            if message.get("response_format") is not None:
+                prompt += (
+                    "\n\n## Response Format:\n\n"
+                    "You MUST strictly adhere to the following schema to reply:\n"
+                    + _json(message["response_format"])
+                )
+        elif role == "developer":
+            prompt += _USER + _text(content)
+            if message.get("tools"):
+                prompt += "\n\n" + _render_tools(message["tools"])
+            if message.get("response_format") is not None:
+                prompt += (
+                    "\n\n## Response Format:\n\n"
+                    "You MUST strictly adhere to the following schema to reply:\n"
+                    + _json(message["response_format"])
+                )
+        elif role == "user":
+            prompt += _USER
+            rendered_blocks = []
+            for block in message.get("content_blocks") or []:
+                if block.get("type") == "text":
+                    rendered_blocks.append(_text(block.get("text")))
+                elif block.get("type") == "tool_result":
+                    rendered_blocks.append(
+                        f"<tool_result>{_text(block.get('content'))}</tool_result>"
+                    )
+            prompt += "\n\n".join(rendered_blocks)
+        elif role == "latest_reminder":
+            prompt += _LATEST_REMINDER + _text(content)
+        elif role == "assistant":
+            previous_has_task = (
+                index > 0 and messages[index - 1].get("task") is not None
+            )
+            keep_reasoning = (
+                enable_thinking
+                and not previous_has_task
+                and (not effective_drop or index > last_user)
+            )
+            if keep_reasoning:
+                prompt += str(message.get("reasoning_content") or "") + _THINK_END
+            prompt += _text(content)
+            tool_calls = message.get("tool_calls") or []
+            if tool_calls:
+                prompt += (
+                    f"\n\n<{_DSML}tool_calls>\n"
+                    + "\n".join(_render_tool_call(call) for call in tool_calls)
+                    + f"\n</{_DSML}tool_calls>"
+                )
+            if not message.get("wo_eos", False):
+                prompt += _EOS
+        else:
+            raise ValueError(f"Unsupported DeepSeek V4 reference role: {role!r}")
+
+        next_role = (
+            messages[index + 1].get("role") if index + 1 < len(messages) else None
+        )
+        if next_role is not None and next_role not in {
+            "assistant",
+            "latest_reminder",
+        }:
+            continue
+
+        task = message.get("task")
+        if task is not None:
+            if task not in _TASK_TOKENS:
+                raise ValueError(f"Invalid DeepSeek V4 reference task: {task!r}")
+            if task != "action":
+                prompt += _TASK_TOKENS[task]
+            else:
+                prompt += _ASSISTANT
+                prompt += _THINK_START if enable_thinking else _THINK_END
+                prompt += _TASK_TOKENS[task]
+            continue
+
+        if (next_role is None and not add_generation_prompt) or role not in {
+            "user",
+            "developer",
+        }:
+            continue
+        prompt += _ASSISTANT
+        if enable_thinking and (not effective_drop or index >= last_user):
+            prompt += _THINK_START
+        else:
+            prompt += _THINK_END
+
+    return prompt
+
+
+def render_reference(tokenizer, messages: list[dict[str, Any]], **kwargs) -> list[int]:
+    """Render ``messages`` through the model's independent reference oracle."""
+    kwargs = dict(kwargs)
+    kwargs.setdefault("add_generation_prompt", False)
+    model_name = getattr(tokenizer, "name_or_path", "")
+
+    if model_name == DEEPSEEK_V4_MODEL:
+        text = _render_deepseek_v4_reference(
+            messages,
+            tools=kwargs.pop("tools", None),
+            add_generation_prompt=kwargs.pop("add_generation_prompt"),
+            enable_thinking=kwargs.pop("enable_thinking", False),
+            drop_thinking=kwargs.pop("drop_thinking", True),
+            reasoning_effort=kwargs.pop("reasoning_effort", "low"),
+        )
+        if kwargs:
+            raise TypeError(
+                f"Unsupported DeepSeek V4 reference kwargs: {sorted(kwargs)}"
+            )
+        return list(tokenizer.encode(text, add_special_tokens=False))
+
+    result = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        return_dict=False,
+        **kwargs,
+    )
+    if isinstance(result, dict):
+        return list(result["input_ids"])
+    if isinstance(result, str):
+        return list(tokenizer.encode(result, add_special_tokens=False))
+    return list(result)
+
+
+__all__ = ["DEEPSEEK_V4_MODEL", "render_reference"]

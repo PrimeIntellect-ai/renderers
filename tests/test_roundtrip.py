@@ -5,13 +5,13 @@ Core renderer invariant: if you render
 extract the assistant's completion slice, and feed it through
 ``parse_response``, you should get back an equivalent structured message.
 Catches asymmetries between a renderer's emit path and its parse path —
-bugs that slip past render-parity tests (which only check vs
-apply_chat_template) and parse-robustness tests (which feed crafted text,
-not rendered output).
+bugs that slip past render-parity tests (which compare against each model's
+reference encoder) and parse-robustness tests (which feed crafted text, not
+rendered output).
 
 Parametrizes over a wider model list than the shared conftest barrage
-(which is kept conservative because several newer renderers still
-disagree with apply_chat_template in complex tool-cycle edge cases).
+(which is kept conservative because several newer renderers still disagree
+with their upstream references in complex tool-cycle edge cases).
 The roundtrip invariant is renderer-self-consistent so it can tolerate
 those gaps while still giving per-renderer coverage of the emit/parse
 pair.

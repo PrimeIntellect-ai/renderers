@@ -1,4 +1,4 @@
-"""Shared catalog and scenario corpus for renderer parity tests."""
+"""Shared catalog and scenario corpus for renderer reference-parity tests."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ TOOLS = [
 class ModelCase:
     model: str
     renderer: str = "auto"
-    oracle: str = "hf"
+    oracle: str = "reference"
     suites: frozenset[str] = frozenset({"parity"})
     excluded_scenarios: frozenset[str] = frozenset()
     oracle_defaults: tuple[tuple[str, Any], ...] = ()
@@ -48,7 +48,7 @@ def _model(
     model: str,
     *,
     renderer: str = "auto",
-    oracle: str = "hf",
+    oracle: str = "reference",
     shared: bool = True,
     roundtrip: bool = True,
     bridge: bool = False,
@@ -63,7 +63,7 @@ def _model(
         suites.add("roundtrip")
     if bridge:
         suites.add("bridge")
-    if oracle != "hf":
+    if oracle == "harmony":
         suites.discard("plain-parser")
         suites.discard("build-helpers")
     if model.startswith("meta-llama/"):
@@ -209,6 +209,9 @@ MODEL_CATALOG = (
             "multi-step-tool-cycle",
         },
     ),
+    # DeepSeek V4 ships a Python encoder instead of a Jinja chat template.
+    # tests/reference_rendering.py supplies its independent reference oracle.
+    _model("deepseek-ai/DeepSeek-V4-Flash-0731", bridge=True),
     _model(
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
         bridge=True,
@@ -679,6 +682,7 @@ KWARG_VALUES: Mapping[str, tuple[Any, ...]] = {
     "raw_last_assistant": (True, False),
     "fallback_strategy": ("reasoning_toolcall_retry", None),
     "clear_thinking": (True, False),
+    "drop_thinking": (True, False),
     "truncate_history_thinking": (True, False),
     "low_effort": (True, False),
     "medium_effort": (True, False),
@@ -696,7 +700,7 @@ KWARG_VALUES: Mapping[str, tuple[Any, ...]] = {
 
 
 def kwarg_combinations(case: ModelCase) -> tuple[dict[str, Any], ...]:
-    """Cartesian product of every valid explicit chat-template kwarg value."""
+    """Cartesian product of every valid explicit reference-control value."""
     config_cls = _config_class_for(case.resolved_renderer)
     fields = sorted(config_cls.template_field_names())
     missing = set(fields) - KWARG_VALUES.keys()
@@ -732,7 +736,7 @@ def scenario_is_valid(
 
     # These renderers intentionally retain a generated empty thinking wrapper
     # on plain historical turns when thinking is disabled. That stability
-    # contract is tested separately; it is not HF-template parity.
+    # contract is tested separately; it is not upstream-reference parity.
     thinking_disabled = kwargs.get("enable_thinking") is False or (
         kwargs.get("enable_thinking") is None
         and case.model in {"Qwen/Qwen3.5-0.8B", "Qwen/Qwen3.5-2B"}
@@ -759,7 +763,7 @@ def scenario_is_valid(
     # Gemma 4's 26B/31B template revision strips the empty disabled-thinking
     # generation prefill from assistant history. The renderer deliberately
     # retains it so sampled streams remain byte-prefix-stable across rerenders.
-    # That behavior is covered by the stability suite, not HF-template parity.
+    # That behavior is covered by the stability suite, not reference parity.
     if (
         case.model in {"google/gemma-4-26B-A4B-it", "google/gemma-4-31B-it"}
         and kwargs.get("enable_thinking", False) is False

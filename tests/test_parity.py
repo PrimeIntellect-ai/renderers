@@ -1,9 +1,11 @@
 """Unified renderer parity matrix.
 
 Every valid cell is the product of one model, one shared conversation
-scenario, and all explicit chat-template kwarg values accepted by that
+scenario, and all explicit reference-controlled values accepted by that
 model's typed config. Unsupported cells are excluded declaratively in the
-model catalog rather than discovered at runtime through skips or xfails.
+model catalog rather than discovered at runtime through skips or xfails. The
+reference is model-aware: most models use Hugging Face Jinja, DeepSeek V4 uses
+its shipped Python encoder, and GPT-OSS uses Harmony.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from parity import (
 from renderers import create_renderer
 from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
 from renderers.configs import RendererConfig, _config_class_for
+from tests.reference_rendering import render_reference
 
 
 def _id(case: ModelCase, scenario: Scenario, kwargs: Mapping[str, Any]) -> str:
@@ -66,26 +69,20 @@ def _renderer(model: str, renderer_name: str, items: tuple[tuple[str, Any], ...]
     return create_renderer(tokenizer, config, chat_template_kwargs=kwargs or None)
 
 
-def _expected_hf(
+def _expected_reference(
     tokenizer,
     scenario: Scenario,
     kwargs: Mapping[str, Any],
 ) -> list[int]:
-    # Config ``None`` values mean "defer to the template default"; omission is
-    # how the Jinja side expresses the same state.
+    # Config ``None`` values mean "defer to the reference default"; omission
+    # expresses the same state for each model-aware oracle.
     explicit_kwargs = {key: value for key, value in kwargs.items() if value is not None}
-    result = tokenizer.apply_chat_template(
-        list(scenario.messages),
-        tokenize=True,
-        return_dict=False,
+    return render_reference(
+        tokenizer,
+        [dict(message) for message in scenario.messages],
         **explicit_kwargs,
         **scenario.render_kwargs,
     )
-    if isinstance(result, dict):
-        return list(result["input_ids"])
-    if isinstance(result, str):
-        return list(tokenizer.encode(result, add_special_tokens=False))
-    return list(result)
 
 
 def _harmony_tool_description(tool):
@@ -256,10 +253,12 @@ def test_renderer_matches_reference(
 
     if case.oracle == "harmony":
         expected = _expected_harmony(scenario, kwargs)
-    else:
+    elif case.oracle == "reference":
         oracle_kwargs = dict(case.oracle_defaults)
         oracle_kwargs.update(kwargs)
-        expected = _expected_hf(tokenizer, scenario, oracle_kwargs)
+        expected = _expected_reference(tokenizer, scenario, oracle_kwargs)
+    else:
+        raise AssertionError(f"Unknown reference oracle: {case.oracle!r}")
     got = renderer.render_ids(list(scenario.messages), **scenario.render_kwargs)
     assert got == expected, (
         f"{case.model} / {scenario.id} / {dict(kwargs)!r}: renderer diverged "

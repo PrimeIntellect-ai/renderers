@@ -982,6 +982,9 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # DeepSeek R1 (reasoning).
     "deepseek-ai/DeepSeek-R1": "deepseek-r1",
     "deepseek-ai/DeepSeek-R1-0528": "deepseek-r1",
+    # DeepSeek V4 Flash 0731 uses the repository's Python DSML encoder (the
+    # tokenizer intentionally ships no Jinja chat_template).
+    "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek-v4",
     # Kimi K2 (K2.5 and K2.6 share the K2.5 template, distinct from K2).
     "moonshotai/Kimi-K2-Instruct": "kimi-k2",
     "moonshotai/Kimi-K2.5": "kimi-k2.5",
@@ -1299,6 +1302,7 @@ def _populate_registry():
         return
     from renderers.deepseek_r1 import DeepSeekR1Renderer
     from renderers.deepseek_v3 import DeepSeekV3Renderer
+    from renderers.deepseek_v4 import DeepSeekV4Renderer
     from renderers.default import DefaultRenderer
     from renderers.glm5 import GLM5Renderer, GLM51Renderer
     from renderers.glm45 import GLM45Renderer
@@ -1344,6 +1348,7 @@ def _populate_registry():
             "minimax-m2": MiniMaxM2Renderer,
             "deepseek-v3": DeepSeekV3Renderer,
             "deepseek-r1": DeepSeekR1Renderer,
+            "deepseek-v4": DeepSeekV4Renderer,
             "hy3": Hy3Renderer,
             "inkling": InklingRenderer,
             "kimi-k2": KimiK2Renderer,

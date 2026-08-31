@@ -930,6 +930,47 @@ class DeepSeekR1RendererConfig(BaseRendererConfig):
     _template_fields = frozenset()
 
 
+class DeepSeekV4RendererConfig(BaseRendererConfig):
+    """DeepSeek-V4-Flash-0731 reference-encoder configuration.
+
+    The checkpoint ships a Python encoder rather than a Jinja template.  These
+    fields mirror its public controls: chat vs thinking mode, historical
+    reasoning dropping, and the opt-in thinking-effort prefix.
+    """
+
+    name: Literal["deepseek-v4"] = "deepseek-v4"
+    _template_fields = frozenset(
+        {"enable_thinking", "drop_thinking", "reasoning_effort"}
+    )
+
+    enable_thinking: bool = False
+    """Select thinking mode.  ``False`` matches the official inference script."""
+
+    drop_thinking: bool = True
+    """Drop reasoning before the latest user query when no tools are present.
+
+    The reference encoder automatically preserves all reasoning whenever tools
+    are supplied, regardless of this value.
+    """
+
+    reasoning_effort: Literal["low", "high", "max"] = "low"
+    """Thinking-only effort prefix; ``low`` adds no text.
+
+    ``low`` is the checkpoint Python encoder's default. DeepSeek's hosted API
+    independently defaults its thinking effort to ``high``.
+    """
+
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        _reject_thinking_retention_conflict(
+            self,
+            "drop_thinking",
+            true_implies="tool_cycle",
+            false_implies="all",
+        )
+        return self
+
+
 RendererConfig = Annotated[
     Union[
         AutoRendererConfig,
@@ -960,6 +1001,7 @@ RendererConfig = Annotated[
         Nemotron35RendererConfig,
         DeepSeekV3RendererConfig,
         DeepSeekR1RendererConfig,
+        DeepSeekV4RendererConfig,
     ],
     Field(discriminator="name"),
 ]
@@ -1006,6 +1048,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "nemotron-3.5": Nemotron35RendererConfig,
     "deepseek-v3": DeepSeekV3RendererConfig,
     "deepseek-r1": DeepSeekR1RendererConfig,
+    "deepseek-v4": DeepSeekV4RendererConfig,
 }
 
 
@@ -1039,6 +1082,7 @@ __all__ = [
     "DefaultRendererConfig",
     "DeepSeekR1RendererConfig",
     "DeepSeekV3RendererConfig",
+    "DeepSeekV4RendererConfig",
     "GLM45RendererConfig",
     "GLM51RendererConfig",
     "GLM5RendererConfig",

@@ -93,6 +93,9 @@ class _FakeClient:
             "request_id": "gen-test",
             "choices": [self.choice],
         }
+        if body and body.get("content_parts"):
+            payload["prompt_token_ids"] = [1, 2, 2, 3]
+            payload["mm_placeholders"] = {"image": [{"offset": 1, "length": 2}]}
         return httpx.Response(
             200,
             content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
@@ -180,6 +183,49 @@ def test_generate_builds_request_body_and_parses_response():
     assert tc.name == "echo"
     assert tc.arguments == {"text": "hello"}
     assert tc.status == ToolCallParseStatus.OK
+
+
+def test_generate_process_multimodal_false_sends_content_parts():
+    class DeferredMultimodalRenderer(_FakeRenderer):
+        supports_process_multimodal = True
+
+        def render(
+            self,
+            messages,
+            *,
+            tools=None,
+            add_generation_prompt=False,
+            process_multimodal=True,
+        ):
+            assert process_multimodal is False
+            return RenderedTokens(token_ids=[1, 2, 3])
+
+    client = _FakeClient()
+    image_url = "data:image/png;base64,aW1hZ2U="
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=DeferredMultimodalRenderer(),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look"},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ],
+            model="test-model",
+            process_multimodal=False,
+        )
+    )
+
+    body = client.calls[0]["body"]
+    assert body["content_parts"] == [{"type": "image_url", "url": image_url}]
+    assert "features" not in body
+    assert result["renderer_prompt_ids"] == [1, 2, 3]
+    assert result["prompt_ids"] == [1, 2, 2, 3]
+    assert result["mm_placeholders"] == {"image": [{"offset": 1, "length": 2}]}
 
 
 def test_generate_rejects_missing_completion_logprobs_before_parsing():

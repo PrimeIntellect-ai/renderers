@@ -31,10 +31,12 @@ TOOLS = [
     }
 ]
 
+QWEN38_MODELS = ["Qwen/Qwen3.8-27B", "Qwen/Qwen3.8-Flash-Next"]
 
-@lru_cache(maxsize=1)
-def _qwen38():
-    tokenizer = load_tokenizer("Qwen/Qwen3.8-27B")
+
+@lru_cache(maxsize=None)
+def _qwen38(model_name):
+    tokenizer = load_tokenizer(model_name)
     return tokenizer, create_renderer(tokenizer)
 
 
@@ -48,10 +50,11 @@ def _expected(tokenizer, messages, **kwargs):
     return list(result)
 
 
-def test_qwen38_is_registered_with_native_defaults():
-    tokenizer, renderer = _qwen38()
+@pytest.mark.parametrize("qwen38_model", QWEN38_MODELS)
+def test_qwen38_is_registered_with_native_defaults(qwen38_model):
+    tokenizer, renderer = _qwen38(qwen38_model)
 
-    assert tokenizer.name_or_path == "Qwen/Qwen3.8-27B"
+    assert tokenizer.name_or_path == qwen38_model
     assert MODEL_RENDERER_MAP[tokenizer.name_or_path] == "qwen3.8"
     assert MULTIMODAL_MODELS[tokenizer.name_or_path] == {"image"}
     assert isinstance(renderer, Qwen38Renderer)
@@ -86,8 +89,9 @@ def test_qwen38_config_discriminator():
         pytest.param({"preserve_thinking": False}, id="drop-history-thinking"),
     ],
 )
-def test_qwen38_text_and_tool_parity(config_kwargs):
-    tokenizer, _ = _qwen38()
+@pytest.mark.parametrize("qwen38_model", QWEN38_MODELS)
+def test_qwen38_text_and_tool_parity(config_kwargs, qwen38_model):
+    tokenizer, _ = _qwen38(qwen38_model)
     renderer = Qwen38Renderer(tokenizer, Qwen38RendererConfig(**config_kwargs))
     cases = [
         (
@@ -152,8 +156,9 @@ def test_qwen38_text_and_tool_parity(config_kwargs):
         assert renderer.render_ids(messages, **render_kwargs) == expected
 
 
-def test_qwen38_keeps_inline_think_markup_in_visible_content():
-    tokenizer, renderer = _qwen38()
+@pytest.mark.parametrize("qwen38_model", QWEN38_MODELS)
+def test_qwen38_keeps_inline_think_markup_in_visible_content(qwen38_model):
+    tokenizer, renderer = _qwen38(qwen38_model)
     messages = [
         {"role": "user", "content": "Echo this."},
         {
@@ -165,8 +170,9 @@ def test_qwen38_keeps_inline_think_markup_in_visible_content():
     assert renderer.render_ids(messages) == _expected(tokenizer, messages)
 
 
-def test_qwen38_requires_a_real_user_query():
-    _, renderer = _qwen38()
+@pytest.mark.parametrize("qwen38_model", QWEN38_MODELS)
+def test_qwen38_requires_a_real_user_query(qwen38_model):
+    _, renderer = _qwen38(qwen38_model)
 
     with pytest.raises(ValueError, match="No user query found"):
         renderer.render_ids([{"role": "system", "content": "System only."}])

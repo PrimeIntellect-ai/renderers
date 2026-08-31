@@ -6,6 +6,8 @@ Runs against every (model, renderer) pair.
 
 from functools import lru_cache
 
+import pytest
+
 from renderers import create_renderer
 from renderers.base import ToolCallParseStatus, load_tokenizer
 
@@ -103,6 +105,68 @@ def _qwen3():
     tokenizer = load_tokenizer("Qwen/Qwen3-0.6B")
     renderer = create_renderer(tokenizer)
     return tokenizer, renderer
+
+
+@lru_cache
+def _prime_qwen3(model: str):
+    tokenizer = load_tokenizer(model)
+    return tokenizer, create_renderer(tokenizer)
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["PrimeIntellect/Qwen3-0.6B", "PrimeIntellect/Qwen3-1.7B"],
+)
+def test_prime_qwen3_empty_think_roundtrips_through_bridge(model):
+    """Present-but-empty reasoning must survive parse → bridge → rerender.
+
+    Collapsing an emitted ``<think></think>`` block to ``None`` drops the
+    block from stored messages and makes every later rerender diverge from
+    the sampled token stream.
+    """
+    tokenizer, renderer = _prime_qwen3(model)
+    stop = renderer.get_stop_token_ids()[0]
+
+    prompt = [{"role": "user", "content": "Reverse abc"}]
+    prompt_ids = renderer.render_ids(prompt, add_generation_prompt=True)
+    full = tokenizer.encode(
+        tokenizer.decode(prompt_ids) + "<think></think>\ncba",
+        add_special_tokens=False,
+    )
+    assert full[: len(prompt_ids)] == prompt_ids
+    completion_ids = full[len(prompt_ids) :] + [stop]
+
+    parsed = renderer.parse_response(completion_ids)
+    assert parsed.reasoning_content == ""
+    assert parsed.content == "cba"
+
+    assistant = {
+        "role": "assistant",
+        "content": parsed.content,
+        "reasoning_content": parsed.reasoning_content,
+    }
+    reminder = {"role": "user", "content": "Now reverse def"}
+    bridged = renderer.bridge_to_next_turn(prompt_ids, completion_ids, [reminder])
+    assert bridged is not None
+    assert bridged.token_ids == renderer.render_ids(
+        [*prompt, assistant, reminder], add_generation_prompt=True
+    )
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["PrimeIntellect/Qwen3-0.6B", "PrimeIntellect/Qwen3-1.7B"],
+)
+def test_prime_qwen3_absent_think_stays_none(model):
+    """A completion without a think block must not invent empty reasoning."""
+    tokenizer, renderer = _prime_qwen3(model)
+    stop = renderer.get_stop_token_ids()[0]
+
+    completion_ids = tokenizer.encode("cba", add_special_tokens=False) + [stop]
+    parsed = renderer.parse_response(completion_ids)
+
+    assert parsed.reasoning_content is None
+    assert parsed.content == "cba"
 
 
 def test_qwen3_in_think_tool_call_is_not_a_real_call():

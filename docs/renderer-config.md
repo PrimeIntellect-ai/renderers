@@ -1,8 +1,7 @@
 # Renderer config
 
-`renderers.RendererConfig` is the typed input to `create_renderer` and
-`create_renderer_pool`. It pins the renderer choice and its config at
-construction time.
+`renderers.RendererConfig` is the typed input to `create_renderer`. It pins the
+renderer choice and its config at construction time.
 
 ```python
 from renderers import create_renderer, Qwen35RendererConfig
@@ -22,8 +21,8 @@ construction.
 Use `type(config).template_field_names()` to inspect the explicit allowlist of
 fields accepted through `chat_template_kwargs`. Every renderer-specific field
 is classified as either a template field or a renderer-only field at class
-definition time. Template fields are covered by parity tests against
-`apply_chat_template` in `tests/test_renderer_config_parity.py`.
+definition time. Template fields are covered by the model/scenario/kwarg
+product in `tests/test_parity.py`.
 
 | Renderer | Config class | Template fields | Renderer-only fields |
 | --- | --- | --- | --- |
@@ -52,6 +51,7 @@ definition time. Template fields are covered by parity tests against
 | Nemotron-3.5 Lightning | `Nemotron35RendererConfig` | `enable_thinking`, `truncate_history_thinking` | - |
 | DeepSeek V3 | `DeepSeekV3RendererConfig` | - | - |
 | DeepSeek R1 | `DeepSeekR1RendererConfig` | - | - |
+| DeepSeek V4 Flash 0731 | `DeepSeekV4RendererConfig` | `enable_thinking`, `drop_thinking`, `reasoning_effort` | - |
 
 Configs are frozen value objects. To override a field, construct a new instance
 or call `config.model_copy(update={...})`.
@@ -75,10 +75,6 @@ Callers that receive run-scoped chat-template kwargs can pass them separately:
 ```python
 r = create_renderer(
     tokenizer,
-    chat_template_kwargs={"enable_thinking": False},
-)
-pool = create_renderer_pool(
-    "Qwen/Qwen3-8B",
     chat_template_kwargs={"enable_thinking": False},
 )
 ```
@@ -150,6 +146,7 @@ the knobs its template actually exposes:
 | Kimi K2.5 / 2.6 | `thinking=False -> all`, else `tool_cycle` |
 | Nemotron-3 / 3.5 | `truncate_history_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | DeepSeek R1 | `template` |
+| DeepSeek V4 Flash 0731 | `enable_thinking=False` or `drop_thinking=False -> all`, else `tool_cycle` |
 | MiniMax M2 | `tool_cycle` |
 | DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / M.1 / XS-2.1 / S-2.1, Llama 3, Inkling | `all` |
 | PrimeIntellect Qwen3 | `all` |

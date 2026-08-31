@@ -19,11 +19,6 @@ dependencies = [
     "openai>=1.108.1",
     "tiktoken",
     "jinja2",
-    # Keep this floor compatible with prime-rl's transformers pin. Inkling's
-    # tokenizer and text-only renderer work on older releases; image/audio
-    # processing fails lazily with an upgrade message when InklingProcessor is
-    # unavailable (native support starts in transformers 5.14).
-    "transformers>=4.50.0",
     # Used by GptOssRenderer to render and parse harmony tokens. Vendoring
     # OpenAI's reference implementation keeps us byte-identical with vLLM
     # (which also uses it) and saves us mirroring a 330-line Jinja template.
@@ -32,7 +27,7 @@ dependencies = [
     # release through 0.5.12.post1 hard-pins ``openai-harmony==0.0.4``, so a
     # higher floor makes ``renderers`` uninstallable alongside SGLang. The
     # GptOssRenderer renders byte-identically on 0.0.4 (verified token-for-token
-    # against 0.0.8) and ``tests/test_gpt_oss_harmony_parity.py`` passes on it,
+    # against 0.0.8) and the Harmony cells in ``tests/test_parity.py`` pass,
     # so the older harmony is safe.
     "openai-harmony>=0.0.4",
     # ``BaseRendererConfig`` inherits from ``pydantic_config.BaseConfig`` so
@@ -40,6 +35,25 @@ dependencies = [
     # bases. Transitively brings pydantic, which ``renderers.configs`` also
     # imports directly.
     "prime-pydantic-config>=0.3.0.dev83",
+]
+
+[project.optional-dependencies]
+# Tokenizer loading uses Hugging Face. Text-only renderers can instead be
+# constructed with a compatible BYO tokenizer and do not import this
+# dependency. Character offsets are optional.
+transformers = [
+    # Keep this floor compatible with prime-rl's transformers pin. Inkling's
+    # tokenizer and text-only renderer work on older releases; image/audio
+    # processing fails lazily with an upgrade message when InklingProcessor is
+    # unavailable (native support starts in transformers 5.14).
+    "transformers>=4.50.0",
+]
+
+# Image/audio renderers also need Pillow to resolve media inputs. Keep this as
+# a separate convenience extra so tokenizer-only users do not pull it in.
+multimodal = [
+    "pillow>=12.2.0",
+    "transformers>=4.50.0",
 ]
 
 [tool.hatch.version]
@@ -90,6 +104,8 @@ dev = [
     "torch>=2.11.0",
     "torchvision>=0.26.0",
     "ty>=0.0.1a29,<0.0.22",
+    # Optional for consumers, but required by tokenizer/parity/VLM tests.
+    "transformers>=4.50.0",
 ]
 
 [tool.uv]

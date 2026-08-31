@@ -7,6 +7,7 @@ except ImportError:
     __version__ = "0+unknown"
 
 from renderers.base import (
+    ChatTemplateTokenizer,
     Content,
     ContentPart,
     ImagePart,
@@ -14,6 +15,7 @@ from renderers.base import (
     Message,
     MultiModalData,
     MultimodalRenderer,
+    OffsetTokenizer,
     ParsedResponse,
     ParsedToolCall,
     PlaceholderRange,
@@ -21,9 +23,9 @@ from renderers.base import (
     RenderedTokens,
     RenderedTrainingSample,
     Renderer,
-    RendererPool,
     TextPart,
     ThinkingPart,
+    Tokenizer,
     ToolCall,
     ToolCallFunction,
     ToolCallParseStatus,
@@ -33,7 +35,6 @@ from renderers.base import (
     build_training_sample,
     build_trajectory_step,
     create_renderer,
-    create_renderer_pool,
     extract_message_tool_names,
     is_multimodal,
     reject_assistant_in_extension,
@@ -47,6 +48,7 @@ from renderers.configs import (
     DefaultRendererConfig,
     DeepSeekR1RendererConfig,
     DeepSeekV3RendererConfig,
+    DeepSeekV4RendererConfig,
     GLM45RendererConfig,
     GLM51RendererConfig,
     GLM5RendererConfig,
@@ -74,20 +76,17 @@ from renderers.configs import (
     RendererConfig,
 )
 
-# Concrete renderer classes are lazy-loaded so that consumers needing
-# only the config layer (``RendererConfig`` discriminated union) don't
-# pay the ``transformers`` import cost. Each renderer module does
-# ``from transformers.tokenization_utils import PreTrainedTokenizer``
-# at module level, so eager imports here would drag ``transformers``
-# into every downstream ``import renderers``. ``__getattr__`` (PEP 562)
-# resolves the names on first attribute access, so ``from renderers
-# import DefaultRenderer`` and ``renderers.DefaultRenderer`` both work
-# transparently. ``create_renderer`` doesn't depend on these eager
-# imports — ``renderers.base._populate_registry`` lazy-imports the
-# concrete classes itself when a renderer is instantiated.
+# Concrete renderer classes are lazy-loaded so that consumers needing only the
+# config layer (``RendererConfig`` discriminated union) don't import every
+# renderer module. Renderer tokenizer annotations use the local ``Tokenizer``
+# protocols, so resolving a text renderer remains safe when the optional
+# ``transformers`` dependency is absent. ``__getattr__`` (PEP 562) resolves the
+# names on first attribute access, while ``renderers.base._populate_registry``
+# handles lazy registration for ``create_renderer``.
 _LAZY_RENDERERS: dict[str, str] = {
     "DeepSeekR1Renderer": "renderers.deepseek_r1",
     "DeepSeekV3Renderer": "renderers.deepseek_v3",
+    "DeepSeekV4Renderer": "renderers.deepseek_v4",
     "DefaultRenderer": "renderers.default",
     "GLM45Renderer": "renderers.glm45",
     "GLM51Renderer": "renderers.glm5",
@@ -134,12 +133,15 @@ def __dir__() -> list[str]:
 __all__ = [
     "AutoRendererConfig",
     "BaseRendererConfig",
+    "ChatTemplateTokenizer",
     "Content",
     "ContentPart",
     "DeepSeekR1Renderer",
     "DeepSeekR1RendererConfig",
     "DeepSeekV3Renderer",
     "DeepSeekV3RendererConfig",
+    "DeepSeekV4Renderer",
+    "DeepSeekV4RendererConfig",
     "DefaultRenderer",
     "DefaultRendererConfig",
     "GLM45Renderer",
@@ -184,6 +186,7 @@ __all__ = [
     "Nemotron3RendererConfig",
     "Nemotron3UltraRenderer",
     "Nemotron3UltraRendererConfig",
+    "OffsetTokenizer",
     "OverlongPromptError",
     "ParsedResponse",
     "ParsedToolCall",
@@ -205,9 +208,9 @@ __all__ = [
     "RenderedTrainingSample",
     "Renderer",
     "RendererConfig",
-    "RendererPool",
     "TextPart",
     "ThinkingPart",
+    "Tokenizer",
     "ToolCall",
     "ToolCallFunction",
     "ToolCallParseStatus",
@@ -219,7 +222,6 @@ __all__ = [
     "build_trajectory_step",
     "config_from_name",
     "create_renderer",
-    "create_renderer_pool",
     "extract_message_tool_names",
     "is_multimodal",
     "reject_assistant_in_extension",

@@ -25,15 +25,13 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from parity import models_for
 from renderers.base import ToolCallParseStatus
 
 # Both GLM renderers share ``parse_glm`` and are served by the same
 # strict vLLM parser (the ``glm45`` and ``glm47`` aliases both resolve
 # to ``Glm47MoeModelToolParser`` in vLLM ≥ 0.24).
-_MODELS = [
-    ("THUDM/GLM-4.5-Air", "auto"),
-    ("zai-org/GLM-5", "auto"),
-]
+_MODELS = [(case.model, case.renderer) for case in models_for("glm-tool-names")]
 
 _TOOLS = [
     {

@@ -4,72 +4,16 @@ Each (model_name, renderer_name) pair gets a tokenizer + renderer.
 The same barrage of tests runs against every pair.
 """
 
-import os
+from pathlib import Path
 
 import pytest
+from parity import models_for
 from renderers import create_renderer
 from renderers.base import load_tokenizer
 from renderers.configs import config_from_name
 
-# (HuggingFace model name, renderer name or "auto")
-#
-# Baseline matrix for render-parity, parse, and per-token-attribution
-# tests. Models here are exercised by every shared test in this folder.
-# Additional models for narrower tests (e.g. roundtrip) live with their
-# own parametrization in the test file.
-RENDERER_MODELS = [
-    ("Qwen/Qwen3-8B", "auto"),
-    ("PrimeIntellect/Qwen3-0.6B", "auto"),
-    ("Qwen/Qwen3.5-9B", "auto"),
-    ("Qwen/Qwen3.6-35B-A3B", "auto"),
-    ("Qwen/Qwen3.8-27B", "auto"),
-    ("Qwen/Qwen3-VL-4B-Instruct", "auto"),
-    ("google/gemma-4-31B-it", "auto"),
-    ("zai-org/GLM-5", "auto"),
-    ("zai-org/GLM-5.1", "auto"),
-    ("zai-org/GLM-4.7-Flash", "auto"),
-    ("THUDM/GLM-4.5-Air", "auto"),
-    ("MiniMaxAI/MiniMax-M2.5", "auto"),
-    ("moonshotai/Kimi-K2-Instruct", "auto"),
-    ("moonshotai/Kimi-K2.5", "auto"),
-    ("moonshotai/Kimi-K2.6", "auto"),
-    ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
-    ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16", "auto"),
-    # Ultra resolves to the `nemotron-3-ultra` config variant via the model
-    # name (auto → MODEL_RENDERER_MAP → nemotron-3-ultra).
-    ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "auto"),
-    # Nemotron 3.5 (Lightning): Ultra's template variant minus the effort
-    # kwarg (auto → MODEL_RENDERER_MAP → nemotron-3.5).
-    ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16", "auto"),
-    ("poolside/Laguna-XS.2", "auto"),
-    ("poolside/Laguna-M.1", "auto"),
-    # XS-2.1 resolves to `LagunaXS21Renderer` via the model name — its
-    # chat template differs from XS.2's (see renderers/laguna_xs2.py).
-    ("poolside/Laguna-XS-2.1", "auto"),
-    # S-2.1 is a larger sibling of XS-2.1 sharing its tokenizer but NOT its
-    # chat template (S-2.1 defaults enable_thinking=True and adds a
-    # preserve_thinking gate), so it resolves to LagunaS21Renderer.
-    ("poolside/Laguna-S-2.1", "auto"),
-    # DeepSeek-V3/R1 are intentionally NOT in this shared barrage: their
-    # chat templates can't render the barrage's tool-call fixtures (the
-    # templates require ``tool['type']`` and a string-serialized
-    # ``arguments``, and V3 only renders tool_calls when content is None —
-    # so ``apply_chat_template`` raises or drops the calls on the shared
-    # shapes), and the is_content body-recovery checks hit a Metaspace
-    # subset-decode artifact. The renderer is correct in all these cases;
-    # there's just no byte-output to parity-check against. Split-specific
-    # parity (V3 bare prompt vs R1 <think>+history-strip) is covered in
-    # tests/test_deepseek_r1.py.
-    # Llama-3 uses the canonical Meta ID for renderer auto-resolution, while
-    # load_tokenizer fetches the tokenizer/chat_template from the unrestricted
-    # unsloth mirror so CI needs no Meta-gated HF token.
-    ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
-    ("openai/gpt-oss-20b", "gpt-oss"),
-    ("tencent/Hy3", "auto"),
-    ("thinkingmachines/Inkling", "auto"),
-    ("thinkingmachines/Inkling-Small", "auto"),
-    ("Qwen/Qwen2.5-0.5B-Instruct", "default"),
-]
+# Backwards-compatible view used by documentation and a few invariant tests.
+RENDERER_MODELS = [(case.model, case.renderer) for case in models_for("shared")]
 
 _cache: dict[str, tuple] = {}
 
@@ -85,10 +29,21 @@ def _load(model_name: str, renderer_name: str):
 
 def pytest_generate_tests(metafunc):
     if "model_name" in metafunc.fixturenames:
+        filename = Path(str(metafunc.definition.path)).name
+        if filename == "test_build_helpers.py":
+            suite = "build-helpers"
+        elif filename in {
+            "test_parse_response.py",
+            "test_parse_response_robustness.py",
+        }:
+            suite = "plain-parser"
+        else:
+            suite = "shared"
+        cases = models_for(suite)
         metafunc.parametrize(
             "model_name,renderer_name",
-            RENDERER_MODELS,
-            ids=[m for m, _ in RENDERER_MODELS],
+            [(case.model, case.renderer) for case in cases],
+            ids=[case.model for case in cases],
         )
 
 
@@ -102,64 +57,3 @@ def tokenizer(model_name, renderer_name):
 def renderer(model_name, renderer_name):
     _, r = _load(model_name, renderer_name)
     return r
-
-
-# Tests that compare the renderer output (or downstream tokens) against
-# HF's ``apply_chat_template`` — or that feed plain text through the
-# parser expecting a non-empty content. Both fail for gpt-oss because:
-#  1. Our GptOssRenderer matches openai-harmony / vLLM, not HF's Jinja
-#     (they disagree on a trailing ``\n\n`` and the function-tools
-#     layout). Harmony parity is covered separately in
-#     ``test_gpt_oss_harmony_parity.py``.
-#  2. The harmony parser only emits content from messages bracketed by
-#     ``<|start|>...<|message|>...<|end|>`` channel markers; plain text
-#     never matches a block, so the test's "Hello there!" probe
-#     trivially returns empty content. The parsing-test fixtures aren't
-#     designed for harmony format.
-_GPT_OSS_HF_PARITY_TEST_FILES = {
-    "test_render_ids.py",
-    "test_build_helpers.py",
-    "test_parse_response.py",
-    "test_parse_response_robustness.py",
-}
-
-
-@pytest.fixture(autouse=True)
-def _skip_gpt_oss_for_hf_parity_tests(request):
-    callspec = getattr(request.node, "callspec", None)
-    model_name = callspec.params.get("model_name") if callspec else None
-    if model_name != "openai/gpt-oss-20b":
-        return
-    test_file = os.path.basename(str(request.node.fspath))
-    if test_file in _GPT_OSS_HF_PARITY_TEST_FILES:
-        pytest.skip(
-            f"{model_name}: renderer matches openai-harmony / vLLM, not HF "
-            "apply_chat_template — see test_gpt_oss_harmony_parity.py"
-        )
-
-
-# Llama-3's chat template fills the "Today Date:" line via ``strftime_now``,
-# so ``apply_chat_template`` with no explicit ``date_string`` bakes in the
-# real wall-clock date — non-deterministic and not byte-stable against a
-# renderer pinned to "26 Jul 2024". Generic HF-parity tests can't pass a
-# kwarg, so they're skipped here; deterministic byte-parity (with the date
-# passed on both sides) is covered in test_llama_3.py.
-_LLAMA_HF_PARITY_TEST_FILES = {
-    "test_render_ids.py",
-    "test_build_helpers.py",
-}
-
-
-@pytest.fixture(autouse=True)
-def _skip_llama_for_hf_parity_tests(request):
-    callspec = getattr(request.node, "callspec", None)
-    model_name = callspec.params.get("model_name") if callspec else None
-    if model_name != "meta-llama/Llama-3.2-1B-Instruct":
-        return
-    test_file = os.path.basename(str(request.node.fspath))
-    if test_file in _LLAMA_HF_PARITY_TEST_FILES:
-        pytest.skip(
-            f"{model_name}: template uses strftime_now for the date line, so "
-            "generic apply_chat_template parity is non-deterministic — "
-            "deterministic byte-parity is covered in test_llama_3.py"
-        )

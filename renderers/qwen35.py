@@ -25,8 +25,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Message,
     MultiModalData,
@@ -34,6 +32,9 @@ from renderers.base import (
     PlaceholderRange,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
+    _content_mask_or_empty,
+    _require_transformers,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -104,6 +105,7 @@ _ENABLE_THINKING_DEFAULTS: dict[str, bool] = {
     "Qwen/Qwen3.6-35B-A3B": True,
     # Qwen3.8 keeps thinking enabled by default.
     "Qwen/Qwen3.8-27B": True,
+    "Qwen/Qwen3.8-Flash-Next": True,
 }
 
 
@@ -125,7 +127,7 @@ class Qwen35Renderer:
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: Qwen35RendererConfig | None = None,
         *,
         processor: Any = None,
@@ -184,8 +186,6 @@ class Qwen35Renderer:
     def _get_processor(self):
         if self._processor is not None:
             return self._processor
-        from transformers import AutoProcessor
-
         name = getattr(self._tokenizer, "name_or_path", None)
         if not name:
             raise RuntimeError(
@@ -194,7 +194,8 @@ class Qwen35Renderer:
                 "constructor, or load the tokenizer with a known name_or_path "
                 "so the processor can be auto-loaded."
             )
-        self._processor = AutoProcessor.from_pretrained(name)
+        transformers = _require_transformers("Auto-loading a Qwen3.5-family processor")
+        self._processor = transformers.AutoProcessor.from_pretrained(name)
         return self._processor
 
     def _process_image(self, part: dict[str, Any]):
@@ -637,7 +638,7 @@ class Qwen35Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=mm_data,
@@ -931,7 +932,7 @@ class Qwen35Renderer:
                 token_ids=tokens,
                 message_indices=indices,
                 sampled_mask=sampled,
-                is_content=content_mask,
+                is_content=_content_mask_or_empty(self._tokenizer, content_mask),
                 message_roles=bridge_roles,
                 message_tool_names=bridge_tool_names,
             )
@@ -945,7 +946,7 @@ class Qwen35Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=bridge_roles,
             message_tool_names=bridge_tool_names,
             multi_modal_data=mm_data,

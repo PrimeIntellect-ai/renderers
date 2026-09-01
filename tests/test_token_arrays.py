@@ -3,11 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from renderers.base import RenderedTrainingSample
 from renderers.token_arrays import (
     FixedWidthArrayBuilder,
     MASK_DTYPE,
     RenderedTokenBuilder,
     TOKEN_IDS_DTYPE,
+    TRAINING_TOKEN_IDS_DTYPE,
     encode_token_ids,
     require_1d_array,
 )
@@ -103,6 +105,17 @@ def test_rendered_token_builder_rejects_list_and_misaligned_mask_custody():
             is_content=[True, False],  # type: ignore[arg-type]
         )
     assert len(builder) == 0
+
+
+def test_training_sample_rejects_mutable_aliases_without_mutating_caller():
+    token_ids = np.asarray([2, 3], dtype=TRAINING_TOKEN_IDS_DTYPE)
+    loss_mask = np.asarray([False, True], dtype=MASK_DTYPE)
+
+    with pytest.raises(ValueError, match="must already be read-only"):
+        RenderedTrainingSample(token_ids=token_ids, loss_mask=loss_mask)
+
+    assert token_ids.flags.writeable
+    assert loss_mask.flags.writeable
 
 
 def test_encode_token_ids_uses_numpy_tokenizer_contract_without_iteration():

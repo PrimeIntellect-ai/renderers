@@ -1548,9 +1548,13 @@ class RenderedTrainingSample:
             require_1d_array("mm_token_type_ids", self.mm_token_type_ids, dtype=MM_TOKEN_TYPE_IDS_DTYPE, minimum=0)
             if self.mm_token_type_ids.size != self.token_ids.size:
                 raise ValueError("mm_token_type_ids length must match token_ids")
-        for values in (self.token_ids, self.loss_mask, self.mm_token_type_ids):
+        for name, values in (
+            ("training token_ids", self.token_ids),
+            ("training loss_mask", self.loss_mask),
+            ("mm_token_type_ids", self.mm_token_type_ids),
+        ):
             if values is not None:
-                values.flags.writeable = False
+                require_readonly(name, values)
 
 
 def _build_mm_token_type_ids(mm_placeholders: dict[str, list[PlaceholderRange]], length: int) -> np.ndarray:
@@ -1712,6 +1716,10 @@ def build_training_sample(
     mm_token_type_ids = (
         _build_mm_token_type_ids(mm.mm_placeholders, len(token_ids)) if mm is not None and mm.mm_placeholders else None
     )
+    token_ids.flags.writeable = False
+    loss_mask.flags.writeable = False
+    if mm_token_type_ids is not None:
+        mm_token_type_ids.flags.writeable = False
     return RenderedTrainingSample(
         token_ids=token_ids, loss_mask=loss_mask, multi_modal_data=mm, mm_token_type_ids=mm_token_type_ids
     )

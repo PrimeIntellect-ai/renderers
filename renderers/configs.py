@@ -26,6 +26,8 @@ from typing import Annotated, ClassVar, Literal, Union
 from pydantic import ConfigDict, Field, model_validator
 from pydantic_config import BaseConfig
 
+from renderers.registry import RENDERER_SPECS
+
 
 def _reject_thinking_retention_conflict(
     config: BaseConfig,
@@ -1015,40 +1017,12 @@ that renderer supports. Bogus combinations (e.g. ``add_vision_id`` under
 """
 
 
-# Map discriminator → config class. Used by ``create_renderer`` when
-# resolving ``AutoRendererConfig`` against ``MODEL_RENDERER_MAP``: the
-# resolved renderer name picks the corresponding typed config, and the
-# auto config's ``thinking_retention`` field is carried over.
+# Map discriminator → config class, derived from the central renderer
+# manifest. Used by ``create_renderer`` when resolving ``AutoRendererConfig``
+# against ``MODEL_RENDERER_MAP``.
 _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "auto": AutoRendererConfig,
-    "default": DefaultRendererConfig,
-    "qwen3": Qwen3RendererConfig,
-    "prime-qwen3": PrimeQwen3RendererConfig,
-    "qwen3.5": Qwen35RendererConfig,
-    "qwen3.6": Qwen36RendererConfig,
-    "qwen3.8": Qwen38RendererConfig,
-    "qwen3-vl": Qwen3VLRendererConfig,
-    "gemma4": Gemma4RendererConfig,
-    "glm-5": GLM5RendererConfig,
-    "glm-5.1": GLM51RendererConfig,
-    "glm-4.5": GLM45RendererConfig,
-    "gpt-oss": GptOssRendererConfig,
-    "hy3": Hy3RendererConfig,
-    "inkling": InklingRendererConfig,
-    "kimi-k2": KimiK2RendererConfig,
-    "kimi-k2.5": KimiK25RendererConfig,
-    "laguna-xs.2": LagunaXS2RendererConfig,
-    "laguna-m.1": LagunaM1RendererConfig,
-    "laguna-xs-2.1": LagunaXS21RendererConfig,
-    "laguna-s-2.1": LagunaS21RendererConfig,
-    "llama-3": Llama3RendererConfig,
-    "minimax-m2": MiniMaxM2RendererConfig,
-    "nemotron-3": Nemotron3RendererConfig,
-    "nemotron-3-ultra": Nemotron3UltraRendererConfig,
-    "nemotron-3.5": Nemotron35RendererConfig,
-    "deepseek-v3": DeepSeekV3RendererConfig,
-    "deepseek-r1": DeepSeekR1RendererConfig,
-    "deepseek-v4": DeepSeekV4RendererConfig,
+    **{spec.name: globals()[spec.config_class] for spec in RENDERER_SPECS},
 }
 
 

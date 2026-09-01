@@ -15,6 +15,7 @@ from renderers.base import (
 )
 from renderers.configs import DefaultRendererConfig, Hy3RendererConfig, LagunaXS21RendererConfig
 from renderers.default import DefaultRenderer
+from renderers.gpt_oss import GptOssRenderer
 from renderers.hy3 import Hy3Renderer
 from renderers.laguna_xs2 import LagunaXS21Renderer
 from renderers.token_arrays import (
@@ -395,6 +396,11 @@ def test_default_renderer_requests_numpy_and_builds_attribution_without_lists():
     assert np.array_equal(rendered.message_indices, np.fromiter((0, 1, -1), dtype="<i4", count=3))
     assert not rendered.token_ids.flags.writeable
     assert not rendered.message_indices.flags.writeable
+
+
+def test_gpt_oss_fails_before_the_list_backed_harmony_abi():
+    with pytest.raises(RuntimeError, match="openai-harmony fixed-width NumPy token ABI"):
+        GptOssRenderer(object())  # type: ignore[arg-type]
 
 
 def test_training_sample_rejects_mutable_aliases_without_mutating_caller():

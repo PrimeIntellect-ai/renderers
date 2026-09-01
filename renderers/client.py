@@ -28,7 +28,6 @@ from renderers.base import (
 
 _request_logger = logging.getLogger("renderers.client")
 ROUTED_EXPERTS_DATA_PREFIX = b'"routed_experts":{"data":"'
-KEPT_TOKENS_IDS_PREFIX = b'"kept_tokens":{"ids":"'
 # vLLM uses this value both when sampled-token evidence is missing and as a
 # lower-bound clamp, so receiving it cannot prove the real logprob was returned.
 VLLM_LOGPROB_SENTINEL = -9999.0
@@ -129,12 +128,9 @@ def _strip_base64_field(raw: bytes, prefix: bytes) -> tuple[bytes, memoryview | 
 
 def parse_generate_response(raw: bytes) -> dict[str, Any]:
     stripped, routed_data = _strip_base64_field(raw, ROUTED_EXPERTS_DATA_PREFIX)
-    stripped, kept_ids_data = _strip_base64_field(stripped, KEPT_TOKENS_IDS_PREFIX)
     payload: dict[str, Any] = json.loads(stripped)
     if routed_data is not None:
         payload["choices"][0]["routed_experts"]["data"] = routed_data
-    if kept_ids_data is not None:
-        payload["choices"][0]["kept_tokens"]["ids"] = kept_ids_data
     return payload
 
 
@@ -374,7 +370,9 @@ async def generate(
     parsed = renderer.parse_response(completion_ids, tools=tools)
 
     routed_experts = choice.get("routed_experts")
-    kept_tokens = choice.get("kept_tokens")
+    # vLLM's native kept-set sampling masks (``--return-sampling-mask``):
+    # one list of surviving vocab ids per completion token.
+    sampling_mask = choice.get("sampling_mask")
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
@@ -403,7 +401,7 @@ async def generate(
         "tool_calls": parsed.tool_calls,
         "finish_reason": finish_reason,
         "routed_experts": routed_experts,
-        "kept_tokens": kept_tokens,
+        "sampling_mask": sampling_mask,
         # The mm sidecar consumed on the request side, surfaced back so
         # callers can persist it on the trajectory step for downstream
         # multi-turn bridging and training-sample construction.

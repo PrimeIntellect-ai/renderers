@@ -2095,7 +2095,7 @@ def build_trajectory_step(
         "completion_mask": [True] * len(completion_ids),
         "completion_logprobs": [0.0] * len(completion_ids),
         "routed_experts": None,
-        "kept_tokens": None,
+        "sampling_mask": None,
     }
     if (
         full_rendered.multi_modal_data is not None

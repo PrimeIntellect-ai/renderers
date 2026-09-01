@@ -233,7 +233,15 @@ def test_bridge_declines_across_user_query_when_template_drops_thinking():
     p, comp = prior(r, think)
     assert r.bridge_to_next_turn(p, comp, [u2]) is None
     # ...and the caller's faithful re-render matches the chat template
-    hist = [u1, {"role": "assistant", "content": think}, u2]
+    hist = [
+        u1,
+        {
+            "role": "assistant",
+            "reasoning_content": "2 plus 2 is 4.",
+            "content": "4",
+        },
+        u2,
+    ]
     rendered = tok.decode(r.render_ids(hist, add_generation_prompt=True))
     assert rendered == tok.apply_chat_template(
         hist, tokenize=False, add_generation_prompt=True

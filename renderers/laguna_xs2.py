@@ -61,6 +61,7 @@ from renderers.base import (
     _infer_offsets_from_decode,
     attribute_text_segments,
     extract_message_tool_names,
+    get_structured_reasoning,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
@@ -664,23 +665,10 @@ class LagunaM1Renderer(LagunaXS2Renderer):
     def _assistant_reasoning_and_content(
         self, msg: Message, content: str
     ) -> tuple[str, str]:
-        # Match the official Jinja exactly: ``reasoning`` wins whenever it
-        # is a string (including the empty string), then
-        # ``reasoning_content`` is considered. An inline </think> block is
-        # removed from content and becomes the fallback reasoning source.
-        reasoning_content = ""
-        if isinstance(msg.get("reasoning"), str):
-            reasoning_content = msg["reasoning"]
-        elif isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-
-        if "</think>" in content:
-            if not reasoning_content:
-                before_close = content.split("</think>", 1)[0].rstrip("\n")
-                reasoning_content = before_close.split("<think>")[-1].lstrip("\n")
-            content = content.rsplit("</think>", 1)[-1].lstrip("\n")
-
-        return reasoning_content, content
+        # ``reasoning`` wins whenever it is a string (including the empty
+        # string), then ``reasoning_content`` is considered. String content is
+        # opaque; callers must normalize legacy inline think blocks first.
+        return get_structured_reasoning(msg, "reasoning", "reasoning_content"), content
 
 
 class LagunaXS21Renderer(LagunaXS2Renderer):

@@ -22,6 +22,7 @@ from renderers.base import (
     _content_mask_or_empty,
     attribute_text_segments,
     extract_message_tool_names,
+    get_structured_reasoning,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
@@ -467,17 +468,7 @@ class GLM45Renderer:
         emit_text,
         emit_text_segments,
     ):
-        reasoning_content = ""
-        if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-        elif "</think>" in content:
-            before, after = content.split("</think>", 1)
-            if "<think>" in before:
-                reasoning_content = before.split("<think>")[-1].lstrip("\n")
-            else:
-                reasoning_content = before.lstrip("\n")
-            reasoning_content = reasoning_content.rstrip("\n")
-            content = after.lstrip("\n")
+        reasoning_content = get_structured_reasoning(msg)
 
         # ``<|assistant|>\n`` is template-injected scaffolding — at
         # inference the chat template emits these as the generation

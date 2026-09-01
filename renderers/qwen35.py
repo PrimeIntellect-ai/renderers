@@ -37,6 +37,7 @@ from renderers.base import (
     _require_transformers,
     attribute_text_segments,
     extract_message_tool_names,
+    get_structured_reasoning,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
@@ -325,24 +326,10 @@ class Qwen35Renderer:
     def _extract_assistant_parts(msg: Message, content: str) -> tuple[str, str]:
         """Return ``(reasoning_content, visible_content)`` for an assistant.
 
-        Qwen3.5 and Qwen3.6 accept the legacy inline
-        ``<think>...</think>content`` shape when ``reasoning_content`` is
-        absent. Qwen3.8 removes that compatibility branch and overrides this
-        hook to keep inline markers in visible content.
+        Reasoning is a structured message field. Inline ``<think>`` markup in
+        ``content`` stays visible content and is never promoted implicitly.
         """
-        reasoning_content = ""
-        if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-        elif "</think>" in content:
-            before_think_end, after_think_end = content.split("</think>", 1)
-            if "<think>" in before_think_end:
-                reasoning_content = before_think_end.split("<think>")[-1].lstrip("\n")
-            else:
-                reasoning_content = before_think_end.lstrip("\n")
-            reasoning_content = reasoning_content.rstrip("\n")
-            content = after_think_end.lstrip("\n")
-
-        return reasoning_content.strip(), content
+        return get_structured_reasoning(msg).strip(), content
 
     # ------------------------------------------------------------------
     # Core render method

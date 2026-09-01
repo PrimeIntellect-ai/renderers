@@ -24,6 +24,7 @@ from renderers.base import (
     _get_offset_tokenizer,
     attribute_text_segments,
     extract_message_tool_names,
+    get_structured_reasoning,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
@@ -494,16 +495,7 @@ class MiniMaxM2Renderer:
     ):
         content = self._visible_text(msg.get("content"))
 
-        reasoning_content = ""
-        if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-        elif "</think>" in content:
-            before, after = content.split("</think>", 1)
-            if "<think>" in before:
-                reasoning_content = before.split("<think>")[-1].strip("\n")
-            else:
-                reasoning_content = before.strip("\n")
-            content = after.strip("\n")
+        reasoning_content = get_structured_reasoning(msg)
 
         # ``]~b]ai\n`` is template-injected scaffolding — at inference
         # the chat template emits these as the generation prompt and the

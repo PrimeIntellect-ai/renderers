@@ -71,7 +71,7 @@ def test_auto_selection_and_typed_config():
     assert parsed.enable_thinking is True
 
 
-def test_reasoning_field_precedence_and_inline_think_extraction():
+def test_reasoning_field_precedence():
     precedence = [
         {"role": "user", "content": "Compute."},
         {
@@ -99,15 +99,6 @@ def test_reasoning_field_precedence_and_inline_think_extraction():
     got = _renderer(enable_thinking=True).render_ids(empty_reasoning_wins)
     assert got == _expected(empty_reasoning_wins, enable_thinking=True)
     assert "also ignored" not in _tok().decode(got)
-
-    inline = [
-        {"role": "user", "content": "Compute."},
-        {
-            "role": "assistant",
-            "content": "<think>\ninline reason\n</think>\nvisible answer",
-        },
-    ]
-    assert _renderer().render_ids(inline) == _expected(inline)
 
 
 def test_reasoning_content_and_tool_call_round_trip():

@@ -38,6 +38,7 @@ from renderers.base import (
     _content_mask_or_empty,
     _require_transformers,
     extract_message_tool_names,
+    get_structured_reasoning,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
@@ -1348,9 +1349,10 @@ class KimiK25Renderer:
         content = msg.get("content")
         reasoning_content: str = ""
 
-        # Extract reasoning from structured content parts or inline <think> tags
+        # Read reasoning only from structured fields / content parts. String
+        # content is opaque and never parsed for inline <think> markup.
         if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
+            reasoning_content = get_structured_reasoning(msg)
             if isinstance(content, list):
                 text_content = "".join(
                     p.get("text", "")
@@ -1372,13 +1374,6 @@ class KimiK25Renderer:
             ]
             reasoning_content = "".join(thinking_parts)
             text_content = "".join(text_parts)
-        elif isinstance(content, str) and "</think>" in content:
-            before, _, after = content.partition("</think>")
-            if "<think>" in before:
-                reasoning_content = before.split("<think>", 1)[-1]
-            else:
-                reasoning_content = before
-            text_content = after.lstrip("\n")
         else:
             text_content = content or ""
 

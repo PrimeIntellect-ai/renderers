@@ -107,7 +107,11 @@ class Message(TypedDict, total=False):
     """A single turn in a multi-turn conversation.
 
     Required keys: role, content.
-    Optional keys mirror the OpenAI chat format for tool calling.
+    Optional keys mirror the OpenAI chat format for tool calling and
+    structured reasoning. Renderers that support structured reasoning read it
+    only from the model's explicit reasoning field; they do not promote
+    ``<think>...</think>`` text embedded in string ``content``. Legacy datasets
+    must normalize that wire-format markup before rendering.
     """
 
     role: str
@@ -117,6 +121,24 @@ class Message(TypedDict, total=False):
     name: str
     reasoning: str
     reasoning_content: str
+
+
+def get_structured_reasoning(
+    message: Mapping[str, Any],
+    *fields: str,
+) -> str:
+    """Return reasoning from the first explicit string field.
+
+    ``content`` is intentionally never inspected. This helper is for renderers
+    whose canonical message schema separates visible content from reasoning;
+    model-output parsers remain responsible for decoding wire-format reasoning
+    delimiters into ``reasoning_content``.
+    """
+    for field_name in fields or ("reasoning_content",):
+        value = message.get(field_name)
+        if isinstance(value, str):
+            return value
+    return ""
 
 
 def extract_message_tool_names(messages: list[Message]) -> list[str | None]:

@@ -74,6 +74,22 @@ class Renderer(Protocol):
 - `ParsedResponse` is `(content, reasoning_content, tool_calls)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
 - Round-trip: rendering `[user, assistant(content, reasoning, tool_calls)]`, slicing the assistant completion, and feeding it through `parse_response` returns an equivalent structured message. Tested per-renderer in `tests/test_roundtrip.py`.
 
+### Structured assistant messages
+
+For renderers whose canonical message schema exposes structured reasoning,
+assistant reasoning must be supplied through `reasoning_content` (or the
+model-specific `reasoning` field). String `content` is opaque: renderers do not
+promote inline `<think>...</think>` passages into reasoning. Likewise, tool
+invocations belong in `tool_calls`, not in-band markup. Normalize legacy SFT
+datasets before rendering rather than relying on model-specific delimiter
+guessing.
+
+This restriction applies to render input, not model output. `parse_response`
+still decodes each model's sampled reasoning and tool delimiters into the
+structured `ParsedResponse` fields. Models whose canonical upstream template
+is itself content-only, such as DeepSeek R1 and Kimi K2, continue to follow
+that model-specific format.
+
 ### `bridge_to_next_turn` (the core contract)
 
 Given `(prev_prompt_ids, prev_completion_ids)` and new environment messages, return ids for the next turn's prompt such that the result starts with `prev_prompt_ids + prev_completion_ids` byte-for-byte and continues with the new messages plus the next assistant opener. If that cannot be proven safe, return `None` and the caller falls back to a full render.

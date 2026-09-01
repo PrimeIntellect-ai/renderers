@@ -251,13 +251,39 @@ def test_hy3_render_and_bridge_keep_hostile_arrays_typed_across_joined_segments(
     rendered = renderer.render(
         [{"role": "system", "content": "policy"}, {"role": "user", "content": "question"}], add_generation_prompt=True
     )
-    completion = _readonly_hostile(np.asarray([renderer._eos], dtype=TOKEN_IDS_DTYPE))
+    completion = _readonly_hostile(np.full(1, renderer._eos, dtype=TOKEN_IDS_DTYPE))
     bridged = renderer.bridge_to_next_turn(
         _readonly_hostile(rendered.token_ids), completion, [{"role": "tool", "content": "answer"}]
     )
 
     assert bridged is not None
-    assert np.array_equal(bridged.token_ids[: rendered.token_ids.size], rendered.token_ids)
+    expected_prefix = np.empty(rendered.token_ids.size + completion.size, dtype=TOKEN_IDS_DTYPE)
+    expected_prefix[: rendered.token_ids.size] = rendered.token_ids
+    expected_prefix[rendered.token_ids.size :] = completion
+    assert np.array_equal(bridged.token_ids[: expected_prefix.size], expected_prefix)
+
+    def assert_body_run(result, text, *, message_index, sampled):
+        expected = np.fromiter((ord(char) for char in text), dtype=TOKEN_IDS_DTYPE, count=len(text))
+        windows = np.lib.stride_tricks.sliding_window_view(result.token_ids, expected.size)
+        matches = np.flatnonzero(np.all(windows == expected, axis=1))
+        assert matches.size == 1
+        start = int(matches[0])
+        end = start + expected.size
+        assert np.all(result.message_indices[start:end] == message_index)
+        assert np.all(result.sampled_mask[start:end] == sampled)
+        assert np.all(result.is_content[start:end])
+
+    assert_body_run(rendered, "policy", message_index=0, sampled=False)
+    assert_body_run(rendered, "question", message_index=1, sampled=False)
+    assert_body_run(bridged, "answer", message_index=0, sampled=False)
+    expected_render_tail = np.fromiter(
+        (renderer._assistant, renderer._think, renderer._think_end), dtype=TOKEN_IDS_DTYPE, count=3
+    )
+    assert rendered.token_ids[0] == renderer._bos
+    assert np.array_equal(rendered.token_ids[-3:], expected_render_tail)
+    assert bridged.message_indices[rendered.token_ids.size] == -1
+    assert not bridged.sampled_mask[rendered.token_ids.size]
+    assert not bridged.is_content[rendered.token_ids.size]
     for values in (
         rendered.token_ids,
         rendered.message_indices,

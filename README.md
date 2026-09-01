@@ -88,12 +88,14 @@ Message counts are read-only integer arrays, span/range APIs are read-only
 array per modality. Builders grow geometrically and return a read-only view of
 their populated storage, so sealing a render does not add an O(n) final copy.
 
-Two dependency boundaries remain explicit and open. The installed Transformers
+Dependency boundaries remain explicit and open. The installed Transformers
 tokenizer implementation may internally build Python lists before honoring
 `return_tensors="np"`, and its public `decode` may call `.tolist()` internally.
-Also, the current `/inference/v1/generate` engine contract transports token
-IDs as JSON lists. The client/server wire must be replaced atomically; this
-package does not provide a permanent list-compatible fallback.
+The current `/inference/v1/generate` contract transports token IDs as JSON
+lists, while released vLLM, SGLang, and Tinker generation results expose list
+token surfaces. Each producer/consumer pair must be replaced atomically; this
+package rejects those values at its strict array boundary and provides no
+permanent list-compatible fallback.
 
 ### `bridge_to_next_turn` (the core contract)
 

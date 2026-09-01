@@ -14,6 +14,8 @@
 """Tinker remote sampling from renderer-owned prompt token IDs.
 
 GPT-OSS is excluded until openai-harmony provides a fixed-width NumPy token ABI.
+This example deliberately rejects the released Tinker ``list[int]`` completion
+surface. It becomes runnable when that service exposes typed token arrays.
 """
 
 from __future__ import annotations
@@ -23,9 +25,11 @@ import asyncio
 import json
 import os
 
+import numpy as np
 import tinker
 from renderers.configs import Qwen35RendererConfig
 from renderers.qwen35 import Qwen35Renderer
+from renderers.token_arrays import owned_token_ids_from_array
 from tinker import types
 from transformers import AutoTokenizer
 
@@ -106,7 +110,7 @@ async def main() -> None:
         output1 = await sampling_client.sample_async(
             prompt=types.ModelInput.from_ints(prompt_ids), num_samples=1, sampling_params=sampling_params
         )
-        completion1 = list(output1.sequences[0].tokens)
+        completion1 = owned_token_ids_from_array("Tinker completion token IDs", output1.sequences[0].tokens)
         parsed1 = renderer.parse_response(completion1)
         print_parsed(label, "turn 1", parsed1)
 
@@ -152,12 +156,13 @@ async def main() -> None:
         if bridged is None:
             raise RuntimeError("bridge_to_next_turn returned None")
         bridged_ids = bridged.token_ids
-        assert bridged_ids[: len(prompt_ids) + len(completion1)] == (prompt_ids + completion1)
+        expected_prefix = np.concatenate((prompt_ids, completion1))
+        assert np.array_equal(bridged_ids[: expected_prefix.size], expected_prefix)
 
         output2 = await sampling_client.sample_async(
             prompt=types.ModelInput.from_ints(bridged_ids), num_samples=1, sampling_params=sampling_params
         )
-        completion2 = list(output2.sequences[0].tokens)
+        completion2 = owned_token_ids_from_array("Tinker completion token IDs", output2.sequences[0].tokens)
         print_parsed(label, "turn 2", renderer.parse_response(completion2))
 
 

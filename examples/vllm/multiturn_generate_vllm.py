@@ -14,6 +14,8 @@
 """vLLM offline generation from renderer-owned prompt token IDs.
 
 GPT-OSS is excluded until openai-harmony provides a fixed-width NumPy token ABI.
+This example deliberately rejects the released vLLM ``list[int]`` completion
+surface. It becomes runnable with the paired typed-output engine change.
 """
 
 from __future__ import annotations
@@ -23,8 +25,10 @@ import gc
 import json
 import os
 
+import numpy as np
 from renderers.configs import Qwen35RendererConfig
 from renderers.qwen35 import Qwen35Renderer
+from renderers.token_arrays import owned_token_ids_from_array
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
@@ -111,7 +115,7 @@ def main() -> None:
         # messages and never applies a chat template.
         prompt_ids = renderer.render_ids(messages, tools=TOOLS, add_generation_prompt=True)
         output1 = llm.generate([{"prompt_token_ids": prompt_ids}], sampling_params=sampling, use_tqdm=False)[0]
-        completion1 = list(output1.outputs[0].token_ids)
+        completion1 = owned_token_ids_from_array("vLLM completion token IDs", output1.outputs[0].token_ids)
         parsed1 = renderer.parse_response(completion1)
         print_parsed(label, "turn 1", parsed1)
 
@@ -157,10 +161,11 @@ def main() -> None:
         if bridged is None:
             raise RuntimeError("bridge_to_next_turn returned None")
         bridged_ids = bridged.token_ids
-        assert bridged_ids[: len(prompt_ids) + len(completion1)] == (prompt_ids + completion1)
+        expected_prefix = np.concatenate((prompt_ids, completion1))
+        assert np.array_equal(bridged_ids[: expected_prefix.size], expected_prefix)
 
         output2 = llm.generate([{"prompt_token_ids": bridged_ids}], sampling_params=sampling, use_tqdm=False)[0]
-        completion2 = list(output2.outputs[0].token_ids)
+        completion2 = owned_token_ids_from_array("vLLM completion token IDs", output2.outputs[0].token_ids)
         print_parsed(label, "turn 2", renderer.parse_response(completion2))
 
         del llm

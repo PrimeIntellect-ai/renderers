@@ -20,6 +20,10 @@ token-out.
 GPT-OSS is excluded until openai-harmony provides a fixed-width NumPy token
 ABI.
 
+The released JSON endpoint is deliberately unsupported by the strict token
+ABI: JSON materializes token lists on both sides. This recipe becomes runnable
+with the paired typed-binary SGLang transport change.
+
 Streaming is intentionally not supported: `parse_response` and
 `bridge_to_next_turn` both need the complete `completion_ids`.
 
@@ -45,9 +49,11 @@ import json
 from typing import Any
 
 import httpx
+import numpy as np
 from renderers.base import Renderer
 from renderers.configs import Qwen35RendererConfig
 from renderers.qwen35 import Qwen35Renderer
+from renderers.token_arrays import owned_token_ids_from_array
 from transformers import AutoTokenizer
 
 
@@ -74,12 +80,15 @@ def make_renderer(model: str, enable_thinking: bool | None) -> Renderer:
     raise ValueError(f"unsupported demo model: {model}")
 
 
-def completion_ids(output: dict, prompt_ids: list[int]) -> list[int]:
-    ids = list(output.get("output_ids") or output.get("token_ids") or [])
-    if not ids:
+def completion_ids(output: dict, prompt_ids: np.ndarray) -> np.ndarray:
+    raw_ids = output.get("output_ids")
+    if raw_ids is None:
+        raw_ids = output.get("token_ids")
+    ids = owned_token_ids_from_array("SGLang completion token IDs", raw_ids)
+    if ids.size == 0:
         raise RuntimeError("SGLang did not return completion token IDs")
     # Match offline recipe: strip prefix only if SGLang echoed the prompt back.
-    return ids[len(prompt_ids) :] if ids[: len(prompt_ids)] == prompt_ids else ids
+    return ids[prompt_ids.size :] if np.array_equal(ids[: prompt_ids.size], prompt_ids) else ids
 
 
 async def generate_sglang(
@@ -87,7 +96,7 @@ async def generate_sglang(
     client: httpx.AsyncClient,
     base_url: str,
     renderer: Renderer,
-    prompt_ids: list[int],
+    prompt_ids: np.ndarray,
     max_new_tokens: int,
     extra_key: str | None = None,
 ) -> dict[str, Any]:
@@ -184,7 +193,8 @@ async def run_one(
     if bridged is None:
         raise RuntimeError("bridge_to_next_turn returned None")
     bridged_ids = bridged.token_ids
-    assert bridged_ids[: len(prompt_ids) + len(completion1)] == (prompt_ids + completion1)
+    expected_prefix = np.concatenate((prompt_ids, completion1))
+    assert np.array_equal(bridged_ids[: expected_prefix.size], expected_prefix)
 
     output2 = await generate_sglang(
         client=client, base_url=base_url, renderer=renderer, prompt_ids=bridged_ids, max_new_tokens=max_new_tokens

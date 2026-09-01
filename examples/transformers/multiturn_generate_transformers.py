@@ -25,11 +25,13 @@ import gc
 import json
 import os
 
+import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from renderers.configs import Qwen35RendererConfig
 from renderers.qwen35 import Qwen35Renderer
+from renderers.token_arrays import owned_token_ids_from_array
 
 
 MODELS = ["Qwen/Qwen3.5-4B"]
@@ -70,6 +72,11 @@ def print_parsed(label: str, turn: str, parsed) -> None:
         print(f"content: {parsed.content}")
 
 
+def completion_ids_from_tensor(name: str, value: torch.Tensor) -> np.ndarray:
+    """Take immutable fixed-width ownership without a Python-list phase."""
+    return owned_token_ids_from_array(name, value.detach().to(device="cpu", dtype=torch.int32).numpy())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-new-tokens", type=int, default=512)
@@ -107,7 +114,7 @@ def main() -> None:
         # Turn 1: render locally and pass token IDs to Transformers. The model
         # receives input_ids, not messages or a chat template.
         prompt_ids = renderer.render_ids(messages, tools=TOOLS, add_generation_prompt=True)
-        input_ids = torch.tensor([prompt_ids], device="cuda")
+        input_ids = torch.tensor(prompt_ids, device="cuda", dtype=torch.int32).unsqueeze(0)
         attention_mask = torch.ones_like(input_ids)
         output1 = hf_model.generate(
             input_ids=input_ids,
@@ -117,7 +124,7 @@ def main() -> None:
             eos_token_id=stop_token_ids,
             pad_token_id=pad_token_id,
         )[0]
-        completion1 = output1[input_ids.shape[-1] :].tolist()
+        completion1 = completion_ids_from_tensor("Transformers completion token IDs", output1[input_ids.shape[-1] :])
         parsed1 = renderer.parse_response(completion1)
         print_parsed(label, "turn 1", parsed1)
 
@@ -163,9 +170,10 @@ def main() -> None:
         if bridged is None:
             raise RuntimeError("bridge_to_next_turn returned None")
         bridged_ids = bridged.token_ids
-        assert bridged_ids[: len(prompt_ids) + len(completion1)] == (prompt_ids + completion1)
+        expected_prefix = np.concatenate((prompt_ids, completion1))
+        assert np.array_equal(bridged_ids[: expected_prefix.size], expected_prefix)
 
-        bridged_input_ids = torch.tensor([bridged_ids], device="cuda")
+        bridged_input_ids = torch.tensor(bridged_ids, device="cuda", dtype=torch.int32).unsqueeze(0)
         bridged_attention_mask = torch.ones_like(bridged_input_ids)
         output2 = hf_model.generate(
             input_ids=bridged_input_ids,
@@ -175,7 +183,9 @@ def main() -> None:
             eos_token_id=stop_token_ids,
             pad_token_id=pad_token_id,
         )[0]
-        completion2 = output2[bridged_input_ids.shape[-1] :].tolist()
+        completion2 = completion_ids_from_tensor(
+            "Transformers completion token IDs", output2[bridged_input_ids.shape[-1] :]
+        )
         print_parsed(label, "turn 2", renderer.parse_response(completion2))
 
         del hf_model

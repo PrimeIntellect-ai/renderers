@@ -181,6 +181,7 @@ class InklingRenderer:
 
     def __init__(self, tokenizer: Tokenizer, config: InklingRendererConfig | None = None, *, processor: Any = None):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self._processor = processor
         self.config = config or InklingRendererConfig()
         # Inkling always renders historical reasoning (the template has no
@@ -307,7 +308,7 @@ class InklingRenderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         mm_hashes: dict[str, list[str]] = {}
         mm_placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
         mm_items: dict[str, list[dict[str, Any]]] = {}
@@ -403,7 +404,7 @@ class InklingRenderer:
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=tool_names,
             multi_modal_data=mm_data,
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -646,7 +647,7 @@ class InklingRenderer:
         if previous_ids is None:
             return None
 
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         builder.prepend_prior(previous_ids)
         new_hashes: dict[str, list[str]] = {}
         new_placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
@@ -744,5 +745,5 @@ class InklingRenderer:
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=tool_names,
             multi_modal_data=mm_data,
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )

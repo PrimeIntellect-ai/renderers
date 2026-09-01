@@ -16,11 +16,13 @@ from renderers.base import (
     build_training_sample,
     attribute_text_segments,
 )
-from renderers.configs import DefaultRendererConfig, Hy3RendererConfig, LagunaXS21RendererConfig
+from renderers.configs import DefaultRendererConfig, Hy3RendererConfig, InklingRendererConfig, LagunaXS21RendererConfig
 from renderers.default import DefaultRenderer
 from renderers.gpt_oss import GptOssRenderer
 from renderers.hy3 import Hy3Renderer
+from renderers.inkling import InklingRenderer
 from renderers.laguna_xs2 import LagunaXS21Renderer
+from renderers.parsers import Qwen3ToolParser
 from renderers.token_arrays import (
     FixedWidthArrayBuilder,
     FixedWidthRangeBuilder,
@@ -265,6 +267,48 @@ def test_parsed_calls_are_immutably_aligned_with_one_packed_span_array():
         ParsedResponse(content="", tool_calls=(ParsedToolCall(raw="mutable"),), tool_call_token_spans=mutable_spans)
 
 
+def test_hostile_qwen_parser_preserves_exact_packed_tool_span():
+    tool_start = 1001
+    tool_end = 1002
+
+    class _Tokenizer:
+        unk_token_id = -1
+
+        def convert_tokens_to_ids(self, token):
+            return {"<tool_call>": tool_start, "</tool_call>": tool_end}.get(token, self.unk_token_id)
+
+        def decode(self, token_ids, *, skip_special_tokens):
+            assert isinstance(token_ids, np.ndarray)
+            assert skip_special_tokens is False
+            return np.asarray(token_ids, dtype=np.uint8).tobytes().decode()
+
+    def ascii_ids(text: str) -> np.ndarray:
+        values = np.frombuffer(text.encode(), dtype=np.uint8).astype(TOKEN_IDS_DTYPE)
+        values.flags.writeable = False
+        return values
+
+    call_builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE)
+    call_builder.append(tool_start)
+    call_builder.extend(ascii_ids('\n{"name":"search","arguments":{"q":"rain"}}\n'))
+    call_builder.append(tool_end)
+    call_ids = call_builder.finish()
+    completion_builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE)
+    completion_builder.extend(ascii_ids("prefix"))
+    completion_builder.extend(call_ids)
+    completion = _readonly_hostile(completion_builder.finish())
+
+    parsed = Qwen3ToolParser(_Tokenizer()).extract(completion)
+
+    assert parsed.tool_calls[0].name == "search"
+    assert parsed.tool_calls[0].arguments == {"q": "rain"}
+    assert parsed.tool_call_token_spans.dtype == np.dtype("<i8")
+    assert parsed.tool_call_token_spans.shape == (1, 2)
+    assert not parsed.tool_call_token_spans.flags.writeable
+    start = int(parsed.tool_call_token_spans[0, 0])
+    end = int(parsed.tool_call_token_spans[0, 1])
+    assert np.array_equal(completion[start:end], call_ids)
+
+
 def test_hy3_render_and_bridge_keep_hostile_arrays_typed_across_joined_segments():
     class _Tokenizer:
         unk_token_id = -1
@@ -349,6 +393,72 @@ def test_hy3_render_and_bridge_keep_hostile_arrays_typed_across_joined_segments(
         assert isinstance(values, np.ndarray)
         assert not values.flags.writeable
     assert tokenizer.offset_probe_calls == 1
+
+
+def test_inkling_reuses_one_offset_capability_probe_across_renders():
+    class _Tokenizer:
+        unk_token_id = -1
+        eos_token_id = None
+
+        def __init__(self):
+            self._specials: dict[str, int] = {}
+            self.offset_probe_calls = 0
+
+        def convert_tokens_to_ids(self, token):
+            return self._specials.setdefault(token, 1000 + len(self._specials))
+
+        def __call__(self, text, *, add_special_tokens, return_tensors, return_offsets_mapping=False):
+            assert add_special_tokens is False
+            assert return_tensors == "np"
+            if text == "a" and return_offsets_mapping:
+                self.offset_probe_calls += 1
+            token_ids = _hostile(np.fromiter((ord(char) for char in text), dtype="<i8", count=len(text)).reshape(1, -1))
+            result = {"input_ids": token_ids}
+            if return_offsets_mapping:
+                offsets = np.empty((1, len(text), 2), dtype="<i8")
+                offsets[0, :, 0] = np.arange(len(text), dtype="<i8")
+                offsets[0, :, 1] = np.arange(1, len(text) + 1, dtype="<i8")
+                result["offset_mapping"] = _hostile(offsets)
+            return result
+
+    class _Processor:
+        def __init__(self):
+            self.waveforms: list[np.ndarray] = []
+
+        def __call__(self, *, audio, sampling_rate, return_tensors):
+            assert sampling_rate == 24_000
+            assert return_tensors == "pt"
+            waveform = audio[0]
+            assert isinstance(waveform, np.ndarray)
+            assert waveform.dtype == np.dtype("<f4")
+            assert waveform.ndim == 1
+            assert not waveform.flags.writeable
+            self.waveforms.append(waveform)
+            return {
+                "audio_input_ids": np.zeros((1, 2, 4), dtype=np.float32),
+                "audio_input_ids_mask": np.ones((1, 2), dtype=MASK_DTYPE),
+            }
+
+    tokenizer = _Tokenizer()
+    processor = _Processor()
+    renderer = InklingRenderer(tokenizer, InklingRendererConfig(), processor=processor)
+    renderer.render([{"role": "user", "content": "first"}])
+    renderer.render([{"role": "user", "content": "second"}])
+    source = np.arange(8, dtype="<f4")
+    source.flags.writeable = False
+    rendered = renderer.render(
+        [{"role": "user", "content": [{"type": "audio", "audio": {"array": source, "sampling_rate": 24_000}}]}]
+    )
+
+    assert tokenizer.offset_probe_calls == 1
+    assert rendered.multi_modal_data is not None
+    assert rendered.multi_modal_data.mm_placeholders["audio"].shape == (1, 2)
+    assert len(processor.waveforms) == 1
+    with pytest.raises(TypeError, match="audio waveform must be a NumPy array"):
+        renderer.render(
+            [{"role": "user", "content": [{"type": "audio", "audio": {"array": [0.0, 1.0], "sampling_rate": 24_000}}]}]
+        )
+    assert len(processor.waveforms) == 1
 
 
 def test_laguna_offsetless_header_keeps_default_scaffold_out_of_message_zero():

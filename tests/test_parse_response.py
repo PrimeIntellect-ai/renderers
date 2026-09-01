@@ -228,14 +228,10 @@ def test_kimi_k25_tool_call_carries_packed_token_span():
     """
     tokenizer, renderer = _kimi_k25()
     # K2.5 tool-call wire shape: section + per-call special tokens.
-    text = (
-        "<|tool_calls_section_begin|>"
-        "<|tool_call_begin|>functions.get_weather:0"
-        "<|tool_call_argument_begin|>"
-        '{"city": "Tokyo"}'
-        "<|tool_call_end|>"
-        "<|tool_calls_section_end|>"
+    call_text = (
+        '<|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"city": "Tokyo"}<|tool_call_end|>'
     )
+    text = "<|tool_calls_section_begin|>" + call_text + "<|tool_calls_section_end|>"
     token_ids = _encode(tokenizer, text)
     parsed = renderer.parse_response(token_ids)
 
@@ -247,6 +243,7 @@ def test_kimi_k25_tool_call_carries_packed_token_span():
     start = int(parsed.tool_call_token_spans[0, 0])
     end = int(parsed.tool_call_token_spans[0, 1])
     assert 0 <= start < end <= len(token_ids), f"packed span out of range for {len(token_ids)} input tokens"
+    assert np.array_equal(token_ids[start:end], _encode(tokenizer, call_text))
 
 
 def test_kimi_k25_in_think_section_is_not_a_real_call():

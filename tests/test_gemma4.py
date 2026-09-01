@@ -176,13 +176,11 @@ def test_disabled_thinking_post_tool_completion_matches_sampled_stream():
 
 def test_parser_extracts_reasoning_and_multiple_typed_tool_calls():
     tokenizer, renderer = _gemma4()
-    text = (
-        "<|channel>thought\nI need two lookups.\n<channel|>"
-        '<|tool_call>call:weather{city:<|"|>Berlin<|"|>,days:2}'
-        "<tool_call|>"
-        "<|tool_call>call:flags{enabled:true,values:[1,null]}<tool_call|>"
-    )
-    parsed = renderer.parse_response(encode_token_ids(tokenizer, text))
+    first_block = '<|tool_call>call:weather{city:<|"|>Berlin<|"|>,days:2}<tool_call|>'
+    second_block = "<|tool_call>call:flags{enabled:true,values:[1,null]}<tool_call|>"
+    text = "<|channel>thought\nI need two lookups.\n<channel|>" + first_block + second_block
+    completion = encode_token_ids(tokenizer, text)
+    parsed = renderer.parse_response(completion)
 
     assert parsed.reasoning_content == "I need two lookups."
     assert parsed.content == ""
@@ -190,6 +188,13 @@ def test_parser_extracts_reasoning_and_multiple_typed_tool_calls():
         ("weather", {"city": "Berlin", "days": 2}),
         ("flags", {"enabled": True, "values": [1, None]}),
     ]
+    assert parsed.tool_call_token_spans.dtype == np.dtype("<i8")
+    assert parsed.tool_call_token_spans.shape == (2, 2)
+    assert not parsed.tool_call_token_spans.flags.writeable
+    for index, expected_block in enumerate((first_block, second_block)):
+        start = int(parsed.tool_call_token_spans[index, 0])
+        end = int(parsed.tool_call_token_spans[index, 1])
+        assert tokenizer.decode(completion[start:end], skip_special_tokens=False) == expected_block
 
 
 def test_parser_recovers_prompt_opened_post_tool_reasoning():

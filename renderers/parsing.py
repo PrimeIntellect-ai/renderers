@@ -1300,10 +1300,10 @@ def parse_kimi_k2_section(
     Accepts *sets* of begin/end token IDs so callers can express models with
     multiple delimiter variants (K2.5 has both plural ``<|tool_calls_section_*|>``
     and singular ``<|tool_call_section_*|>`` forms, though only the plural form
-    is in the special-token vocab in practice). Returns the content ids ahead
-    of the section and a list of ``ParsedToolCall`` covering every attempted
-    block inside it; an unclosed section is still walked to whatever the model
-    emitted before EOS.
+    is in the special-token vocab in practice). The result keeps content ids,
+    an immutable tuple of semantic calls, and one aligned packed span array;
+    an unclosed section is still walked to whatever the model emitted before
+    EOS.
 
     ``scan_start`` restricts the section search to ``ids[scan_start:]`` while
     keeping ``content_ids = ids[:section_start]`` and all token spans relative

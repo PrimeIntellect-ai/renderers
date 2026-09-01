@@ -66,6 +66,7 @@ class GLM5Renderer:
 
     def __init__(self, tokenizer: Tokenizer, config: GLM5RendererConfig | GLM51RendererConfig | None = None):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self.config = config or type(self)._config_cls()
         if not self.config.clear_thinking:
             implied_thinking_retention = "all"
@@ -138,7 +139,7 @@ class GLM5Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         emit_special = builder.emit_special
         emit_text = builder.emit_text
         emit_text_segments = builder.emit_text_segments
@@ -229,7 +230,7 @@ class GLM5Renderer:
         return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -285,7 +286,7 @@ class GLM5Renderer:
             previous_ids = closed
 
         last_prev = int(previous_ids[-1])
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
@@ -348,7 +349,7 @@ class GLM5Renderer:
         return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def _render_assistant(self, msg, msg_idx, content, last_user_index, *, emit_special, emit_text, emit_text_segments):

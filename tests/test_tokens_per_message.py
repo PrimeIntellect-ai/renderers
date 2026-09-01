@@ -14,7 +14,7 @@ tests pin:
   than its total count.
 - ``sampled_only=True`` is zero for tool / user / system roles — the
   model never samples conversation history.
-- ``message_token_spans`` returns contiguous ``(start, end)`` slices
+- ``message_token_spans`` returns contiguous packed ``[start, end]`` slices
   per message that ``zip``s against ``message_roles``. Slicing
   ``token_ids[start:end]`` recovers the message's tokens.
 
@@ -25,7 +25,29 @@ assertions and return all zeros from the helper under that flag.
 
 from __future__ import annotations
 
+import numpy as np
+
 from renderers.base import RenderedTokens
+from renderers.token_arrays import (
+    COUNTS_DTYPE,
+    MASK_DTYPE,
+    MESSAGE_INDICES_DTYPE,
+    OFFSETS_DTYPE,
+    TOKEN_IDS_DTYPE,
+    empty_array,
+)
+
+
+def _array(values: str, dtype: np.dtype) -> np.ndarray:
+    result = np.fromstring(values, sep=" ", dtype=dtype)
+    result.flags.writeable = False
+    return result
+
+
+def _spans(values: str) -> np.ndarray:
+    result = np.fromstring(values, sep=" ", dtype=OFFSETS_DTYPE).reshape(-1, 2)
+    result.flags.writeable = False
+    return result
 
 
 def test_tokens_per_message_sum_equals_attributed(model_name, renderer):
@@ -43,9 +65,10 @@ def test_tokens_per_message_sum_equals_attributed(model_name, renderer):
     rendered = renderer.render(msgs, add_generation_prompt=True)
 
     counts = rendered.tokens_per_message()
-    scaffold = sum(1 for idx in rendered.message_indices if idx == -1)
-    assert sum(counts) + scaffold == len(rendered.token_ids), (
-        f"{model_name}: tokens_per_message sum {sum(counts)} + scaffold "
+    scaffold = int(np.count_nonzero(rendered.message_indices == -1))
+    count_total = int(np.sum(counts))
+    assert count_total + scaffold == len(rendered.token_ids), (
+        f"{model_name}: tokens_per_message sum {count_total} + scaffold "
         f"{scaffold} != token count {len(rendered.token_ids)}"
     )
 
@@ -59,8 +82,8 @@ def test_tokens_per_message_sum_equals_attributed(model_name, renderer):
     )
 
     # Every caller message must have a positive count.
-    bad = [i for i, n in enumerate(counts) if n == 0]
-    assert not bad, f"{model_name}: messages with zero attributed tokens: {bad}"
+    bad = np.flatnonzero(counts == 0)
+    assert bad.size == 0, f"{model_name}: messages with zero attributed tokens: {bad}"
 
 
 def test_tokens_per_message_sampled_lt_total_for_assistant(model_name, renderer):
@@ -77,7 +100,7 @@ def test_tokens_per_message_sampled_lt_total_for_assistant(model_name, renderer)
         {"role": "assistant", "content": "Hello world!"},
     ]
     rendered = renderer.render(msgs)
-    if not rendered.sampled_mask:
+    if rendered.sampled_mask.size == 0:
         return
 
     total = rendered.tokens_per_message()
@@ -104,7 +127,7 @@ def test_tokens_per_message_sampled_zero_for_history_roles(model_name, renderer)
         {"role": "assistant", "content": "Hello!"},
     ]
     rendered = renderer.render(msgs)
-    if not rendered.sampled_mask:
+    if rendered.sampled_mask.size == 0:
         return
 
     sampled = rendered.tokens_per_message(sampled_only=True)
@@ -140,7 +163,7 @@ def test_tokens_per_message_clamps_oversized_n_messages(model_name, renderer):
     rendered = renderer.render(msgs)
     clamped = rendered.tokens_per_message(99)
     assert len(clamped) == len(rendered.message_roles)
-    assert clamped == rendered.tokens_per_message()
+    assert np.array_equal(clamped, rendered.tokens_per_message())
 
 
 def test_tokens_per_message_bridge_attributes_new_messages(model_name, renderer):
@@ -161,7 +184,7 @@ def test_tokens_per_message_bridge_attributes_new_messages(model_name, renderer)
     ]
     bridge = renderer.bridge_to_next_turn(
         previous_prompt_ids=rendered_prior.token_ids,
-        previous_completion_ids=[],
+        previous_completion_ids=empty_array(TOKEN_IDS_DTYPE),
         new_messages=new_messages,
     )
     if bridge is None:
@@ -176,12 +199,12 @@ def test_tokens_per_message_bridge_attributes_new_messages(model_name, renderer)
     assert bridge.message_roles == ["user"], (
         f"{model_name}: bridge message_roles {bridge.message_roles} != ['user']"
     )
-    assert not any(bridge.sampled_mask), (
+    assert not np.any(bridge.sampled_mask), (
         f"{model_name}: bridge emitted a token marked is_sampled=True"
     )
 
     counts = bridge.tokens_per_message()
-    assert counts == [counts[0]] and counts[0] > 0, (
+    assert counts.size == 1 and counts[0] > 0, (
         f"{model_name}: bridge attributed {counts} tokens; expected one "
         f"positive entry for the new user message"
     )
@@ -203,7 +226,7 @@ def test_tokens_by_role_includes_every_input_role(model_name, renderer):
     assert set(by_role) == {"system", "user", "assistant"}, (
         f"{model_name}: tokens_by_role keys {set(by_role)} != expected roles"
     )
-    assert sum(by_role.values()) == sum(rendered.tokens_per_message()), (
+    assert sum(by_role.values()) == int(np.sum(rendered.tokens_per_message())), (
         f"{model_name}: tokens_by_role sum disagrees with tokens_per_message sum"
     )
 
@@ -217,7 +240,7 @@ def test_tokens_by_role_sampled_only_assistant_only(model_name, renderer):
         {"role": "assistant", "content": "Hello!"},
     ]
     rendered = renderer.render(msgs)
-    if not rendered.sampled_mask:
+    if rendered.sampled_mask.size == 0:
         return
 
     by_role = rendered.tokens_by_role(sampled_only=True)
@@ -227,7 +250,7 @@ def test_tokens_by_role_sampled_only_assistant_only(model_name, renderer):
 
 
 def test_message_token_spans_recover_token_ranges(model_name, renderer):
-    """``message_token_spans()`` returns ``(start, end)`` such that
+    """``message_token_spans()`` returns packed ``[start, end]`` rows such that
     ``token_ids[start:end]`` contains exactly the tokens attributed to
     that message and ``token_ids[end-1]`` is still in that message
     (i.e. the span is the inclusive token range of the message).
@@ -248,24 +271,19 @@ def test_message_token_spans_recover_token_ranges(model_name, renderer):
     assert len(spans) == len(msgs)
 
     # Each span's tokens match the message_indices attribution.
-    for i, span in enumerate(spans):
-        assert span is not None, f"{model_name}: message {i} has no span"
-        start, end = span
-        attributed = [
-            rendered.message_indices[k]
-            for k in range(start, end)
-            if rendered.message_indices[k] == i
-        ]
+    for i in range(spans.shape[0]):
+        start = int(spans[i, 0])
+        end = int(spans[i, 1])
+        assert start >= 0, f"{model_name}: message {i} has no span"
         # At least one token in the span belongs to this message
         # (contiguity assumption — see method docstring).
-        assert attributed, (
-            f"{model_name}: span {span} for msg {i} contains no msg-i tokens"
+        assert np.any(rendered.message_indices[start:end] == i), (
+            f"{model_name}: span {spans[i]} for msg {i} contains no msg-i tokens"
         )
 
     # Spans are non-decreasing by start.
-    starts = [s[0] for s in spans if s is not None]
-    assert starts == sorted(starts), (
-        f"{model_name}: spans not in message order: {starts}"
+    assert np.all(np.diff(spans[:, 0]) >= 0), (
+        f"{model_name}: spans not in message order: {spans[:, 0]}"
     )
 
 
@@ -284,7 +302,7 @@ def test_role_token_spans_groups_by_role(model_name, renderer):
     by_role = rendered.tokens_by_role()
 
     for role, spans in role_spans.items():
-        span_total = sum(e - s for s, e in spans)
+        span_total = int(np.sum(spans[:, 1] - spans[:, 0]))
         assert span_total == by_role[role], (
             f"{model_name}: role {role!r} span-total {span_total} != "
             f"tokens_by_role {by_role[role]}"
@@ -295,31 +313,31 @@ def test_tokens_per_message_no_messages_helper_works():
     """Pure-data-shape: methods on a manually-constructed RenderedTokens
     without any renderer involvement. No fixture needed."""
     r = RenderedTokens(
-        token_ids=[10, 11, 12, 13, 14],
-        message_indices=[0, 0, 1, 1, -1],
-        sampled_mask=[False, True, False, False, False],
+        token_ids=_array("10 11 12 13 14", TOKEN_IDS_DTYPE),
+        message_indices=_array("0 0 1 1 -1", MESSAGE_INDICES_DTYPE),
+        sampled_mask=_array("0 1 0 0 0", MASK_DTYPE),
         message_roles=["user", "assistant"],
     )
-    assert r.tokens_per_message() == [2, 2]
-    assert r.tokens_per_message(sampled_only=True) == [1, 0]
+    assert np.array_equal(r.tokens_per_message(), _array("2 2", COUNTS_DTYPE))
+    assert np.array_equal(
+        r.tokens_per_message(sampled_only=True), _array("1 0", COUNTS_DTYPE)
+    )
     assert r.tokens_by_role() == {"user": 2, "assistant": 2}
     assert r.tokens_by_role(sampled_only=True) == {"user": 1, "assistant": 0}
-    assert r.message_token_spans() == [(0, 2), (2, 4)]
-    assert r.role_token_spans() == {
-        "user": [(0, 2)],
-        "assistant": [(2, 4)],
-    }
+    assert np.array_equal(r.message_token_spans(), _spans("0 2 2 4"))
+    role_spans = r.role_token_spans()
+    assert role_spans.keys() == {"user", "assistant"}
+    assert np.array_equal(role_spans["user"], _spans("0 2"))
+    assert np.array_equal(role_spans["assistant"], _spans("2 4"))
 
 
 def test_message_token_spans_empty_message():
     """A message that contributed zero tokens (rare but possible for
     empty content some templates skip) gets ``None`` as its span."""
     r = RenderedTokens(
-        token_ids=[10, 11, 12],
-        message_indices=[0, 0, 2],
+        token_ids=_array("10 11 12", TOKEN_IDS_DTYPE),
+        message_indices=_array("0 0 2", MESSAGE_INDICES_DTYPE),
         message_roles=["user", "assistant", "tool"],
     )
     spans = r.message_token_spans()
-    assert spans[0] == (0, 2)
-    assert spans[1] is None  # no tokens attributed
-    assert spans[2] == (2, 3)
+    assert np.array_equal(spans, _spans("0 2 -1 -1 2 3"))

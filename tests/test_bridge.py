@@ -18,10 +18,33 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import numpy as np
 import pytest
 from parity import models_for
+from renderers.token_arrays import (
+    FixedWidthArrayBuilder,
+    TOKEN_IDS_DTYPE,
+    empty_array,
+    encode_token_ids,
+)
 
 _BRIDGE_MODELS = [(case.model, case.renderer) for case in models_for("bridge")]
+
+
+def _concat_tokens(*arrays: np.ndarray) -> np.ndarray:
+    values = np.concatenate(arrays, dtype=TOKEN_IDS_DTYPE)
+    values.flags.writeable = False
+    return values
+
+
+def _completion_with_close(tokenizer, text: str, close_id: int) -> np.ndarray:
+    content = encode_token_ids(tokenizer, text)
+    builder = FixedWidthArrayBuilder(
+        TOKEN_IDS_DTYPE, initial_capacity=content.size + 1
+    )
+    builder.extend(content)
+    builder.append(close_id)
+    return builder.finish()
 
 
 @lru_cache(maxsize=None)
@@ -94,19 +117,15 @@ def _simulate_prior_turn(renderer, assistant=None):
     full_with_assistant = renderer.render_ids(
         prior + assistant, add_generation_prompt=False
     )
-    prev_completion = list(full_with_assistant[len(prev_prompt) :])
+    prev_completion = full_with_assistant[len(prev_prompt) :]
 
     # Trim past any trailing scaffolding the template emits AFTER the
     # close (e.g. chatml's trailing ``\n``). vLLM only returns tokens up
     # to and including the close itself.
-    stop_ids = set(renderer.get_stop_token_ids())
-    last_close = -1
-    for i in range(len(prev_completion) - 1, -1, -1):
-        if prev_completion[i] in stop_ids:
-            last_close = i
-            break
-    if last_close >= 0:
-        prev_completion = prev_completion[: last_close + 1]
+    stop_ids = np.asarray(renderer.get_stop_token_ids(), dtype=TOKEN_IDS_DTYPE)
+    close_positions = np.flatnonzero(np.isin(prev_completion, stop_ids))
+    if close_positions.size:
+        prev_completion = prev_completion[: int(close_positions[-1]) + 1]
 
     return prev_prompt, prev_completion
 
@@ -121,8 +140,8 @@ def test_bridge_extends_prev_verbatim_on_clean_stop(br_renderer_all, br_model):
     assert bridged is not None, f"{br_model}: bridge returned None on clean stop"
     bridged_ids = bridged.token_ids
 
-    prev = prev_prompt + prev_completion
-    assert bridged_ids[: len(prev)] == prev, (
+    prev = _concat_tokens(prev_prompt, prev_completion)
+    assert np.array_equal(bridged_ids[: len(prev)], prev), (
         f"{br_model}: bridged does NOT extend prev_prompt + prev_completion"
     )
     assert len(bridged_ids) > len(prev), (
@@ -146,7 +165,9 @@ def test_bridge_rejects_empty_prev_or_new(br_renderer):
     _, prev_completion = _simulate_prior_turn(br_renderer)
     assert (
         br_renderer.bridge_to_next_turn(
-            [], prev_completion, [{"role": "user", "content": "x"}]
+            empty_array(TOKEN_IDS_DTYPE),
+            prev_completion,
+            [{"role": "user", "content": "x"}],
         )
         is None
     )
@@ -172,8 +193,8 @@ def test_bridge_synthesises_close_on_truncation(br_renderer_all, br_model):
         f"{br_model}: bridge returned None on truncation; expected synth-close"
     )
     bridged_ids = bridged.token_ids
-    prev_trunc = prev_prompt + prev_completion_trunc
-    assert bridged_ids[: len(prev_trunc)] == prev_trunc, (
+    prev_trunc = _concat_tokens(prev_prompt, prev_completion_trunc)
+    assert np.array_equal(bridged_ids[: len(prev_trunc)], prev_trunc), (
         f"{br_model}: truncated-prior bridge did not keep prev tokens verbatim"
     )
     assert len(bridged_ids) > len(prev_trunc), (
@@ -225,7 +246,7 @@ def test_bridge_declines_across_user_query_when_template_drops_thinking():
 
     def prior(r, asst_text):
         p = r.render_ids([u1], add_generation_prompt=True)
-        completion = tok.encode(asst_text, add_special_tokens=False) + [im_end]
+        completion = _completion_with_close(tok, asst_text, im_end)
         return p, completion
 
     # new user query + prior thinking + default retention -> decline

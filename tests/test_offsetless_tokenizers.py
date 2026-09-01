@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pytest
 
 from renderers import create_renderer
@@ -21,8 +22,11 @@ class OffsetlessTokenizer:
             raise AttributeError(name)
         return getattr(self._tokenizer, name)
 
-    def encode(self, *args: Any, **kwargs: Any) -> list[int]:
-        return self._tokenizer.encode(*args, **kwargs)
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("return_offsets_mapping"):
+            raise NotImplementedError("offset mapping is intentionally unavailable")
+        kwargs["return_tensors"] = "np"
+        return self._tokenizer(*args, **kwargs)
 
     def decode(self, *args: Any, **kwargs: Any) -> str:
         return self._tokenizer.decode(*args, **kwargs)
@@ -114,13 +118,13 @@ def _offsetless_renderer(renderer: Any) -> Any:
 
 
 def _assert_offsetless_contract(expected: Any, actual: Any, renderer: Any) -> None:
-    assert actual.token_ids == expected.token_ids
-    assert actual.message_indices == expected.message_indices
+    assert np.array_equal(actual.token_ids, expected.token_ids)
+    assert np.array_equal(actual.message_indices, expected.message_indices)
     if type(renderer).__name__ == "PrimeQwen3Renderer":
-        assert actual.sampled_mask == []
+        assert actual.sampled_mask.size == 0
     else:
-        assert actual.sampled_mask == expected.sampled_mask
-    assert actual.is_content == []
+        assert np.array_equal(actual.sampled_mask, expected.sampled_mask)
+    assert actual.is_content.size == 0
     assert actual.message_roles == expected.message_roles
     assert actual.message_tool_names == expected.message_tool_names
     assert actual.multi_modal_data == expected.multi_modal_data
@@ -196,7 +200,8 @@ def test_hy3_offsetless_preserves_multiple_system_message_indices() -> None:
     actual = _offsetless_renderer(renderer).render(messages, tools=TOOLS)
 
     _assert_offsetless_contract(expected, actual, renderer)
-    assert {0, 1}.issubset(actual.message_indices)
+    assert np.any(actual.message_indices == 0)
+    assert np.any(actual.message_indices == 1)
 
 
 @pytest.mark.parametrize(

@@ -7,12 +7,15 @@ stripping of ``</think>`` from historical assistant turns.
 
 from functools import lru_cache
 
+import numpy as np
+
 from renderers import (
     DeepSeekR1Renderer,
     DeepSeekV3Renderer,
     create_renderer,
 )
 from renderers.base import load_tokenizer
+from renderers.token_arrays import owned_token_ids_from_array
 
 
 @lru_cache
@@ -63,9 +66,14 @@ def test_r1_strips_reasoning_from_history():
         {"role": "user", "content": "q2"},
     ]
     got = r1.render_ids(msgs)
-    expected = list(tok.apply_chat_template(msgs, tokenize=True, return_dict=False))
+    expected = owned_token_ids_from_array(
+        "apply_chat_template",
+        tok.apply_chat_template(
+            msgs, tokenize=True, return_dict=False, return_tensors="np"
+        ),
+    )
 
-    assert got == expected
+    assert np.array_equal(got, expected)
     # Reasoning must not survive into the rendered history.
     assert "private reasoning" not in tok.decode(got)
 
@@ -79,7 +87,12 @@ def test_v3_emits_content_verbatim_ignoring_reasoning():
         {"role": "assistant", "reasoning_content": "should be ignored", "content": "4"},
     ]
     got = v3.render_ids(msgs)
-    expected = list(tok.apply_chat_template(msgs, tokenize=True, return_dict=False))
+    expected = owned_token_ids_from_array(
+        "apply_chat_template",
+        tok.apply_chat_template(
+            msgs, tokenize=True, return_dict=False, return_tensors="np"
+        ),
+    )
 
-    assert got == expected
+    assert np.array_equal(got, expected)
     assert "should be ignored" not in tok.decode(got)

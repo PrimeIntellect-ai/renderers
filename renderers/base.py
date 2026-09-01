@@ -19,6 +19,7 @@ from renderers.token_arrays import (
     TRAINING_TOKEN_IDS_DTYPE,
     encode_token_ids,
     empty_array,
+    owned_readonly_copy,
     readonly_view,
     require_1d_array,
     require_range_array,
@@ -673,13 +674,18 @@ class RenderedConversation:
     messages: list[Message] = field(default_factory=list)
     parsed_completion: ParsedResponse | None = None
 
-    @property
     def __post_init__(self) -> None:
         require_1d_array("prompt_ids", self.prompt_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
         require_1d_array("completion_ids", self.completion_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
         require_1d_array("completion_logprobs", self.completion_logprobs, dtype=LOGPROBS_DTYPE)
         if self.completion_logprobs.size not in (0, self.completion_ids.size):
             raise ValueError("completion_logprobs length must be zero or match completion_ids")
+        for name, values in (
+            ("prompt_ids", self.prompt_ids),
+            ("completion_ids", self.completion_ids),
+            ("completion_logprobs", self.completion_logprobs),
+        ):
+            require_readonly(name, values)
 
     @property
     def token_ids(self) -> np.ndarray:
@@ -695,10 +701,12 @@ class RenderedConversation:
         parsed_completion: ParsedResponse | None = None,
     ) -> "RenderedConversation":
         return RenderedConversation(
-            prompt_ids=self.prompt_ids.copy(),
-            completion_ids=completion_ids.copy(),
+            prompt_ids=owned_readonly_copy("prompt_ids", self.prompt_ids, dtype=TOKEN_IDS_DTYPE, minimum=0),
+            completion_ids=owned_readonly_copy("completion_ids", completion_ids, dtype=TOKEN_IDS_DTYPE, minimum=0),
             completion_logprobs=(
-                completion_logprobs.copy() if completion_logprobs is not None else empty_array(LOGPROBS_DTYPE)
+                owned_readonly_copy("completion_logprobs", completion_logprobs, dtype=LOGPROBS_DTYPE)
+                if completion_logprobs is not None
+                else empty_array(LOGPROBS_DTYPE)
             ),
             messages=list(self.messages),
             parsed_completion=parsed_completion,
@@ -719,8 +727,6 @@ class Tokenizer(Protocol):
     name_or_path: str
     unk_token_id: int | None
     eos_token_id: int | None
-
-    def encode(self, text: str, *args: Any, **kwargs: Any) -> np.ndarray: ...
 
     def decode(self, token_ids: Any, *args: Any, **kwargs: Any) -> str: ...
 

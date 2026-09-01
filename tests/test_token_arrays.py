@@ -6,6 +6,7 @@ import pytest
 from renderers.base import (
     MultiModalData,
     PlaceholderRange,
+    RenderedConversation,
     RenderedTokens,
     RenderedTrainingSample,
     build_training_sample,
@@ -14,6 +15,7 @@ from renderers.token_arrays import (
     FixedWidthArrayBuilder,
     FixedWidthRangeBuilder,
     MASK_DTYPE,
+    LOGPROBS_DTYPE,
     RenderedTokenBuilder,
     TOKEN_IDS_DTYPE,
     TRAINING_TOKEN_IDS_DTYPE,
@@ -215,7 +217,37 @@ def test_encode_token_ids_uses_numpy_tokenizer_contract_without_iteration():
 def test_encode_token_ids_rejects_legacy_encode_fallback():
     class _Tokenizer:
         def encode(self, text, *, add_special_tokens):
-            return [2, 3, 5]
+            raise AssertionError("legacy list-returning encode must never be invoked")
 
-    with pytest.raises(TypeError, match="legacy list token custody is unsupported"):
+    with pytest.raises(TypeError, match="callable NumPy tokenization"):
         encode_token_ids(_Tokenizer(), "payload")
+
+
+def test_rendered_conversation_validates_and_takes_readonly_completion_ownership():
+    prompt = _readonly_hostile(np.asarray([2, 3], dtype=TOKEN_IDS_DTYPE))
+    conversation = RenderedConversation(prompt_ids=prompt)
+    completion = _hostile(np.asarray([5, 7], dtype=TOKEN_IDS_DTYPE))
+    logprobs = _hostile(np.asarray([-0.5, -0.25], dtype=LOGPROBS_DTYPE))
+
+    completed = conversation.with_completion(completion, completion_logprobs=logprobs)
+
+    assert np.array_equal(completed.prompt_ids, prompt)
+    assert np.array_equal(completed.completion_ids, completion)
+    assert np.array_equal(completed.completion_logprobs, logprobs)
+    assert all(
+        not values.flags.writeable
+        for values in (completed.prompt_ids, completed.completion_ids, completed.completion_logprobs)
+    )
+    completion[0] = 101
+    assert completed.completion_ids[0] == 5
+
+    with pytest.raises(TypeError, match="must be a NumPy array"):
+        RenderedConversation(prompt_ids=[2, 3])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must already be read-only"):
+        RenderedConversation(prompt_ids=np.asarray([2, 3], dtype=TOKEN_IDS_DTYPE))
+    with pytest.raises(ValueError, match="zero or match"):
+        RenderedConversation(
+            prompt_ids=prompt,
+            completion_ids=_readonly_hostile(np.asarray([5, 7], dtype=TOKEN_IDS_DTYPE)),
+            completion_logprobs=_readonly_hostile(np.asarray([-0.5], dtype=LOGPROBS_DTYPE)),
+        )

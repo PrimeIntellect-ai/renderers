@@ -63,6 +63,14 @@ def empty_array(dtype: np.dtype) -> np.ndarray:
     return value
 
 
+def owned_readonly_copy(name: str, value: object, *, dtype: np.dtype, minimum: int | None = None) -> np.ndarray:
+    """Validate then take explicit immutable ownership at a public boundary."""
+    source = require_1d_array(name, value, dtype=dtype, minimum=minimum)
+    owned = np.array(source, dtype=dtype, copy=True, order="C")
+    owned.flags.writeable = False
+    return owned
+
+
 class FixedWidthArrayBuilder:
     """A geometrically growing NumPy buffer with no list-backed phase."""
 
@@ -358,14 +366,13 @@ def _single_token_sequence(name: str, value: object) -> np.ndarray:
 
 
 def encode_token_ids(tokenizer: Any, text: str) -> np.ndarray:
-    """Encode through a NumPy-capable tokenizer contract, rejecting lists."""
-    if callable(tokenizer):
-        try:
-            encoded = tokenizer(text, add_special_tokens=False, return_tensors="np")
-        except (KeyError, NotImplementedError, TypeError, ValueError):
-            encoded = None
-        if isinstance(encoded, Mapping) and "input_ids" in encoded:
-            return _single_token_sequence(type(tokenizer).__name__, encoded["input_ids"])
-
-    encoded = tokenizer.encode(text, add_special_tokens=False)
-    return _single_token_sequence(type(tokenizer).__name__, encoded)
+    """Encode only through the NumPy tokenizer ABI; never invoke list APIs."""
+    if not callable(tokenizer):
+        raise TypeError(f"{type(tokenizer).__name__} must support callable NumPy tokenization")
+    try:
+        encoded = tokenizer(text, add_special_tokens=False, return_tensors="np")
+    except TypeError as exc:
+        raise TypeError(f"{type(tokenizer).__name__} must support callable NumPy tokenization") from exc
+    if not isinstance(encoded, Mapping) or "input_ids" not in encoded:
+        raise TypeError(f"{type(tokenizer).__name__} must return a mapping with NumPy input_ids")
+    return _single_token_sequence(type(tokenizer).__name__, encoded["input_ids"])

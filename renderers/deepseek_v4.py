@@ -192,6 +192,29 @@ def _reasoning_content(message: Mapping[str, Any]) -> str:
     return ""
 
 
+def _split_inline_reasoning(content: str) -> tuple[str, str]:
+    """Split a ``<think>...</think>`` passage in ``content`` into reasoning.
+
+    Returns ``(reasoning, visible_content)``.  ``<think>`` and ``</think>`` are
+    real tokens, so a passage left in ``content`` collides with the delimiters
+    the renderer emits itself.  Whatever sits between them is kept byte for
+    byte, because the renderer joins reasoning and content with no separator.
+    """
+    if "</think>" not in content:
+        return "", content
+    before, after = content.split("</think>", 1)
+    head, opener, reasoning = before.partition("<think>")
+    if not opener or head.strip():
+        # Without an opener, or with text ahead of it, the message does not say
+        # which part is reasoning.  Guessing would either drop that text or
+        # reclassify it, so leave the content as written: this is a problem
+        # with the data, not one the renderer should decide.
+        return "", content
+    # A whitespace-only prefix has no slot in the rendered stream, which opens
+    # with the renderer's own ``<think>``.  Every sibling strips it likewise.
+    return reasoning, after
+
+
 def _tool_function(tool: Mapping[str, Any]) -> Mapping[str, Any]:
     function = tool.get("function")
     return function if isinstance(function, Mapping) else tool
@@ -263,6 +286,12 @@ def _prepare_messages(messages: list[Message]) -> list[_LogicalMessage]:
         )
         if role == "assistant":
             logical.reasoning_content = _reasoning_content(message)
+            if not logical.reasoning_content and isinstance(
+                message.get("content"), str
+            ):
+                logical.reasoning_content, logical.content = _split_inline_reasoning(
+                    logical.content
+                )
             logical.tool_calls = list(message.get("tool_calls") or [])
         merged.append(logical)
 

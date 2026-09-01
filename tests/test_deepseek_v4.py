@@ -15,6 +15,7 @@ from renderers import (
     create_renderer,
 )
 from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.deepseek_v4 import _split_inline_reasoning
 from tests.reference_rendering import render_reference
 
 
@@ -562,4 +563,208 @@ def test_bridge_extends_developer_query_when_preserving_all_thinking():
     assert bridged.token_ids == renderer.render_ids(
         [*prior_messages, answer, *new_messages],
         add_generation_prompt=True,
+    )
+
+
+def test_thinking_in_content_is_converted_to_reasoning():
+    """Reasoning carried inline in ``content`` becomes the turn's reasoning.
+
+    Deliberate divergence from ``_render_deepseek_v4_reference``: the reference
+    encoder reads only ``reasoning_content``, so it emits the renderer's own
+    ``<think>`` delimiter *and* the data's, producing an unmatched pair.  Here
+    ``<think>``/``</think>`` are real tokens, so that stream is always
+    malformed; widening the accepted input domain past upstream lets raw SFT
+    rows render.  ``tests/reference_rendering.py`` stays a faithful mirror, and
+    ``deepseek-v4`` is left out of the parity suite's ``inline-thinking-history``
+    scenario.
+    """
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "<think>reasoning</think>answer"},
+    ]
+
+    assert _decode(_renderer(enable_thinking=True), messages) == (
+        f"{BOS}{USER}hi{ASSISTANT}<think>reasoning</think>answer{EOS}"
+    )
+
+
+def test_inline_think_split_keeps_every_byte():
+    """The split is verbatim.  DeepSeek V4 concatenates reasoning, ``</think>``
+    and content with no separator, so preserving whitespace on both sides of
+    the delimiters is what makes a re-render reproduce the original stream."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "<think>\nreason\n</think>\n\nanswer"},
+    ]
+
+    assert _decode(_renderer(enable_thinking=True), messages) == (
+        f"{BOS}{USER}hi{ASSISTANT}<think>\nreason\n</think>\n\nanswer{EOS}"
+    )
+
+
+def test_inline_think_is_dropped_when_thinking_disabled():
+    """Under the default config the converted reasoning is dropped like any other,
+    leaving the generation prompt's ``</think>`` and no stray opener."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "<think>reasoning</think>answer"},
+    ]
+
+    text = _decode(_renderer(), messages)
+
+    assert text == f"{BOS}{USER}hi{ASSISTANT}</think>answer{EOS}"
+    assert "<think>" not in text
+
+
+def test_inline_think_history_follows_drop_thinking():
+    messages = [
+        {"role": "user", "content": "First"},
+        {"role": "assistant", "content": "<think>old secret</think>First answer"},
+        {"role": "user", "content": "Second"},
+        {
+            "role": "assistant",
+            "content": "<think>current thought</think>Second answer",
+        },
+    ]
+
+    dropped = _decode(_renderer(enable_thinking=True), messages)
+    assert dropped == (
+        f"{BOS}{USER}First{ASSISTANT}</think>First answer{EOS}"
+        f"{USER}Second{ASSISTANT}<think>current thought</think>Second answer{EOS}"
+    )
+    assert "old secret" not in dropped
+
+    assert _decode(_renderer(enable_thinking=True, drop_thinking=False), messages) == (
+        f"{BOS}{USER}First{ASSISTANT}<think>old secret</think>First answer{EOS}"
+        f"{USER}Second{ASSISTANT}<think>current thought</think>Second answer{EOS}"
+    )
+
+
+def test_tools_retain_converted_reasoning_on_history():
+    messages = [
+        {"role": "user", "content": "First"},
+        {"role": "assistant", "content": "<think>old secret</think>First answer"},
+        {"role": "user", "content": "Second"},
+        {
+            "role": "assistant",
+            "content": "<think>current thought</think>Second answer",
+        },
+    ]
+
+    text = _decode(_renderer(enable_thinking=True), messages, tools=TOOLS)
+
+    assert f"{USER}First{ASSISTANT}<think>old secret</think>First answer{EOS}" in text
+    assert (
+        f"{USER}Second{ASSISTANT}<think>current thought</think>Second answer{EOS}"
+    ) in text
+
+
+def test_explicit_reasoning_content_takes_precedence_over_the_split():
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "reasoning_content": "structured reasoning",
+            "content": "answer",
+        },
+    ]
+
+    assert _decode(_renderer(enable_thinking=True), messages) == (
+        f"{BOS}{USER}hi{ASSISTANT}<think>structured reasoning</think>answer{EOS}"
+    )
+
+
+def test_converted_reasoning_survives_parse_and_rerender():
+    """The verbatim split is an identity: parsing the rendered
+    completion and rebuilding the message from the parsed halves re-renders to
+    the same token ids."""
+    renderer = _renderer(enable_thinking=True)
+    query = {"role": "user", "content": "hi"}
+    messages = [
+        query,
+        {"role": "assistant", "content": "<think>\nreason\n</think>\n\nanswer"},
+    ]
+    rendered = renderer.render_ids(messages)
+    assistant_id = _tokenizer().encode(ASSISTANT, add_special_tokens=False)[0]
+    completion_start = rendered.index(assistant_id) + 2  # skip Assistant + <think>
+
+    parsed = renderer.parse_response(rendered[completion_start:])
+
+    assert parsed.reasoning_content == "\nreason\n"
+    assert parsed.content == "\n\nanswer"
+    rebuilt = [
+        query,
+        {
+            "role": "assistant",
+            "reasoning_content": parsed.reasoning_content,
+            "content": parsed.content,
+        },
+    ]
+    assert renderer.render_ids(rebuilt) == rendered
+
+
+def test_thinking_is_converted_through_a_whitespace_prefix():
+    """Models routinely emit a newline before the opener.  The rendered stream
+    starts with the renderer's own ``<think>``, so there is no slot for that
+    prefix and no split can preserve it; normalizing it away is what every
+    sibling renderer does, and it beats falling back to a stray delimiter."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "\n<think>\nreason\n</think>\n\nanswer"},
+    ]
+
+    assert _decode(_renderer(enable_thinking=True), messages) == (
+        f"{BOS}{USER}hi{ASSISTANT}<think>\nreason\n</think>\n\nanswer{EOS}"
+    )
+
+
+def test_inline_think_after_real_text_is_left_alone():
+    """Text before the opener has nowhere to go, and dropping it would delete
+    model output.  The turn keeps the pre-change rendering instead."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "Sure!<think>reason</think>answer"},
+    ]
+
+    assert _decode(_renderer(enable_thinking=True), messages) == (
+        f"{BOS}{USER}hi{ASSISTANT}<think></think>Sure!<think>reason</think>answer{EOS}"
+    )
+
+
+def test_bare_closing_think_tag_is_left_alone():
+    """A closer with no opener does not say which part is reasoning.  Reading
+    the prefix as reasoning would reclassify text the message never marked, and
+    on a historical turn ``drop_thinking`` would then delete it.  The renderer
+    does not guess: this is a problem with the data.
+    """
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "reason</think>answer"},
+    ]
+
+    assert _decode(_renderer(enable_thinking=True), messages) == (
+        f"{BOS}{USER}hi{ASSISTANT}<think></think>reason</think>answer{EOS}"
+    )
+
+
+def test_split_inline_reasoning_branches():
+    """The full branch table.  Anything the message does not mark clearly is
+    returned unchanged rather than guessed at."""
+    assert _split_inline_reasoning("plain answer") == ("", "plain answer")
+    assert _split_inline_reasoning("<think>r</think>a") == ("r", "a")
+    assert _split_inline_reasoning("\n <think>r</think>a") == ("r", "a")
+    assert _split_inline_reasoning("r</think>a") == ("", "r</think>a")
+    assert _split_inline_reasoning("r</think>a<think>r2</think>a2") == (
+        "",
+        "r</think>a<think>r2</think>a2",
+    )
+    # A doubled opener splits at the first one, keeping the inner marker inside
+    # the reasoning rather than dropping the text between them.  Known gap.
+    assert _split_inline_reasoning("<think>outer <think>inner</think>a") == (
+        "outer <think>inner",
+        "a",
+    )
+    assert _split_inline_reasoning("Sure!<think>r</think>a") == (
+        "",
+        "Sure!<think>r</think>a",
     )

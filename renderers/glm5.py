@@ -23,9 +23,11 @@ from renderers.base import (
     _content_mask_or_empty,
     attribute_text_segments,
     extract_message_tool_names,
+    get_structured_reasoning,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
+    validate_canonical_messages,
 )
 from renderers.configs import GLM5RendererConfig, GLM51RendererConfig
 from renderers.parsing import parse_glm
@@ -50,6 +52,8 @@ _TOOLS_FOOTER = (
 
 class GLM5Renderer:
     """Deterministic message → token renderer for GLM-5 models."""
+
+    supports_reasoning_content = True
 
     # GLM-5.1 flips this on: even when the most-recent assistant has no
     # reasoning content, the template wraps it with ``<think></think>``
@@ -149,6 +153,11 @@ class GLM5Renderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 
@@ -484,17 +493,7 @@ class GLM5Renderer:
         emit_text,
         emit_text_segments,
     ):
-        reasoning_content = ""
-        if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-        elif "</think>" in content:
-            before, after = content.split("</think>", 1)
-            if "<think>" in before:
-                reasoning_content = before.split("<think>")[-1].lstrip("\n")
-            else:
-                reasoning_content = before.lstrip("\n")
-            reasoning_content = reasoning_content.rstrip("\n")
-            content = after.lstrip("\n")
+        reasoning_content = get_structured_reasoning(msg)
 
         # ``<|assistant|>`` is template-injected: the chat template emits
         # it as the generation prompt at inference, and the model never

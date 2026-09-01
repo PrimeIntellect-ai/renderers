@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 import logging
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -37,13 +37,6 @@ class TextPart(TypedDict):
     text: str
 
 
-class ThinkingPart(TypedDict):
-    """Model's internal reasoning (chain-of-thought) as a content part."""
-
-    type: Literal["thinking"]
-    thinking: str
-
-
 class ImagePart(TypedDict, total=False):
     """An image attached to a message.
 
@@ -74,7 +67,7 @@ class VideoPart(TypedDict, total=False):
     video_url: dict[str, Any]
 
 
-ContentPart = TextPart | ThinkingPart | ImagePart | VideoPart
+ContentPart = TextPart | ImagePart | VideoPart
 
 # Content is either a plain string or a list of structured parts.
 Content = str | list[ContentPart]
@@ -107,7 +100,11 @@ class Message(TypedDict, total=False):
     """A single turn in a multi-turn conversation.
 
     Required keys: role, content.
-    Optional keys mirror the OpenAI chat format for tool calling.
+    Optional keys mirror the OpenAI chat format for tool calling and
+    structured reasoning. Renderers that support structured reasoning read it
+    only from the model's explicit reasoning field; they do not promote
+    ``<think>...</think>`` text embedded in string ``content``. Legacy datasets
+    must normalize that wire-format markup before rendering.
     """
 
     role: str
@@ -115,8 +112,102 @@ class Message(TypedDict, total=False):
     tool_calls: list[ToolCall]
     tool_call_id: str
     name: str
-    reasoning: str
     reasoning_content: str
+
+
+def validate_canonical_messages(
+    messages: list[Message],
+    *,
+    supports_reasoning_content: bool,
+    renderer_name: str,
+    allow_inline_reasoning_markup: bool | Collection[int] = False,
+) -> None:
+    """Validate the canonical message boundary before rendering.
+
+    Dataset adapters own conversion from legacy/model-native shapes into the
+    canonical schema. Renderers therefore consume assistant reasoning only from
+    ``reasoning_content`` and never infer it from ``content``. A renderer that
+    cannot represent structured reasoning must reject it instead of silently
+    discarding it.
+
+    ``allow_inline_reasoning_markup`` is reserved for explicit raw native-wire
+    passthrough modes. Pass a collection of message indices when only specific
+    messages are raw. It must not be used to accept legacy dataset records.
+    """
+    for message_index, message in enumerate(messages):
+        if message.get("role") != "assistant":
+            continue
+
+        if "reasoning" in message:
+            raise ValueError(
+                f"{renderer_name}: assistant message {message_index} uses the "
+                "non-canonical 'reasoning' field; normalize it to "
+                "'reasoning_content' before rendering"
+            )
+
+        reasoning = message.get("reasoning_content")
+        if reasoning is not None and not isinstance(reasoning, str):
+            raise TypeError(
+                f"{renderer_name}: assistant message {message_index} has a "
+                "non-string 'reasoning_content'"
+            )
+        if reasoning and not supports_reasoning_content:
+            raise ValueError(
+                f"{renderer_name} does not support structured reasoning; "
+                f"assistant message {message_index} has non-empty "
+                "'reasoning_content'"
+            )
+
+        content = message.get("content")
+        text_fragments: list[str] = []
+        if isinstance(content, str):
+            text_fragments.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, str):
+                    text_fragments.append(part)
+                    continue
+                if not isinstance(part, Mapping):
+                    continue
+                if part.get("type") == "thinking":
+                    raise ValueError(
+                        f"{renderer_name}: assistant message {message_index} "
+                        "uses a non-canonical 'thinking' content part; normalize "
+                        "it to 'reasoning_content' before rendering"
+                    )
+                part_type = part.get("type")
+                text = part.get("text")
+                if part_type in (None, "text", "input_text") and isinstance(text, str):
+                    text_fragments.append(text)
+
+        if isinstance(allow_inline_reasoning_markup, bool):
+            inline_markup_allowed = allow_inline_reasoning_markup
+        else:
+            inline_markup_allowed = message_index in allow_inline_reasoning_markup
+        if not inline_markup_allowed and any(
+            "<think>" in fragment or "</think>" in fragment
+            for fragment in text_fragments
+        ):
+            raise ValueError(
+                f"{renderer_name}: assistant message {message_index} contains "
+                "reserved reasoning markup in 'content'; normalize legacy "
+                "'<think>...</think>' data to 'reasoning_content' plus visible "
+                "'content' before rendering"
+            )
+
+
+def get_structured_reasoning(
+    message: Mapping[str, Any],
+) -> str:
+    """Return canonical assistant reasoning when it is a string.
+
+    ``content`` is intentionally never inspected. This helper is for renderers
+    whose canonical message schema separates visible content from reasoning;
+    model-output parsers remain responsible for decoding wire-format reasoning
+    delimiters into ``reasoning_content``.
+    """
+    value = message.get("reasoning_content")
+    return value if isinstance(value, str) else ""
 
 
 def extract_message_tool_names(messages: list[Message]) -> list[str | None]:
@@ -709,6 +800,8 @@ class ChatTemplateTokenizer(Tokenizer, Protocol):
 @runtime_checkable
 class Renderer(Protocol):
     """Owns message ↔ token conversion for a specific model family."""
+
+    supports_reasoning_content: bool
 
     def render(
         self,

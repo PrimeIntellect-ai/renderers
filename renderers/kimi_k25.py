@@ -38,10 +38,12 @@ from renderers.base import (
     _content_mask_or_empty,
     _require_transformers,
     extract_message_tool_names,
+    get_structured_reasoning,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
+    validate_canonical_messages,
 )
 from renderers.configs import KimiK25RendererConfig
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
@@ -591,6 +593,7 @@ class KimiK25Renderer:
     The tokenizer should be ``moonshotai/Kimi-K2-Instruct`` (same as K2).
     """
 
+    supports_reasoning_content = True
     supports_process_multimodal = True
 
     def __init__(
@@ -751,6 +754,11 @@ class KimiK25Renderer:
           - Generation prompt: ``<|im_assistant|>assistant<|im_middle|>``
             + ``<think>`` (or ``<think></think>`` when thinking off)
         """
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 
@@ -1348,37 +1356,14 @@ class KimiK25Renderer:
         content = msg.get("content")
         reasoning_content: str = ""
 
-        # Extract reasoning from structured content parts or inline <think> tags
-        if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-            if isinstance(content, list):
-                text_content = "".join(
-                    p.get("text", "")
-                    for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
-            else:
-                text_content = content or ""
-        elif isinstance(content, list):
-            thinking_parts = [
-                p.get("thinking", "")
-                for p in content
-                if isinstance(p, dict) and p.get("type") == "thinking"
-            ]
+        reasoning_content = get_structured_reasoning(msg)
+        if isinstance(content, list):
             text_parts = [
                 p.get("text", "")
                 for p in content
                 if isinstance(p, dict) and p.get("type") == "text"
             ]
-            reasoning_content = "".join(thinking_parts)
             text_content = "".join(text_parts)
-        elif isinstance(content, str) and "</think>" in content:
-            before, _, after = content.partition("</think>")
-            if "<think>" in before:
-                reasoning_content = before.split("<think>", 1)[-1]
-            else:
-                reasoning_content = before
-            text_content = after.lstrip("\n")
         else:
             text_content = content or ""
 

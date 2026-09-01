@@ -332,11 +332,39 @@ def test_raw_last_assistant_drops_wrap_and_eos():
     """A trailing non-tool assistant renders as bare visible content."""
     convo = [
         {"role": "user", "content": "Q"},
-        {"role": "assistant", "reasoning_content": "R", "content": "the answer"},
+        {"role": "assistant", "content": "the answer"},
     ]
     raw = _decode(_renderer(raw_last_assistant=True).render_ids(convo))
     assert raw.endswith(_ASSISTANT + "the answer")  # no think wrap, no eos
     assert _THINK not in raw.split(_ASSISTANT)[-1]
+
+
+def test_raw_last_assistant_rejects_structured_reasoning():
+    convo = [
+        {"role": "user", "content": "Q"},
+        {"role": "assistant", "reasoning_content": "R", "content": "answer"},
+    ]
+    with pytest.raises(ValueError, match="raw_last_assistant cannot represent"):
+        _renderer(raw_last_assistant=True).render_ids(convo)
+
+
+def test_raw_last_assistant_allows_inline_native_markup_only_on_raw_turn():
+    raw_content = "<think>prefix reasoning</think>answer prefix"
+    convo = [
+        {"role": "user", "content": "Q"},
+        {"role": "assistant", "content": raw_content},
+    ]
+    rendered = _decode(_renderer(raw_last_assistant=True).render_ids(convo))
+    assert rendered.endswith(_ASSISTANT + raw_content)
+
+    historical_inline = [
+        {"role": "user", "content": "Q1"},
+        {"role": "assistant", "content": raw_content},
+        {"role": "user", "content": "Q2"},
+        {"role": "assistant", "content": "answer prefix"},
+    ]
+    with pytest.raises(ValueError, match="normalize legacy.*reasoning_content"):
+        _renderer(raw_last_assistant=True).render_ids(historical_inline)
 
 
 def test_fallback_strategy_forces_high_and_no_gen_prompt():

@@ -22,9 +22,11 @@ from renderers.base import (
     _content_mask_or_empty,
     attribute_text_segments,
     extract_message_tool_names,
+    get_structured_reasoning,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
+    validate_canonical_messages,
 )
 from renderers.configs import GLM45RendererConfig
 from renderers.parsing import parse_glm
@@ -52,6 +54,8 @@ _TOOLS_FOOTER = (
 
 class GLM45Renderer:
     """Deterministic message → token renderer for GLM-4.5 Air models."""
+
+    supports_reasoning_content = True
 
     def __init__(
         self,
@@ -123,6 +127,11 @@ class GLM45Renderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 
@@ -467,17 +476,7 @@ class GLM45Renderer:
         emit_text,
         emit_text_segments,
     ):
-        reasoning_content = ""
-        if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-        elif "</think>" in content:
-            before, after = content.split("</think>", 1)
-            if "<think>" in before:
-                reasoning_content = before.split("<think>")[-1].lstrip("\n")
-            else:
-                reasoning_content = before.lstrip("\n")
-            reasoning_content = reasoning_content.rstrip("\n")
-            content = after.lstrip("\n")
+        reasoning_content = get_structured_reasoning(msg)
 
         # ``<|assistant|>\n`` is template-injected scaffolding — at
         # inference the chat template emits these as the generation

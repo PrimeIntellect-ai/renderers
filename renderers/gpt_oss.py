@@ -61,6 +61,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
+    validate_canonical_messages,
 )
 from renderers.configs import GptOssRendererConfig
 from renderers.parsing import parse_gpt_oss
@@ -120,6 +121,8 @@ def _arguments_to_str(arguments: Any) -> str:
 
 class GptOssRenderer:
     """Deterministic message → token renderer for OpenAI gpt-oss (harmony)."""
+
+    supports_reasoning_content = True
 
     def __init__(
         self,
@@ -267,6 +270,11 @@ class GptOssRenderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 

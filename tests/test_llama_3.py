@@ -87,11 +87,7 @@ def test_preserve_thinking_flags_are_noops(llama_pair):
     _, _, tok, _ = llama_pair
     msgs = [
         {"role": "user", "content": "Hi."},
-        {
-            "role": "assistant",
-            "reasoning_content": "internal musings",
-            "content": "Hello!",
-        },
+        {"role": "assistant", "content": "Hello!"},
     ]
     base = Llama3Renderer(tok).render_ids(msgs)
     for level in ("tool_cycle", "all"):

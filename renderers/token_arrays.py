@@ -28,7 +28,7 @@ def require_1d_array(name: str, value: object, *, dtype: np.dtype, minimum: int 
 
 
 def readonly_view(value: np.ndarray) -> np.ndarray:
-    """Return a zero-copy view whose write flag cannot mutate its producer."""
+    """Return a read-only zero-copy view of a caller-owned buffer."""
     view = value.view()
     view.flags.writeable = False
     return view
@@ -46,8 +46,8 @@ class FixedWidthArrayBuilder:
     __slots__ = ("_buffer", "_dtype", "_sealed", "_size")
 
     def __init__(self, dtype: np.dtype, *, initial_capacity: int = 64) -> None:
-        if initial_capacity < 0:
-            raise ValueError("initial_capacity must be non-negative")
+        if type(initial_capacity) is not int or initial_capacity < 0:
+            raise TypeError("initial_capacity must be a non-negative integer")
         self._dtype = np.dtype(dtype)
         self._buffer = np.empty(initial_capacity, dtype=self._dtype)
         self._size = 0
@@ -57,6 +57,8 @@ class FixedWidthArrayBuilder:
         return self._size
 
     def _reserve(self, additional: int) -> None:
+        if type(additional) is not int or additional < 0:
+            raise TypeError("additional capacity must be a non-negative integer")
         if self._sealed:
             raise RuntimeError("fixed-width array builder is already sealed")
         required = self._size + additional
@@ -68,6 +70,7 @@ class FixedWidthArrayBuilder:
         self._buffer = grown
 
     def append(self, value: int | bool) -> None:
+        self._validate_scalar(value)
         self._reserve(1)
         self._buffer[self._size] = value
         self._size += 1
@@ -80,11 +83,23 @@ class FixedWidthArrayBuilder:
         self._size += count
 
     def extend_constant(self, value: int | bool, count: int) -> None:
-        if count < 0:
-            raise ValueError("count must be non-negative")
+        self._validate_scalar(value)
+        if type(count) is not int or count < 0:
+            raise TypeError("count must be a non-negative integer")
         self._reserve(count)
         self._buffer[self._size : self._size + count] = value
         self._size += count
+
+    def _validate_scalar(self, value: int | bool) -> None:
+        if self._dtype == MASK_DTYPE:
+            if type(value) is not bool:
+                raise TypeError(f"builder value must be bool, got {type(value).__name__}")
+            return
+        if type(value) is not int:
+            raise TypeError(f"builder value must be int, got {type(value).__name__}")
+        bounds = np.iinfo(self._dtype)
+        if value < bounds.min or value > bounds.max:
+            raise ValueError(f"builder value {value} is outside {self._dtype.str}")
 
     def finish(self) -> np.ndarray:
         """Seal and return the populated prefix without an O(n) final copy."""
@@ -107,6 +122,14 @@ class RenderedTokenBuilder:
         return len(self._token_ids)
 
     def emit_special(self, token_id: int, message_index: int, *, sampled: bool, content: bool) -> None:
+        if type(token_id) is not int:
+            raise TypeError(f"token_id must be int, got {type(token_id).__name__}")
+        if type(message_index) is not int:
+            raise TypeError(f"message_index must be int, got {type(message_index).__name__}")
+        if type(sampled) is not bool:
+            raise TypeError(f"sampled must be bool, got {type(sampled).__name__}")
+        if type(content) is not bool:
+            raise TypeError(f"content must be bool, got {type(content).__name__}")
         if token_id < 0 or token_id > np.iinfo(TOKEN_IDS_DTYPE).max:
             raise ValueError(f"token_id is outside the int32 token range: {token_id}")
         if message_index < -1 or message_index > np.iinfo(MESSAGE_INDICES_DTYPE).max:
@@ -120,15 +143,23 @@ class RenderedTokenBuilder:
         self, token_ids: np.ndarray, message_index: int, *, sampled: bool, content: bool | np.ndarray
     ) -> None:
         require_1d_array("token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        if type(message_index) is not int:
+            raise TypeError(f"message_index must be int, got {type(message_index).__name__}")
+        if type(sampled) is not bool:
+            raise TypeError(f"sampled must be bool, got {type(sampled).__name__}")
         if message_index < -1 or message_index > np.iinfo(MESSAGE_INDICES_DTYPE).max:
             raise ValueError(f"message_index is outside the int32 attribution range: {message_index}")
-        self._token_ids.extend(token_ids)
-        self._message_indices.extend_constant(message_index, token_ids.size)
-        self._sampled_mask.extend_constant(sampled, token_ids.size)
         if isinstance(content, np.ndarray):
             require_1d_array("is_content", content, dtype=MASK_DTYPE)
             if content.size != token_ids.size:
                 raise ValueError(f"is_content length {content.size} does not match token_ids length {token_ids.size}")
+        elif type(content) is not bool:
+            raise TypeError(f"content must be bool or a NumPy bool array, got {type(content).__name__}")
+
+        self._token_ids.extend(token_ids)
+        self._message_indices.extend_constant(message_index, token_ids.size)
+        self._sampled_mask.extend_constant(sampled, token_ids.size)
+        if isinstance(content, np.ndarray):
             self._is_content.extend(content)
         else:
             self._is_content.extend_constant(content, token_ids.size)
@@ -148,6 +179,9 @@ class RenderedTokenBuilder:
         """Seal aligned arrays and construct the public RenderedTokens value."""
         from renderers.base import RenderedTokens
 
+        sizes = {len(self._token_ids), len(self._message_indices), len(self._sampled_mask), len(self._is_content)}
+        if len(sizes) != 1:
+            raise RuntimeError("rendered token builder signals are misaligned")
         token_ids = self._token_ids.finish()
         message_indices = self._message_indices.finish()
         sampled_mask = self._sampled_mask.finish() if sampled_available else empty_array(MASK_DTYPE)
@@ -176,7 +210,9 @@ def _single_token_sequence(name: str, value: object) -> np.ndarray:
         raise TypeError(f"{name} input_ids must use a fixed-width integer dtype, got {value.dtype}")
     if value.size and (np.any(value < 0) or np.any(value > np.iinfo(TOKEN_IDS_DTYPE).max)):
         raise ValueError(f"{name} input_ids are outside the int32 token range")
-    return readonly_view(value.astype(TOKEN_IDS_DTYPE, copy=False))
+    owned = np.array(value, dtype=TOKEN_IDS_DTYPE, copy=True, order="C")
+    owned.flags.writeable = False
+    return owned
 
 
 def encode_token_ids(tokenizer: Any, text: str) -> np.ndarray:

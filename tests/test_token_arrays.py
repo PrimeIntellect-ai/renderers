@@ -46,6 +46,24 @@ def test_builder_and_validator_reject_legacy_lists():
         require_1d_array("tokens", [1, 2, 3], dtype=TOKEN_IDS_DTYPE)
 
 
+@pytest.mark.parametrize("value", [True, 1.5, "2"])
+def test_builder_rejects_non_integer_capacity_and_count(value):
+    with pytest.raises(TypeError, match="non-negative integer"):
+        FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=value)  # type: ignore[arg-type]
+    builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE)
+    with pytest.raises(TypeError, match="non-negative integer"):
+        builder.extend_constant(1, value)  # type: ignore[arg-type]
+
+
+def test_builder_rejects_scalar_dtype_compatibility():
+    tokens = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE)
+    mask = FixedWidthArrayBuilder(MASK_DTYPE)
+    with pytest.raises(TypeError, match="must be int"):
+        tokens.append(True)
+    with pytest.raises(TypeError, match="must be bool"):
+        mask.append(1)
+
+
 def test_rendered_token_builder_keeps_all_signals_aligned_and_fixed_width():
     builder = RenderedTokenBuilder(initial_capacity=1)
     tokens = _hostile(np.asarray([11, 13], dtype=TOKEN_IDS_DTYPE))
@@ -73,6 +91,15 @@ def test_rendered_token_builder_rejects_list_and_misaligned_mask_custody():
         builder.emit_tokens(
             np.asarray([1, 2], dtype=TOKEN_IDS_DTYPE), 0, sampled=False, content=np.asarray([True], dtype=MASK_DTYPE)
         )
+    assert len(builder) == 0
+    with pytest.raises(TypeError, match="content must be bool"):
+        builder.emit_tokens(
+            np.asarray([1, 2], dtype=TOKEN_IDS_DTYPE),
+            0,
+            sampled=False,
+            content=[True, False],  # type: ignore[arg-type]
+        )
+    assert len(builder) == 0
 
 
 def test_encode_token_ids_uses_numpy_tokenizer_contract_without_iteration():
@@ -93,6 +120,8 @@ def test_encode_token_ids_uses_numpy_tokenizer_contract_without_iteration():
     assert np.array_equal(actual, np.asarray([2, 3, 5], dtype=TOKEN_IDS_DTYPE))
     assert actual.dtype == TOKEN_IDS_DTYPE
     assert not actual.flags.writeable
+    expected[0, 0] = 101
+    assert actual[0] == 2
 
 
 def test_encode_token_ids_rejects_legacy_encode_fallback():

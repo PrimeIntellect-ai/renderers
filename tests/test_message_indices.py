@@ -40,6 +40,8 @@ Tests in this file:
 
 from __future__ import annotations
 
+import numpy as np
+
 
 def test_message_indices_in_range(model_name, renderer):
     """Every emitted token's ``message_indices`` must be in
@@ -60,19 +62,19 @@ def test_message_indices_in_range(model_name, renderer):
     assert len(rendered.token_ids) == len(rendered.message_indices), (
         f"{model_name}: token_ids and message_indices length mismatch"
     )
-    bad = [
-        (k, idx)
-        for k, idx in enumerate(rendered.message_indices)
-        if not (idx == -1 or 0 <= idx < n)
-    ]
-    assert not bad, (
-        f"{model_name}: out-of-range message_indices entries (k, idx): {bad[:8]}"
+    valid = (rendered.message_indices == -1) | (
+        (rendered.message_indices >= 0) & (rendered.message_indices < n)
+    )
+    bad = np.flatnonzero(~valid)
+    assert bad.size == 0, (
+        f"{model_name}: out-of-range message_indices at positions {bad[:8]}"
     )
 
     # Every caller message must contribute at least one token.
-    seen = set(rendered.message_indices)
-    missing = [k for k in range(n) if k not in seen]
-    assert not missing, (
+    attributed = rendered.message_indices[rendered.message_indices >= 0]
+    counts = np.bincount(attributed, minlength=n)
+    missing = np.flatnonzero(counts[:n] == 0)
+    assert missing.size == 0, (
         f"{model_name}: messages not represented in message_indices: {missing}"
     )
 
@@ -109,12 +111,10 @@ def test_kimi_k2_unknown_role_message_indices():
     rendered = renderer.render(msgs)
 
     n = len(msgs)
-    bad = [
-        (k, idx)
-        for k, idx in enumerate(rendered.message_indices)
-        if not (idx == -1 or 0 <= idx < n)
-    ]
-    assert not bad, (
-        f"out-of-range message_indices on Kimi K2 unknown-role fallback "
-        f"(k, idx): {bad[:8]}"
+    valid = (rendered.message_indices == -1) | (
+        (rendered.message_indices >= 0) & (rendered.message_indices < n)
+    )
+    bad = np.flatnonzero(~valid)
+    assert bad.size == 0, (
+        f"out-of-range message_indices on Kimi K2 unknown-role fallback at positions {bad[:8]}"
     )

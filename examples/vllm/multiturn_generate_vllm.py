@@ -5,14 +5,18 @@
 #   "renderers>=0.1.6",
 #   "vllm>=0.20",
 #   "transformers>=4.50.0",
-#   "openai-harmony>=0.0.8",
 #   "openai>=1.108.1",
 #   "tiktoken",
 #   "jinja2",
 #   "numpy",
 # ]
 # ///
-"""vLLM offline generation from renderer-owned prompt token IDs."""
+"""vLLM offline generation from renderer-owned prompt token IDs.
+
+GPT-OSS is excluded until openai-harmony provides a fixed-width NumPy token ABI.
+This example deliberately rejects the released vLLM ``list[int]`` completion
+surface. It becomes runnable with the paired typed-output engine change.
+"""
 
 from __future__ import annotations
 
@@ -21,14 +25,15 @@ import gc
 import json
 import os
 
+import numpy as np
 from renderers.configs import Qwen35RendererConfig
-from renderers.gpt_oss import GptOssRenderer
 from renderers.qwen35 import Qwen35Renderer
+from renderers.token_arrays import owned_token_ids_from_array
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 
-MODELS = ["Qwen/Qwen3.5-4B", "openai/gpt-oss-20b"]
+MODELS = ["Qwen/Qwen3.5-4B"]
 QWEN_THINKING_MODES = [True, False]
 
 TOOLS = [
@@ -39,10 +44,7 @@ TOOLS = [
             "description": "Multiply two integers.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "a": {"type": "integer"},
-                    "b": {"type": "integer"},
-                },
+                "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
                 "required": ["a", "b"],
             },
         },
@@ -56,8 +58,6 @@ def make_renderer(model: str, enable_thinking: bool | None):
         return Qwen35Renderer(
             tokenizer, Qwen35RendererConfig(enable_thinking=enable_thinking)
         )
-    if model == "openai/gpt-oss-20b":
-        return GptOssRenderer(tokenizer)
     raise ValueError(f"unsupported demo model: {model}")
 
 
@@ -126,11 +126,11 @@ def main() -> None:
             messages, tools=TOOLS, add_generation_prompt=True
         )
         output1 = llm.generate(
-            [{"prompt_token_ids": prompt_ids}],
-            sampling_params=sampling,
-            use_tqdm=False,
+            [{"prompt_token_ids": prompt_ids}], sampling_params=sampling, use_tqdm=False
         )[0]
-        completion1 = list(output1.outputs[0].token_ids)
+        completion1 = owned_token_ids_from_array(
+            "vLLM completion token IDs", output1.outputs[0].token_ids
+        )
         parsed1 = renderer.parse_response(completion1)
         print_parsed(label, "turn 1", parsed1)
 
@@ -184,16 +184,17 @@ def main() -> None:
         if bridged is None:
             raise RuntimeError("bridge_to_next_turn returned None")
         bridged_ids = bridged.token_ids
-        assert bridged_ids[: len(prompt_ids) + len(completion1)] == (
-            prompt_ids + completion1
-        )
+        expected_prefix = np.concatenate((prompt_ids, completion1))
+        assert np.array_equal(bridged_ids[: expected_prefix.size], expected_prefix)
 
         output2 = llm.generate(
             [{"prompt_token_ids": bridged_ids}],
             sampling_params=sampling,
             use_tqdm=False,
         )[0]
-        completion2 = list(output2.outputs[0].token_ids)
+        completion2 = owned_token_ids_from_array(
+            "vLLM completion token IDs", output2.outputs[0].token_ids
+        )
         print_parsed(label, "turn 2", renderer.parse_response(completion2))
 
         del llm

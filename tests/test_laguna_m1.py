@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import numpy as np
 from pydantic import TypeAdapter
 
 from renderers import (
@@ -82,7 +83,7 @@ def test_reasoning_field_precedence_and_inline_think_extraction():
         },
     ]
     got = _renderer(enable_thinking=True).render_ids(precedence)
-    assert got == _expected(precedence, enable_thinking=True)
+    assert np.array_equal(got, _expected(precedence, enable_thinking=True))
     text = _tok().decode(got)
     assert "preferred" in text
     assert "ignored" not in text
@@ -97,7 +98,7 @@ def test_reasoning_field_precedence_and_inline_think_extraction():
         },
     ]
     got = _renderer(enable_thinking=True).render_ids(empty_reasoning_wins)
-    assert got == _expected(empty_reasoning_wins, enable_thinking=True)
+    assert np.array_equal(got, _expected(empty_reasoning_wins, enable_thinking=True))
     assert "also ignored" not in _tok().decode(got)
 
     inline = [
@@ -107,7 +108,7 @@ def test_reasoning_field_precedence_and_inline_think_extraction():
             "content": "<think>\ninline reason\n</think>\nvisible answer",
         },
     ]
-    assert _renderer().render_ids(inline) == _expected(inline)
+    assert np.array_equal(_renderer().render_ids(inline), _expected(inline))
 
 
 def test_reasoning_content_and_tool_call_round_trip():
@@ -147,8 +148,11 @@ def test_raw_assistant_round_trip_parity():
         },
     ]
     renderer = _renderer(enable_thinking=True, render_assistant_messages_raw=True)
-    assert renderer.render_ids(messages) == _expected(
-        messages,
-        enable_thinking=True,
-        render_assistant_messages_raw=True,
+    assert np.array_equal(
+        renderer.render_ids(messages),
+        _expected(
+            messages,
+            enable_thinking=True,
+            render_assistant_messages_raw=True,
+        ),
     )

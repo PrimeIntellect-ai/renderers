@@ -6,14 +6,18 @@
 #   "sglang==0.5.10.post1",
 #   "flash-attn-4>=4.0.0b4",
 #   "transformers>=5.3.0",
-#   "openai-harmony==0.0.4",
 #   "openai>=1.108.1",
 #   "tiktoken",
 #   "jinja2",
 #   "numpy",
 # ]
 # ///
-"""SGLang offline generation from renderer-owned prompt token IDs."""
+"""SGLang offline generation from renderer-owned prompt token IDs.
+
+GPT-OSS is excluded until openai-harmony provides a fixed-width NumPy token ABI.
+This example deliberately rejects the released SGLang ``list[int]`` completion
+surface. It becomes runnable with the paired typed-output engine change.
+"""
 
 from __future__ import annotations
 
@@ -21,14 +25,15 @@ import argparse
 import json
 import os
 
+import numpy as np
 import sglang as sgl
 from renderers.configs import Qwen35RendererConfig
-from renderers.gpt_oss import GptOssRenderer
 from renderers.qwen35 import Qwen35Renderer
+from renderers.token_arrays import owned_token_ids_from_array
 from transformers import AutoTokenizer
 
 
-MODELS = ["Qwen/Qwen3.5-4B", "openai/gpt-oss-20b"]
+MODELS = ["Qwen/Qwen3.5-4B"]
 QWEN_THINKING_MODES = [True, False]
 
 TOOLS = [
@@ -39,10 +44,7 @@ TOOLS = [
             "description": "Multiply two integers.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "a": {"type": "integer"},
-                    "b": {"type": "integer"},
-                },
+                "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
                 "required": ["a", "b"],
             },
         },
@@ -56,8 +58,6 @@ def make_renderer(model: str, enable_thinking: bool | None):
         return Qwen35Renderer(
             tokenizer, Qwen35RendererConfig(enable_thinking=enable_thinking)
         )
-    if model == "openai/gpt-oss-20b":
-        return GptOssRenderer(tokenizer)
     raise ValueError(f"unsupported demo model: {model}")
 
 
@@ -72,11 +72,18 @@ def print_parsed(label: str, turn: str, parsed) -> None:
         print(f"content: {parsed.content}")
 
 
-def completion_ids(output: dict, prompt_ids: list[int]) -> list[int]:
-    ids = list(output.get("output_ids") or output.get("token_ids") or [])
-    if not ids:
+def completion_ids(output: dict, prompt_ids: np.ndarray) -> np.ndarray:
+    raw_ids = output.get("output_ids")
+    if raw_ids is None:
+        raw_ids = output.get("token_ids")
+    ids = owned_token_ids_from_array("SGLang completion token IDs", raw_ids)
+    if ids.size == 0:
         raise RuntimeError("SGLang did not return completion token IDs")
-    return ids[len(prompt_ids) :] if ids[: len(prompt_ids)] == prompt_ids else ids
+    return (
+        ids[prompt_ids.size :]
+        if np.array_equal(ids[: prompt_ids.size], prompt_ids)
+        else ids
+    )
 
 
 def main() -> None:
@@ -111,8 +118,6 @@ def main() -> None:
             "context_length": args.context_length,
             "attention_backend": "triton",
         }
-        if model == "openai/gpt-oss-20b":
-            engine_kwargs["moe_runner_backend"] = "triton"
         engine = sgl.Engine(**engine_kwargs)
 
         sampling = {
@@ -191,9 +196,8 @@ def main() -> None:
         if bridged is None:
             raise RuntimeError("bridge_to_next_turn returned None")
         bridged_ids = bridged.token_ids
-        assert bridged_ids[: len(prompt_ids) + len(completion1)] == (
-            prompt_ids + completion1
-        )
+        expected_prefix = np.concatenate((prompt_ids, completion1))
+        assert np.array_equal(bridged_ids[: expected_prefix.size], expected_prefix)
 
         output2 = engine.generate(input_ids=bridged_ids, sampling_params=sampling)
         completion2 = completion_ids(output2, bridged_ids)

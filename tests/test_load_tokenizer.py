@@ -12,8 +12,11 @@ import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
+
 from renderers import base
 from renderers.base import TOKENIZER_SOURCE_OVERRIDES, TRUSTED_REVISIONS, load_tokenizer
+from renderers.token_arrays import TOKEN_IDS_DTYPE, TextSegmentBuilder, encode_token_ids
 
 
 # ---------------------------------------------------------------------------
@@ -126,22 +129,39 @@ def test_offsetless_byo_preserves_ids_without_content_attribution():
     class _NoOffsets:
         name_or_path = "anywhere/anything"
 
-        def encode(self, text, *, add_special_tokens=False):
-            assert add_special_tokens is False
-            return [len(text)]
+        def encode(self, *args, **kwargs):
+            raise AssertionError("legacy list-producing encode must not be called")
 
-        def __call__(self, *args, **kwargs):
-            raise NotImplementedError("BYO tokenizer has no offsets")
+        def __call__(
+            self,
+            text,
+            *,
+            add_special_tokens,
+            return_tensors,
+            return_offsets_mapping=False,
+        ):
+            assert add_special_tokens is False
+            assert return_tensors == "np"
+            if return_offsets_mapping:
+                raise NotImplementedError("BYO tokenizer has no offsets")
+            token_ids = np.empty((1, 1), dtype=TOKEN_IDS_DTYPE)
+            token_ids[0, 0] = len(text)
+            return {"input_ids": token_ids}
 
     tokenizer = _NoOffsets()
     assert base._get_offset_tokenizer(tokenizer) is None
 
-    attributed = base.attribute_text_segments(
-        tokenizer,
-        [("user\n", False), ("hello", True)],
-    )
+    segments = TextSegmentBuilder()
+    segments.append("user\n", is_content=False)
+    segments.append("hello", is_content=True)
+    attributed = base.attribute_text_segments(tokenizer, segments.finish())
 
-    assert attributed == [(10, False)]
+    assert np.array_equal(
+        attributed.token_ids, np.fromiter((10,), dtype=TOKEN_IDS_DTYPE, count=1)
+    )
+    assert attributed.is_content.shape == (1,)
+    assert not np.any(attributed.is_content)
+    assert not attributed.is_content.flags.writeable
     assert attributed.has_content_attribution is False
 
 
@@ -155,9 +175,11 @@ def test_load_tokenizer_real_qwen_works_without_remote_code():
     trust_remote_code. Qwen tokenizers don't ship custom Python."""
     tok = load_tokenizer("Qwen/Qwen3-0.6B")
     assert tok is not None
-    # Smoke: the tokenizer can encode a basic string.
-    ids = tok.encode("hello", add_special_tokens=False)
+    # Smoke: the tokenizer can produce fixed-width IDs for a basic string.
+    ids = encode_token_ids(tok, "hello")
     assert len(ids) > 0
+    assert ids.dtype == TOKEN_IDS_DTYPE
+    assert not ids.flags.writeable
 
 
 def test_load_tokenizer_real_kimi_uses_pinned_revision():
@@ -167,5 +189,7 @@ def test_load_tokenizer_real_kimi_uses_pinned_revision():
     point for the trusted-revision allow-list."""
     tok = load_tokenizer("moonshotai/Kimi-K2.5")
     assert tok is not None
-    ids = tok.encode("hello", add_special_tokens=False)
+    ids = encode_token_ids(tok, "hello")
     assert len(ids) > 0
+    assert ids.dtype == TOKEN_IDS_DTYPE
+    assert not ids.flags.writeable

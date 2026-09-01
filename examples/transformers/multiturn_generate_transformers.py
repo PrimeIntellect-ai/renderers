@@ -7,14 +7,16 @@
 #   "accelerate",
 #   "torch",
 #   "kernels>=0.12.0",
-#   "openai-harmony>=0.0.8",
 #   "openai>=1.108.1",
 #   "tiktoken",
 #   "jinja2",
 #   "numpy",
 # ]
 # ///
-"""Transformers generation from renderer-owned prompt token IDs."""
+"""Transformers generation from renderer-owned prompt token IDs.
+
+GPT-OSS is excluded until openai-harmony provides a fixed-width NumPy token ABI.
+"""
 
 from __future__ import annotations
 
@@ -23,15 +25,16 @@ import gc
 import json
 import os
 
+import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from renderers.configs import Qwen35RendererConfig
-from renderers.gpt_oss import GptOssRenderer
 from renderers.qwen35 import Qwen35Renderer
+from renderers.token_arrays import owned_token_ids_from_array
 
 
-MODELS = ["Qwen/Qwen3.5-4B", "openai/gpt-oss-20b"]
+MODELS = ["Qwen/Qwen3.5-4B"]
 QWEN_THINKING_MODES = [True, False]
 
 TOOLS = [
@@ -42,10 +45,7 @@ TOOLS = [
             "description": "Multiply two integers.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "a": {"type": "integer"},
-                    "b": {"type": "integer"},
-                },
+                "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
                 "required": ["a", "b"],
             },
         },
@@ -58,8 +58,6 @@ def make_renderer(model: str, enable_thinking: bool | None):
     if model.startswith("Qwen/Qwen3.5-"):
         config = Qwen35RendererConfig(enable_thinking=enable_thinking)
         return Qwen35Renderer(tokenizer, config), tokenizer
-    if model == "openai/gpt-oss-20b":
-        return GptOssRenderer(tokenizer), tokenizer
     raise ValueError(f"unsupported demo model: {model}")
 
 
@@ -72,6 +70,13 @@ def print_parsed(label: str, turn: str, parsed) -> None:
         print(f"tool_call: {tc.name}({tc.arguments}) [{tc.status.value}]")
     if parsed.content:
         print(f"content: {parsed.content}")
+
+
+def completion_ids_from_tensor(name: str, value: torch.Tensor) -> np.ndarray:
+    """Take immutable fixed-width ownership without a Python-list phase."""
+    return owned_token_ids_from_array(
+        name, value.detach().to(device="cpu", dtype=torch.int32).numpy()
+    )
 
 
 def main() -> None:
@@ -102,9 +107,7 @@ def main() -> None:
 
         renderer, tokenizer = make_renderer(model, enable_thinking)
         hf_model = AutoModelForCausalLM.from_pretrained(
-            model,
-            dtype=torch.bfloat16,
-            trust_remote_code=False,
+            model, dtype=torch.bfloat16, trust_remote_code=False
         ).to("cuda")
         hf_model.eval()
 
@@ -124,7 +127,9 @@ def main() -> None:
         prompt_ids = renderer.render_ids(
             messages, tools=TOOLS, add_generation_prompt=True
         )
-        input_ids = torch.tensor([prompt_ids], device="cuda")
+        input_ids = torch.tensor(
+            prompt_ids, device="cuda", dtype=torch.int32
+        ).unsqueeze(0)
         attention_mask = torch.ones_like(input_ids)
         output1 = hf_model.generate(
             input_ids=input_ids,
@@ -134,7 +139,9 @@ def main() -> None:
             eos_token_id=stop_token_ids,
             pad_token_id=pad_token_id,
         )[0]
-        completion1 = output1[input_ids.shape[-1] :].tolist()
+        completion1 = completion_ids_from_tensor(
+            "Transformers completion token IDs", output1[input_ids.shape[-1] :]
+        )
         parsed1 = renderer.parse_response(completion1)
         print_parsed(label, "turn 1", parsed1)
 
@@ -188,11 +195,12 @@ def main() -> None:
         if bridged is None:
             raise RuntimeError("bridge_to_next_turn returned None")
         bridged_ids = bridged.token_ids
-        assert bridged_ids[: len(prompt_ids) + len(completion1)] == (
-            prompt_ids + completion1
-        )
+        expected_prefix = np.concatenate((prompt_ids, completion1))
+        assert np.array_equal(bridged_ids[: expected_prefix.size], expected_prefix)
 
-        bridged_input_ids = torch.tensor([bridged_ids], device="cuda")
+        bridged_input_ids = torch.tensor(
+            bridged_ids, device="cuda", dtype=torch.int32
+        ).unsqueeze(0)
         bridged_attention_mask = torch.ones_like(bridged_input_ids)
         output2 = hf_model.generate(
             input_ids=bridged_input_ids,
@@ -202,7 +210,9 @@ def main() -> None:
             eos_token_id=stop_token_ids,
             pad_token_id=pad_token_id,
         )[0]
-        completion2 = output2[bridged_input_ids.shape[-1] :].tolist()
+        completion2 = completion_ids_from_tensor(
+            "Transformers completion token IDs", output2[bridged_input_ids.shape[-1] :]
+        )
         print_parsed(label, "turn 2", renderer.parse_response(completion2))
 
         del hf_model

@@ -54,6 +54,35 @@ pytest.importorskip("torch", reason="torch required for multimodal tests")
 
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
+from renderers.token_arrays import (  # noqa: E402
+    FixedWidthArrayBuilder,
+    OFFSETS_DTYPE,
+    TOKEN_IDS_DTYPE,
+    empty_span_array,
+    encode_token_ids,
+    owned_token_ids_from_array,
+)
+
+
+def _processor_token_ids(output) -> np.ndarray:
+    values = output["input_ids"]
+    if hasattr(values, "detach"):
+        values = values.detach().cpu().numpy()
+    return owned_token_ids_from_array("processor", values)
+
+
+def _completion_with_close(tokenizer, text: str, close_id: int) -> np.ndarray:
+    content = encode_token_ids(tokenizer, text)
+    builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=content.size + 1)
+    builder.extend(content)
+    builder.append(close_id)
+    return builder.finish()
+
+
+def _concat_tokens(*arrays: np.ndarray) -> np.ndarray:
+    values = np.concatenate(arrays, dtype=TOKEN_IDS_DTYPE)
+    values.flags.writeable = False
+    return values
 
 
 # ---------------------------------------------------------------------------
@@ -213,9 +242,9 @@ def _qwen_vl_processor_input_ids(processor, messages, add_gp):
             ):
                 if "image" in item and not isinstance(item["image"], dict):
                     images.append(item["image"])
-    return processor(images=images, text=text, return_tensors="pt")["input_ids"][
-        0
-    ].tolist()
+    return _processor_token_ids(
+        processor(images=images, text=text, return_tensors="pt")
+    )
 
 
 def _audio_content_part(audio):
@@ -252,9 +281,7 @@ def _inkling_audio_processor_input_ids(processor, messages, add_gp):
                 if key in item:
                     audios.append(item[key])
                     break
-    return processor(audio=audios, text=text, return_tensors="pt")["input_ids"][
-        0
-    ].tolist()
+    return _processor_token_ids(processor(audio=audios, text=text, return_tensors="pt"))
 
 
 def _kimi_processor_input_ids(processor, messages, add_gp):
@@ -268,7 +295,7 @@ def _kimi_processor_input_ids(processor, messages, add_gp):
     out = processor(
         messages=messages, add_generation_prompt=add_gp, return_tensors="pt"
     )
-    return out["input_ids"][0].tolist()
+    return _processor_token_ids(out)
 
 
 def _gemma4_processor_input_ids(processor, messages, add_gp):
@@ -289,7 +316,7 @@ def _gemma4_processor_input_ids(processor, messages, add_gp):
                 if raw is not None:
                     images.append(raw)
     out = processor(images=[images], text=[text], return_tensors="pt")
-    return out["input_ids"][0].tolist()
+    return _processor_token_ids(out)
 
 
 def _audio_sample():
@@ -629,7 +656,7 @@ def test_multimodal_byte_parity_vs_processor(mm_model_name, modality, tiny_image
         # a one-shot processor(messages=).
         theirs = kit["processor_input_ids"](processor, messages, add_gp)
 
-        assert ours == theirs, (
+        assert np.array_equal(ours, theirs), (
             f"{mm_model_name} / {modality} / case={case.id}: "
             f"renderer diverges from processor.\n"
             f"  ours[:80]={ours[:80]}\n  theirs[:80]={theirs[:80]}\n"
@@ -658,23 +685,18 @@ def test_multimodal_placeholders_match_pad_runs(mm_model_name, modality, tiny_im
             f"{mm_model_name} / {modality} / {case.id}: render() returned no mm_data"
         )
 
-        # Discover the actual pad-token runs in the token stream.
-        pad_runs: list[tuple[int, int]] = []
-        i, n = 0, len(rendered.token_ids)
-        while i < n:
-            if rendered.token_ids[i] == pad_id:
-                start = i
-                while i < n and rendered.token_ids[i] == pad_id:
-                    i += 1
-                pad_runs.append((start, i - start))
-            else:
-                i += 1
+        active = rendered.token_ids == pad_id
+        starts = np.flatnonzero(active & ~np.r_[False, active[:-1]])
+        ends = np.flatnonzero(active & ~np.r_[active[1:], False]) + 1
+        pad_runs = np.empty((starts.size, 2), dtype=OFFSETS_DTYPE)
+        pad_runs[:, 0] = starts
+        pad_runs[:, 1] = ends - starts
+        pad_runs.flags.writeable = False
 
-        claimed = [
-            (p.offset, p.length)
-            for p in rendered.multi_modal_data.mm_placeholders.get(modality, [])
-        ]
-        assert claimed == pad_runs, (
+        claimed = rendered.multi_modal_data.mm_placeholders.get(
+            modality, empty_span_array()
+        )
+        assert np.array_equal(claimed, pad_runs), (
             f"{mm_model_name} / {modality} / {case.id}: "
             f"mm_placeholders {claimed} vs actual pad runs {pad_runs}"
         )
@@ -740,16 +762,17 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
 
     initial_rendered = renderer.render(initial, add_generation_prompt=True)
     prior_mm = initial_rendered.multi_modal_data
-    prior_counts = (
-        len(prior_mm.mm_placeholders.get(modality, [])),
-        len(prior_mm.mm_items.get(modality, [])),
-        len(prior_mm.mm_hashes.get(modality, [])),
-    )
+    assert prior_mm is not None
+    prior_counts = np.empty(3, dtype=OFFSETS_DTYPE)
+    prior_counts[0] = len(prior_mm.mm_placeholders.get(modality, empty_span_array()))
+    prior_counts[1] = len(prior_mm.mm_items.get(modality, []))
+    prior_counts[2] = len(prior_mm.mm_hashes.get(modality, []))
+    prior_counts.flags.writeable = False
     # ``previous_completion_ids`` mirrors what a sampler would emit starting
     # AFTER the prompt's assistant opener — response text then the renderer's
     # own turn-close token.
     close_id = renderer.get_stop_token_ids()[0]
-    completion_ids = tokenizer.encode("Saw it.", add_special_tokens=False) + [close_id]
+    completion_ids = _completion_with_close(tokenizer, "Saw it.", close_id)
 
     bridged_raw = renderer.bridge_to_next_turn(
         previous_prompt_ids=initial_rendered.token_ids,
@@ -761,20 +784,13 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
         f"{mm_model_name} / {modality}: bridge returned None for multimodal extension"
     )
 
-    # Multimodal bridges return ``RenderedTokens`` (text-only callers
-    # historically expected ``list[int]``; the per-renderer return
-    # type splits on whether ``mm_data`` is non-empty).
-    bridged_ids = (
-        bridged_raw.token_ids
-        if hasattr(bridged_raw, "token_ids")
-        else list(bridged_raw)
-    )
-    bridged_mm = getattr(bridged_raw, "multi_modal_data", None)
+    bridged_ids = bridged_raw.token_ids
+    bridged_mm = bridged_raw.multi_modal_data
 
     # (1) Verbatim prefix — what the sampler saw is what the trainer
     # reconstructs.
-    prev = list(initial_rendered.token_ids) + list(completion_ids)
-    assert bridged_ids[: len(prev)] == prev, (
+    prev = _concat_tokens(initial_rendered.token_ids, completion_ids)
+    assert np.array_equal(bridged_ids[: len(prev)], prev), (
         f"{mm_model_name} / {modality}: bridge prefix diverges from prev_prompt + prev_completion"
     )
     assert len(bridged_ids) > len(prev), (
@@ -785,7 +801,7 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     assert bridged_mm is not None, (
         f"{mm_model_name} / {modality}: bridge dropped multi_modal_data"
     )
-    placeholders = bridged_mm.mm_placeholders.get(modality, [])
+    placeholders = bridged_mm.mm_placeholders.get(modality, empty_span_array())
     assert len(placeholders) == 2, (
         f"{mm_model_name} / {modality}: expected 2 image placeholders "
         f"(1 carried + 1 new), got {len(placeholders)}"
@@ -797,15 +813,14 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     # (2b) The prior turn's sidecar is unchanged — the bridge copies the
     # per-modality lists, so the carried-forward item doesn't grow the
     # caller's previous_multi_modal_data in place.
-    assert (
-        (
-            len(prior_mm.mm_placeholders.get(modality, [])),
-            len(prior_mm.mm_items.get(modality, [])),
-            len(prior_mm.mm_hashes.get(modality, [])),
-        )
-        == prior_counts
-        == (1, 1, 1)
-    ), f"{mm_model_name} / {modality}: bridge mutated previous_multi_modal_data"
+    current_counts = np.empty(3, dtype=OFFSETS_DTYPE)
+    current_counts[0] = len(prior_mm.mm_placeholders.get(modality, empty_span_array()))
+    current_counts[1] = len(prior_mm.mm_items.get(modality, []))
+    current_counts[2] = len(prior_mm.mm_hashes.get(modality, []))
+    current_counts.flags.writeable = False
+    assert np.array_equal(current_counts, prior_counts) and np.all(prior_counts == 1), (
+        f"{mm_model_name} / {modality}: bridge mutated previous_multi_modal_data"
+    )
 
     # (3) Extension contains the new turn's pad run, and its
     # placeholder offset lands inside the extension region.
@@ -814,9 +829,9 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     assert pad_id in extension, (
         f"{mm_model_name} / {modality}: new turn's placeholder pad missing from extension"
     )
-    new_placeholder = placeholders[-1]
-    assert new_placeholder.offset >= len(prev), (
-        f"{mm_model_name} / {modality}: new placeholder offset {new_placeholder.offset} "
+    new_placeholder_offset = int(placeholders[-1, 0])
+    assert new_placeholder_offset >= len(prev), (
+        f"{mm_model_name} / {modality}: new placeholder offset {new_placeholder_offset} "
         f"sits inside the carried-forward prefix (len={len(prev)})"
     )
 
@@ -844,9 +859,7 @@ def test_inkling_bridge_does_not_mutate_prior_mm_data(tiny_image):
     assert prior is not None and len(prior.mm_placeholders["image"]) == 1
 
     close_id = renderer.get_stop_token_ids()[0]
-    completion_ids = processor.tokenizer.encode("Saw it.", add_special_tokens=False) + [
-        close_id
-    ]
+    completion_ids = _completion_with_close(processor.tokenizer, "Saw it.", close_id)
     new = [
         {
             "role": "user",
@@ -919,7 +932,7 @@ def test_tool_response_image_byte_parity(mm_model_name, modality, tiny_image):
             continue
         ours = renderer.render_ids(messages, add_generation_prompt=add_gp)
         theirs = kit["processor_input_ids"](processor, messages, add_gp)
-        assert ours == theirs, (
+        assert np.array_equal(ours, theirs), (
             f"{mm_model_name} / tool / case={case.id}: "
             f"renderer diverges from processor.\n"
             f"  len(ours)={len(ours)} len(theirs)={len(theirs)}\n"
@@ -956,9 +969,9 @@ def _qwen_vl_processor_input_ids_with_kwargs(
             ):
                 if "image" in item and not isinstance(item["image"], dict):
                     images.append(item["image"])
-    return processor(images=images, text=text, return_tensors="pt")["input_ids"][
-        0
-    ].tolist()
+    return _processor_token_ids(
+        processor(images=images, text=text, return_tensors="pt")
+    )
 
 
 # ``add_vision_id`` is exposed on the Qwen-VL family renderers
@@ -1010,7 +1023,7 @@ def test_add_vision_id_parity_vs_processor(
         theirs = _qwen_vl_processor_input_ids_with_kwargs(
             processor, messages, add_gp, add_vision_id=add_vision_id
         )
-        assert ours == theirs, (
+        assert np.array_equal(ours, theirs), (
             f"{mm_model_name} / add_vision_id={add_vision_id} / "
             f"case={case.id}: renderer diverges from processor.\n"
             f"  ours[:80]={ours[:80]}\n  theirs[:80]={theirs[:80]}\n"
@@ -1078,7 +1091,7 @@ def test_bridge_refuses_when_add_vision_id_loses_prior_count(
 
     initial_rendered = renderer.render(initial, add_generation_prompt=True)
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    completion_ids = tokenizer.encode("Saw it.", add_special_tokens=False) + [im_end_id]
+    completion_ids = _completion_with_close(tokenizer, "Saw it.", im_end_id)
 
     # No previous_multi_modal_data → bridge must refuse so the caller
     # falls back to a full re-render (where the counter restarts from

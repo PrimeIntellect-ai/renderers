@@ -14,14 +14,15 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
+
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
     Tokenizer,
-    _content_mask_or_empty,
-    attribute_text_segments,
+    _get_offset_tokenizer,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -30,6 +31,7 @@ from renderers.base import (
 )
 from renderers.configs import DeepSeekV3RendererConfig
 from renderers.parsing import parse_deepseek_v3
+from renderers.token_arrays import RenderedTokenBuilder, encode_token_ids
 
 # Fullwidth vertical bar used in DeepSeek special token names.
 _SEP = "\uff5c"  # ｜  (U+FF5C)
@@ -62,15 +64,13 @@ class DeepSeekV3Renderer:
     _GEN_THINK_PREFILL: str = ""
 
     def __init__(
-        self,
-        tokenizer: Tokenizer,
-        config: DeepSeekV3RendererConfig | None = None,
+        self, tokenizer: Tokenizer, config: DeepSeekV3RendererConfig | None = None
     ):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self.config = config or type(self)._config_cls()
         self.effective_thinking_retention = resolve_thinking_retention(
-            self.config,
-            self._implied_thinking_retention,
+            self.config, self._implied_thinking_retention
         )
 
         # ── BOS / EOS ────────────────────────────────────────────────
@@ -103,14 +103,9 @@ class DeepSeekV3Renderer:
     def _get_special_token(self, name: str) -> int:
         """Encode <｜{name}｜> and assert it maps to exactly one token."""
         token_str = _ds_token(name)
-        ids = self._tokenizer.encode(token_str, add_special_tokens=False)
+        ids = encode_token_ids(self._tokenizer, token_str)
         assert len(ids) == 1, f"Expected single token for {token_str!r}, got {ids}"
-        return ids[0]
-
-    def _encode(self, text: str) -> list[int]:
-        if not text:
-            return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return int(ids[0])
 
     # ------------------------------------------------------------------
     # Public API
@@ -126,47 +121,12 @@ class DeepSeekV3Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        tokens: list[int] = []
-        indices: list[int] = []
-        sampled: list[bool] = []
-        content_mask: list[bool] = []
-
-        def emit_ids(
-            ids: list[int], msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
-
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            emit_ids(
-                self._encode(text),
-                msg_idx,
-                is_sampled=is_sampled,
-                is_content=is_content,
-            )
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
-        ) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                tokens.append(tok_id)
-                indices.append(msg_idx)
-                sampled.append(is_sampled)
-                content_mask.append(is_content)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
         # ── 1. BOS token ─────────────────────────────────────────────
         emit_special(self._bos, -1, is_sampled=False, is_content=False)
@@ -256,13 +216,10 @@ class DeepSeekV3Renderer:
                     self._GEN_THINK_PREFILL, -1, is_sampled=False, is_content=False
                 )
 
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -271,16 +228,14 @@ class DeepSeekV3Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-    ) -> list[int]:
+    ) -> np.ndarray:
         return self.render(
-            messages,
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
         ).token_ids
 
     def parse_response(
         self,
-        token_ids: list[int],
+        token_ids: np.ndarray,
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — args land in a ```json fence, schema not needed
     ) -> ParsedResponse:
@@ -300,21 +255,20 @@ class DeepSeekV3Renderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
         if (
-            not previous_prompt_ids
+            len(previous_prompt_ids) == 0
             or not new_messages
             or reject_assistant_in_extension(new_messages)
         ):
             return None
         if should_rerender_for_thinking_retention(
-            self.effective_thinking_retention,
-            new_messages,
+            self.effective_thinking_retention, new_messages
         ):
             return None
 
@@ -327,10 +281,10 @@ class DeepSeekV3Renderer:
         if previous_ids is None:
             return None
 
-        ext: list[int] = []
-        ext_indices: list[int] = []
-        ext_sampled: list[bool] = []
-        ext_content: list[bool] = []
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
         # and ``sampled_mask`` (uniformly ``False`` — every token the
@@ -338,30 +292,8 @@ class DeepSeekV3Renderer:
         # something the model sampled). ``is_content`` follows the same
         # rules as in :meth:`render` so consumers can walk the trajectory
         # and read each step's own body mask.
-        def emit_special(
-            token_id: int,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ext.append(token_id)
-            ext_indices.append(msg_idx)
-            ext_sampled.append(is_sampled)
-            ext_content.append(is_content)
-
-        def emit_text(
-            text: str,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ids = self._encode(text)
-            ext.extend(ids)
-            ext_indices.extend([msg_idx] * len(ids))
-            ext_sampled.extend([is_sampled] * len(ids))
-            ext_content.extend([is_content] * len(ids))
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
 
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
@@ -404,16 +336,10 @@ class DeepSeekV3Renderer:
         if self._GEN_THINK_PREFILL:
             emit_text(self._GEN_THINK_PREFILL, -1)
 
-        total_len = len(previous_ids) + len(ext)
-        return RenderedTokens(
-            token_ids=previous_ids + ext,
-            message_indices=[-1] * len(previous_ids) + ext_indices,
-            sampled_mask=[False] * total_len,
-            is_content=_content_mask_or_empty(
-                self._tokenizer, [False] * len(previous_ids) + ext_content
-            ),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     # ------------------------------------------------------------------

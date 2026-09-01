@@ -25,17 +25,19 @@ import json
 import re
 from typing import Any
 
+import numpy as np
+
 from renderers.base import (
     Message,
     MultiModalData,
     ParsedResponse,
     ParsedToolCall,
-    PlaceholderRange,
+    ParsedToolCallBuilder,
     RenderedTokens,
     ToolCallParseStatus,
     ToolSpec,
     Tokenizer,
-    _content_mask_or_empty,
+    _get_offset_tokenizer,
     _require_transformers,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -50,6 +52,18 @@ from renderers.qwen3_vl import (
     _is_image_part,
     _is_video_part,
     _load_pil_image,
+)
+from renderers.token_arrays import (
+    OFFSETS_DTYPE,
+    TOKEN_IDS_DTYPE,
+    FixedWidthArrayBuilder,
+    FixedWidthRangeBuilder,
+    RenderedTokenBuilder,
+    encode_token_ids,
+    finish_range_builders,
+    merge_range_maps,
+    require_1d_array,
+    require_readonly,
 )
 
 # ---------------------------------------------------------------------------
@@ -420,11 +434,9 @@ _TOOL_CALL_RE = re.compile(
 
 def _parse_kimi_k2_response(
     tokenizer,
-    token_ids: list[int],
+    token_ids: np.ndarray,
     *,
     stop_ids: set[int],
-    think_open_ids: list[int],
-    think_close_ids: list[int],
     tool_calls_section_begin_id: int | None,
     tool_calls_section_end_id: int | None,
     tool_call_begin_id: int | None,
@@ -433,9 +445,8 @@ def _parse_kimi_k2_response(
 ) -> ParsedResponse:
     """Parse Kimi K2/K2.5 completion tokens.
 
-    Primary path: walk token IDs via :func:`parse_kimi_k2_section`. That gives
-    every ``ParsedToolCall`` a ``token_span`` pointing back into the
-    (stop-stripped) input — what the trainer needs for selective loss masking.
+    Primary path walks token IDs via :func:`parse_kimi_k2_section`, producing
+    one packed response-level span array over the stop-stripped input.
 
     Fallback path: regex on decoded text. Only used when none of the section
     delimiters appear as special tokens, which in practice means the model
@@ -447,12 +458,11 @@ def _parse_kimi_k2_response(
     ``<think>...</think>`` is always text-extracted from the content slice
     (K2.5 emits them as plain text, not special tokens).
     """
-    # Strip stop token
-    ids = list(token_ids)
-    for i, t in enumerate(ids):
-        if t in stop_ids:
-            ids = ids[:i]
-            break
+    require_1d_array("token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+    require_readonly("token_ids", token_ids)
+    stop_values = np.fromiter(stop_ids, dtype=TOKEN_IDS_DTYPE)
+    stop_positions = np.flatnonzero(np.isin(token_ids, stop_values))
+    ids = token_ids[: int(stop_positions[0])] if stop_positions.size else token_ids
 
     # Reasoning first: a tool-call section the model drafts *inside* its
     # <think> trace must not be parsed as a real call (regression #78 — cf.
@@ -463,7 +473,7 @@ def _parse_kimi_k2_response(
 
     # Token-ID path — produces spans. Only run if every relevant special
     # token resolved at init (i.e. is in the tokenizer's vocab).
-    tool_calls: list[ParsedToolCall] = []
+    tool_calls = ParsedToolCallBuilder()
     have_special_tokens = (
         tool_calls_section_begin_id is not None
         and tool_calls_section_end_id is not None
@@ -472,7 +482,7 @@ def _parse_kimi_k2_response(
         and tool_call_end_id is not None
     )
     if have_special_tokens:
-        content_ids, tool_calls = parse_kimi_k2_section(
+        parsed_tools = parse_kimi_k2_section(
             tokenizer,
             ids,
             tool_calls_section_begin_ids={tool_calls_section_begin_id},
@@ -482,19 +492,21 @@ def _parse_kimi_k2_response(
             tool_call_end_id=tool_call_end_id,
             scan_start=reasoning_end,
         )
+        content_ids = parsed_tools.content_ids
+        tool_calls.extend(parsed_tools.tool_calls, parsed_tools.tool_call_token_spans)
         text = (
             tokenizer.decode(content_ids, skip_special_tokens=False)
-            if content_ids
+            if content_ids.size
             else ""
         )
     else:
-        text = tokenizer.decode(ids, skip_special_tokens=False) if ids else ""
+        text = tokenizer.decode(ids, skip_special_tokens=False) if ids.size else ""
 
     # Fallback path: model emitted literal-text section delimiters (singular
     # variant) rather than special tokens. Spans unavailable here. Start the
     # search past the first </think> so a literal section drafted inside the
     # reasoning trace isn't matched as a real call (regression #78).
-    if not tool_calls:
+    if len(tool_calls) == 0:
         think_close = text.find("</think>")
         search_from = think_close + len("</think>") if think_close != -1 else 0
         tc_match = _TOOL_CALLS_SECTION_RE.search(text, search_from)
@@ -550,9 +562,7 @@ def _parse_kimi_k2_response(
             # Truncated reasoning (no closing tag) — discard any partial
             # tool-call attempts since the model never finished thinking.
             return ParsedResponse(
-                content="",
-                reasoning_content=after_open.strip() or None,
-                tool_calls=[],
+                content="", reasoning_content=after_open.strip() or None
             )
     elif "</think>" in text:
         # Sampler stripped the prefilled <think> open tag — see
@@ -562,10 +572,12 @@ def _parse_kimi_k2_response(
         reasoning = before.strip("\n") or None
         text = after.strip("\n")
 
+    calls, spans = tool_calls.finish()
     return ParsedResponse(
         content=text.strip(),
         reasoning_content=reasoning.strip() if reasoning else None,
-        tool_calls=tool_calls,
+        tool_calls=calls,
+        tool_call_token_spans=spans,
     )
 
 
@@ -601,11 +613,11 @@ class KimiK25Renderer:
         processor: Any = None,
     ):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self._processor = processor
         self.config = config or KimiK25RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
-            self.config,
-            "tool_cycle" if self.config.thinking else "all",
+            self.config, "tool_cycle" if self.config.thinking else "all"
         )
 
         # Core structural tokens — all must be single special tokens in the vocab
@@ -635,8 +647,8 @@ class KimiK25Renderer:
 
         # <think> / </think> may be multi-token in K2.5; we encode them as text.
         # We cache the encoded IDs for use in _normalize_response_tokens.
-        self._think_open_ids: list[int] = self._encode("<think>")
-        self._think_close_ids: list[int] = self._encode("</think>")
+        self._think_open_ids = encode_token_ids(self._tokenizer, "<think>")
+        self._think_close_ids = encode_token_ids(self._tokenizer, "</think>")
 
         # The stop token for generation
         self._endoftext: int | None = self._try_token_id("<|endoftext|>")
@@ -721,11 +733,6 @@ class KimiK25Renderer:
             return None
         return tid
 
-    def _encode(self, text: str) -> list[int]:
-        if not text:
-            return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
-
     # ------------------------------------------------------------------
     # Core render
     # ------------------------------------------------------------------
@@ -764,46 +771,18 @@ class KimiK25Renderer:
                 last_non_tc_assistant = k
                 break
 
-        tokens: list[int] = []
-        indices: list[int] = []
-        sampled: list[bool] = []
-        content_mask: list[bool] = []
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         mm_hashes: dict[str, list[str]] = {}
-        mm_placeholders: dict[str, list[PlaceholderRange]] = {}
+        mm_placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
         mm_items: dict[str, list[dict[str, Any]]] = {}
 
-        def emit_ids(
-            ids: list[int], msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
-
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            emit_ids(
-                self._encode(text),
-                msg_idx,
-                is_sampled=is_sampled,
-                is_content=is_content,
-            )
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
 
         def emit_image(
-            part: dict[str, Any],
-            msg_idx: int,
-            *,
-            is_sampled: bool,
-            is_content: bool,
+            part: dict[str, Any], msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
             """Emit Kimi K2.5's image wrap and accumulate ``mm_data``.
 
@@ -835,12 +814,9 @@ class KimiK25Renderer:
             emit_special(
                 self._media_content, msg_idx, is_sampled=is_sampled, is_content=False
             )
-            offset = len(tokens)
+            offset = len(builder)
             emit_special(
-                self._media_pad,
-                msg_idx,
-                is_sampled=is_sampled,
-                is_content=is_content,
+                self._media_pad, msg_idx, is_sampled=is_sampled, is_content=is_content
             )
             emit_special(
                 self._media_end, msg_idx, is_sampled=is_sampled, is_content=False
@@ -850,18 +826,15 @@ class KimiK25Renderer:
                 return
             assert out is not None and h is not None
             mm_hashes.setdefault("image", []).append(h)
-            mm_placeholders.setdefault("image", []).append(
-                PlaceholderRange(offset=offset, length=1)
-            )
+            mm_placeholder_builders.setdefault(
+                "image", FixedWidthRangeBuilder()
+            ).append(offset, 1)
             # ``grid_thws`` (Kimi) is the per-image equivalent of Qwen-VL's
             # ``image_grid_thw``. Ship under Kimi's native key so the
             # orchestrator's generic ``torch.cat``-based packer routes it
             # directly into the model's forward kwargs.
             mm_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "grid_thws": out["grid_thws"],
-                }
+                {"pixel_values": out["pixel_values"], "grid_thws": out["grid_thws"]}
             )
 
         # ── Tool declaration prefix (comes first) ──
@@ -920,7 +893,6 @@ class KimiK25Renderer:
                     i,
                     emit_special=emit_special,
                     emit_text=emit_text,
-                    emit_ids=emit_ids,
                     emit_image=emit_image,
                 )
             elif msg.get("content") is not None:
@@ -933,7 +905,6 @@ class KimiK25Renderer:
                     i,
                     emit_special,
                     emit_text,
-                    emit_ids,
                     emit_image=emit_image,
                     is_sampled=False,
                     is_content=True,
@@ -954,21 +925,17 @@ class KimiK25Renderer:
                 emit_text("<think></think>", -1, is_sampled=False, is_content=False)
 
         mm_data: MultiModalData | None = None
+        mm_placeholders = finish_range_builders(mm_placeholder_builders)
         if mm_hashes or mm_placeholders or mm_items:
             mm_data = MultiModalData(
-                mm_hashes=mm_hashes,
-                mm_placeholders=mm_placeholders,
-                mm_items=mm_items,
+                mm_hashes=mm_hashes, mm_placeholders=mm_placeholders, mm_items=mm_items
             )
 
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=mm_data,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -977,16 +944,14 @@ class KimiK25Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-    ) -> list[int]:
+    ) -> np.ndarray:
         return self.render(
-            messages,
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
         ).token_ids
 
     def parse_response(
         self,
-        token_ids: list[int],
+        token_ids: np.ndarray,
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — section-JSON wire format quotes strings, schema not needed
     ) -> ParsedResponse:
@@ -995,18 +960,18 @@ class KimiK25Renderer:
             stop_ids.add(self._endoftext)
 
         # Restore the synthetic <think> prefill if it was stripped by the
-        # sampler. ``parse`` then walks ``normalized``, so any token_span we
-        # emit is in the *normalized* frame. We track the prepend offset and
+        # sampler. ``parse`` then walks ``normalized``, so packed spans are in
+        # the *normalized* frame. We track the prepend offset and
         # shift spans back so they refer to the caller's ``token_ids``.
-        normalized = self._normalize_response_tokens(list(token_ids))
+        require_1d_array("token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_readonly("token_ids", token_ids)
+        normalized = self._normalize_response_tokens(token_ids)
         prepend_offset = len(normalized) - len(token_ids)
 
         parsed = _parse_kimi_k2_response(
             self._tokenizer,
             normalized,
             stop_ids=stop_ids,
-            think_open_ids=self._think_open_ids,
-            think_close_ids=self._think_close_ids,
             tool_calls_section_begin_id=self._tool_calls_section_begin,
             tool_calls_section_end_id=self._tool_calls_section_end,
             tool_call_begin_id=self._tool_call_begin,
@@ -1015,10 +980,22 @@ class KimiK25Renderer:
         )
 
         if prepend_offset:
-            for tc in parsed.tool_calls:
-                if tc.token_span is not None:
-                    start, end = tc.token_span
-                    tc.token_span = (start - prepend_offset, end - prepend_offset)
+            spans = np.array(
+                parsed.tool_call_token_spans, dtype=OFFSETS_DTYPE, copy=True
+            )
+            known = np.all(spans >= 0, axis=1)
+            spans[known] -= prepend_offset
+            if spans.size and np.any(spans[known] < 0):
+                raise ValueError(
+                    "normalized tool-call spans precede the caller token frame"
+                )
+            spans.flags.writeable = False
+            parsed = ParsedResponse(
+                content=parsed.content,
+                reasoning_content=parsed.reasoning_content,
+                tool_calls=parsed.tool_calls,
+                tool_call_token_spans=spans,
+            )
 
         return parsed
 
@@ -1030,8 +1007,8 @@ class KimiK25Renderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
@@ -1039,15 +1016,14 @@ class KimiK25Renderer:
         process_multimodal: bool = True,
     ) -> "RenderedTokens | None":
         if (
-            not previous_prompt_ids
+            len(previous_prompt_ids) == 0
             or not new_messages
             or reject_assistant_in_extension(new_messages)
         ):
             return None
 
         if should_rerender_for_thinking_retention(
-            self.effective_thinking_retention,
-            new_messages,
+            self.effective_thinking_retention, new_messages
         ):
             return None
 
@@ -1073,50 +1049,16 @@ class KimiK25Renderer:
         # was model-sampled. ``is_content`` follows the same rules as in
         # :meth:`render` so consumers can walk the trajectory and read
         # each step's own body mask.
-        tokens: list[int] = list(previous_ids)
-        indices: list[int] = [-1] * len(previous_ids)
-        sampled: list[bool] = [False] * len(previous_ids)
-        content_mask: list[bool] = [False] * len(previous_ids)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        builder.prepend_prior(previous_ids)
         new_hashes: dict[str, list[str]] = {}
-        new_placeholders: dict[str, list[PlaceholderRange]] = {}
+        new_placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
         new_items: dict[str, list[dict[str, Any]]] = {}
 
-        def emit_special(
-            token_id: int,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ids = self._encode(text)
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
-
-        def emit_ids(
-            ids: list[int],
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
 
         def emit_image(
             part: dict[str, Any],
@@ -1132,7 +1074,7 @@ class KimiK25Renderer:
             emit_special(self._media_begin, msg_idx)
             emit_text("image", msg_idx)
             emit_special(self._media_content, msg_idx)
-            offset = len(tokens)
+            offset = len(builder)
             # ``<|media_pad|>`` stands in for caller-provided image data —
             # mark it as body when the surrounding content is body.
             emit_special(self._media_pad, msg_idx, is_content=is_content)
@@ -1142,14 +1084,11 @@ class KimiK25Renderer:
                 return
             assert out is not None and h is not None
             new_hashes.setdefault("image", []).append(h)
-            new_placeholders.setdefault("image", []).append(
-                PlaceholderRange(offset=offset, length=1)
-            )
+            new_placeholder_builders.setdefault(
+                "image", FixedWidthRangeBuilder()
+            ).append(offset, 1)
             new_items.setdefault("image", []).append(
-                {
-                    "pixel_values": out["pixel_values"],
-                    "grid_thws": out["grid_thws"],
-                }
+                {"pixel_values": out["pixel_values"], "grid_thws": out["grid_thws"]}
             )
 
         # Bridge handles user/system/tool only (reject_assistant_in_extension
@@ -1173,7 +1112,6 @@ class KimiK25Renderer:
                     i,
                     emit_special=emit_special,
                     emit_text=emit_text,
-                    emit_ids=emit_ids,
                     emit_image=emit_image,
                 )
             elif msg.get("content") is not None:
@@ -1182,7 +1120,6 @@ class KimiK25Renderer:
                     i,
                     emit_special,
                     emit_text,
-                    emit_ids,
                     emit_image=emit_image,
                     is_sampled=False,
                     is_content=True,
@@ -1207,10 +1144,12 @@ class KimiK25Renderer:
             if process_multimodal and previous_multi_modal_data
             else {}
         )
-        merged_placeholders: dict[str, list[PlaceholderRange]] = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
+        new_placeholders = finish_range_builders(new_placeholder_builders)
+        merged_placeholders = merge_range_maps(
+            previous_multi_modal_data.mm_placeholders
             if process_multimodal and previous_multi_modal_data
-            else {}
+            else {},
+            new_placeholders,
         )
         merged_items: dict[str, list[dict[str, Any]]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
@@ -1219,21 +1158,16 @@ class KimiK25Renderer:
         )
         for modality, vals in new_hashes.items():
             merged_hashes.setdefault(modality, []).extend(vals)
-        for modality, vals in new_placeholders.items():
-            merged_placeholders.setdefault(modality, []).extend(vals)
         for modality, vals in new_items.items():
             merged_items.setdefault(modality, []).extend(vals)
 
         bridge_roles = [m.get("role") or "" for m in new_messages]
         bridge_tool_names = extract_message_tool_names(new_messages)
         if not (merged_hashes or merged_placeholders or merged_items):
-            return RenderedTokens(
-                token_ids=tokens,
-                message_indices=indices,
-                sampled_mask=sampled,
-                is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+            return builder.finish(
                 message_roles=bridge_roles,
                 message_tool_names=bridge_tool_names,
+                content_available=self._offset_tokenizer is not None,
             )
 
         mm_data = MultiModalData(
@@ -1241,14 +1175,11 @@ class KimiK25Renderer:
             mm_placeholders=merged_placeholders,
             mm_items=merged_items,
         )
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=bridge_roles,
             message_tool_names=bridge_tool_names,
             multi_modal_data=mm_data,
+            content_available=self._offset_tokenizer is not None,
         )
 
     # ------------------------------------------------------------------
@@ -1261,7 +1192,6 @@ class KimiK25Renderer:
         msg_idx: int,
         emit_special,
         emit_text,
-        emit_ids,
         *,
         emit_image=None,
         is_sampled: bool,
@@ -1329,13 +1259,7 @@ class KimiK25Renderer:
                 # Other part types are silently skipped
 
     def _render_assistant_body(
-        self,
-        msg: Message,
-        msg_idx: int,
-        *,
-        is_suffix: bool,
-        emit_special,
-        emit_text,
+        self, msg: Message, msg_idx: int, *, is_suffix: bool, emit_special, emit_text
     ) -> None:
         """Emit assistant body (after the role tag): ``<think>...</think>`` +
         content + optional tool_calls section. No ``<|im_end|>``; caller emits
@@ -1421,10 +1345,7 @@ class KimiK25Renderer:
                 # the function name from that field).
                 tool_id = tc.get("id") or ""
                 emit_special(
-                    self._tool_call_begin,
-                    msg_idx,
-                    is_sampled=True,
-                    is_content=True,
+                    self._tool_call_begin, msg_idx, is_sampled=True, is_content=True
                 )
                 emit_text(tool_id, msg_idx, is_sampled=True, is_content=True)
                 emit_special(
@@ -1435,27 +1356,14 @@ class KimiK25Renderer:
                 )
                 emit_text(args_str, msg_idx, is_sampled=True, is_content=True)
                 emit_special(
-                    self._tool_call_end,
-                    msg_idx,
-                    is_sampled=True,
-                    is_content=True,
+                    self._tool_call_end, msg_idx, is_sampled=True, is_content=True
                 )
             emit_special(
-                self._tool_calls_section_end,
-                msg_idx,
-                is_sampled=True,
-                is_content=True,
+                self._tool_calls_section_end, msg_idx, is_sampled=True, is_content=True
             )
 
     def _render_tool_body(
-        self,
-        msg: Message,
-        msg_idx: int,
-        *,
-        emit_special,
-        emit_text,
-        emit_ids,
-        emit_image=None,
+        self, msg: Message, msg_idx: int, *, emit_special, emit_text, emit_image=None
     ) -> None:
         """Emit tool-result body (after the role tag): ``## Return of {id}\\n``
         + content. No ``<|im_end|>``; caller emits that.
@@ -1488,13 +1396,12 @@ class KimiK25Renderer:
                 msg_idx,
                 emit_special,
                 emit_text,
-                emit_ids,
                 emit_image=emit_image,
                 is_sampled=False,
                 is_content=True,
             )
 
-    def _normalize_response_tokens(self, response: list[int]) -> list[int]:
+    def _normalize_response_tokens(self, response: np.ndarray) -> np.ndarray:
         """Restore the synthetic ``<think>`` prefill if the sampler stripped it.
 
         When thinking is enabled the generation prompt ends with a ``<think>``
@@ -1503,31 +1410,48 @@ class KimiK25Renderer:
         start with ``<think>`` (encoded tokens), we prepend the ``<think>``
         tokens so the downstream text-based parser sees a complete block.
         """
-        if not response:
+        require_1d_array("response", response, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_readonly("response", response)
+        if response.size == 0:
             return response
 
         open_ids = self._think_open_ids
         close_ids = self._think_close_ids
 
-        if not open_ids or not close_ids:
+        if open_ids.size == 0 or close_ids.size == 0:
             return response
 
         # Check whether <think> appears anywhere in the response. Checking
         # anywhere (not just the start) avoids false positives when the
         # caller's slicing happens to include earlier scaffolding tokens
         # (e.g. the assistant role tag) before the open tag.
-        contains_open = any(
-            response[j : j + len(open_ids)] == open_ids
-            for j in range(len(response) - len(open_ids) + 1)
+        contains_open = response.size >= open_ids.size and bool(
+            np.any(
+                np.all(
+                    np.lib.stride_tricks.sliding_window_view(response, open_ids.size)
+                    == open_ids,
+                    axis=1,
+                )
+            )
         )
 
         # Check whether </think> appears anywhere in the response
-        contains_close = any(
-            response[j : j + len(close_ids)] == close_ids
-            for j in range(len(response) - len(close_ids) + 1)
+        contains_close = response.size >= close_ids.size and bool(
+            np.any(
+                np.all(
+                    np.lib.stride_tricks.sliding_window_view(response, close_ids.size)
+                    == close_ids,
+                    axis=1,
+                )
+            )
         )
 
         if not contains_open and contains_close:
-            return open_ids + response
+            combined = FixedWidthArrayBuilder(
+                TOKEN_IDS_DTYPE, initial_capacity=open_ids.size + response.size
+            )
+            combined.extend(open_ids)
+            combined.extend(response)
+            return combined.finish()
 
         return response

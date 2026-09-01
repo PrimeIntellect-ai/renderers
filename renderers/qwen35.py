@@ -25,17 +25,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import numpy as np
+
 from renderers.base import (
     Message,
     MultiModalData,
     ParsedResponse,
-    PlaceholderRange,
     RenderedTokens,
     ToolSpec,
     Tokenizer,
-    _content_mask_or_empty,
+    _get_offset_tokenizer,
     _require_transformers,
-    attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -44,6 +44,13 @@ from renderers.base import (
 )
 from renderers.configs import Qwen35RendererConfig
 from renderers.parsing import parse_qwen35
+from renderers.token_arrays import (
+    FixedWidthRangeBuilder,
+    RenderedTokenBuilder,
+    TextSegmentBuilder,
+    finish_range_builders,
+    merge_range_maps,
+)
 from renderers.qwen3_vl import (
     _image_hash,
     _is_image_part,
@@ -134,6 +141,7 @@ class Qwen35Renderer:
         processor: Any = None,
     ):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self._processor = processor
         cfg = config or type(self)._config_cls()
         # ``enable_thinking=None`` defers to the model's known default (see
@@ -152,8 +160,7 @@ class Qwen35Renderer:
         else:
             implied_thinking_retention = "tool_cycle"
         self.effective_thinking_retention = resolve_thinking_retention(
-            cfg,
-            implied_thinking_retention,
+            cfg, implied_thinking_retention
         )
 
         # Look up special token IDs from the tokenizer (not hardcoded)
@@ -239,11 +246,6 @@ class Qwen35Renderer:
             f"Special token {token!r} not found in tokenizer vocabulary"
         )
         return tid
-
-    def _encode(self, text: str) -> list[int]:
-        if not text:
-            return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
 
     # ------------------------------------------------------------------
     # Content rendering (mirrors the render_content Jinja macro)
@@ -359,12 +361,11 @@ class Qwen35Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        tokens: list[int] = []
-        indices: list[int] = []
-        sampled: list[bool] = []
-        content_mask: list[bool] = []
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         mm_hashes: dict[str, list[str]] = {}
-        mm_placeholders: dict[str, list[PlaceholderRange]] = {}
+        mm_placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
         mm_items: dict[str, list[dict[str, Any]]] = {}
         # 1-indexed counters for ``add_vision_id`` (mirrors the Jinja's
         # ``image_count`` / ``video_count`` namespaces). Increment only
@@ -374,49 +375,9 @@ class Qwen35Renderer:
         # ``emit_image`` is only reached from user / tool emission paths.
         vision_counts = {"image": 0, "video": 0}
 
-        def emit_ids(
-            ids: list[int], msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
-
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            emit_ids(
-                self._encode(text),
-                msg_idx,
-                is_sampled=is_sampled,
-                is_content=is_content,
-            )
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
-        ) -> None:
-            """Tokenize concatenated segments as one BPE pass; per-token
-            ``is_content`` follows each token's source segment.
-
-            Lets call sites express "this wrap + this body, joined the
-            same way as the chat template, but attributed separately"
-            without splitting the encode call (which could shift BPE
-            merges at the boundary)."""
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                tokens.append(tok_id)
-                indices.append(msg_idx)
-                sampled.append(is_sampled)
-                content_mask.append(is_content)
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
         def emit_image(part: dict[str, Any], msg_idx: int) -> None:
             # Image placeholders only appear in user / tool messages; the
@@ -442,7 +403,7 @@ class Qwen35Renderer:
             emit_special(
                 self._vision_start, msg_idx, is_sampled=False, is_content=False
             )
-            offset = len(tokens)
+            offset = len(builder)
             for _ in range(n):
                 emit_special(
                     self._image_pad, msg_idx, is_sampled=False, is_content=True
@@ -451,9 +412,9 @@ class Qwen35Renderer:
             if process_multimodal:
                 assert out is not None and h is not None
                 mm_hashes.setdefault("image", []).append(h)
-                mm_placeholders.setdefault("image", []).append(
-                    PlaceholderRange(offset=offset, length=n)
-                )
+                mm_placeholder_builders.setdefault(
+                    "image", FixedWidthRangeBuilder()
+                ).append(offset, n)
                 mm_items.setdefault("image", []).append(
                     {
                         "pixel_values": out["pixel_values"],
@@ -480,17 +441,19 @@ class Qwen35Renderer:
             # First flush includes the ``"user\n"`` wrap as a scaffold
             # segment; subsequent flushes are pure body (after a media
             # break).
-            buf_segments: list[tuple[str, bool]] = [("user\n", False)]
+            buf_segments = TextSegmentBuilder()
+            buf_segments.append("user\n", is_content=False)
 
             def flush_buf() -> None:
+                nonlocal buf_segments
                 if buf_segments:
-                    emit_text_segments(buf_segments, msg_idx, is_sampled=False)
-                    buf_segments.clear()
+                    emit_text_segments(buf_segments.finish(), msg_idx, is_sampled=False)
+                    buf_segments = TextSegmentBuilder()
 
             for item in content_list:
                 if isinstance(item, str):
                     if item:
-                        buf_segments.append((item, True))
+                        buf_segments.append(item, is_content=True)
                 elif isinstance(item, dict):
                     if _is_image_part(item):
                         flush_buf()
@@ -501,7 +464,7 @@ class Qwen35Renderer:
                         )
                     elif "text" in item:
                         if item["text"]:
-                            buf_segments.append((item["text"], True))
+                            buf_segments.append(item["text"], is_content=True)
                     else:
                         raise ValueError(f"Unexpected content item: {item}")
                 else:
@@ -524,20 +487,23 @@ class Qwen35Renderer:
             # JSON tool specs — is scaffold. The tools dict is
             # recoverable from the ``tools`` argument; don't re-attribute
             # its embedded JSON as message body.
-            segments: list[tuple[str, bool]] = [("system\n", False)]
+            segments = TextSegmentBuilder()
+            segments.append("system\n", is_content=False)
             if reasoning_instructions:
-                segments.append((reasoning_instructions + "\n\n", False))
-            segments.append((_TOOLS_HEADER, False))
+                segments.append(reasoning_instructions + "\n\n", is_content=False)
+            segments.append(_TOOLS_HEADER, is_content=False)
             for tool in tools:
-                segments.append(("\n" + json.dumps(tool, ensure_ascii=False), False))
-            segments.append((_TOOLS_FOOTER, False))
-            segments.append((_TOOLS_INSTRUCTIONS, False))
+                segments.append(
+                    "\n" + json.dumps(tool, ensure_ascii=False), is_content=False
+                )
+            segments.append(_TOOLS_FOOTER, is_content=False)
+            segments.append(_TOOLS_INSTRUCTIONS, is_content=False)
             if first_is_system:
                 sys_content = self._render_content(messages[0].get("content")).strip()
                 if sys_content:
-                    segments.append(("\n\n", False))
-                    segments.append((sys_content, True))
-            emit_text_segments(segments, sys_idx, is_sampled=False)
+                    segments.append("\n\n", is_content=False)
+                    segments.append(sys_content, is_content=True)
+            emit_text_segments(segments.finish(), sys_idx, is_sampled=False)
             emit_special(self._im_end, sys_idx, is_sampled=False, is_content=False)
             emit_text("\n", sys_idx, is_sampled=False, is_content=False)
         elif first_is_system:
@@ -548,13 +514,16 @@ class Qwen35Renderer:
                 or not self._omit_empty_system_message()
             ):
                 emit_special(self._im_start, 0, is_sampled=False, is_content=False)
-                sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+                sys_segments = TextSegmentBuilder()
+                sys_segments.append("system\n", is_content=False)
                 if reasoning_instructions:
                     separator = "\n\n" if sys_content else ""
-                    sys_segments.append((reasoning_instructions + separator, False))
+                    sys_segments.append(
+                        reasoning_instructions + separator, is_content=False
+                    )
                 if sys_content:
-                    sys_segments.append((sys_content, True))
-                emit_text_segments(sys_segments, 0, is_sampled=False)
+                    sys_segments.append(sys_content, is_content=True)
+                emit_text_segments(sys_segments.finish(), 0, is_sampled=False)
                 emit_special(self._im_end, 0, is_sampled=False, is_content=False)
                 emit_text("\n", 0, is_sampled=False, is_content=False)
         elif reasoning_instructions:
@@ -562,11 +531,10 @@ class Qwen35Renderer:
             # not provide a system message. It is renderer scaffold, so use
             # the synthetic ``-1`` attribution bucket.
             emit_special(self._im_start, -1, is_sampled=False, is_content=False)
-            emit_text_segments(
-                [("system\n", False), (reasoning_instructions, False)],
-                -1,
-                is_sampled=False,
-            )
+            sys_segments = TextSegmentBuilder()
+            sys_segments.append("system\n", is_content=False)
+            sys_segments.append(reasoning_instructions, is_content=False)
+            emit_text_segments(sys_segments.finish(), -1, is_sampled=False)
             emit_special(self._im_end, -1, is_sampled=False, is_content=False)
             emit_text("\n", -1, is_sampled=False, is_content=False)
 
@@ -589,10 +557,11 @@ class Qwen35Renderer:
                     emit_user_with_media(raw_content, i)
                 else:
                     emit_special(self._im_start, i, is_sampled=False, is_content=False)
-                    user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                    user_segments = TextSegmentBuilder()
+                    user_segments.append("user\n", is_content=False)
                     if content:
-                        user_segments.append((content, True))
-                    emit_text_segments(user_segments, i, is_sampled=False)
+                        user_segments.append(content, is_content=True)
+                    emit_text_segments(user_segments.finish(), i, is_sampled=False)
                     emit_special(self._im_end, i, is_sampled=False, is_content=False)
                     emit_text("\n", i, is_sampled=False, is_content=False)
 
@@ -604,7 +573,6 @@ class Qwen35Renderer:
                     last_qi,
                     emit_special=emit_special,
                     emit_text=emit_text,
-                    emit_ids=emit_ids,
                     emit_text_segments=emit_text_segments,
                 )
 
@@ -635,21 +603,17 @@ class Qwen35Renderer:
                 emit_text("\n\n", -1, is_sampled=False, is_content=False)
 
         mm_data: MultiModalData | None = None
+        mm_placeholders = finish_range_builders(mm_placeholder_builders)
         if mm_hashes or mm_placeholders or mm_items:
             mm_data = MultiModalData(
-                mm_hashes=mm_hashes,
-                mm_placeholders=mm_placeholders,
-                mm_items=mm_items,
+                mm_hashes=mm_hashes, mm_placeholders=mm_placeholders, mm_items=mm_items
             )
 
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=mm_data,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -658,18 +622,13 @@ class Qwen35Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-    ) -> list[int]:
+    ) -> np.ndarray:
         return self.render(
-            messages,
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
         ).token_ids
 
     def parse_response(
-        self,
-        token_ids: list[int],
-        *,
-        tools: list[ToolSpec] | None = None,
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
     ) -> ParsedResponse:
         return parse_qwen35(
             self._tokenizer,
@@ -687,8 +646,8 @@ class Qwen35Renderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
@@ -696,7 +655,7 @@ class Qwen35Renderer:
         process_multimodal: bool = True,
     ) -> "RenderedTokens | None":
         if (
-            not previous_prompt_ids
+            len(previous_prompt_ids) == 0
             or not new_messages
             or reject_assistant_in_extension(new_messages)
         ):
@@ -747,12 +706,12 @@ class Qwen35Renderer:
         # consumers can walk the trajectory and read each step's own
         # body mask; the prior portion is uniformly False since we have
         # no attribution info for it.
-        tokens: list[int] = list(previous_ids)
-        indices: list[int] = [-1] * len(previous_ids)
-        sampled: list[bool] = [False] * len(previous_ids)
-        content_mask: list[bool] = [False] * len(previous_ids)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        builder.prepend_prior(previous_ids)
         new_hashes: dict[str, list[str]] = {}
-        new_placeholders: dict[str, list[PlaceholderRange]] = {}
+        new_placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
         new_items: dict[str, list[dict[str, Any]]] = {}
         # Seed the ``add_vision_id`` counters from prior-turn images / videos
         # so the bridged turn's first placeholder gets ``Picture {prev+1}``.
@@ -765,47 +724,12 @@ class Qwen35Renderer:
             prev_image_count = len(previous_multi_modal_data.mm_items.get("image", []))
             prev_video_count = len(previous_multi_modal_data.mm_items.get("video", []))
         elif not process_multimodal:
-            prev_image_count = previous_ids.count(self._image_pad)
+            prev_image_count = int(np.count_nonzero(previous_ids == self._image_pad))
         vision_counts = {"image": prev_image_count, "video": prev_video_count}
 
-        def emit_special(
-            token_id: int,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ids = self._encode(text)
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]],
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-        ) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                tokens.append(tok_id)
-                indices.append(msg_idx)
-                sampled.append(is_sampled)
-                content_mask.append(is_content)
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
         def emit_image(part: dict[str, Any], msg_idx: int = -1) -> None:
             if process_multimodal:
@@ -817,16 +741,16 @@ class Qwen35Renderer:
             if self.config.add_vision_id:
                 emit_text(f"Picture {vision_counts['image']}: ", msg_idx)
             emit_special(self._vision_start, msg_idx)
-            offset = len(tokens)
+            offset = len(builder)
             for _ in range(n):
                 emit_special(self._image_pad, msg_idx, is_content=True)
             emit_special(self._vision_end, msg_idx)
             if process_multimodal:
                 assert out is not None and h is not None
                 new_hashes.setdefault("image", []).append(h)
-                new_placeholders.setdefault("image", []).append(
-                    PlaceholderRange(offset=offset, length=n)
-                )
+                new_placeholder_builders.setdefault(
+                    "image", FixedWidthRangeBuilder()
+                ).append(offset, n)
                 new_items.setdefault("image", []).append(
                     {
                         "pixel_values": out["pixel_values"],
@@ -836,17 +760,19 @@ class Qwen35Renderer:
 
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             emit_special(self._im_start, msg_idx)
-            buf_segments: list[tuple[str, bool]] = [("user\n", False)]
+            buf_segments = TextSegmentBuilder()
+            buf_segments.append("user\n", is_content=False)
 
             def flush_buf() -> None:
+                nonlocal buf_segments
                 if buf_segments:
-                    emit_text_segments(buf_segments, msg_idx)
-                    buf_segments.clear()
+                    emit_text_segments(buf_segments.finish(), msg_idx)
+                    buf_segments = TextSegmentBuilder()
 
             for item in content_list:
                 if isinstance(item, str):
                     if item:
-                        buf_segments.append((item, True))
+                        buf_segments.append(item, is_content=True)
                 elif isinstance(item, dict):
                     if _is_image_part(item):
                         flush_buf()
@@ -857,7 +783,7 @@ class Qwen35Renderer:
                         )
                     elif "text" in item:
                         if item["text"]:
-                            buf_segments.append((item["text"], True))
+                            buf_segments.append(item["text"], is_content=True)
                     else:
                         raise ValueError(f"Unexpected content item: {item}")
                 else:
@@ -880,18 +806,20 @@ class Qwen35Renderer:
                     emit_user_with_media(raw_content, i)
                 else:
                     emit_special(self._im_start, i)
-                    user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                    user_segments = TextSegmentBuilder()
+                    user_segments.append("user\n", is_content=False)
                     if content:
-                        user_segments.append((content, True))
-                    emit_text_segments(user_segments, i)
+                        user_segments.append(content, is_content=True)
+                    emit_text_segments(user_segments.finish(), i)
                     emit_special(self._im_end, i)
                     emit_text("\n", i)
             elif role == "system":
                 emit_special(self._im_start, i)
-                sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+                sys_segments = TextSegmentBuilder()
+                sys_segments.append("system\n", is_content=False)
                 if content:
-                    sys_segments.append((content, True))
-                emit_text_segments(sys_segments, i)
+                    sys_segments.append(content, is_content=True)
+                emit_text_segments(sys_segments.finish(), i)
                 emit_special(self._im_end, i)
                 emit_text("\n", i)
             elif role == "tool":
@@ -926,11 +854,13 @@ class Qwen35Renderer:
             if process_multimodal and previous_multi_modal_data
             else {}
         )
-        merged_placeholders: dict[str, list[PlaceholderRange]] = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
+        previous_placeholders = (
+            previous_multi_modal_data.mm_placeholders
             if process_multimodal and previous_multi_modal_data
             else {}
         )
+        new_placeholders = finish_range_builders(new_placeholder_builders)
+        merged_placeholders = merge_range_maps(previous_placeholders, new_placeholders)
         merged_items: dict[str, list[dict[str, Any]]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
             if process_multimodal and previous_multi_modal_data
@@ -938,21 +868,16 @@ class Qwen35Renderer:
         )
         for modality, vals in new_hashes.items():
             merged_hashes.setdefault(modality, []).extend(vals)
-        for modality, vals in new_placeholders.items():
-            merged_placeholders.setdefault(modality, []).extend(vals)
         for modality, vals in new_items.items():
             merged_items.setdefault(modality, []).extend(vals)
 
         bridge_roles = [m.get("role") or "" for m in new_messages]
         bridge_tool_names = extract_message_tool_names(new_messages)
         if not (merged_hashes or merged_placeholders or merged_items):
-            return RenderedTokens(
-                token_ids=tokens,
-                message_indices=indices,
-                sampled_mask=sampled,
-                is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+            return builder.finish(
                 message_roles=bridge_roles,
                 message_tool_names=bridge_tool_names,
+                content_available=self._offset_tokenizer is not None,
             )
 
         mm_data = MultiModalData(
@@ -960,14 +885,11 @@ class Qwen35Renderer:
             mm_placeholders=merged_placeholders,
             mm_items=merged_items,
         )
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=bridge_roles,
             message_tool_names=bridge_tool_names,
             multi_modal_data=mm_data,
+            content_available=self._offset_tokenizer is not None,
         )
 
     # ------------------------------------------------------------------
@@ -1006,7 +928,6 @@ class Qwen35Renderer:
         *,
         emit_special,
         emit_text,
-        emit_ids,
         emit_text_segments,
     ) -> None:
         reasoning_content, content = self._extract_assistant_parts(msg, content)
@@ -1164,17 +1085,19 @@ class Qwen35Renderer:
             # text items in this run are body. After a media break, the
             # buffer resets to pure body until the next media break or
             # end-of-content.
-            buf_segments: list[tuple[str, bool]] = [("\n", False)]
+            buf_segments = TextSegmentBuilder()
+            buf_segments.append("\n", is_content=False)
 
             def flush_buf() -> None:
+                nonlocal buf_segments
                 if buf_segments:
-                    emit_text_segments(buf_segments, msg_idx, is_sampled=False)
-                    buf_segments.clear()
+                    emit_text_segments(buf_segments.finish(), msg_idx, is_sampled=False)
+                    buf_segments = TextSegmentBuilder()
 
             for item in raw_content:
                 if isinstance(item, str):
                     if item:
-                        buf_segments.append((item, True))
+                        buf_segments.append(item, is_content=True)
                 elif isinstance(item, dict):
                     if _is_image_part(item):
                         flush_buf()
@@ -1185,7 +1108,7 @@ class Qwen35Renderer:
                         )
                     elif "text" in item:
                         if item["text"]:
-                            buf_segments.append((item["text"], True))
+                            buf_segments.append(item["text"], is_content=True)
                     else:
                         raise ValueError(f"Unexpected content item: {item}")
                 else:
@@ -1197,11 +1120,11 @@ class Qwen35Renderer:
             # ``\n`` + content + ``\n`` — body is the middle segment only.
             # Single BPE pass over the joined text preserves boundary
             # merges.
-            emit_text_segments(
-                [("\n", False), (content, True), ("\n", False)],
-                msg_idx,
-                is_sampled=False,
-            )
+            tool_segments = TextSegmentBuilder()
+            tool_segments.append("\n", is_content=False)
+            tool_segments.append(content, is_content=True)
+            tool_segments.append("\n", is_content=False)
+            emit_text_segments(tool_segments.finish(), msg_idx, is_sampled=False)
 
         emit_special(
             self._tool_response_end, msg_idx, is_sampled=False, is_content=False

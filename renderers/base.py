@@ -15,6 +15,33 @@ from typing import (
     runtime_checkable,
 )
 
+import numpy as np
+
+from renderers.token_arrays import (
+    _OFFSET_CAPABILITY_UNRESOLVED,
+    COUNTS_DTYPE,
+    FixedWidthSpanBuilder,
+    LOGPROBS_DTYPE,
+    MASK_DTYPE,
+    MESSAGE_INDICES_DTYPE,
+    MM_TOKEN_TYPE_IDS_DTYPE,
+    OFFSETS_DTYPE,
+    TOKEN_IDS_DTYPE,
+    TRAINING_TOKEN_IDS_DTYPE,
+    TextSegments,
+    encode_token_ids,
+    empty_array,
+    empty_span_array,
+    owned_offsets_from_array,
+    owned_readonly_copy,
+    owned_token_ids_from_array,
+    readonly_view,
+    require_1d_array,
+    require_range_array,
+    require_readonly,
+    require_span_array,
+)
+
 if TYPE_CHECKING:
     from renderers.configs import (
         AutoRendererConfig,
@@ -186,7 +213,7 @@ def extract_message_tool_names(messages: list[Message]) -> list[str | None]:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class PlaceholderRange:
     """Where a single multimodal item's placeholder tokens sit in the stream.
 
@@ -198,6 +225,19 @@ class PlaceholderRange:
 
     offset: int
     length: int
+
+    def __post_init__(self) -> None:
+        upper_bound = np.iinfo(OFFSETS_DTYPE).max
+        for name, value in (("offset", self.offset), ("length", self.length)):
+            if type(value) is not int or value < 0 or value > upper_bound:
+                raise TypeError(f"{name} must be a non-negative integer")
+
+    def as_array(self) -> np.ndarray:
+        """Create the one-item public representation without object accumulation."""
+        value = np.empty((1, 2), dtype=OFFSETS_DTYPE)
+        value[0] = (self.offset, self.length)
+        value.flags.writeable = False
+        return value
 
 
 @dataclass
@@ -213,8 +253,13 @@ class MultiModalData:
     """
 
     mm_hashes: dict[str, list[str]] = field(default_factory=dict)
-    mm_placeholders: dict[str, list[PlaceholderRange]] = field(default_factory=dict)
+    mm_placeholders: dict[str, np.ndarray] = field(default_factory=dict)
     mm_items: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for modality, values in self.mm_placeholders.items():
+            require_range_array(f"mm_placeholders[{modality!r}]", values)
+            require_readonly(f"mm_placeholders[{modality!r}]", values)
 
     def is_empty(self) -> bool:
         return not (self.mm_hashes or self.mm_placeholders or self.mm_items)
@@ -306,17 +351,46 @@ class RenderedTokens:
     text-only renderers leave it as ``None``.
     """
 
-    token_ids: list[int] = field(default_factory=list)
-    message_indices: list[int] = field(default_factory=list)
-    sampled_mask: list[bool] = field(default_factory=list)
-    is_content: list[bool] = field(default_factory=list)
+    token_ids: np.ndarray = field(default_factory=lambda: empty_array(TOKEN_IDS_DTYPE))
+    message_indices: np.ndarray = field(
+        default_factory=lambda: empty_array(MESSAGE_INDICES_DTYPE)
+    )
+    sampled_mask: np.ndarray = field(default_factory=lambda: empty_array(MASK_DTYPE))
+    is_content: np.ndarray = field(default_factory=lambda: empty_array(MASK_DTYPE))
     message_roles: list[str] = field(default_factory=list)
     message_tool_names: list[str | None] = field(default_factory=list)
     multi_modal_data: "MultiModalData | None" = None
 
+    def __post_init__(self) -> None:
+        require_1d_array("token_ids", self.token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_1d_array(
+            "message_indices",
+            self.message_indices,
+            dtype=MESSAGE_INDICES_DTYPE,
+            minimum=-1,
+        )
+        require_1d_array("sampled_mask", self.sampled_mask, dtype=MASK_DTYPE)
+        require_1d_array("is_content", self.is_content, dtype=MASK_DTYPE)
+        token_count = self.token_ids.size
+        if self.message_indices.size != token_count:
+            raise ValueError("message_indices length must match token_ids")
+        for name, values in (
+            ("sampled_mask", self.sampled_mask),
+            ("is_content", self.is_content),
+        ):
+            if values.size not in (0, token_count):
+                raise ValueError(f"{name} length must be zero or match token_ids")
+        for name, values in (
+            ("token_ids", self.token_ids),
+            ("message_indices", self.message_indices),
+            ("sampled_mask", self.sampled_mask),
+            ("is_content", self.is_content),
+        ):
+            require_readonly(name, values)
+
     def tokens_per_message(
         self, n_messages: int | None = None, *, sampled_only: bool = False
-    ) -> list[int]:
+    ) -> np.ndarray:
         """Count rendered tokens attributed to each caller-relative message.
 
         ``out[i]`` is the number of tokens with ``message_indices[k] == i``,
@@ -346,7 +420,7 @@ class RenderedTokens:
         — indices outside ``[0, n_messages)`` are ignored, so passing a
         smaller value won't raise; it just drops the tail. Values larger
         than ``len(self.message_roles)`` are clamped, so the returned
-        list never claims more messages than the renderer attributed.
+        array never claims more messages than the renderer attributed.
 
         Works on results from both :meth:`Renderer.render` and
         :meth:`Renderer.bridge_to_next_turn`. For a bridge result the
@@ -355,30 +429,31 @@ class RenderedTokens:
         ``-1`` (and ``sampled_mask`` uniformly ``False``), so it
         contributes nothing to either count.
         """
-        if n_messages is None:
-            n_messages = len(self.message_roles)
-        else:
-            n_messages = min(n_messages, len(self.message_roles))
-        out = [0] * n_messages
+        if n_messages is not None and (type(n_messages) is not int or n_messages < 0):
+            raise TypeError("n_messages must be a non-negative integer")
+        n_messages = (
+            len(self.message_roles)
+            if n_messages is None
+            else min(n_messages, len(self.message_roles))
+        )
+        out = np.zeros(n_messages, dtype=COUNTS_DTYPE)
+        valid = (self.message_indices >= 0) & (self.message_indices < n_messages)
         if sampled_only:
-            if len(self.sampled_mask) != len(self.token_ids):
+            if self.sampled_mask.size != self.token_ids.size:
+                out.flags.writeable = False
                 return out
-            for idx, sampled in zip(self.message_indices, self.sampled_mask):
-                if sampled and 0 <= idx < n_messages:
-                    out[idx] += 1
-        else:
-            for idx in self.message_indices:
-                if 0 <= idx < n_messages:
-                    out[idx] += 1
+            valid &= self.sampled_mask
+        np.add.at(out, self.message_indices[valid], 1)
+        out.flags.writeable = False
         return out
 
-    def message_token_spans(self) -> list[tuple[int, int] | None]:
+    def message_token_spans(self) -> np.ndarray:
         """Per-message ``(start, end)`` slices into :attr:`token_ids`.
 
         ``out[i]`` is the half-open span ``[start, end)`` such that
         ``token_ids[start:end]`` are the tokens attributed to
         ``messages[i]`` (or ``new_messages[i]`` for a bridge result).
-        Messages that contributed no tokens get ``None``. Renderer
+        Messages that contributed no tokens get the ``[-1, -1]`` sentinel. Renderer
         scaffolding outside any message (``message_indices[k] == -1``)
         is not represented.
 
@@ -397,35 +472,28 @@ class RenderedTokens:
         Cheap to call: single pass over ``message_indices``. Re-call
         rather than caching the result if you mutate the dataclass.
         """
-        if self.message_roles:
-            n_messages = len(self.message_roles)
-        else:
-            max_idx = -1
-            for idx in self.message_indices:
-                if idx > max_idx:
-                    max_idx = idx
-            n_messages = max_idx + 1
-
-        firsts: list[int] = [-1] * n_messages
-        lasts: list[int] = [-1] * n_messages
-        for k, idx in enumerate(self.message_indices):
-            if 0 <= idx < n_messages:
-                if firsts[idx] == -1:
-                    firsts[idx] = k
-                lasts[idx] = k
-
-        out: list[tuple[int, int] | None] = []
-        for i in range(n_messages):
-            if firsts[i] == -1:
-                out.append(None)
-            else:
-                out.append((firsts[i], lasts[i] + 1))
+        n_messages = len(self.message_roles)
+        if not self.message_roles and self.message_indices.size:
+            n_messages = max(0, int(self.message_indices.max()) + 1)
+        out = np.full((n_messages, 2), -1, dtype=OFFSETS_DTYPE)
+        valid = (self.message_indices >= 0) & (self.message_indices < n_messages)
+        if np.any(valid):
+            indices = self.message_indices[valid]
+            positions = np.arange(self.message_indices.size, dtype=OFFSETS_DTYPE)[valid]
+            firsts = np.full(n_messages, self.message_indices.size, dtype=OFFSETS_DTYPE)
+            lasts = np.full(n_messages, -1, dtype=OFFSETS_DTYPE)
+            np.minimum.at(firsts, indices, positions)
+            np.maximum.at(lasts, indices, positions)
+            present = lasts >= 0
+            out[present, 0] = firsts[present]
+            out[present, 1] = lasts[present] + 1
+        out.flags.writeable = False
         return out
 
-    def role_token_spans(self) -> dict[str, list[tuple[int, int]]]:
+    def role_token_spans(self) -> dict[str, np.ndarray]:
         """:meth:`message_token_spans` regrouped by ``message_roles``.
 
-        Maps each role appearing in :attr:`message_roles` to a list of
+        Maps each role appearing in :attr:`message_roles` to a fixed-width array of
         ``(start, end)`` spans — one per occurrence of that role, in
         message order. Messages with no contributed tokens are skipped.
         Returns an empty dict if :attr:`message_roles` is empty.
@@ -436,12 +504,14 @@ class RenderedTokens:
         ``attention[start:end]`` for tool-response attention analysis.
         """
         spans = self.message_token_spans()
-        out: dict[str, list[tuple[int, int]]] = {}
-        for role, span in zip(self.message_roles, spans):
-            if span is None:
-                out.setdefault(role, [])
-                continue
-            out.setdefault(role, []).append(span)
+        out: dict[str, np.ndarray] = {}
+        for role in dict.fromkeys(self.message_roles):
+            role_mask = np.fromiter(
+                (value == role for value in self.message_roles), dtype=MASK_DTYPE
+            )
+            values = spans[role_mask & (spans[:, 0] >= 0)].copy()
+            values.flags.writeable = False
+            out[role] = values
         return out
 
     def tokens_by_role(self, *, sampled_only: bool = False) -> dict[str, int]:
@@ -463,14 +533,14 @@ class RenderedTokens:
         """
         counts = self.tokens_per_message(sampled_only=sampled_only)
         out: dict[str, int] = {}
-        for role, n in zip(self.message_roles, counts):
-            out[role] = out.get(role, 0) + n
+        for message_index, role in enumerate(self.message_roles):
+            out[role] = out.get(role, 0) + int(counts[message_index])
         return out
 
-    def content_token_spans_by_role(self) -> dict[str, list[tuple[int, int]]]:
+    def content_token_spans_by_role(self) -> dict[str, np.ndarray]:
         """Per-role spans of contiguous body-only tokens (``is_content=True``).
 
-        Maps each role appearing in :attr:`message_roles` to a list of
+        Maps each role appearing in :attr:`message_roles` to an array of
         half-open ``[start, end)`` slices into :attr:`token_ids` over
         which every token satisfies ``is_content=True`` AND belongs to
         a message of that role. Spans never cross message boundaries:
@@ -486,47 +556,58 @@ class RenderedTokens:
         bodies while RL acts only on assistant turns is the canonical
         case::
 
-            spans = rendered.content_token_spans_by_role()
-            tool_sft_mask = [False] * len(rendered.token_ids)
-            for s, e in spans.get("tool", []):
-                for k in range(s, e):
-                    tool_sft_mask[k] = True
+            tool_sft_mask = rendered.content_mask_for_roles({"tool"})
 
         See also :meth:`content_mask_for_roles` for the same
-        computation returned as a per-token bool list.
+        computation returned as a per-token bool array.
         """
-        out: dict[str, list[tuple[int, int]]] = {}
-        if not self.is_content or not self.message_roles:
+        out: dict[str, np.ndarray] = {}
+        if self.is_content.size == 0 or not self.message_roles:
             return out
         n = len(self.token_ids)
         if len(self.is_content) != n or len(self.message_indices) != n:
             return out
 
-        msg_spans = self.message_token_spans()
-        for role, span in zip(self.message_roles, msg_spans):
-            bucket = out.setdefault(role, [])
-            if span is None:
-                continue
-            start, end = span
-            run_start: int | None = None
-            for k in range(start, end):
-                if self.is_content[k]:
-                    if run_start is None:
-                        run_start = k
-                else:
-                    if run_start is not None:
-                        bucket.append((run_start, k))
-                        run_start = None
-            if run_start is not None:
-                bucket.append((run_start, end))
+        valid_message = (self.message_indices >= 0) & (
+            self.message_indices < len(self.message_roles)
+        )
+        safe_message_indices = np.where(valid_message, self.message_indices, 0)
+        for role in dict.fromkeys(self.message_roles):
+            message_has_role = np.fromiter(
+                (value == role for value in self.message_roles), dtype=MASK_DTYPE
+            )
+            active = (
+                valid_message & self.is_content & message_has_role[safe_message_indices]
+            )
+            previous_active = np.empty(n, dtype=MASK_DTYPE)
+            previous_active[0] = False
+            previous_active[1:] = active[:-1] & (
+                self.message_indices[1:] == self.message_indices[:-1]
+            )
+            next_active = np.empty(n, dtype=MASK_DTYPE)
+            next_active[-1] = False
+            next_active[:-1] = active[1:] & (
+                self.message_indices[:-1] == self.message_indices[1:]
+            )
+            starts = np.flatnonzero(active & ~previous_active).astype(
+                OFFSETS_DTYPE, copy=False
+            )
+            ends = (np.flatnonzero(active & ~next_active) + 1).astype(
+                OFFSETS_DTYPE, copy=False
+            )
+            spans = np.empty((starts.size, 2), dtype=OFFSETS_DTYPE)
+            spans[:, 0] = starts
+            spans[:, 1] = ends
+            spans.flags.writeable = False
+            out[role] = spans
         return out
 
-    def content_mask_for_roles(self, roles: "set[str] | frozenset[str]") -> list[bool]:
-        """Per-token bool list: ``True`` iff the token is body of a
+    def content_mask_for_roles(self, roles: "set[str] | frozenset[str]") -> np.ndarray:
+        """Per-token bool array: ``True`` iff the token is body of a
         message whose role is in ``roles``.
 
         Length matches :attr:`token_ids`. Returns an all-``False``
-        list of that length when :attr:`is_content` or
+        array of that length when :attr:`is_content` or
         :attr:`message_roles` is empty — consumers can AND this with
         their own attribution masks without length checks.
 
@@ -534,25 +615,28 @@ class RenderedTokens:
         cover the trainable-role question; this one covers the
         complementary "body-only" question. The two compose: SFT mask
         on tool body is
-        ``rendered.content_mask_for_roles({"tool"})``; RL mask on
-        assistant tokens stays
-        ``[s and (mi >= 0 and rendered.message_roles[mi] == "assistant")
-        for s, mi in zip(rendered.sampled_mask, rendered.message_indices)]``.
+        ``rendered.content_mask_for_roles({"tool"})``; consumers should keep
+        any further per-token mask composition in NumPy as well.
         """
         n = len(self.token_ids)
-        mask = [False] * n
-        if not self.is_content or not self.message_roles:
+        mask = np.zeros(n, dtype=MASK_DTYPE)
+        if self.is_content.size == 0 or not self.message_roles:
+            mask.flags.writeable = False
             return mask
         if len(self.is_content) != n or len(self.message_indices) != n:
+            mask.flags.writeable = False
             return mask
 
-        for k, msg_idx in enumerate(self.message_indices):
-            if msg_idx < 0:
-                continue
-            if msg_idx >= len(self.message_roles):
-                continue
-            if self.message_roles[msg_idx] in roles and self.is_content[k]:
-                mask[k] = True
+        valid = (self.message_indices >= 0) & (
+            self.message_indices < len(self.message_roles)
+        )
+        message_selected = np.fromiter(
+            (role in roles for role in self.message_roles), dtype=MASK_DTYPE
+        )
+        mask[valid] = (
+            self.is_content[valid] & message_selected[self.message_indices[valid]]
+        )
+        mask.flags.writeable = False
         return mask
 
 
@@ -597,13 +681,6 @@ class ParsedToolCall:
     response, so ``[OK, INVALID_JSON, OK]`` is a faithful record of "the
     model emitted three parallel calls; the second was broken."
 
-    ``token_span`` is a half-open ``[start, end)`` slice into the
-    completion's stripped token id stream (i.e. ``token_ids`` after
-    ``_strip_stop_tokens``); some text-based parsers can't cheaply
-    recover token offsets and leave it ``None``. Useful for trainer-side
-    selective loss masking: zero the mask over the spans of non-OK
-    entries to avoid reinforcing malformed structures.
-
     ``raw`` is the decoded text of the block as the model emitted it
     (before any JSON normalization). Always populated — for failed
     attempts it's the only way to see what actually went wrong.
@@ -612,53 +689,137 @@ class ParsedToolCall:
     raw: str
     name: str | None = None
     arguments: dict[str, Any] | str | None = None
-    token_span: tuple[int, int] | None = None
     status: ToolCallParseStatus = ToolCallParseStatus.OK
     id: str | None = None  # native tool-call id when the format carries one (Kimi K2)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ParsedResponse:
     """Result of parsing completion tokens back into a structured message.
 
-    ``tool_calls`` is a list of every parse attempt — successful and
+    ``tool_calls`` is an immutable tuple of every parse attempt — successful and
     malformed alike. Filter with ``[tc for tc in r.tool_calls if
     tc.status == ToolCallParseStatus.OK]`` to get only the calls that
-    came out clean. Empty list = the model didn't emit any tool calls
-    (different from "tried and failed entirely", which produces a list
+    came out clean. An empty tuple means the model didn't emit any tool calls
+    (different from "tried and failed entirely", which produces a tuple
     with non-OK entries).
     """
 
     content: str
     reasoning_content: str | None = None
-    tool_calls: list[ParsedToolCall] = field(default_factory=list)
+    tool_calls: tuple[ParsedToolCall, ...] = ()
+    tool_call_token_spans: np.ndarray = field(default_factory=empty_span_array)
+
+    def __post_init__(self) -> None:
+        require_span_array("tool_call_token_spans", self.tool_call_token_spans)
+        require_readonly("tool_call_token_spans", self.tool_call_token_spans)
+        if type(self.tool_calls) is not tuple:
+            raise TypeError("tool_calls must be an immutable tuple")
+        if self.tool_call_token_spans.shape[0] != len(self.tool_calls):
+            raise ValueError(
+                "tool_call_token_spans must align one-to-one with tool_calls"
+            )
+
+
+class ParsedToolCallBuilder:
+    """Keep semantic calls aligned with one packed fixed-width span array."""
+
+    __slots__ = ("_calls", "_spans")
+
+    def __init__(self) -> None:
+        self._calls: list[ParsedToolCall] = []
+        self._spans = FixedWidthSpanBuilder()
+
+    def __len__(self) -> int:
+        return len(self._calls)
+
+    def append(self, call: ParsedToolCall, start: int = -1, end: int = -1) -> None:
+        if not isinstance(call, ParsedToolCall):
+            raise TypeError(f"call must be ParsedToolCall, got {type(call).__name__}")
+        self._spans.append(start, end)
+        self._calls.append(call)
+
+    def extend(self, calls: tuple[ParsedToolCall, ...], spans: np.ndarray) -> None:
+        if type(calls) is not tuple or not all(
+            isinstance(call, ParsedToolCall) for call in calls
+        ):
+            raise TypeError("calls must be an immutable tuple of ParsedToolCall values")
+        require_span_array("tool_call_token_spans", spans)
+        if len(calls) != spans.shape[0]:
+            raise ValueError(
+                "tool_call_token_spans must align one-to-one with tool_calls"
+            )
+        self._spans.extend(spans)
+        self._calls.extend(calls)
+
+    def finish(self) -> tuple[tuple[ParsedToolCall, ...], np.ndarray]:
+        return tuple(self._calls), self._spans.finish()
 
 
 @dataclass
 class RenderedConversation:
     """Exact token state for a rendered conversation."""
 
-    prompt_ids: list[int]
-    completion_ids: list[int] = field(default_factory=list)
-    completion_logprobs: list[float] = field(default_factory=list)
+    prompt_ids: np.ndarray
+    completion_ids: np.ndarray = field(
+        default_factory=lambda: empty_array(TOKEN_IDS_DTYPE)
+    )
+    completion_logprobs: np.ndarray = field(
+        default_factory=lambda: empty_array(LOGPROBS_DTYPE)
+    )
     messages: list[Message] = field(default_factory=list)
     parsed_completion: ParsedResponse | None = None
 
+    def __post_init__(self) -> None:
+        require_1d_array(
+            "prompt_ids", self.prompt_ids, dtype=TOKEN_IDS_DTYPE, minimum=0
+        )
+        require_1d_array(
+            "completion_ids", self.completion_ids, dtype=TOKEN_IDS_DTYPE, minimum=0
+        )
+        require_1d_array(
+            "completion_logprobs", self.completion_logprobs, dtype=LOGPROBS_DTYPE
+        )
+        if self.completion_logprobs.size not in (0, self.completion_ids.size):
+            raise ValueError(
+                "completion_logprobs length must be zero or match completion_ids"
+            )
+        for name, values in (
+            ("prompt_ids", self.prompt_ids),
+            ("completion_ids", self.completion_ids),
+            ("completion_logprobs", self.completion_logprobs),
+        ):
+            require_readonly(name, values)
+
     @property
-    def token_ids(self) -> list[int]:
-        return self.prompt_ids + self.completion_ids
+    def token_ids(self) -> np.ndarray:
+        combined = np.concatenate(
+            (self.prompt_ids, self.completion_ids), dtype=TOKEN_IDS_DTYPE
+        )
+        combined.flags.writeable = False
+        return combined
 
     def with_completion(
         self,
-        completion_ids: list[int],
+        completion_ids: np.ndarray,
         *,
-        completion_logprobs: list[float] | None = None,
+        completion_logprobs: np.ndarray | None = None,
         parsed_completion: ParsedResponse | None = None,
     ) -> "RenderedConversation":
         return RenderedConversation(
-            prompt_ids=list(self.prompt_ids),
-            completion_ids=list(completion_ids),
-            completion_logprobs=list(completion_logprobs or []),
+            prompt_ids=owned_readonly_copy(
+                "prompt_ids", self.prompt_ids, dtype=TOKEN_IDS_DTYPE, minimum=0
+            ),
+            completion_ids=owned_readonly_copy(
+                "completion_ids", completion_ids, dtype=TOKEN_IDS_DTYPE, minimum=0
+            ),
+            completion_logprobs=(
+                owned_readonly_copy(
+                    "completion_logprobs", completion_logprobs, dtype=LOGPROBS_DTYPE
+                )
+                if completion_logprobs is not None
+                else empty_array(LOGPROBS_DTYPE)
+            ),
             messages=list(self.messages),
             parsed_completion=parsed_completion,
         )
@@ -679,7 +840,7 @@ class Tokenizer(Protocol):
     unk_token_id: int | None
     eos_token_id: int | None
 
-    def encode(self, text: str, *args: Any, **kwargs: Any) -> list[int]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
     def decode(self, token_ids: Any, *args: Any, **kwargs: Any) -> str: ...
 
@@ -695,8 +856,6 @@ class OffsetTokenizer(Tokenizer, Protocol):
     BPE pass. A basic :class:`Tokenizer` remains sufficient for rendering token
     IDs; when offsets are unavailable, renderers leave ``is_content`` empty.
     """
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
 
 @runtime_checkable
@@ -734,15 +893,12 @@ class Renderer(Protocol):
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-    ) -> list[int]:
+    ) -> np.ndarray:
         """Render messages to token IDs (without attribution metadata)."""
         ...
 
     def parse_response(
-        self,
-        token_ids: list[int],
-        *,
-        tools: list[ToolSpec] | None = None,
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
     ) -> ParsedResponse:
         """Parse completion tokens back into a structured message.
 
@@ -763,8 +919,8 @@ class Renderer(Protocol):
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
@@ -857,8 +1013,8 @@ class MultimodalRenderer(Renderer, Protocol):
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
@@ -1182,10 +1338,7 @@ def _tokenizer_load_kwargs(model_name_or_path: str) -> dict[str, Any]:
 
 
 def _preserve_requested_tokenizer_name(
-    tokenizer,
-    *,
-    requested_name_or_path: str,
-    loaded_name_or_path: str,
+    tokenizer, *, requested_name_or_path: str, loaded_name_or_path: str
 ):
     if requested_name_or_path == loaded_name_or_path:
         return tokenizer
@@ -1401,9 +1554,7 @@ def create_renderer(
     _populate_registry()
 
     config = _resolve_renderer_config(
-        tokenizer,
-        config,
-        chat_template_kwargs=chat_template_kwargs,
+        tokenizer, config, chat_template_kwargs=chat_template_kwargs
     )
     cls = RENDERER_REGISTRY.get(config.name)
     if cls is None:
@@ -1414,8 +1565,7 @@ def create_renderer(
 
 
 def _merge_chat_template_kwargs(
-    config: RendererConfig,
-    chat_template_kwargs: Mapping[str, Any] | None,
+    config: RendererConfig, chat_template_kwargs: Mapping[str, Any] | None
 ) -> RendererConfig:
     if not chat_template_kwargs:
         return config
@@ -1462,9 +1612,7 @@ def _resolve_renderer_config(
 
     if isinstance(config, AutoRendererConfig):
         return _resolve_auto_config(
-            tokenizer,
-            config,
-            chat_template_kwargs=chat_template_kwargs,
+            tokenizer, config, chat_template_kwargs=chat_template_kwargs
         )
 
     return _merge_chat_template_kwargs(config, chat_template_kwargs)
@@ -1496,8 +1644,7 @@ def _resolve_auto_config(
     if renderer_name is not None:
         cfg_cls = _config_class_for(renderer_name)
         return _merge_chat_template_kwargs(
-            cfg_cls(**preserve_carry),
-            chat_template_kwargs,
+            cfg_cls(**preserve_carry), chat_template_kwargs
         )
 
     if chat_template_kwargs:
@@ -1562,25 +1709,56 @@ class RenderedTrainingSample:
     text-only samples through a VLM renderer), so the text path is unchanged.
     """
 
-    token_ids: list[int]
-    loss_mask: list[bool]
+    token_ids: np.ndarray
+    loss_mask: np.ndarray
     multi_modal_data: "MultiModalData | None" = None
-    mm_token_type_ids: list[int] | None = None
+    mm_token_type_ids: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        require_1d_array(
+            "training token_ids",
+            self.token_ids,
+            dtype=TRAINING_TOKEN_IDS_DTYPE,
+            minimum=0,
+        )
+        require_1d_array("training loss_mask", self.loss_mask, dtype=MASK_DTYPE)
+        if self.loss_mask.size != self.token_ids.size:
+            raise ValueError("training loss_mask length must match token_ids")
+        if self.mm_token_type_ids is not None:
+            require_1d_array(
+                "mm_token_type_ids",
+                self.mm_token_type_ids,
+                dtype=MM_TOKEN_TYPE_IDS_DTYPE,
+                minimum=0,
+            )
+            if self.mm_token_type_ids.size != self.token_ids.size:
+                raise ValueError("mm_token_type_ids length must match token_ids")
+        for name, values in (
+            ("training token_ids", self.token_ids),
+            ("training loss_mask", self.loss_mask),
+            ("mm_token_type_ids", self.mm_token_type_ids),
+        ):
+            if values is not None:
+                require_readonly(name, values)
 
 
 def _build_mm_token_type_ids(
-    mm_placeholders: dict[str, list[PlaceholderRange]], length: int
-) -> list[int]:
+    mm_placeholders: dict[str, np.ndarray], length: int
+) -> np.ndarray:
     """Per-token modality flags (0=text, 1=image, 2=video) from placeholder ranges."""
-    ids = [0] * length
+    ids = np.zeros(length, dtype=MM_TOKEN_TYPE_IDS_DTYPE)
     for modality, ranges in mm_placeholders.items():
+        require_range_array(f"mm_placeholders[{modality!r}]", ranges)
         type_id = _MM_TYPE_ID.get(modality, 0)
         if type_id == 0:
             continue
-        for r in ranges:
-            end = min(r.offset + r.length, length)
-            for i in range(r.offset, end):
-                ids[i] = type_id
+        starts = np.minimum(ranges[:, 0], length)
+        clipped_lengths = np.minimum(ranges[:, 1], length - starts)
+        ends = starts + clipped_lengths
+        coverage_delta = np.zeros(length + 1, dtype=COUNTS_DTYPE)
+        np.add.at(coverage_delta, starts, 1)
+        np.add.at(coverage_delta, ends, -1)
+        ids[np.cumsum(coverage_delta[:-1]) > 0] = type_id
     return ids
 
 
@@ -1621,7 +1799,7 @@ def build_training_sample(
     restrict training to a specific role (e.g. assistant-only) even on
     a renderer whose ``sampled_mask`` already covers other roles.
 
-    Renderers that don't populate ``sampled_mask`` (empty list) fall
+    Renderers that don't populate ``sampled_mask`` (an empty read-only boolean array) fall
     back to attribution-only masking — every token attributed to a
     trainable role is trained on, including template-injected
     ``<|im_start|>role\\n`` openers. In this fallback mode
@@ -1643,7 +1821,7 @@ def build_training_sample(
     (``content_sft_roles={"tool"}``).
 
     Requires the renderer to populate ``is_content`` for the body-only
-    path to fire. Renderers that leave it empty (``DefaultRenderer``,
+    path to fire. Renderers that leave it as an empty read-only boolean array (``DefaultRenderer``,
     or hand-coded renderers that haven't been wired up yet) ignore
     ``content_sft_roles`` silently — falling back to the original
     ``role_to_mask`` + ``sampled_mask`` behaviour.
@@ -1675,30 +1853,35 @@ def build_training_sample(
             "lambda m: m['role'] == 'assistant') for this renderer."
         )
 
-    loss_mask: list[bool] = []
-    for k, msg_idx in enumerate(rendered.message_indices):
-        if msg_idx < 0:
-            loss_mask.append(False)
-            continue
-        msg = messages[msg_idx]
-        # Body-only path for opt-in roles. Fires only on tokens whose
-        # is_content bit is set; never adds the scaffolding around the
-        # message, so the model isn't supervised on emitting the role
-        # tags / wraps that would derail a rollout.
-        if body_roles and msg.get("role") in body_roles:
-            loss_mask.append(rendered.is_content[k])
-            continue
-        if has_sampled_info and not rendered.sampled_mask[k]:
-            loss_mask.append(False)
-        elif role_to_mask is None:
-            # sampled_mask alone gates the loss when no role filter is
-            # supplied. ``sampled_mask[k]`` is True here (handled by the
-            # branch above), so this token is trainable.
-            loss_mask.append(True)
-        else:
-            loss_mask.append(role_to_mask(msg))
+    loss_mask = np.zeros(rendered.token_ids.size, dtype=MASK_DTYPE)
+    valid_message = (rendered.message_indices >= 0) & (
+        rendered.message_indices < len(messages)
+    )
+    safe_message_indices = np.where(valid_message, rendered.message_indices, 0)
+    body_tokens = np.zeros(rendered.token_ids.size, dtype=MASK_DTYPE)
+    if body_roles:
+        message_is_body_role = np.fromiter(
+            (message.get("role") in body_roles for message in messages),
+            dtype=MASK_DTYPE,
+            count=len(messages),
+        )
+        body_tokens = valid_message & message_is_body_role[safe_message_indices]
+        loss_mask[body_tokens] = rendered.is_content[body_tokens]
 
-    token_ids = list(rendered.token_ids)
+    remaining = valid_message & ~body_tokens
+    if has_sampled_info:
+        remaining &= rendered.sampled_mask
+    if role_to_mask is None:
+        loss_mask[remaining] = True
+    else:
+        message_is_trainable = np.fromiter(
+            (role_to_mask(message) for message in messages),
+            dtype=MASK_DTYPE,
+            count=len(messages),
+        )
+        loss_mask[remaining] = message_is_trainable[safe_message_indices[remaining]]
+
+    token_ids = rendered.token_ids.astype(TRAINING_TOKEN_IDS_DTYPE, copy=True)
     # Requires sampled_mask (opaque templates hide the assistant close)
     # and a final assistant message the role filter trains.
     if (
@@ -1708,14 +1891,21 @@ def build_training_sample(
         and (role_to_mask is None or role_to_mask(messages[-1]))
     ):
         stop_ids = set(renderer.get_stop_token_ids())
-        last_trainable = next(
-            (k for k in range(len(loss_mask) - 1, -1, -1) if loss_mask[k]), None
+        trainable_positions = np.flatnonzero(loss_mask)
+        last_trainable = (
+            int(trainable_positions[-1]) if trainable_positions.size else None
         )
         if last_trainable is None or token_ids[last_trainable] not in stop_ids:
-            token_ids.append(renderer.get_stop_token_ids()[0])
+            extended_ids = np.empty(token_ids.size + 1, dtype=TRAINING_TOKEN_IDS_DTYPE)
+            extended_ids[:-1] = token_ids
+            extended_ids[-1] = renderer.get_stop_token_ids()[0]
+            token_ids = extended_ids
             # loss_mask=True marks the token as trainable — the appended
             # stop is a training target, like any sampled token.
-            loss_mask.append(True)
+            extended_mask = np.empty(loss_mask.size + 1, dtype=MASK_DTYPE)
+            extended_mask[:-1] = loss_mask
+            extended_mask[-1] = True
+            loss_mask = extended_mask
 
     # Surface the multimodal payload for VLM renderers. ``None`` for text
     # renderers and for text-only samples (empty media) so downstream
@@ -1728,6 +1918,10 @@ def build_training_sample(
         if mm is not None and mm.mm_placeholders
         else None
     )
+    token_ids.flags.writeable = False
+    loss_mask.flags.writeable = False
+    if mm_token_type_ids is not None:
+        mm_token_type_ids.flags.writeable = False
     return RenderedTrainingSample(
         token_ids=token_ids,
         loss_mask=loss_mask,
@@ -1736,21 +1930,21 @@ def build_training_sample(
     )
 
 
-def _common_prefix_len(a: list[int], b: list[int]) -> int:
+def _common_prefix_len(a: np.ndarray, b: np.ndarray) -> int:
+    require_1d_array("prefix a", a, dtype=TOKEN_IDS_DTYPE, minimum=0)
+    require_1d_array("prefix b", b, dtype=TOKEN_IDS_DTYPE, minimum=0)
     max_len = min(len(a), len(b))
-    for idx in range(max_len):
-        if a[idx] != b[idx]:
-            return idx
-    return max_len
+    mismatches = np.flatnonzero(a[:max_len] != b[:max_len])
+    return int(mismatches[0]) if mismatches.size else max_len
 
 
 def trim_to_turn_close(
-    previous_prompt_ids: list[int],
-    previous_completion_ids: list[int],
+    previous_prompt_ids: np.ndarray,
+    previous_completion_ids: np.ndarray,
     close_token_ids: set[int],
     *,
     synthesize_close: int | None = None,
-) -> list[int] | None:
+) -> np.ndarray | None:
     """Return the longest prefix of ``prev_prompt + prev_completion`` that
     ends at a turn-close token, or ``None`` if none exists and
     ``synthesize_close`` is not provided.
@@ -1769,27 +1963,57 @@ def trim_to_turn_close(
     it doesn't call this — it returns ``None`` from ``bridge_to_next_turn``
     unconditionally.
     """
-    previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
-    for idx in range(len(previous_ids) - 1, len(previous_prompt_ids) - 1, -1):
-        if previous_ids[idx] in close_token_ids:
-            return previous_ids[: idx + 1]
+    require_1d_array(
+        "previous_prompt_ids", previous_prompt_ids, dtype=TOKEN_IDS_DTYPE, minimum=0
+    )
+    require_1d_array(
+        "previous_completion_ids",
+        previous_completion_ids,
+        dtype=TOKEN_IDS_DTYPE,
+        minimum=0,
+    )
+    previous_ids = np.concatenate(
+        (previous_prompt_ids, previous_completion_ids), dtype=TOKEN_IDS_DTYPE
+    )
+    close_positions = np.flatnonzero(
+        np.isin(previous_completion_ids, tuple(close_token_ids), assume_unique=True)
+    )
+    if close_positions.size:
+        end = previous_prompt_ids.size + int(close_positions[-1]) + 1
+        return readonly_view(previous_ids[:end])
     if synthesize_close is None:
         return None
-    previous_ids.append(synthesize_close)
-    return previous_ids
+    extended = np.empty(previous_ids.size + 1, dtype=TOKEN_IDS_DTYPE)
+    extended[:-1] = previous_ids
+    extended[-1] = synthesize_close
+    extended.flags.writeable = False
+    return extended
 
 
-class AttributedTextSegments(list[tuple[int, bool]]):
-    """Token/content pairs with an explicit attribution-availability flag."""
+@dataclass(frozen=True)
+class AttributedTextSegments:
+    """Aligned fixed-width token/content arrays from one segmented BPE pass."""
 
-    def __init__(
-        self,
-        values=(),
-        *,
-        has_content_attribution: bool,
-    ) -> None:
-        super().__init__(values)
-        self.has_content_attribution = has_content_attribution
+    token_ids: np.ndarray
+    is_content: np.ndarray
+    has_content_attribution: bool
+
+    def __post_init__(self) -> None:
+        require_1d_array(
+            "attributed token_ids", self.token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0
+        )
+        require_1d_array("attributed is_content", self.is_content, dtype=MASK_DTYPE)
+        if self.token_ids.size != self.is_content.size:
+            raise ValueError(
+                "attributed token_ids and is_content must have equal lengths"
+            )
+        if type(self.has_content_attribution) is not bool:
+            raise TypeError("has_content_attribution must be bool")
+        require_readonly("attributed token_ids", self.token_ids)
+        require_readonly("attributed is_content", self.is_content)
+
+    def __len__(self) -> int:
+        return self.token_ids.size
 
 
 def _get_offset_tokenizer(tokenizer: Tokenizer) -> OffsetTokenizer | None:
@@ -1802,23 +2026,27 @@ def _get_offset_tokenizer(tokenizer: Tokenizer) -> OffsetTokenizer | None:
     loaded via :func:`load_tokenizer` are ``PreTrainedTokenizerFast``
     instances that satisfy this capability, but BYO tokenizers need not.
     """
-    call = getattr(tokenizer, "__call__", None)
-    if not callable(call):
+    if not callable(tokenizer):
         return None
     try:
-        encoding = call("a", add_special_tokens=False, return_offsets_mapping=True)
-        encoding["input_ids"]
-        encoding["offset_mapping"]
+        encoding = tokenizer(
+            "a",
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+            return_tensors="np",
+        )
+        if not isinstance(encoding["input_ids"], np.ndarray):
+            return None
+        if not isinstance(encoding["offset_mapping"], np.ndarray):
+            return None
     except (KeyError, NotImplementedError, TypeError, ValueError):
         return None
     return cast(OffsetTokenizer, tokenizer)
 
 
 def _infer_offsets_from_decode(
-    tokenizer: Tokenizer,
-    token_ids: list[int],
-    text: str,
-) -> list[tuple[int, int]] | None:
+    tokenizer: Tokenizer, token_ids: np.ndarray, text: str
+) -> np.ndarray | None:
     """Recover token character spans from an exact decoder round-trip.
 
     This is a narrow fallback for metadata that does not require exposing
@@ -1835,7 +2063,9 @@ def _infer_offsets_from_decode(
     remains unavailable without native offsets.
     """
 
-    def decode(ids: list[int]) -> str | None:
+    require_1d_array("decode token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+
+    def decode(ids: np.ndarray) -> str | None:
         variants = (
             {"skip_special_tokens": False, "clean_up_tokenization_spaces": False},
             {"skip_special_tokens": False},
@@ -1852,55 +2082,58 @@ def _infer_offsets_from_decode(
         return None
 
     pieces: list[str] = []
-    for token_id in token_ids:
-        piece = decode([token_id])
+    for token_index in range(token_ids.size):
+        piece = decode(token_ids[token_index : token_index + 1])
         if piece is None:
             break
         pieces.append(piece)
     if len(pieces) == len(token_ids) and "".join(pieces) == text:
-        offsets: list[tuple[int, int]] = []
+        offsets = np.empty((token_ids.size, 2), dtype=OFFSETS_DTYPE)
         position = 0
-        for piece in pieces:
+        for token_index, piece in enumerate(pieces):
             end = position + len(piece)
-            offsets.append((position, end))
+            offsets[token_index] = (position, end)
             position = end
+        offsets.flags.writeable = False
         return offsets
 
-    offsets = []
+    offsets = np.empty((token_ids.size, 2), dtype=OFFSETS_DTYPE)
     previous_end = 0
     for end_index in range(1, len(token_ids) + 1):
         prefix = decode(token_ids[:end_index])
         if prefix is None or len(prefix) < previous_end or not text.startswith(prefix):
             return None
         current_end = len(prefix)
-        offsets.append((previous_end, current_end))
+        offsets[end_index - 1] = (previous_end, current_end)
         previous_end = current_end
     if previous_end != len(text):
         return None
+    offsets.flags.writeable = False
     return offsets
 
 
 def _content_mask_or_empty(
-    tokenizer: Tokenizer, content_mask: list[bool]
-) -> list[bool]:
-    """Return exact content attribution, or the empty-list unavailable sentinel."""
+    tokenizer: Tokenizer, content_mask: np.ndarray
+) -> np.ndarray:
+    """Return exact content attribution, or an empty fixed-width sentinel."""
+    require_1d_array("is_content", content_mask, dtype=MASK_DTYPE)
     if _get_offset_tokenizer(tokenizer) is None:
-        return []
+        return empty_array(MASK_DTYPE)
     return content_mask
 
 
 def attribute_text_segments(
     tokenizer: Tokenizer,
-    segments: "list[tuple[str, bool]]",
+    segments: TextSegments,
     *,
     overlap_is_content: bool = False,
+    _offset_tokenizer: OffsetTokenizer | None | object = _OFFSET_CAPABILITY_UNRESOLVED,
 ) -> AttributedTextSegments:
     """Tokenize concatenated segments as a single BPE pass and return
     ``(token_id, is_content)`` pairs.
 
-    ``segments`` is a list of ``(text, is_content)`` chunks the renderer
-    wants to emit contiguously — for example ``[("user\\n", False),
-    (content, True)]`` for a user message. Concatenation is done before
+    ``segments`` owns structural text chunks aligned with one read-only
+    fixed-width content mask. Concatenation is done before
     encoding to preserve BPE merges across the wrap/body boundary; the
     resulting tokens are then attributed back to their source segment
     via the fast tokenizer's ``offset_mapping``.
@@ -1927,79 +2160,78 @@ def attribute_text_segments(
     basic :class:`Tokenizer`, the joined text is still encoded in one pass so
     token IDs remain identical, but the bools are placeholders and
     ``has_content_attribution`` is false. Renderers propagate that state as an
-    empty ``RenderedTokens.is_content`` list rather than exposing a partial or
+    empty ``RenderedTokens.is_content`` array rather than exposing a partial or
     inaccurate mask.
 
-    Empty input or empty joined text returns an empty list.
+    Empty input or empty joined text returns empty fixed-width arrays.
     """
-    if not segments:
-        return AttributedTextSegments([], has_content_attribution=True)
-    full_text = "".join(text for text, _ in segments)
-    if not full_text:
-        return AttributedTextSegments([], has_content_attribution=True)
-
-    offset_tokenizer = _get_offset_tokenizer(tokenizer)
-    if offset_tokenizer is None:
-        token_ids = tokenizer.encode(full_text, add_special_tokens=False)
+    if not isinstance(segments, TextSegments):
+        raise TypeError(f"segments must be TextSegments, got {type(segments).__name__}")
+    texts = segments.texts
+    segment_content = segments.is_content
+    if not texts:
         return AttributedTextSegments(
-            ((token_id, False) for token_id in token_ids),
-            has_content_attribution=False,
+            empty_array(TOKEN_IDS_DTYPE),
+            empty_array(MASK_DTYPE),
+            has_content_attribution=True,
+        )
+    full_text = "".join(texts)
+    if not full_text:
+        return AttributedTextSegments(
+            empty_array(TOKEN_IDS_DTYPE),
+            empty_array(MASK_DTYPE),
+            has_content_attribution=True,
+        )
+
+    offset_tokenizer = (
+        _get_offset_tokenizer(tokenizer)
+        if _offset_tokenizer is _OFFSET_CAPABILITY_UNRESOLVED
+        else cast(OffsetTokenizer | None, _offset_tokenizer)
+    )
+    if offset_tokenizer is None:
+        token_ids = encode_token_ids(tokenizer, full_text)
+        is_content = np.zeros(token_ids.size, dtype=MASK_DTYPE)
+        is_content.flags.writeable = False
+        return AttributedTextSegments(
+            token_ids, is_content, has_content_attribution=False
         )
     encoding = offset_tokenizer(
         full_text,
         add_special_tokens=False,
         return_offsets_mapping=True,
+        return_tensors="np",
     )
-    token_ids = list(encoding["input_ids"])
-    offsets = list(encoding["offset_mapping"])
+    token_ids = owned_token_ids_from_array(
+        type(offset_tokenizer).__name__, encoding["input_ids"]
+    )
+    offsets = owned_offsets_from_array(
+        type(offset_tokenizer).__name__,
+        encoding["offset_mapping"],
+        token_count=token_ids.size,
+    )
 
-    # Build segment char-span lookup. Track the half-open span
-    # [seg_start, seg_end) of each segment and its is_content bit.
-    spans: list[tuple[int, int, bool]] = []
-    pos = 0
-    for text, is_content in segments:
-        spans.append((pos, pos + len(text), is_content))
-        pos += len(text)
-    total_len = pos
-
-    out: list[tuple[int, bool]] = []
-    last_is_content = spans[-1][2] if spans else False
-    for tok_id, (start, end) in zip(token_ids, offsets):
-        if start >= total_len:
-            # Token's character offset is past every segment (shouldn't
-            # normally happen for add_special_tokens=False, but defensive
-            # against tokenizer-specific edge cases).
-            out.append((tok_id, last_is_content))
-            continue
-        if overlap_is_content and end > start:
-            out.append(
-                (
-                    tok_id,
-                    any(
-                        seg_is_content
-                        for seg_start, seg_end, seg_is_content in spans
-                        if seg_start < end and start < seg_end
-                    ),
-                )
-            )
-            continue
-        # Find the segment that contains `start`. Segments are
-        # contiguous and ordered, so a linear scan is fine — the inner
-        # loop runs at most len(segments) times per token and segments
-        # is typically 2-3 in practice.
-        is_content = last_is_content
-        for seg_start, seg_end, seg_is_content in spans:
-            if seg_start <= start < seg_end:
-                is_content = seg_is_content
-                break
-        else:
-            # start == total_len handled above; the remaining case is
-            # an empty segment in the middle. Empty segments emit no
-            # characters, so no token can land in them; fall through to
-            # the last non-empty segment's bit.
-            pass
-        out.append((tok_id, is_content))
-    return AttributedTextSegments(out, has_content_attribution=True)
+    char_lengths = np.fromiter(
+        (len(text) for text in texts), dtype=OFFSETS_DTYPE, count=len(texts)
+    )
+    segment_ends = np.cumsum(char_lengths, dtype=OFFSETS_DTYPE)
+    token_segments = np.searchsorted(segment_ends, offsets[:, 0], side="right")
+    np.minimum(token_segments, segment_ends.size - 1, out=token_segments)
+    out = np.array(segment_content[token_segments], dtype=MASK_DTYPE, copy=True)
+    if overlap_is_content:
+        last_segments = np.searchsorted(
+            segment_ends, np.maximum(offsets[:, 1] - 1, offsets[:, 0]), side="right"
+        )
+        np.minimum(last_segments, segment_ends.size - 1, out=last_segments)
+        content_prefix = np.empty(segment_content.size + 1, dtype=OFFSETS_DTYPE)
+        content_prefix[0] = 0
+        np.cumsum(segment_content, dtype=OFFSETS_DTYPE, out=content_prefix[1:])
+        nonempty_tokens = offsets[:, 1] > offsets[:, 0]
+        out[nonempty_tokens] = (
+            content_prefix[last_segments[nonempty_tokens] + 1]
+            > content_prefix[token_segments[nonempty_tokens]]
+        )
+    out.flags.writeable = False
+    return AttributedTextSegments(token_ids, out, has_content_attribution=True)
 
 
 def reject_assistant_in_extension(new_messages: list[Message]) -> bool:
@@ -2031,8 +2263,7 @@ def introduces_user_query(
 
 
 def resolve_thinking_retention(
-    config: Any,
-    implied: ResolvedThinkingRetention,
+    config: Any, implied: ResolvedThinkingRetention
 ) -> ResolvedThinkingRetention:
     """Resolve the effective bridge policy for a renderer instance.
 
@@ -2090,10 +2321,10 @@ def build_trajectory_step(
 
     out: dict[str, Any] = {
         "prompt_ids": full_ids[:split_idx],
-        "prompt_mask": [False] * split_idx,
+        "prompt_mask": np.zeros(split_idx, dtype=MASK_DTYPE),
         "completion_ids": completion_ids,
-        "completion_mask": [True] * len(completion_ids),
-        "completion_logprobs": [0.0] * len(completion_ids),
+        "completion_mask": np.ones(len(completion_ids), dtype=MASK_DTYPE),
+        "completion_logprobs": np.zeros(len(completion_ids), dtype=LOGPROBS_DTYPE),
         "routed_experts": None,
         "kept_tokens": None,
     }

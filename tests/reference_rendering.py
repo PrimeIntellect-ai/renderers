@@ -3,7 +3,8 @@
 The oracle is selected from the resolved renderer, not assumed to be Hugging
 Face ``apply_chat_template``. Most checkpoints currently route to that adapter,
 DeepSeek V4 routes to its shipped Python-encoder contract, and GPT-OSS routes to
-Harmony. ``render_reference`` is the single invocation path for all three.
+an explicit fail-closed Harmony adapter until Harmony publishes a fixed-width
+ABI. ``render_reference`` is the single invocation path for all three.
 
 The compact DSV4 implementation below is deliberately test-side and independent
 of ``renderers.deepseek_v4``.  It mirrors the public chat/tool branches of the
@@ -17,11 +18,13 @@ import copy
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Protocol
 
+import numpy as np
+
 from renderers.base import MODEL_RENDERER_MAP
+from renderers.token_arrays import encode_token_ids, owned_token_ids_from_array
 
 
 DEEPSEEK_V4_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
@@ -35,7 +38,7 @@ class OracleRenderer(Protocol):
         tokenizer: Any,
         messages: list[dict[str, Any]],
         **kwargs: Any,
-    ) -> list[int]: ...
+    ) -> np.ndarray: ...
 
 
 @dataclass(frozen=True)
@@ -405,25 +408,23 @@ def _render_hugging_face(
     tokenizer: Any,
     messages: list[dict[str, Any]],
     **kwargs: Any,
-) -> list[int]:
+) -> np.ndarray:
     result = tokenizer.apply_chat_template(
         messages,
         tokenize=True,
         return_dict=False,
+        return_tensors="np",
         **kwargs,
     )
-    if isinstance(result, dict):
-        return list(result["input_ids"])
-    if isinstance(result, str):
-        return list(tokenizer.encode(result, add_special_tokens=False))
-    return list(result)
+    values = result["input_ids"] if isinstance(result, Mapping) else result
+    return owned_token_ids_from_array("apply_chat_template", values)
 
 
 def _render_deepseek_v4(
     tokenizer: Any,
     messages: list[dict[str, Any]],
     **kwargs: Any,
-) -> list[int]:
+) -> np.ndarray:
     kwargs = dict(kwargs)
     text = _render_deepseek_v4_reference(
         messages,
@@ -435,171 +436,18 @@ def _render_deepseek_v4(
     )
     if kwargs:
         raise TypeError(f"Unsupported DeepSeek V4 reference kwargs: {sorted(kwargs)}")
-    return list(tokenizer.encode(text, add_special_tokens=False))
-
-
-def _harmony_tool_description(tool: Mapping[str, Any]):
-    from openai_harmony import ToolDescription
-
-    fn = tool.get("function", tool)
-    return ToolDescription.new(
-        name=fn.get("name", ""),
-        description=fn.get("description", ""),
-        parameters=fn.get("parameters") or {},
-    )
-
-
-def _harmony_messages(
-    messages: list[dict[str, Any]],
-    *,
-    tools: list[dict[str, Any]] | None,
-    reasoning_effort: str,
-    conversation_start_date: str | None,
-):
-    from openai_harmony import (
-        Author,
-        DeveloperContent,
-        Message,
-        ReasoningEffort,
-        Role,
-        SystemContent,
-    )
-
-    effort = {
-        "low": ReasoningEffort.LOW,
-        "medium": ReasoningEffort.MEDIUM,
-        "high": ReasoningEffort.HIGH,
-    }[reasoning_effort]
-    system = (
-        SystemContent.new()
-        .with_reasoning_effort(effort)
-        .with_conversation_start_date(
-            conversation_start_date or datetime.now().strftime("%Y-%m-%d")
-        )
-    )
-    out = [Message.from_role_and_content(Role.SYSTEM, system)]
-    first_system = next(
-        (
-            index
-            for index, message in enumerate(messages)
-            if message["role"] == "system"
-        ),
-        None,
-    )
-    if first_system is not None or tools:
-        developer = DeveloperContent.new()
-        if first_system is not None and messages[first_system].get("content"):
-            developer = developer.with_instructions(messages[first_system]["content"])
-        if tools:
-            developer = developer.with_function_tools(
-                [_harmony_tool_description(tool) for tool in tools]
-            )
-        out.append(Message.from_role_and_content(Role.DEVELOPER, developer))
-
-    for index, message in enumerate(messages):
-        if index == first_system:
-            continue
-        role = message["role"]
-        content = message.get("content") or ""
-        if role == "user":
-            out.append(Message.from_role_and_content(Role.USER, content))
-            continue
-        if role in {"system", "developer"}:
-            developer = DeveloperContent.new().with_instructions(content)
-            out.append(Message.from_role_and_content(Role.DEVELOPER, developer))
-            continue
-        if role == "tool":
-            name = message.get("name") or "unknown"
-            if not name.startswith("functions."):
-                name = f"functions.{name}"
-            tool_message = Message.from_author_and_content(
-                Author.new(Role.TOOL, name), content
-            )
-            out.append(
-                tool_message.with_recipient("assistant").with_channel("commentary")
-            )
-            continue
-        if role != "assistant":
-            raise AssertionError(f"Harmony oracle does not support role={role!r}")
-
-        tool_calls = message.get("tool_calls") or []
-        later_final = any(
-            later.get("role") == "assistant"
-            and not later.get("tool_calls")
-            and bool(later.get("content"))
-            for later in messages[index + 1 :]
-        )
-        reasoning = message.get("reasoning_content")
-        if reasoning and tool_calls and not later_final:
-            out.append(
-                Message.from_role_and_content(Role.ASSISTANT, reasoning).with_channel(
-                    "analysis"
-                )
-            )
-        if content:
-            out.append(
-                Message.from_role_and_content(Role.ASSISTANT, content).with_channel(
-                    "final"
-                )
-            )
-        for tool_call in tool_calls:
-            fn = tool_call.get("function", tool_call)
-            arguments = fn.get("arguments", {})
-            if not isinstance(arguments, str):
-                arguments = json.dumps(arguments, ensure_ascii=False)
-            name = fn.get("name", "")
-            if not name.startswith("functions."):
-                name = f"functions.{name}"
-            out.append(
-                Message.from_role_and_content(Role.ASSISTANT, arguments)
-                .with_channel("commentary")
-                .with_recipient(name)
-            )
-        if not content and not tool_calls and not reasoning:
-            out.append(
-                Message.from_role_and_content(Role.ASSISTANT, "").with_channel("final")
-            )
-    return out
+    return encode_token_ids(tokenizer, text)
 
 
 def _render_harmony(
     tokenizer: Any,
     messages: list[dict[str, Any]],
     **kwargs: Any,
-) -> list[int]:
-    del tokenizer
-    from openai_harmony import (
-        Conversation,
-        HarmonyEncodingName,
-        Role,
-        load_harmony_encoding,
+) -> np.ndarray:
+    del tokenizer, messages, kwargs
+    raise RuntimeError(
+        "Harmony reference rendering requires an openai-harmony fixed-width NumPy token ABI"
     )
-
-    kwargs = dict(kwargs)
-    add_generation_prompt = kwargs.pop("add_generation_prompt")
-    tools = kwargs.pop("tools", None)
-    reasoning_effort = kwargs.pop("reasoning_effort", "medium")
-    conversation_start_date = kwargs.pop("conversation_start_date", None)
-    if kwargs:
-        raise TypeError(f"Unsupported Harmony reference kwargs: {sorted(kwargs)}")
-
-    encoder = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
-    conversation = Conversation.from_messages(
-        _harmony_messages(
-            messages,
-            tools=tools,
-            reasoning_effort=reasoning_effort,
-            conversation_start_date=conversation_start_date,
-        )
-    )
-    if add_generation_prompt:
-        prompt = encoder.render_conversation_for_completion(
-            conversation, next_turn_role=Role.ASSISTANT
-        )
-        return prompt + encoder.encode(
-            "<|channel|>analysis<|message|>", allowed_special="all"
-        )
-    return encoder.render_conversation_for_training(conversation)
 
 
 REFERENCE_ORACLES: Mapping[str, ReferenceOracle] = MappingProxyType(
@@ -639,7 +487,7 @@ def render_reference(
     *,
     oracle: str | None = None,
     **kwargs: Any,
-) -> list[int]:
+) -> np.ndarray:
     """Render ``messages`` through one resolved reference-oracle adapter."""
     oracle_name = oracle or reference_oracle_for_model(
         getattr(tokenizer, "name_or_path", "")

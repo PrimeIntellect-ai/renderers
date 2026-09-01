@@ -44,11 +44,10 @@ from renderers.base import (
     Message,
     MultiModalData,
     ParsedResponse,
-    PlaceholderRange,
     RenderedTokens,
     ToolSpec,
     Tokenizer,
-    _content_mask_or_empty,
+    _get_offset_tokenizer,
     _require_transformers,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -59,6 +58,12 @@ from renderers.base import (
 from renderers.configs import INKLING_EFFORT_MAP, InklingRendererConfig
 from renderers.parsing import parse_inkling
 from renderers.qwen3_vl import _image_hash, _load_pil_image
+from renderers.token_arrays import (
+    FixedWidthRangeBuilder,
+    RenderedTokenBuilder,
+    finish_range_builders,
+    merge_range_maps,
+)
 
 # Content-part ``type`` values the template maps to each modality. Untyped
 # parts (``type`` absent) are treated as text — matching the Jinja template's
@@ -127,7 +132,7 @@ def _load_inkling_image(part: Any):
 def _load_audio(part: Any) -> tuple[np.ndarray, int]:
     """Resolve an audio content part to ``(waveform, sampling_rate)``.
 
-    Accepts a raw mono waveform (``np.ndarray`` / list of floats) or a
+    Accepts a fixed-width float32 mono waveform or a
     HuggingFace-``datasets``-style ``{"array", "sampling_rate"}`` dict, under
     ``part["audio"]`` / ``["input_audio"]`` / ``["audio_url"]`` or the part
     itself. Decoding bytes / paths / URLs is out of scope (the processor's
@@ -150,7 +155,17 @@ def _load_audio(part: Any) -> tuple[np.ndarray, int]:
             "{'array', 'sampling_rate'} dict); byte/path/URL decoding is not "
             "supported here."
         )
-    return np.asarray(data, dtype=np.float32), sampling_rate
+    if not isinstance(data, np.ndarray):
+        raise TypeError(
+            f"audio waveform must be a NumPy array, got {type(data).__name__}"
+        )
+    if data.ndim != 1:
+        raise ValueError(f"audio waveform must be rank 1, got shape {data.shape}")
+    if data.dtype != np.dtype("<f4"):
+        raise TypeError(f"audio waveform must have dtype <f4, got {data.dtype.str}")
+    waveform = np.array(data, dtype=np.dtype("<f4"), copy=True, order="C")
+    waveform.flags.writeable = False
+    return waveform, sampling_rate
 
 
 def _audio_hash(wav: np.ndarray, sampling_rate: int) -> str:
@@ -179,6 +194,7 @@ class InklingRenderer:
         processor: Any = None,
     ):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self._processor = processor
         self.config = config or InklingRendererConfig()
         # Inkling always renders historical reasoning (the template has no
@@ -243,11 +259,6 @@ class InklingRenderer:
         if not isinstance(tid, int) or tid == self._tokenizer.unk_token_id:
             return None
         return tid
-
-    def _encode(self, text: str) -> list[int]:
-        if not text:
-            return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
 
     def _get_processor(self):
         if self._processor is not None:
@@ -324,30 +335,15 @@ class InklingRenderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        tokens: list[int] = []
-        indices: list[int] = []
-        sampled: list[bool] = []
-        content_mask: list[bool] = []
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         mm_hashes: dict[str, list[str]] = {}
-        mm_placeholders: dict[str, list[PlaceholderRange]] = {}
+        mm_placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
         mm_items: dict[str, list[dict[str, Any]]] = {}
 
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            ids = self._encode(text)
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
 
         def emit_image(
             part: Any,
@@ -367,7 +363,7 @@ class InklingRenderer:
                 is_sampled=is_sampled,
                 is_content=marker_is_content,
             )
-            offset = len(tokens)
+            offset = len(builder)
             for _ in range(num_patches):
                 emit_special(
                     self._image_pad, msg_idx, is_sampled=is_sampled, is_content=True
@@ -379,9 +375,9 @@ class InklingRenderer:
                 is_content=marker_is_content,
             )
             mm_hashes.setdefault("image", []).append(h)
-            mm_placeholders.setdefault("image", []).append(
-                PlaceholderRange(offset=offset, length=num_patches)
-            )
+            mm_placeholder_builders.setdefault(
+                "image", FixedWidthRangeBuilder()
+            ).append(offset, num_patches)
             mm_items.setdefault("image", []).append(
                 {"pixel_values": out["pixel_values"]}
             )
@@ -404,7 +400,7 @@ class InklingRenderer:
                 is_sampled=is_sampled,
                 is_content=marker_is_content,
             )
-            offset = len(tokens)
+            offset = len(builder)
             for _ in range(n_frames):
                 emit_special(
                     self._audio_pad, msg_idx, is_sampled=is_sampled, is_content=True
@@ -422,9 +418,9 @@ class InklingRenderer:
                 is_content=marker_is_content,
             )
             mm_hashes.setdefault("audio", []).append(_audio_hash(wav, sr))
-            mm_placeholders.setdefault("audio", []).append(
-                PlaceholderRange(offset=offset, length=n_frames)
-            )
+            mm_placeholder_builders.setdefault(
+                "audio", FixedWidthRangeBuilder()
+            ).append(offset, n_frames)
             mm_items.setdefault("audio", []).append(
                 {
                     "audio_input_ids": processed["audio_input_ids"],
@@ -482,21 +478,17 @@ class InklingRenderer:
             emit_special(self._message_model, -1, is_sampled=False, is_content=False)
 
         mm_data: MultiModalData | None = None
+        mm_placeholders = finish_range_builders(mm_placeholder_builders)
         if mm_hashes or mm_placeholders or mm_items:
             mm_data = MultiModalData(
-                mm_hashes=mm_hashes,
-                mm_placeholders=mm_placeholders,
-                mm_items=mm_items,
+                mm_hashes=mm_hashes, mm_placeholders=mm_placeholders, mm_items=mm_items
             )
 
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=tool_names,
             multi_modal_data=mm_data,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -505,14 +497,14 @@ class InklingRenderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-    ) -> list[int]:
+    ) -> np.ndarray:
         return self.render(
             messages, tools=tools, add_generation_prompt=add_generation_prompt
         ).token_ids
 
     def parse_response(
         self,
-        token_ids: list[int],
+        token_ids: np.ndarray,
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — args are native JSON, no schema coercion
     ) -> ParsedResponse:
@@ -729,10 +721,7 @@ class InklingRenderer:
                 is_content=True,
             )
             emit_text(
-                self._invoke_json(name, args),
-                msg_idx,
-                is_sampled=True,
-                is_content=True,
+                self._invoke_json(name, args), msg_idx, is_sampled=True, is_content=True
             )
             emit_special(self._end_message, msg_idx, is_sampled=True, is_content=True)
 
@@ -782,15 +771,15 @@ class InklingRenderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
         previous_multi_modal_data: MultiModalData | None = None,
     ) -> "RenderedTokens | None":
         if (
-            not previous_prompt_ids
+            len(previous_prompt_ids) == 0
             or not new_messages
             or reject_assistant_in_extension(new_messages)
         ):
@@ -826,30 +815,16 @@ class InklingRenderer:
         if previous_ids is None:
             return None
 
-        tokens: list[int] = list(previous_ids)
-        indices: list[int] = [-1] * len(previous_ids)
-        sampled: list[bool] = [False] * len(previous_ids)
-        content_mask: list[bool] = [False] * len(previous_ids)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        builder.prepend_prior(previous_ids)
         new_hashes: dict[str, list[str]] = {}
-        new_placeholders: dict[str, list[PlaceholderRange]] = {}
+        new_placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
         new_items: dict[str, list[dict[str, Any]]] = {}
 
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            ids = self._encode(text)
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
 
         def emit_image(
             part, msg_idx, role_open, *, is_sampled, marker_is_content
@@ -864,7 +839,7 @@ class InklingRenderer:
                 is_sampled=is_sampled,
                 is_content=marker_is_content,
             )
-            offset = len(tokens)
+            offset = len(builder)
             for _ in range(num_patches):
                 emit_special(
                     self._image_pad, msg_idx, is_sampled=is_sampled, is_content=True
@@ -876,9 +851,9 @@ class InklingRenderer:
                 is_content=marker_is_content,
             )
             new_hashes.setdefault("image", []).append(h)
-            new_placeholders.setdefault("image", []).append(
-                PlaceholderRange(offset=offset, length=num_patches)
-            )
+            new_placeholder_builders.setdefault(
+                "image", FixedWidthRangeBuilder()
+            ).append(offset, num_patches)
             new_items.setdefault("image", []).append(
                 {"pixel_values": out["pixel_values"]}
             )
@@ -896,7 +871,7 @@ class InklingRenderer:
                 is_sampled=is_sampled,
                 is_content=marker_is_content,
             )
-            offset = len(tokens)
+            offset = len(builder)
             for _ in range(n_frames):
                 emit_special(
                     self._audio_pad, msg_idx, is_sampled=is_sampled, is_content=True
@@ -914,9 +889,9 @@ class InklingRenderer:
                 is_content=marker_is_content,
             )
             new_hashes.setdefault("audio", []).append(_audio_hash(wav, sr))
-            new_placeholders.setdefault("audio", []).append(
-                PlaceholderRange(offset=offset, length=n_frames)
-            )
+            new_placeholder_builders.setdefault(
+                "audio", FixedWidthRangeBuilder()
+            ).append(offset, n_frames)
             new_items.setdefault("audio", []).append(
                 {
                     "audio_input_ids": processed["audio_input_ids"],
@@ -961,10 +936,12 @@ class InklingRenderer:
             if previous_multi_modal_data
             else {}
         )
-        merged_placeholders = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
+        new_placeholders = finish_range_builders(new_placeholder_builders)
+        merged_placeholders = merge_range_maps(
+            previous_multi_modal_data.mm_placeholders
             if previous_multi_modal_data
-            else {}
+            else {},
+            new_placeholders,
         )
         merged_items = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
@@ -973,8 +950,6 @@ class InklingRenderer:
         )
         for modality, vals in new_hashes.items():
             merged_hashes.setdefault(modality, []).extend(vals)
-        for modality, vals in new_placeholders.items():
-            merged_placeholders.setdefault(modality, []).extend(vals)
         for modality, vals in new_items.items():
             merged_items.setdefault(modality, []).extend(vals)
 
@@ -986,12 +961,9 @@ class InklingRenderer:
                 mm_items=merged_items,
             )
 
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=tool_names,
             multi_modal_data=mm_data,
+            content_available=self._offset_tokenizer is not None,
         )

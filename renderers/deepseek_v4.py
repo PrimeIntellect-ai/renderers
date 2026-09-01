@@ -22,13 +22,14 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+import numpy as np
+
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     Tokenizer,
     ToolSpec,
-    _content_mask_or_empty,
     _get_offset_tokenizer,
     _infer_offsets_from_decode,
     extract_message_tool_names,
@@ -39,6 +40,16 @@ from renderers.base import (
 )
 from renderers.configs import DeepSeekV4RendererConfig
 from renderers.parsing import parse_deepseek_v4
+from renderers.token_arrays import (
+    MASK_DTYPE,
+    MESSAGE_INDICES_DTYPE,
+    OFFSETS_DTYPE,
+    FixedWidthArrayBuilder,
+    RenderedTokenBuilder,
+    encode_token_ids,
+    owned_offsets_from_array,
+    owned_token_ids_from_array,
+)
 
 
 _BOS = "<｜begin▁of▁sentence｜>"
@@ -224,11 +235,7 @@ def _prepare_messages(messages: list[Message]) -> list[_LogicalMessage]:
                 merged[-1].blocks.append(block)
             else:
                 merged.append(
-                    _LogicalMessage(
-                        role="user",
-                        message_index=index,
-                        blocks=[block],
-                    )
+                    _LogicalMessage(role="user", message_index=index, blocks=[block])
                 )
             continue
 
@@ -295,9 +302,7 @@ class DeepSeekV4Renderer:
     _implied_thinking_retention = "tool_cycle"
 
     def __init__(
-        self,
-        tokenizer: Tokenizer,
-        config: DeepSeekV4RendererConfig | None = None,
+        self, tokenizer: Tokenizer, config: DeepSeekV4RendererConfig | None = None
     ):
         self._tokenizer = tokenizer
         self.config = config or DeepSeekV4RendererConfig()
@@ -307,9 +312,9 @@ class DeepSeekV4Renderer:
             else "all"
         )
         self.effective_thinking_retention = resolve_thinking_retention(
-            self.config,
-            implied_retention,
+            self.config, implied_retention
         )
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
 
         self._bos = self._special_id(_BOS)
         self._eos = self._special_id(_EOS)
@@ -324,10 +329,10 @@ class DeepSeekV4Renderer:
         }
 
     def _special_id(self, token: str) -> int:
-        ids = self._tokenizer.encode(token, add_special_tokens=False)
-        if len(ids) != 1:
-            raise ValueError(f"Expected one token for {token!r}, got {ids}")
-        return ids[0]
+        ids = encode_token_ids(self._tokenizer, token)
+        if ids.size != 1:
+            raise ValueError(f"Expected one token for {token!r}, got {ids.size}")
+        return int(ids[0])
 
     @staticmethod
     def _render_tools(tools: list[ToolSpec]) -> str:
@@ -359,9 +364,7 @@ class DeepSeekV4Renderer:
             is_string = isinstance(value, str)
             rendered_value = value if is_string else _json(value)
             params.append(
-                f'<{_DSML}parameter name="{key}" '
-                f'string="{str(is_string).lower()}">{rendered_value}'
-                f"</{_DSML}parameter>"
+                f'<{_DSML}parameter name="{key}" string="{str(is_string).lower()}">{rendered_value}</{_DSML}parameter>'
             )
         arguments_text = "\n".join(params)
         return f'<{_DSML}invoke name="{name}">\n{arguments_text}\n</{_DSML}invoke>'
@@ -417,23 +420,13 @@ class DeepSeekV4Renderer:
                 if message.role != "developer" or index >= last_query
             ]
 
-        token_ids: list[int] = []
-        message_indices: list[int] = []
-        sampled_mask: list[bool] = []
-        is_content: list[bool] = []
-        pending_text: list[tuple[str, int, bool, bool]] = []
-
-        def emit_ids(
-            ids: list[int],
-            message_index: int,
-            *,
-            sampled: bool = False,
-            content: bool = False,
-        ) -> None:
-            token_ids.extend(ids)
-            message_indices.extend([message_index] * len(ids))
-            sampled_mask.extend([sampled] * len(ids))
-            is_content.extend([content] * len(ids))
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        pending_texts: list[str] = []
+        pending_indices = FixedWidthArrayBuilder(MESSAGE_INDICES_DTYPE)
+        pending_sampled = FixedWidthArrayBuilder(MASK_DTYPE)
+        pending_content = FixedWidthArrayBuilder(MASK_DTYPE)
 
         def flush_text() -> None:
             """Tokenize contiguous text once, preserving source metadata.
@@ -444,32 +437,30 @@ class DeepSeekV4Renderer:
             let us recover message/sample/content attribution after the
             required single encoding pass.
             """
-            if not pending_text:
+            nonlocal pending_indices, pending_sampled, pending_content, pending_texts
+            if not pending_texts:
                 return
 
-            full_text = "".join(text for text, *_ in pending_text)
-            if not full_text:
-                pending_text.clear()
-                return
+            full_text = "".join(pending_texts)
+            char_lengths = np.fromiter(
+                (len(text) for text in pending_texts),
+                dtype=OFFSETS_DTYPE,
+                count=len(pending_texts),
+            )
+            segment_ends = np.cumsum(char_lengths, dtype=OFFSETS_DTYPE)
+            segment_indices = pending_indices.finish()
+            segment_sampled = pending_sampled.finish()
+            segment_content = pending_content.finish()
+            pending_texts = []
+            pending_indices = FixedWidthArrayBuilder(MESSAGE_INDICES_DTYPE)
+            pending_sampled = FixedWidthArrayBuilder(MASK_DTYPE)
+            pending_content = FixedWidthArrayBuilder(MASK_DTYPE)
 
-            spans: list[tuple[int, int, int, bool, bool]] = []
-            position = 0
-            for text, message_index, sampled, content in pending_text:
-                end = position + len(text)
-                if end > position:
-                    spans.append((position, end, message_index, sampled, content))
-                position = end
-
-            offset_tokenizer = _get_offset_tokenizer(self._tokenizer)
+            offset_tokenizer = self._offset_tokenizer
             if offset_tokenizer is None:
-                text_ids = self._tokenizer.encode(
-                    full_text,
-                    add_special_tokens=False,
-                )
+                text_ids = encode_token_ids(self._tokenizer, full_text)
                 offsets = _infer_offsets_from_decode(
-                    self._tokenizer,
-                    text_ids,
-                    full_text,
+                    self._tokenizer, text_ids, full_text
                 )
                 has_content_attribution = False
                 if offsets is None:
@@ -478,70 +469,59 @@ class DeepSeekV4Renderer:
                     # special tokens have one sampled state, so retain that
                     # signal and associate the opaque run with a contributing
                     # caller message.
-                    fallback_message_index = next(
-                        (
-                            span_message_index
-                            for _, _, span_message_index, _, _ in spans
-                            if span_message_index >= 0
-                        ),
-                        spans[-1][2] if spans else -1,
+                    candidates = np.flatnonzero(segment_indices >= 0)
+                    fallback_message_index = (
+                        int(segment_indices[candidates[0]])
+                        if candidates.size
+                        else int(segment_indices[-1])
                     )
-                    fallback_sampled = spans[-1][3] if spans else False
-                    emit_ids(
+                    builder.emit_tokens(
                         text_ids,
                         fallback_message_index,
-                        sampled=fallback_sampled,
+                        is_sampled=bool(segment_sampled[-1]),
+                        is_content=False,
                     )
-                    pending_text.clear()
                     return
             else:
                 encoding = offset_tokenizer(
                     full_text,
                     add_special_tokens=False,
                     return_offsets_mapping=True,
+                    return_tensors="np",
                 )
-                text_ids = list(encoding["input_ids"])
-                offsets = list(encoding["offset_mapping"])
+                text_ids = owned_token_ids_from_array(
+                    type(offset_tokenizer).__name__, encoding["input_ids"]
+                )
+                offsets = owned_offsets_from_array(
+                    type(offset_tokenizer).__name__,
+                    encoding["offset_mapping"],
+                    token_count=text_ids.size,
+                )
                 has_content_attribution = True
-
-            fallback = spans[-1][2:] if spans else (-1, False, False)
-            for token_id, (start, end) in zip(text_ids, offsets):
-                metadata: tuple[int, bool, bool] = fallback
-                for (
-                    span_start,
-                    span_end,
-                    span_message_index,
-                    span_sampled,
-                    span_content,
-                ) in spans:
-                    if span_start <= start < span_end:
-                        metadata = (
-                            span_message_index,
-                            span_sampled,
-                            span_content,
-                        )
-                        break
-
-                message_index, sampled, content = metadata
-                if has_content_attribution and end > start:
-                    # Preserve every body byte when a BPE token straddles a
-                    # scaffold/content boundary. This intentionally permits a
-                    # few adjacent scaffold bytes to share the content bit.
-                    content = any(
-                        span_content
-                        for span_start, span_end, _, _, span_content in spans
-                        if span_start < end and start < span_end
-                    )
-                elif not has_content_attribution:
-                    content = False
-                emit_ids(
-                    [token_id],
-                    message_index,
-                    sampled=sampled,
-                    content=content,
+            token_segments = np.searchsorted(segment_ends, offsets[:, 0], side="right")
+            np.minimum(token_segments, segment_ends.size - 1, out=token_segments)
+            token_indices = np.array(
+                segment_indices[token_segments], dtype=MESSAGE_INDICES_DTYPE, copy=True
+            )
+            token_sampled = np.array(
+                segment_sampled[token_segments], dtype=MASK_DTYPE, copy=True
+            )
+            if has_content_attribution:
+                last_segments = np.searchsorted(
+                    segment_ends,
+                    np.maximum(offsets[:, 1] - 1, offsets[:, 0]),
+                    side="right",
                 )
-
-            pending_text.clear()
+                np.minimum(last_segments, segment_ends.size - 1, out=last_segments)
+                content_prefix = np.empty(segment_content.size + 1, dtype=OFFSETS_DTYPE)
+                content_prefix[0] = 0
+                np.cumsum(segment_content, dtype=OFFSETS_DTYPE, out=content_prefix[1:])
+                token_content = (
+                    content_prefix[last_segments + 1] > content_prefix[token_segments]
+                )
+            else:
+                token_content = np.zeros(text_ids.size, dtype=MASK_DTYPE)
+            builder.emit_aligned(text_ids, token_indices, token_sampled, token_content)
 
         def emit_special(
             token_id: int,
@@ -551,11 +531,8 @@ class DeepSeekV4Renderer:
             content: bool = False,
         ) -> None:
             flush_text()
-            emit_ids(
-                [token_id],
-                message_index,
-                sampled=sampled,
-                content=content,
+            builder.emit_special(
+                token_id, message_index, is_sampled=sampled, is_content=content
             )
 
         def emit_text(
@@ -566,15 +543,15 @@ class DeepSeekV4Renderer:
             content: bool = False,
         ) -> None:
             if text:
-                pending_text.append((text, message_index, sampled, content))
+                pending_texts.append(text)
+                pending_indices.append(message_index)
+                pending_sampled.append(sampled)
+                pending_content.append(content)
 
         if add_bos:
             emit_special(self._bos, -1)
         if add_effort_prompt and self.config.enable_thinking:
-            emit_text(
-                _REASONING_EFFORT_PROMPTS[self.config.reasoning_effort],
-                -1,
-            )
+            emit_text(_REASONING_EFFORT_PROMPTS[self.config.reasoning_effort], -1)
 
         last_query_index = -1
         for index, message in enumerate(logical_messages):
@@ -625,18 +602,10 @@ class DeepSeekV4Renderer:
                         emit_text("\n\n", block.message_index)
                     if block.kind == "tool_result":
                         emit_text("<tool_result>", block.message_index)
-                        emit_text(
-                            block.content,
-                            block.message_index,
-                            content=True,
-                        )
+                        emit_text(block.content, block.message_index, content=True)
                         emit_text("</tool_result>", block.message_index)
                     else:
-                        emit_text(
-                            block.content,
-                            block.message_index,
-                            content=True,
-                        )
+                        emit_text(block.content, block.message_index, content=True)
 
             elif role == "latest_reminder":
                 emit_special(self._latest_reminder, msg_idx)
@@ -653,52 +622,30 @@ class DeepSeekV4Renderer:
                 )
                 if keep_reasoning:
                     emit_text(
-                        message.reasoning_content,
-                        msg_idx,
-                        sampled=True,
-                        content=True,
+                        message.reasoning_content, msg_idx, sampled=True, content=True
                     )
-                    emit_special(
-                        self._think_end,
-                        msg_idx,
-                        sampled=True,
-                        content=True,
-                    )
+                    emit_special(self._think_end, msg_idx, sampled=True, content=True)
 
-                emit_text(
-                    message.content,
-                    msg_idx,
-                    sampled=True,
-                    content=True,
-                )
+                emit_text(message.content, msg_idx, sampled=True, content=True)
                 if message.tool_calls:
                     rendered_calls = "\n".join(
                         self._render_tool_call(call) for call in message.tool_calls
                     )
                     emit_text(
-                        f"\n\n<{_DSML}tool_calls>\n{rendered_calls}\n"
-                        f"</{_DSML}tool_calls>",
+                        f"\n\n<{_DSML}tool_calls>\n{rendered_calls}\n</{_DSML}tool_calls>",
                         msg_idx,
                         sampled=True,
                         content=True,
                     )
                 if not message.wo_eos:
-                    emit_special(
-                        self._eos,
-                        msg_idx,
-                        sampled=True,
-                        content=True,
-                    )
+                    emit_special(self._eos, msg_idx, sampled=True, content=True)
 
             else:
                 raise ValueError(f"Unsupported DeepSeek V4 role: {role!r}")
 
             if tools and index == tool_target:
                 emit_text("\n\n" + self._render_tools(tools), msg_idx)
-            if message.response_format is not None and role in {
-                "system",
-                "developer",
-            }:
+            if message.response_format is not None and role in {"system", "developer"}:
                 emit_text(
                     "\n\n## Response Format:\n\n"
                     "You MUST strictly adhere to the following schema to reply:\n"
@@ -728,8 +675,7 @@ class DeepSeekV4Renderer:
             if task is not None:
                 if task not in self._task_ids:
                     raise ValueError(
-                        f"Invalid DeepSeek V4 task {task!r}; expected one of "
-                        f"{sorted(self._task_ids)}"
+                        f"Invalid DeepSeek V4 task {task!r}; expected one of {sorted(self._task_ids)}"
                     )
                 if task != "action":
                     emit_special(self._task_ids[task], transition_msg_idx)
@@ -756,13 +702,10 @@ class DeepSeekV4Renderer:
             )
 
         flush_text()
-        return RenderedTokens(
-            token_ids=token_ids,
-            message_indices=message_indices,
-            sampled_mask=sampled_mask,
-            is_content=_content_mask_or_empty(self._tokenizer, is_content),
+        return builder.finish(
             message_roles=[message.get("role") or "" for message in messages],
             message_tool_names=extract_message_tool_names(messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -771,16 +714,14 @@ class DeepSeekV4Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-    ) -> list[int]:
+    ) -> np.ndarray:
         return self.render(
-            messages,
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
         ).token_ids
 
     def parse_response(
         self,
-        token_ids: list[int],
+        token_ids: np.ndarray,
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002
     ) -> ParsedResponse:
@@ -798,14 +739,14 @@ class DeepSeekV4Renderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002
     ) -> RenderedTokens | None:
         if (
-            not previous_prompt_ids
+            previous_prompt_ids.size == 0
             or not new_messages
             or reject_assistant_in_extension(new_messages)
         ):
@@ -842,17 +783,24 @@ class DeepSeekV4Renderer:
         except ValueError:
             return None
 
-        prior_length = len(previous_ids)
-        return RenderedTokens(
-            token_ids=previous_ids + extension.token_ids,
-            message_indices=[-1] * prior_length + extension.message_indices,
-            sampled_mask=[False] * (prior_length + len(extension.token_ids)),
-            is_content=_content_mask_or_empty(
-                self._tokenizer,
-                [False] * prior_length + extension.is_content,
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        builder.prepend_prior(previous_ids)
+        builder.emit_aligned(
+            extension.token_ids,
+            extension.message_indices,
+            np.zeros(extension.token_ids.size, dtype=MASK_DTYPE),
+            (
+                extension.is_content
+                if extension.is_content.size
+                else np.zeros(extension.token_ids.size, dtype=MASK_DTYPE)
             ),
+        )
+        return builder.finish(
             message_roles=extension.message_roles,
             message_tool_names=extension.message_tool_names,
+            content_available=self._offset_tokenizer is not None,
         )
 
 

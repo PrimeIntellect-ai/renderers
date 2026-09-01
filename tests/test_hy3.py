@@ -12,10 +12,17 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import numpy as np
 import pytest
 
 from renderers import Hy3RendererConfig, create_renderer
 from renderers.base import ToolCallParseStatus, load_tokenizer
+from renderers.token_arrays import (
+    FixedWidthArrayBuilder,
+    TOKEN_IDS_DTYPE,
+    encode_token_ids,
+    owned_token_ids_from_array,
+)
 
 _MODEL = "tencent/Hy3"
 
@@ -52,6 +59,21 @@ def _renderer(**flags):
 
 def _decode(ids):
     return _tok().decode(ids, skip_special_tokens=False)
+
+
+def _append_token(token_ids: np.ndarray, token_id: int) -> np.ndarray:
+    builder = FixedWidthArrayBuilder(
+        TOKEN_IDS_DTYPE, initial_capacity=len(token_ids) + 1
+    )
+    builder.extend(token_ids)
+    builder.append(token_id)
+    return builder.finish()
+
+
+def _empty_token_ids() -> np.ndarray:
+    values = np.empty(0, dtype=TOKEN_IDS_DTYPE)
+    values.flags.writeable = False
+    return values
 
 
 # ── generation-prompt polarity ─────────────────────────────────────────
@@ -106,9 +128,8 @@ def test_parse_low_mode_inference_stream():
     it with ``</think>`` the model emits itself (the ``<think>`` opener was in
     the prompt)."""
     r = _renderer(reasoning_effort="low")
-    comp = _tok().encode(
-        "Let me work it out." + _THINK_END + "It is 4." + _EOS,
-        add_special_tokens=False,
+    comp = encode_token_ids(
+        _tok(), "Let me work it out." + _THINK_END + "It is 4." + _EOS
     )
     parsed = r.parse_response(comp)
     assert parsed.reasoning_content == "Let me work it out."
@@ -120,7 +141,7 @@ def test_parse_no_think_inference_stream():
     """In no_think mode the completion is the bare answer (both think tokens
     were prefilled into the prompt)."""
     r = _renderer()
-    comp = _tok().encode("It is 4." + _EOS, add_special_tokens=False)
+    comp = encode_token_ids(_tok(), "It is 4." + _EOS)
     parsed = r.parse_response(comp)
     assert parsed.content == "It is 4."
     assert parsed.reasoning_content is None
@@ -130,12 +151,12 @@ def test_parse_tool_call_stream_with_schema():
     """A tool-call completion parses name + typed args; the schema keeps a
     string arg verbatim (status OK, no JSON fallback)."""
     r = _renderer()
-    comp = _tok().encode(
+    comp = encode_token_ids(
+        _tok(),
         "<tool_calls:opensource>\n<tool_call:opensource>get_weather<tool_sep:opensource>\n"
         "<arg_key:opensource>city</arg_key:opensource>\n"
         "<arg_value:opensource>Paris</arg_value:opensource>\n"
         "</tool_call:opensource>\n</tool_calls:opensource>" + _EOS,
-        add_special_tokens=False,
     )
     parsed = r.parse_response(comp, tools=TOOLS)
     assert len(parsed.tool_calls) == 1
@@ -148,11 +169,11 @@ def test_parse_tool_call_stream_with_schema():
 
 def test_parse_unclosed_tool_call_is_flagged():
     r = _renderer()
-    comp = _tok().encode(
+    comp = encode_token_ids(
+        _tok(),
         "<tool_calls:opensource>\n<tool_call:opensource>get_weather<tool_sep:opensource>\n"
         "<arg_key:opensource>city</arg_key:opensource>\n"
         "<arg_value:opensource>Paris</arg_value:opensource>\n",
-        add_special_tokens=False,
     )
     parsed = r.parse_response(comp)
     assert len(parsed.tool_calls) == 1
@@ -161,13 +182,13 @@ def test_parse_unclosed_tool_call_is_flagged():
 
 def test_parse_content_before_tool_call_preserved():
     r = _renderer()
-    comp = _tok().encode(
+    comp = encode_token_ids(
+        _tok(),
         "Let me check."
         "<tool_calls:opensource>\n<tool_call:opensource>get_weather<tool_sep:opensource>\n"
         "<arg_key:opensource>city</arg_key:opensource>\n"
         "<arg_value:opensource>Paris</arg_value:opensource>\n"
         "</tool_call:opensource>\n</tool_calls:opensource>" + _EOS,
-        add_special_tokens=False,
     )
     parsed = r.parse_response(comp, tools=TOOLS)
     assert parsed.content == "Let me check."
@@ -202,9 +223,12 @@ def test_tool_group_not_reopened_after_plain_assistant():
         tools=TOOLS,
         add_generation_prompt=True,
         tokenize=True,
-        return_dict=False,
+        return_dict=True,
+        return_tensors="np",
     )
-    assert ours == list(theirs)
+    assert np.array_equal(
+        ours, owned_token_ids_from_array("template input_ids", theirs["input_ids"][0])
+    )
 
 
 # ── preserved_thinking history retention ─────────────────────────────────
@@ -252,9 +276,9 @@ def test_effective_retention_defaults_conservative():
 
 
 def test_preserved_thinking_conflict_raises():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="conflicts"):
         Hy3RendererConfig(preserved_thinking=True, thinking_retention="tool_cycle")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="conflicts"):
         Hy3RendererConfig(preserved_thinking=False, thinking_retention="all")
 
 
@@ -280,13 +304,13 @@ def test_bridge_default_config_with_tools_extends_across_user_turn():
     r = _renderer()
     prev = [{"role": "user", "content": "Weather?"}]
     pp = r.render_ids(prev, tools=TOOLS, add_generation_prompt=True)
-    pc = list(r.render_ids([*prev, _BRIDGE_ASST], tools=TOOLS)[len(pp) :])
+    pc = r.render_ids([*prev, _BRIDGE_ASST], tools=TOOLS)[len(pp) :]
 
     bridged = r.bridge_to_next_turn(pp, pc, _BRIDGE_EXT, tools=TOOLS)
     fresh = r.render_ids(
         [*prev, _BRIDGE_ASST, *_BRIDGE_EXT], tools=TOOLS, add_generation_prompt=True
     )
-    assert bridged is not None and bridged.token_ids == fresh
+    assert bridged is not None and np.array_equal(bridged.token_ids, fresh)
 
 
 def test_bridge_default_config_without_tools_declines_at_user_turn():
@@ -295,7 +319,7 @@ def test_bridge_default_config_without_tools_declines_at_user_turn():
     r = _renderer()
     prev = [{"role": "user", "content": "Q1"}]
     pp = r.render_ids(prev, add_generation_prompt=True)
-    pc = list(r.render_ids([*prev, {"role": "assistant", "content": "A1"}])[len(pp) :])
+    pc = r.render_ids([*prev, {"role": "assistant", "content": "A1"}])[len(pp) :]
     assert r.bridge_to_next_turn(pp, pc, [{"role": "user", "content": "Q2"}]) is None
 
 
@@ -306,7 +330,7 @@ def test_bridge_explicit_tool_cycle_declines_at_user_turn_despite_tools():
     r = _renderer(thinking_retention="tool_cycle")
     prev = [{"role": "user", "content": "Weather?"}]
     pp = r.render_ids(prev, tools=TOOLS, add_generation_prompt=True)
-    pc = list(r.render_ids([*prev, _BRIDGE_ASST], tools=TOOLS)[len(pp) :])
+    pc = r.render_ids([*prev, _BRIDGE_ASST], tools=TOOLS)[len(pp) :]
     assert r.bridge_to_next_turn(pp, pc, _BRIDGE_EXT, tools=TOOLS) is None
 
 
@@ -360,9 +384,9 @@ def test_fallback_strategy_bridge_matches_full_render():
     prior = [{"role": "user", "content": "Hi."}]
     pp = r.render_ids(prior, add_generation_prompt=True)
     full = r.render_ids([*prior, {"role": "assistant", "content": "Hello!"}])
-    pc = list(full[len(pp) :])
-    if not pc or pc[-1] != eos:
-        pc = pc + [eos]
+    pc = full[len(pp) :]
+    if pc.size == 0 or pc[-1] != eos:
+        pc = _append_token(pc, eos)
 
     bridged = r.bridge_to_next_turn(pp, pc, [{"role": "tool", "content": "result"}])
     assert bridged is not None
@@ -371,30 +395,31 @@ def test_fallback_strategy_bridge_matches_full_render():
     assert _ASSISTANT not in _decode(bridged.token_ids[len(pp) + len(pc) :])
 
 
-# ── tool-call token_span reporting ───────────────────────────────────────
+# ── packed tool-call span reporting ──────────────────────────────────────
 
 
-def test_tool_call_token_span_indexes_stripped_stream():
-    """``token_span`` must slice the stop-stripped completion back to the
+def test_tool_call_packed_span_indexes_stripped_stream():
+    """The packed span must slice the stop-stripped completion back to the
     <tool_call>…</tool_call> block, accounting for the reasoning + leading
     content stripped before parsing."""
     from renderers.parsing import _strip_stop_tokens
 
     r = _renderer(reasoning_effort="low")
     tok = _tok()
-    comp = tok.encode(
+    comp = encode_token_ids(
+        tok,
         "Let me think." + _THINK_END + "Checking now."
         "<tool_calls:opensource>\n<tool_call:opensource>get_weather<tool_sep:opensource>\n"
         "<arg_key:opensource>city</arg_key:opensource>\n"
         "<arg_value:opensource>Paris</arg_value:opensource>\n"
         "</tool_call:opensource>\n</tool_calls:opensource>" + _EOS,
-        add_special_tokens=False,
     )
     parsed = r.parse_response(comp, tools=TOOLS)
     tc = parsed.tool_calls[0]
     assert tc.status is ToolCallParseStatus.OK
     stripped = _strip_stop_tokens(comp, {tok.convert_tokens_to_ids(_EOS)})
-    s, e = tc.token_span
+    s = int(parsed.tool_call_token_spans[0, 0])
+    e = int(parsed.tool_call_token_spans[0, 1])
     assert stripped[s] == tok.convert_tokens_to_ids("<tool_call:opensource>")
     assert stripped[e - 1] == tok.convert_tokens_to_ids("</tool_call:opensource>")
     # The reported block decodes to exactly this call, no reasoning/content leak.
@@ -421,7 +446,7 @@ def test_bridge_tool_cycle_matches_full_render():
     }
     prev = [{"role": "user", "content": "Weather?"}]
     pp = r.render_ids(prev, add_generation_prompt=True)
-    pc = list(r.render_ids([*prev, asst])[len(pp) :])
+    pc = r.render_ids([*prev, asst])[len(pp) :]
     assert pc[-1] == eos  # tool-call turn closes with eos
 
     bridged = r.bridge_to_next_turn(pp, pc, [{"role": "tool", "content": '{"t": 20}'}])
@@ -429,7 +454,7 @@ def test_bridge_tool_cycle_matches_full_render():
         [*prev, asst, {"role": "tool", "content": '{"t": 20}'}],
         add_generation_prompt=True,
     )
-    assert bridged is not None and bridged.token_ids == fresh
+    assert bridged is not None and np.array_equal(bridged.token_ids, fresh)
 
 
 def test_bridge_tool_groups_across_user_turn_match_full_render():
@@ -447,7 +472,7 @@ def test_bridge_tool_groups_across_user_turn_match_full_render():
     }
     prev = [{"role": "user", "content": "Weather?"}]
     pp = r.render_ids(prev, tools=TOOLS, add_generation_prompt=True)
-    pc = list(r.render_ids([*prev, asst], tools=TOOLS)[len(pp) :])
+    pc = r.render_ids([*prev, asst], tools=TOOLS)[len(pp) :]
 
     ext = [
         {"role": "tool", "content": "sunny"},
@@ -456,7 +481,7 @@ def test_bridge_tool_groups_across_user_turn_match_full_render():
     ]
     bridged = r.bridge_to_next_turn(pp, pc, ext, tools=TOOLS)
     fresh = r.render_ids([*prev, asst, *ext], tools=TOOLS, add_generation_prompt=True)
-    assert bridged is not None and bridged.token_ids == fresh
+    assert bridged is not None and np.array_equal(bridged.token_ids, fresh)
 
 
 def test_bridge_declines_on_empty_completion():
@@ -481,6 +506,8 @@ def test_bridge_declines_on_empty_completion():
     prompt = rf.render_ids(base, add_generation_prompt=True)  # fallback → no gen prompt
     assert prompt[-1] == _tok().convert_tokens_to_ids("</tool_responses:opensource>")
     assert (
-        rf.bridge_to_next_turn(prompt, [], [{"role": "tool", "content": "more"}])
+        rf.bridge_to_next_turn(
+            prompt, _empty_token_ids(), [{"role": "tool", "content": "more"}]
+        )
         is None
     )

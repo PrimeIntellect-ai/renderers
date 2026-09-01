@@ -17,14 +17,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import numpy as np
+
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
     Tokenizer,
-    _content_mask_or_empty,
-    attribute_text_segments,
+    _get_offset_tokenizer,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -37,6 +38,7 @@ from renderers.configs import (
     Nemotron35RendererConfig,
 )
 from renderers.parsing import parse_qwen35
+from renderers.token_arrays import RenderedTokenBuilder, TextSegmentBuilder
 
 # ---------------------------------------------------------------------------
 # Tool system prompt constants
@@ -122,6 +124,7 @@ class Nemotron3Renderer:
         config: Nemotron3RendererConfig | Nemotron3UltraRendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         cfg = config or type(self)._config_cls()
         self.config = cfg
         if not cfg.truncate_history_thinking:
@@ -131,8 +134,7 @@ class Nemotron3Renderer:
         else:
             implied_thinking_retention = "tool_cycle"
         self.effective_thinking_retention = resolve_thinking_retention(
-            cfg,
-            implied_thinking_retention,
+            cfg, implied_thinking_retention
         )
 
         # Resolve the per-variant reasoning-effort hint appended to the last
@@ -175,11 +177,6 @@ class Nemotron3Renderer:
             )
         return tid
 
-    def _encode(self, text: str) -> list[int]:
-        if not text:
-            return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
-
     # ------------------------------------------------------------------
     # Content rendering
     # ------------------------------------------------------------------
@@ -215,10 +212,7 @@ class Nemotron3Renderer:
         # envelope by unwrapping before formatting.
         if "function" in tool and isinstance(tool["function"], dict):
             tool = tool["function"]
-        lines = [
-            "<function>",
-            f"<name>{tool['name']}</name>",
-        ]
+        lines = ["<function>", f"<name>{tool['name']}</name>"]
         description = tool.get("description", "").strip()
         if description:
             lines.append(f"<description>{description}</description>")
@@ -299,47 +293,12 @@ class Nemotron3Renderer:
                 return -1
             return i + idx_offset
 
-        tokens: list[int] = []
-        indices: list[int] = []
-        sampled: list[bool] = []
-        content_mask: list[bool] = []
-
-        def emit_ids(
-            ids: list[int], msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
-
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            emit_ids(
-                self._encode(text),
-                msg_idx,
-                is_sampled=is_sampled,
-                is_content=is_content,
-            )
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
-        ) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                tokens.append(tok_id)
-                indices.append(msg_idx)
-                sampled.append(is_sampled)
-                content_mask.append(is_content)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
         # ── 1. System message + optional tools ──────────────────────
         first_is_system = messages[0].get("role") == "system"
@@ -372,12 +331,13 @@ class Nemotron3Renderer:
 
             # Body = caller's system text only; tools block (header, per-
             # tool XML, footer, instructions) is scaffold.
-            sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+            sys_segments = TextSegmentBuilder()
+            sys_segments.append("system\n", is_content=False)
             if sys_content:
-                sys_segments.append((sys_content, True))
-                sys_segments.append(("\n\n", False))
-            sys_segments.append((tools_block, False))
-            emit_text_segments(sys_segments, sys_idx, is_sampled=False)
+                sys_segments.append(sys_content, is_content=True)
+                sys_segments.append("\n\n", is_content=False)
+            sys_segments.append(tools_block, is_content=False)
+            emit_text_segments(sys_segments.finish(), sys_idx, is_sampled=False)
             emit_special(self._im_end, sys_idx, is_sampled=False, is_content=False)
             emit_text("\n", sys_idx, is_sampled=False, is_content=False)
 
@@ -385,10 +345,11 @@ class Nemotron3Renderer:
             sys_idx = orig_idx(0)
             sys_content = self._render_content(messages[0].get("content"))
             emit_special(self._im_start, sys_idx, is_sampled=False, is_content=False)
-            sys_segments2: list[tuple[str, bool]] = [("system\n", False)]
+            sys_segments2 = TextSegmentBuilder()
+            sys_segments2.append("system\n", is_content=False)
             if sys_content:
-                sys_segments2.append((sys_content, True))
-            emit_text_segments(sys_segments2, sys_idx, is_sampled=False)
+                sys_segments2.append(sys_content, is_content=True)
+            emit_text_segments(sys_segments2.finish(), sys_idx, is_sampled=False)
             emit_special(self._im_end, sys_idx, is_sampled=False, is_content=False)
             emit_text("\n", sys_idx, is_sampled=False, is_content=False)
 
@@ -423,16 +384,19 @@ class Nemotron3Renderer:
                 emit_special(
                     self._im_start, msg_orig_idx, is_sampled=False, is_content=False
                 )
-                user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                user_segments = TextSegmentBuilder()
+                user_segments.append("user\n", is_content=False)
                 if content:
-                    user_segments.append((content, True))
+                    user_segments.append(content, is_content=True)
                 # Reasoning-effort hint rides on the LAST user message only,
                 # glued to the content so BPE sees them as one chunk (matching
                 # the template's ``content + '\n\n{reasoning effort: …}'``). It
                 # is template scaffold, not caller content → is_content=False.
                 if self._effort_hint and i == last_user_idx_norm:
-                    user_segments.append((self._effort_hint, False))
-                emit_text_segments(user_segments, msg_orig_idx, is_sampled=False)
+                    user_segments.append(self._effort_hint, is_content=False)
+                emit_text_segments(
+                    user_segments.finish(), msg_orig_idx, is_sampled=False
+                )
                 emit_special(
                     self._im_end, msg_orig_idx, is_sampled=False, is_content=False
                 )
@@ -480,13 +444,10 @@ class Nemotron3Renderer:
                 emit_special(self._think, -1, is_sampled=False, is_content=False)
                 emit_special(self._think_end, -1, is_sampled=False, is_content=False)
 
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in original_messages],
             message_tool_names=extract_message_tool_names(original_messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -495,18 +456,13 @@ class Nemotron3Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-    ) -> list[int]:
+    ) -> np.ndarray:
         return self.render(
-            messages,
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
         ).token_ids
 
     def parse_response(
-        self,
-        token_ids: list[int],
-        *,
-        tools: list[ToolSpec] | None = None,
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
     ) -> ParsedResponse:
         stop_ids = {self._im_end}
         if self._endoftext is not None:
@@ -530,14 +486,14 @@ class Nemotron3Renderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
         if (
-            not previous_prompt_ids
+            len(previous_prompt_ids) == 0
             or not new_messages
             or reject_assistant_in_extension(new_messages)
             # An active effort hint rides on the *last* user message. Appending
@@ -549,8 +505,7 @@ class Nemotron3Renderer:
             return None
 
         if should_rerender_for_thinking_retention(
-            self.effective_thinking_retention,
-            new_messages,
+            self.effective_thinking_retention, new_messages
         ):
             return None
 
@@ -566,10 +521,10 @@ class Nemotron3Renderer:
         if previous_ids is None:
             return None
 
-        ext: list[int] = []
-        ext_indices: list[int] = []
-        ext_sampled: list[bool] = []
-        ext_content: list[bool] = []
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
         # and ``sampled_mask`` (uniformly ``False`` — every token the
@@ -577,44 +532,9 @@ class Nemotron3Renderer:
         # something the model sampled). ``is_content`` follows the same
         # rules as in :meth:`render` so consumers can walk the trajectory
         # and read each step's own body mask.
-        def emit_special(
-            token_id: int,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ext.append(token_id)
-            ext_indices.append(msg_idx)
-            ext_sampled.append(is_sampled)
-            ext_content.append(is_content)
-
-        def emit_text(
-            text: str,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ids = self._encode(text)
-            ext.extend(ids)
-            ext_indices.extend([msg_idx] * len(ids))
-            ext_sampled.extend([is_sampled] * len(ids))
-            ext_content.extend([is_content] * len(ids))
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]],
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-        ) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                ext.append(tok_id)
-                ext_indices.append(msg_idx)
-                ext_sampled.append(is_sampled)
-                ext_content.append(is_content)
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
         emit_text("\n", -1)
 
@@ -625,18 +545,20 @@ class Nemotron3Renderer:
             content = self._render_content(msg.get("content"))
             if role == "user":
                 emit_special(self._im_start, i)
-                user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                user_segments = TextSegmentBuilder()
+                user_segments.append("user\n", is_content=False)
                 if content:
-                    user_segments.append((content, True))
-                emit_text_segments(user_segments, i)
+                    user_segments.append(content, is_content=True)
+                emit_text_segments(user_segments.finish(), i)
                 emit_special(self._im_end, i)
                 emit_text("\n", i)
             elif role == "system":
                 emit_special(self._im_start, i)
-                sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+                sys_segments = TextSegmentBuilder()
+                sys_segments.append("system\n", is_content=False)
                 if content:
-                    sys_segments.append((content, True))
-                emit_text_segments(sys_segments, i)
+                    sys_segments.append(content, is_content=True)
+                emit_text_segments(sys_segments.finish(), i)
                 emit_special(self._im_end, i)
                 emit_text("\n", i)
             elif role == "tool":
@@ -663,16 +585,10 @@ class Nemotron3Renderer:
             emit_special(self._think, -1)
             emit_special(self._think_end, -1)
 
-        total_len = len(previous_ids) + len(ext)
-        return RenderedTokens(
-            token_ids=previous_ids + ext,
-            message_indices=[-1] * len(previous_ids) + ext_indices,
-            sampled_mask=[False] * total_len,
-            is_content=_content_mask_or_empty(
-                self._tokenizer, [False] * len(previous_ids) + ext_content
-            ),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     # ------------------------------------------------------------------
@@ -836,9 +752,11 @@ class Nemotron3Renderer:
         # separator into this block.
 
         emit_special(self._tool_response, oi, is_sampled=False, is_content=False)
-        emit_text_segments(
-            [("\n", False), (content, True), ("\n", False)], oi, is_sampled=False
-        )
+        tool_segments = TextSegmentBuilder()
+        tool_segments.append("\n", is_content=False)
+        tool_segments.append(content, is_content=True)
+        tool_segments.append("\n", is_content=False)
+        emit_text_segments(tool_segments.finish(), oi, is_sampled=False)
         emit_special(self._tool_response_end, oi, is_sampled=False, is_content=False)
         # Nemotron 3: trailing \n after </tool_response>
         emit_text("\n", oi, is_sampled=False, is_content=False)

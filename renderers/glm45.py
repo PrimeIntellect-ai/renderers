@@ -13,14 +13,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import numpy as np
+
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
     Tokenizer,
-    _content_mask_or_empty,
-    attribute_text_segments,
+    _get_offset_tokenizer,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -28,6 +29,11 @@ from renderers.base import (
 )
 from renderers.configs import GLM45RendererConfig
 from renderers.parsing import parse_glm
+from renderers.token_arrays import (
+    RenderedTokenBuilder,
+    TextSegmentBuilder,
+    TOKEN_IDS_DTYPE,
+)
 
 _TOOLS_HEADER = (
     "\n# Tools\n\n"
@@ -53,16 +59,12 @@ _TOOLS_FOOTER = (
 class GLM45Renderer:
     """Deterministic message → token renderer for GLM-4.5 Air models."""
 
-    def __init__(
-        self,
-        tokenizer: Tokenizer,
-        config: GLM45RendererConfig | None = None,
-    ):
+    def __init__(self, tokenizer: Tokenizer, config: GLM45RendererConfig | None = None):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self.config = config or GLM45RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
-            self.config,
-            "all" if not self.config.enable_thinking else "tool_cycle",
+            self.config, "all" if not self.config.enable_thinking else "tool_cycle"
         )
 
         self._gmask = self._token_id("[gMASK]")
@@ -87,11 +89,6 @@ class GLM45Renderer:
             f"Special token {token!r} not found in tokenizer vocabulary"
         )
         return tid
-
-    def _encode(self, text: str) -> list[int]:
-        if not text:
-            return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
 
     @staticmethod
     def _visible_text(content: Any) -> str:
@@ -126,45 +123,12 @@ class GLM45Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        tokens: list[int] = []
-        indices: list[int] = []
-        sampled: list[bool] = []
-        content_mask: list[bool] = []
-
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            ids = self._encode(text)
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
-        ) -> None:
-            """Tokenize concatenated segments as one BPE pass; per-token
-            ``is_content`` follows each token's source segment.
-
-            Lets call sites express "this wrap + this body, joined the
-            same way as the chat template, but attributed separately"
-            without splitting the encode call (which could shift BPE
-            merges at the boundary)."""
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                tokens.append(tok_id)
-                indices.append(msg_idx)
-                sampled.append(is_sampled)
-                content_mask.append(is_content)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
         # ── Prefix ──────────────────────────────────────────────────
         emit_special(self._gmask, -1, is_sampled=False, is_content=False)
@@ -210,24 +174,24 @@ class GLM45Renderer:
                 emit_special(self._system, i, is_sampled=False, is_content=False)
                 # ``\n`` is the scaffold separator after the role tag;
                 # the body proper is the caller-provided content.
-                emit_text_segments(
-                    [("\n", False), (content, True)], i, is_sampled=False
-                )
+                system_segments = TextSegmentBuilder()
+                system_segments.append("\n", is_content=False)
+                system_segments.append(content, is_content=True)
+                emit_text_segments(system_segments.finish(), i, is_sampled=False)
 
             elif role == "user":
                 emit_special(
-                    self._user,
-                    i,
-                    is_sampled=closes_assistant_turn,
-                    is_content=False,
+                    self._user, i, is_sampled=closes_assistant_turn, is_content=False
                 )
                 # ``\n`` is scaffold; ``content`` is body; the optional
                 # ``/nothink`` suffix is scaffold the renderer injects
                 # when ``enable_thinking=False``.
-                user_segments: list[tuple[str, bool]] = [("\n", False), (content, True)]
+                user_segments = TextSegmentBuilder()
+                user_segments.append("\n", is_content=False)
+                user_segments.append(content, is_content=True)
                 if not self.config.enable_thinking and not content.endswith("/nothink"):
-                    user_segments.append(("/nothink", False))
-                emit_text_segments(user_segments, i, is_sampled=False)
+                    user_segments.append("/nothink", is_content=False)
+                emit_text_segments(user_segments.finish(), i, is_sampled=False)
 
             elif role == "assistant":
                 self._render_assistant(
@@ -258,13 +222,10 @@ class GLM45Renderer:
                 emit_special(self._think, -1, is_sampled=False, is_content=False)
                 emit_special(self._think_end, -1, is_sampled=False, is_content=False)
 
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -273,18 +234,13 @@ class GLM45Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-    ) -> list[int]:
+    ) -> np.ndarray:
         return self.render(
-            messages,
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
         ).token_ids
 
     def parse_response(
-        self,
-        token_ids: list[int],
-        *,
-        tools: list[ToolSpec] | None = None,
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
     ) -> ParsedResponse:
         return parse_glm(
             self._tokenizer,
@@ -306,41 +262,41 @@ class GLM45Renderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
         if (
-            not previous_prompt_ids
+            len(previous_prompt_ids) == 0
             or not new_messages
             or reject_assistant_in_extension(new_messages)
         ):
             return None
 
         if should_rerender_for_thinking_retention(
-            self.effective_thinking_retention,
-            new_messages,
+            self.effective_thinking_retention, new_messages
         ):
             return None
 
         # Same next-turn-marker scheme as GLM-5, but role markers are
         # followed by a literal ``\n`` in the prompt text.
-        previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
+        previous_ids = np.concatenate(
+            (previous_prompt_ids, previous_completion_ids), dtype=TOKEN_IDS_DTYPE
+        )
         stop_ids = {self._endoftext, self._user, self._observation}
-        if (
-            not previous_ids[len(previous_prompt_ids) :]
-            or previous_ids[-1] not in stop_ids
-        ):
-            previous_ids.append(self._endoftext)
+        if previous_completion_ids.size == 0 or int(previous_ids[-1]) not in stop_ids:
+            closed = np.empty(previous_ids.size + 1, dtype=TOKEN_IDS_DTYPE)
+            closed[:-1] = previous_ids
+            closed[-1] = self._endoftext
+            previous_ids = closed
 
-        last_prev = previous_ids[-1]
-
-        ext: list[int] = []
-        ext_indices: list[int] = []
-        ext_sampled: list[bool] = []
-        ext_content: list[bool] = []
+        last_prev = int(previous_ids[-1])
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
         # and ``sampled_mask`` (uniformly ``False`` — every token the
@@ -350,44 +306,9 @@ class GLM45Renderer:
         # and read each step's own body mask. Downstream consumers can
         # run :meth:`RenderedTokens.tokens_per_message` on the bridge
         # output to get per-new-message token counts without re-rendering.
-        def emit_special(
-            token_id: int,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ext.append(token_id)
-            ext_indices.append(msg_idx)
-            ext_sampled.append(is_sampled)
-            ext_content.append(is_content)
-
-        def emit_text(
-            text: str,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ids = self._encode(text)
-            ext.extend(ids)
-            ext_indices.extend([msg_idx] * len(ids))
-            ext_sampled.extend([is_sampled] * len(ids))
-            ext_content.extend([is_content] * len(ids))
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]],
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-        ) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                ext.append(tok_id)
-                ext_indices.append(msg_idx)
-                ext_sampled.append(is_sampled)
-                ext_content.append(is_content)
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
         # The opener-token of the first new_message may also serve as
         # the close of the previous assistant turn (when the model
@@ -410,30 +331,29 @@ class GLM45Renderer:
             if role == "user":
                 if not (i == 0 and last_prev == self._user):
                     emit_special(self._user, i)
-                user_segments: list[tuple[str, bool]] = [
-                    ("\n", False),
-                    (content, True),
-                ]
+                user_segments = TextSegmentBuilder()
+                user_segments.append("\n", is_content=False)
+                user_segments.append(content, is_content=True)
                 if not self.config.enable_thinking and not content.endswith("/nothink"):
-                    user_segments.append(("/nothink", False))
-                emit_text_segments(user_segments, i)
+                    user_segments.append("/nothink", is_content=False)
+                emit_text_segments(user_segments.finish(), i)
             elif role == "system":
                 emit_special(self._system, i)
-                emit_text_segments([("\n", False), (content, True)], i)
+                system_segments = TextSegmentBuilder()
+                system_segments.append("\n", is_content=False)
+                system_segments.append(content, is_content=True)
+                emit_text_segments(system_segments.finish(), i)
             elif role == "tool":
                 prev_is_tool = i > 0 and new_messages[i - 1].get("role") == "tool"
                 if i == 0 and last_prev == self._observation:
                     pass
                 elif not prev_is_tool:
                     emit_special(self._observation, i)
-                emit_text_segments(
-                    [
-                        ("\n<tool_response>\n", False),
-                        (content, True),
-                        ("\n</tool_response>", False),
-                    ],
-                    i,
-                )
+                tool_segments = TextSegmentBuilder()
+                tool_segments.append("\n<tool_response>\n", is_content=False)
+                tool_segments.append(content, is_content=True)
+                tool_segments.append("\n</tool_response>", is_content=False)
+                emit_text_segments(tool_segments.finish(), i)
             else:
                 return None
 
@@ -444,16 +364,10 @@ class GLM45Renderer:
             emit_special(self._think, -1)
             emit_special(self._think_end, -1)
 
-        total_len = len(previous_ids) + len(ext)
-        return RenderedTokens(
-            token_ids=previous_ids + ext,
-            message_indices=[-1] * len(previous_ids) + ext_indices,
-            sampled_mask=[False] * total_len,
-            is_content=_content_mask_or_empty(
-                self._tokenizer, [False] * len(previous_ids) + ext_content
-            ),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     def _render_assistant(
@@ -594,12 +508,8 @@ class GLM45Renderer:
                 is_content=False,
             )
 
-        emit_text_segments(
-            [
-                ("\n<tool_response>\n", False),
-                (content, True),
-                ("\n</tool_response>", False),
-            ],
-            msg_idx,
-            is_sampled=False,
-        )
+        tool_segments = TextSegmentBuilder()
+        tool_segments.append("\n<tool_response>\n", is_content=False)
+        tool_segments.append(content, is_content=True)
+        tool_segments.append("\n</tool_response>", is_content=False)
+        emit_text_segments(tool_segments.finish(), msg_idx, is_sampled=False)

@@ -6,15 +6,15 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import numpy as np
+
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
     Tokenizer,
-    _content_mask_or_empty,
     _get_offset_tokenizer,
-    attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -23,6 +23,7 @@ from renderers.base import (
 )
 from renderers.configs import PrimeQwen3RendererConfig
 from renderers.parsing import parse_qwen35
+from renderers.token_arrays import RenderedTokenBuilder, TextSegmentBuilder
 
 _DEFAULT_TOOL_SYSTEM = "You are Qwen, a helpful AI assistant that can interact with a computer to solve tasks."
 _TOOLS_HEADER = "\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>"
@@ -48,10 +49,7 @@ _TOOLS_FOOTER = (
 )
 
 
-def _render_extra_keys(
-    value: Any,
-    handled_keys: frozenset[str],
-) -> str:
+def _render_extra_keys(value: Any, handled_keys: frozenset[str]) -> str:
     if not isinstance(value, Mapping):
         return ""
 
@@ -102,105 +100,30 @@ def _tool_definition(tool: ToolSpec) -> str:
                             + "</description>"
                         )
                     rendered += _render_extra_keys(
-                        param_fields,
-                        frozenset({"name", "type", "description"}),
+                        param_fields, frozenset({"name", "type", "description"})
                     )
                 rendered += "\n</parameter>"
-        rendered += _render_extra_keys(
-            parameters,
-            frozenset({"type", "properties"}),
-        )
+        rendered += _render_extra_keys(parameters, frozenset({"type", "properties"}))
 
     rendered += "\n</parameters>"
     rendered += _render_extra_keys(
-        raw_tool,
-        frozenset({"type", "name", "description", "parameters"}),
+        raw_tool, frozenset({"type", "name", "description", "parameters"})
     )
     rendered += "\n</function>"
     return rendered
-
-
-class _TokenBuilder:
-    def __init__(self, tokenizer: Tokenizer):
-        self.tokenizer = tokenizer
-        self.token_ids: list[int] = []
-        self.message_indices: list[int] = []
-        self.sampled_mask: list[bool] = []
-        self.is_content: list[bool] = []
-
-    def emit_special(
-        self,
-        token_id: int,
-        message_index: int,
-        *,
-        sampled: bool,
-        content: bool,
-    ) -> None:
-        self.token_ids.append(token_id)
-        self.message_indices.append(message_index)
-        self.sampled_mask.append(sampled)
-        self.is_content.append(content)
-
-    def emit_text(
-        self,
-        text: str,
-        message_index: int,
-        *,
-        sampled: bool,
-        content: bool,
-    ) -> None:
-        if not text:
-            return
-        token_ids = self.tokenizer.encode(text, add_special_tokens=False)
-        self.token_ids.extend(token_ids)
-        self.message_indices.extend([message_index] * len(token_ids))
-        self.sampled_mask.extend([sampled] * len(token_ids))
-        self.is_content.extend([content] * len(token_ids))
-
-    def emit_segments(
-        self,
-        segments: list[tuple[str, bool]],
-        message_index: int,
-        *,
-        sampled: bool,
-    ) -> None:
-        for token_id, content in attribute_text_segments(self.tokenizer, segments):
-            self.token_ids.append(token_id)
-            self.message_indices.append(message_index)
-            self.sampled_mask.append(sampled)
-            self.is_content.append(content)
-
-    def emit_assistant_segments(
-        self,
-        segments: list[tuple[str, bool]],
-        message_index: int,
-    ) -> None:
-        for token_id, content in attribute_text_segments(self.tokenizer, segments):
-            self.token_ids.append(token_id)
-            self.message_indices.append(message_index)
-            self.sampled_mask.append(content)
-            self.is_content.append(content)
-
-    def prepend_prior(self, token_ids: list[int]) -> None:
-        self.token_ids.extend(token_ids)
-        self.message_indices.extend([-1] * len(token_ids))
-        self.sampled_mask.extend([False] * len(token_ids))
-        self.is_content.extend([False] * len(token_ids))
 
 
 class PrimeQwen3Renderer:
     """Renderer for PrimeIntellect/Qwen3-0.6B and Qwen3-1.7B."""
 
     def __init__(
-        self,
-        tokenizer: Tokenizer,
-        config: PrimeQwen3RendererConfig | None = None,
+        self, tokenizer: Tokenizer, config: PrimeQwen3RendererConfig | None = None
     ):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self.config = config or PrimeQwen3RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
-            self.config,
-            "all",
+            self.config, "all"
         )
 
         self._im_start = self._token_id("<|im_start|>")
@@ -239,44 +162,38 @@ class PrimeQwen3Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = _TokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         first_is_system = messages[0].get("role") == "system"
         loop_start = 1 if first_is_system else 0
 
         if first_is_system or tools:
             system_index = 0 if first_is_system else -1
             builder.emit_special(
-                self._im_start,
-                system_index,
-                sampled=False,
-                content=False,
+                self._im_start, system_index, is_sampled=False, is_content=False
             )
-            system_segments: list[tuple[str, bool]] = [("system\n", False)]
+            system_segments = TextSegmentBuilder()
+            system_segments.append("system\n", is_content=False)
             if first_is_system:
-                system_segments.append((self._content(messages[0]), True))
+                system_segments.append(self._content(messages[0]), is_content=True)
             else:
-                system_segments.append((_DEFAULT_TOOL_SYSTEM, False))
+                system_segments.append(_DEFAULT_TOOL_SYSTEM, is_content=False)
 
             if tools:
                 tools_text = _TOOLS_HEADER
                 for tool in tools:
                     tools_text += _tool_definition(tool)
                 tools_text += _TOOLS_FOOTER
-                system_segments.append((tools_text, False))
+                system_segments.append(tools_text, is_content=False)
 
-            builder.emit_segments(system_segments, system_index, sampled=False)
+            builder.emit_text_segments(
+                system_segments.finish(), system_index, is_sampled=False
+            )
             builder.emit_special(
-                self._im_end,
-                system_index,
-                sampled=False,
-                content=False,
+                self._im_end, system_index, is_sampled=False, is_content=False
             )
-            builder.emit_text(
-                "\n",
-                system_index,
-                sampled=False,
-                content=False,
-            )
+            builder.emit_text("\n", system_index, is_sampled=False, is_content=False)
 
         loop_messages = messages[loop_start:]
         for loop_index, message in enumerate(loop_messages):
@@ -285,11 +202,7 @@ class PrimeQwen3Renderer:
             if role == "assistant":
                 tool_calls = message.get("tool_calls")
                 if tool_calls:
-                    self._render_assistant_tool_calls(
-                        message,
-                        message_index,
-                        builder,
-                    )
+                    self._render_assistant_tool_calls(message, message_index, builder)
                 else:
                     self._render_assistant(message, message_index, builder)
             elif role == "tool":
@@ -314,135 +227,87 @@ class PrimeQwen3Renderer:
         if add_generation_prompt:
             self._render_generation_prompt(builder)
 
-        return RenderedTokens(
-            token_ids=builder.token_ids,
-            message_indices=builder.message_indices,
-            sampled_mask=(
-                builder.sampled_mask
-                if _get_offset_tokenizer(self._tokenizer) is not None
-                else []
-            ),
-            is_content=_content_mask_or_empty(self._tokenizer, builder.is_content),
+        attribution_available = self._offset_tokenizer is not None
+        return builder.finish(
             message_roles=[message.get("role") or "" for message in messages],
             message_tool_names=extract_message_tool_names(messages),
+            sampled_available=attribution_available,
+            content_available=attribution_available,
         )
 
     def _render_history_message(
-        self,
-        message: Message,
-        message_index: int,
-        builder: _TokenBuilder,
+        self, message: Message, message_index: int, builder: RenderedTokenBuilder
     ) -> None:
         role = message.get("role", "")
         builder.emit_special(
-            self._im_start,
-            message_index,
-            sampled=False,
-            content=False,
+            self._im_start, message_index, is_sampled=False, is_content=False
         )
-        builder.emit_segments(
-            [(role + "\n", False), (self._content(message), True)],
-            message_index,
-            sampled=False,
-        )
+        segments = TextSegmentBuilder()
+        segments.append(role + "\n", is_content=False)
+        segments.append(self._content(message), is_content=True)
+        builder.emit_text_segments(segments.finish(), message_index, is_sampled=False)
         builder.emit_special(
-            self._im_end,
-            message_index,
-            sampled=False,
-            content=False,
+            self._im_end, message_index, is_sampled=False, is_content=False
         )
-        builder.emit_text(
-            "\n",
-            message_index,
-            sampled=False,
-            content=False,
-        )
+        builder.emit_text("\n", message_index, is_sampled=False, is_content=False)
 
     def _render_assistant(
-        self,
-        message: Message,
-        message_index: int,
-        builder: _TokenBuilder,
+        self, message: Message, message_index: int, builder: RenderedTokenBuilder
     ) -> None:
         content = self._content(message)
         builder.emit_special(
-            self._im_start,
-            message_index,
-            sampled=False,
-            content=False,
+            self._im_start, message_index, is_sampled=False, is_content=False
         )
 
         if "reasoning_content" in message:
             builder.emit_text(
-                "assistant\n",
-                message_index,
-                sampled=False,
-                content=False,
+                "assistant\n", message_index, is_sampled=False, is_content=False
             )
             builder.emit_special(
-                self._think,
-                message_index,
-                sampled=True,
-                content=True,
+                self._think, message_index, is_sampled=True, is_content=True
             )
             reasoning = message.get("reasoning_content")
             if reasoning:
                 builder.emit_text(
                     str(reasoning).strip(),
                     message_index,
-                    sampled=True,
-                    content=True,
+                    is_sampled=True,
+                    is_content=True,
                 )
             builder.emit_special(
-                self._think_end,
-                message_index,
-                sampled=True,
-                content=True,
+                self._think_end, message_index, is_sampled=True, is_content=True
             )
             if content.strip():
                 builder.emit_text(
                     "\n" + content.strip(),
                     message_index,
-                    sampled=True,
-                    content=True,
+                    is_sampled=True,
+                    is_content=True,
                 )
         else:
-            builder.emit_assistant_segments(
-                [("assistant\n", False), (content, True)],
-                message_index,
-            )
+            segments = TextSegmentBuilder()
+            segments.append("assistant\n", is_content=False)
+            segments.append(content, is_content=True)
+            builder.emit_assistant_segments(segments.finish(), message_index)
 
         builder.emit_special(
-            self._im_end,
-            message_index,
-            sampled=True,
-            content=True,
+            self._im_end, message_index, is_sampled=True, is_content=True
         )
-        builder.emit_text(
-            "\n",
-            message_index,
-            sampled=False,
-            content=False,
-        )
+        builder.emit_text("\n", message_index, is_sampled=False, is_content=False)
 
     def _render_assistant_tool_calls(
-        self,
-        message: Message,
-        message_index: int,
-        builder: _TokenBuilder,
+        self, message: Message, message_index: int, builder: RenderedTokenBuilder
     ) -> None:
         builder.emit_special(
-            self._im_start,
-            message_index,
-            sampled=False,
-            content=False,
+            self._im_start, message_index, is_sampled=False, is_content=False
         )
         content = message.get("content")
         trimmed_content = content.strip() if isinstance(content, str) else ""
-        opener_segments = [("assistant\n", False)]
+        opener_segments = TextSegmentBuilder()
+        opener_segments.append("assistant\n", is_content=False)
         if trimmed_content:
-            opener_segments.append((trimmed_content + "\n\n", True))
-        builder.emit_assistant_segments(opener_segments, message_index)
+            opener_segments.append(trimmed_content + "\n\n", is_content=True)
+        builder.emit_assistant_segments(opener_segments.finish(), message_index)
 
         tool_calls = message.get("tool_calls") or []
         for tool_call_index, tool_call in enumerate(tool_calls):
@@ -455,10 +320,7 @@ class PrimeQwen3Renderer:
                 raise TypeError("Tool calls must be mappings.")
 
             builder.emit_special(
-                self._tool_call,
-                message_index,
-                sampled=True,
-                content=True,
+                self._tool_call, message_index, is_sampled=True, is_content=True
             )
             call_text = "\n<function=" + str(raw_call.get("name", "")) + ">\n"
             if "arguments" in raw_call:
@@ -491,112 +353,58 @@ class PrimeQwen3Renderer:
                     )
             call_text += "</function>\n"
             builder.emit_text(
-                call_text,
-                message_index,
-                sampled=True,
-                content=True,
+                call_text, message_index, is_sampled=True, is_content=True
             )
             builder.emit_special(
-                self._tool_call_end,
-                message_index,
-                sampled=True,
-                content=True,
+                self._tool_call_end, message_index, is_sampled=True, is_content=True
             )
             if tool_call_index < len(tool_calls) - 1:
-                builder.emit_text(
-                    "\n",
-                    message_index,
-                    sampled=True,
-                    content=True,
-                )
+                builder.emit_text("\n", message_index, is_sampled=True, is_content=True)
 
         builder.emit_special(
-            self._im_end,
-            message_index,
-            sampled=True,
-            content=True,
+            self._im_end, message_index, is_sampled=True, is_content=True
         )
-        builder.emit_text(
-            "\n",
-            message_index,
-            sampled=False,
-            content=False,
-        )
+        builder.emit_text("\n", message_index, is_sampled=False, is_content=False)
 
     def _render_tool(
         self,
         message: Message,
         message_index: int,
-        builder: _TokenBuilder,
+        builder: RenderedTokenBuilder,
         *,
         opens_group: bool,
         closes_group: bool,
     ) -> None:
         if opens_group:
             builder.emit_special(
-                self._im_start,
-                message_index,
-                sampled=False,
-                content=False,
+                self._im_start, message_index, is_sampled=False, is_content=False
             )
             builder.emit_text(
-                "user\n",
-                message_index,
-                sampled=False,
-                content=False,
+                "user\n", message_index, is_sampled=False, is_content=False
             )
 
         builder.emit_special(
-            self._tool_response,
-            message_index,
-            sampled=False,
-            content=False,
+            self._tool_response, message_index, is_sampled=False, is_content=False
         )
-        builder.emit_segments(
-            [("\n", False), (self._content(message), True), ("\n", False)],
-            message_index,
-            sampled=False,
-        )
+        segments = TextSegmentBuilder()
+        segments.append("\n", is_content=False)
+        segments.append(self._content(message), is_content=True)
+        segments.append("\n", is_content=False)
+        builder.emit_text_segments(segments.finish(), message_index, is_sampled=False)
         builder.emit_special(
-            self._tool_response_end,
-            message_index,
-            sampled=False,
-            content=False,
+            self._tool_response_end, message_index, is_sampled=False, is_content=False
         )
-        builder.emit_text(
-            "\n",
-            message_index,
-            sampled=False,
-            content=False,
-        )
+        builder.emit_text("\n", message_index, is_sampled=False, is_content=False)
 
         if closes_group:
             builder.emit_special(
-                self._im_end,
-                message_index,
-                sampled=False,
-                content=False,
+                self._im_end, message_index, is_sampled=False, is_content=False
             )
-            builder.emit_text(
-                "\n",
-                message_index,
-                sampled=False,
-                content=False,
-            )
+            builder.emit_text("\n", message_index, is_sampled=False, is_content=False)
 
-    def _render_generation_prompt(self, builder: _TokenBuilder) -> None:
-        builder.emit_special(
-            self._im_start,
-            -1,
-            sampled=False,
-            content=False,
-        )
-        builder.emit_text(
-            "assistant\n",
-            -1,
-            sampled=False,
-            content=False,
-        )
+    def _render_generation_prompt(self, builder: RenderedTokenBuilder) -> None:
+        builder.emit_special(self._im_start, -1, is_sampled=False, is_content=False)
+        builder.emit_text("assistant\n", -1, is_sampled=False, is_content=False)
 
     def render_ids(
         self,
@@ -604,18 +412,13 @@ class PrimeQwen3Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-    ) -> list[int]:
+    ) -> np.ndarray:
         return self.render(
-            messages,
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
         ).token_ids
 
     def parse_response(
-        self,
-        token_ids: list[int],
-        *,
-        tools: list[ToolSpec] | None = None,
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
     ) -> ParsedResponse:
         return parse_qwen35(
             self._tokenizer,
@@ -633,21 +436,20 @@ class PrimeQwen3Renderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002
     ) -> RenderedTokens | None:
         if (
-            not previous_prompt_ids
+            len(previous_prompt_ids) == 0
             or not new_messages
             or reject_assistant_in_extension(new_messages)
         ):
             return None
         if should_rerender_for_thinking_retention(
-            self.effective_thinking_retention,
-            new_messages,
+            self.effective_thinking_retention, new_messages
         ):
             return None
 
@@ -660,9 +462,11 @@ class PrimeQwen3Renderer:
         if previous_ids is None:
             return None
 
-        builder = _TokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         builder.prepend_prior(previous_ids)
-        builder.emit_text("\n", -1, sampled=False, content=False)
+        builder.emit_text("\n", -1, is_sampled=False, is_content=False)
 
         for message_index, message in enumerate(new_messages):
             role = message.get("role", "")
@@ -686,17 +490,12 @@ class PrimeQwen3Renderer:
                 self._render_history_message(message, message_index, builder)
 
         self._render_generation_prompt(builder)
-        return RenderedTokens(
-            token_ids=builder.token_ids,
-            message_indices=builder.message_indices,
-            sampled_mask=(
-                builder.sampled_mask
-                if _get_offset_tokenizer(self._tokenizer) is not None
-                else []
-            ),
-            is_content=_content_mask_or_empty(self._tokenizer, builder.is_content),
+        attribution_available = self._offset_tokenizer is not None
+        return builder.finish(
             message_roles=[message.get("role") or "" for message in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
+            sampled_available=attribution_available,
+            content_available=attribution_available,
         )
 
 

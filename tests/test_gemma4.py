@@ -2,12 +2,19 @@
 
 from functools import lru_cache
 
+import numpy as np
 import pytest
 from parity import models_for
 
 from renderers import Gemma4Renderer, create_renderer
 from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS, load_tokenizer
 from renderers.configs import Gemma4RendererConfig
+from renderers.token_arrays import (
+    TOKEN_IDS_DTYPE,
+    FixedWidthArrayBuilder,
+    encode_token_ids,
+    owned_token_ids_from_array,
+)
 
 
 _MODELS = tuple(case.model for case in models_for("gemma-checkpoints"))
@@ -50,16 +57,12 @@ def test_disabled_thinking_prefill_tracks_template_revision(monkeypatch):
 def test_preserve_thinking_controls_derived_retention_and_rejects_conflicts():
     tokenizer, _ = _gemma4()
     preserved = Gemma4Renderer(
-        tokenizer,
-        Gemma4RendererConfig(enable_thinking=True, preserve_thinking=True),
+        tokenizer, Gemma4RendererConfig(enable_thinking=True, preserve_thinking=True)
     )
     assert preserved.effective_thinking_retention == "all"
 
     with pytest.raises(ValueError, match="preserve_thinking=True implies"):
-        Gemma4RendererConfig(
-            preserve_thinking=True,
-            thinking_retention="tool_cycle",
-        )
+        Gemma4RendererConfig(preserve_thinking=True, thinking_retention="tool_cycle")
 
 
 @pytest.mark.parametrize(
@@ -120,10 +123,7 @@ def test_tool_cycle_matches_canonical_template(enable_thinking):
                 {
                     "id": "call-1",
                     "type": "function",
-                    "function": {
-                        "name": "weather",
-                        "arguments": {"city": "Berlin"},
-                    },
+                    "function": {"name": "weather", "arguments": {"city": "Berlin"}},
                 }
             ],
         },
@@ -146,8 +146,12 @@ def test_tool_cycle_matches_canonical_template(enable_thinking):
         add_generation_prompt=False,
         enable_thinking=enable_thinking,
         return_dict=False,
+        return_tensors="np",
     )
-    assert renderer.render_ids(messages, tools=tools) == list(expected)
+    assert np.array_equal(
+        renderer.render_ids(messages, tools=tools),
+        owned_token_ids_from_array("expected", expected),
+    )
 
 
 def test_disabled_thinking_post_tool_completion_matches_sampled_stream():
@@ -181,10 +185,7 @@ def test_disabled_thinking_post_tool_completion_matches_sampled_stream():
             {
                 "id": "call-1",
                 "type": "function",
-                "function": {
-                    "name": "weather",
-                    "arguments": {"city": "Berlin"},
-                },
+                "function": {"name": "weather", "arguments": {"city": "Berlin"}},
             }
         ],
     }
@@ -201,26 +202,21 @@ def test_disabled_thinking_post_tool_completion_matches_sampled_stream():
     tool_call_prompt = renderer.render_ids(
         [user, tool_call], tools=tools, add_generation_prompt=True
     )
-    assert tool_call_prompt[: len(initial_prompt)] == initial_prompt
+    assert np.array_equal(tool_call_prompt[: len(initial_prompt)], initial_prompt)
     tool_call_completion = tool_call_prompt[len(initial_prompt) :]
 
     post_tool_prompt = renderer.bridge_to_next_turn(
-        initial_prompt,
-        tool_call_completion,
-        [tool_response],
-        tools=tools,
+        initial_prompt, tool_call_completion, [tool_response], tools=tools
     )
     assert post_tool_prompt is not None
 
-    final_completion = tokenizer.encode(final["content"], add_special_tokens=False) + [
-        renderer.get_stop_token_ids()[0]
-    ]
+    final_completion_builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE)
+    final_completion_builder.extend(encode_token_ids(tokenizer, final["content"]))
+    final_completion_builder.append(renderer.get_stop_token_ids()[0])
+    final_completion = final_completion_builder.finish()
     reminder = {"role": "user", "content": "Please summarize."}
     extended_stream = renderer.bridge_to_next_turn(
-        post_tool_prompt.token_ids,
-        final_completion,
-        [reminder],
-        tools=tools,
+        post_tool_prompt.token_ids, final_completion, [reminder], tools=tools
     )
     assert extended_stream is not None
     rerendered = renderer.render_ids(
@@ -228,18 +224,20 @@ def test_disabled_thinking_post_tool_completion_matches_sampled_stream():
         tools=tools,
         add_generation_prompt=True,
     )
-    assert rerendered == extended_stream.token_ids
+    assert np.array_equal(rerendered, extended_stream.token_ids)
 
 
 def test_parser_extracts_reasoning_and_multiple_typed_tool_calls():
     tokenizer, renderer = _gemma4()
+    first_block = '<|tool_call>call:weather{city:<|"|>Berlin<|"|>,days:2}<tool_call|>'
+    second_block = "<|tool_call>call:flags{enabled:true,values:[1,null]}<tool_call|>"
     text = (
         "<|channel>thought\nI need two lookups.\n<channel|>"
-        '<|tool_call>call:weather{city:<|"|>Berlin<|"|>,days:2}'
-        "<tool_call|>"
-        "<|tool_call>call:flags{enabled:true,values:[1,null]}<tool_call|>"
+        + first_block
+        + second_block
     )
-    parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
+    completion = encode_token_ids(tokenizer, text)
+    parsed = renderer.parse_response(completion)
 
     assert parsed.reasoning_content == "I need two lookups."
     assert parsed.content == ""
@@ -247,6 +245,16 @@ def test_parser_extracts_reasoning_and_multiple_typed_tool_calls():
         ("weather", {"city": "Berlin", "days": 2}),
         ("flags", {"enabled": True, "values": [1, None]}),
     ]
+    assert parsed.tool_call_token_spans.dtype == np.dtype("<i8")
+    assert parsed.tool_call_token_spans.shape == (2, 2)
+    assert not parsed.tool_call_token_spans.flags.writeable
+    for index, expected_block in enumerate((first_block, second_block)):
+        start = int(parsed.tool_call_token_spans[index, 0])
+        end = int(parsed.tool_call_token_spans[index, 1])
+        assert (
+            tokenizer.decode(completion[start:end], skip_special_tokens=False)
+            == expected_block
+        )
 
 
 def test_parser_recovers_prompt_opened_post_tool_reasoning():
@@ -268,28 +276,30 @@ def test_parser_recovers_prompt_opened_post_tool_reasoning():
         add_generation_prompt=True,
         enable_thinking=True,
         return_dict=False,
+        return_tensors="np",
     )
     prompt = renderer.render_ids(messages, add_generation_prompt=True)
 
-    assert prompt == list(expected_prompt)
+    assert np.array_equal(
+        prompt, owned_token_ids_from_array("expected_prompt", expected_prompt)
+    )
     assert tokenizer.decode(prompt, skip_special_tokens=False).endswith(
         "<|channel>thought\n"
     )
 
-    completion = tokenizer.encode(
-        "Need synthesize.\n<channel|>It is sunny.<turn|>",
-        add_special_tokens=False,
+    completion = encode_token_ids(
+        tokenizer, "Need synthesize.\n<channel|>It is sunny.<turn|>"
     )
 
     parsed = renderer.parse_response(completion)
 
     assert parsed.reasoning_content == "Need synthesize."
     assert parsed.content == "It is sunny."
-    assert parsed.tool_calls == []
+    assert parsed.tool_calls == ()
 
     # Initial-turn content without a channel closer remains ordinary content.
     direct = renderer.parse_response(
-        tokenizer.encode("Direct answer.<turn|>", add_special_tokens=False)
+        encode_token_ids(tokenizer, "Direct answer.<turn|>")
     )
     assert direct.reasoning_content is None
     assert direct.content == "Direct answer."
@@ -329,7 +339,7 @@ def test_real_processor_keeps_one_batched_row_per_image(size):
     assert item["pixel_values"].shape[0] == 1
     assert item["image_position_ids"].shape[0] == 1
     assert item["pixel_values"].shape[1] == item["image_position_ids"].shape[1]
-    assert placeholder.length > 0
+    assert placeholder[1] > 0
 
 
 def test_schema_unified_image_parts_still_expand_image_tokens():
@@ -363,14 +373,14 @@ def test_schema_unified_image_parts_still_expand_image_tokens():
     roundtripped = renderer.render(schema_unified)
 
     image_id = tokenizer.convert_tokens_to_ids("<|image|>")
-    assert baseline.token_ids.count(image_id) > 0
-    assert roundtripped.token_ids == baseline.token_ids
+    assert np.count_nonzero(baseline.token_ids == image_id) > 0
+    assert np.array_equal(roundtripped.token_ids, baseline.token_ids)
     assert (
         roundtripped.multi_modal_data.mm_hashes == baseline.multi_modal_data.mm_hashes
     )
-    assert (
-        roundtripped.multi_modal_data.mm_placeholders
-        == baseline.multi_modal_data.mm_placeholders
+    assert np.array_equal(
+        roundtripped.multi_modal_data.mm_placeholders["image"],
+        baseline.multi_modal_data.mm_placeholders["image"],
     )
 
 
@@ -404,7 +414,7 @@ def test_schema_unified_tool_response_image_parts_survive():
     rendered = renderer.render(messages)
 
     image_id = tokenizer.convert_tokens_to_ids("<|image|>")
-    assert rendered.token_ids.count(image_id) > 0
+    assert np.count_nonzero(rendered.token_ids == image_id) > 0
     assert rendered.multi_modal_data.mm_hashes["image"]
     assert "captured" in tokenizer.decode(rendered.token_ids, skip_special_tokens=False)
 
@@ -425,11 +435,7 @@ def test_untyped_text_parts_render_in_tool_responses():
                 }
             ],
         },
-        {
-            "role": "tool",
-            "tool_call_id": "call-1",
-            "content": [{"text": "all good"}],
-        },
+        {"role": "tool", "tool_call_id": "call-1", "content": [{"text": "all good"}]},
     ]
     text = tokenizer.decode(renderer.render_ids(messages), skip_special_tokens=False)
     assert "all good" in text
@@ -464,6 +470,7 @@ def test_legacy_assistant_tool_responses_preserve_mask_contract():
     ]
     rendered = renderer.render(messages)
 
-    for index, message_index in enumerate(rendered.message_indices):
-        if message_index == 1:
-            assert rendered.is_content[index] == rendered.sampled_mask[index]
+    assistant_tokens = rendered.message_indices == 1
+    assert np.array_equal(
+        rendered.is_content[assistant_tokens], rendered.sampled_mask[assistant_tokens]
+    )

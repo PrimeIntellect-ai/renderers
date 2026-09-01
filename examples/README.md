@@ -29,7 +29,6 @@ CUDA_VISIBLE_DEVICES=1 uv run --script examples/sglang/multiturn_generate_sglang
 ```
 
 The SGLang script uses `input_ids`, so SGLang does not apply a chat template.
-It leaves `openai-harmony` at SGLang's pinned version for dependency resolution.
 
 ### SGLang HTTP Recipe (online)
 
@@ -81,8 +80,10 @@ CUDA_VISIBLE_DEVICES=1 uv run --script examples/sglang/multiturn_generate_sglang
 wait
 ```
 
-Each script runs `Qwen/Qwen3.5-4B` with `enable_thinking=True` and `False`, then
-`openai/gpt-oss-20b`.
+Each script runs `Qwen/Qwen3.5-4B` with `enable_thinking=True` and `False`.
+GPT-OSS is intentionally omitted: `GptOssRenderer` fails closed until
+`openai-harmony` exposes a fixed-width NumPy token ABI without transient Python
+token lists.
 
 ## Multimodal Note
 

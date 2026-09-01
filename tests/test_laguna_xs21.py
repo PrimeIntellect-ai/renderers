@@ -19,10 +19,17 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import numpy as np
+
 from renderers import create_renderer
 from renderers.base import load_tokenizer
 from renderers.configs import LagunaXS21RendererConfig
 from renderers.laguna_xs2 import LagunaXS21Renderer
+from renderers.token_arrays import (
+    TOKEN_IDS_DTYPE,
+    encode_token_ids,
+    owned_token_ids_from_array,
+)
 
 _MODEL = "poolside/Laguna-XS-2.1"
 
@@ -57,15 +64,17 @@ def _renderer(**config_kwargs) -> LagunaXS21Renderer:
 
 
 def _expected(msgs, *, tools=None, add_generation_prompt=False, **template_kwargs):
-    return list(
+    return owned_token_ids_from_array(
+        "apply_chat_template",
         _tok().apply_chat_template(
             msgs,
             tools=tools,
             add_generation_prompt=add_generation_prompt,
             tokenize=True,
             return_dict=False,
+            return_tensors="np",
             **template_kwargs,
-        )
+        ),
     )
 
 
@@ -80,8 +89,9 @@ def test_empty_system_opts_out_of_system_block():
         {"role": "user", "content": "Hi"},
     ]
     r = _renderer()
-    assert r.render_ids(msgs, add_generation_prompt=True) == _expected(
-        msgs, add_generation_prompt=True
+    assert np.array_equal(
+        r.render_ids(msgs, add_generation_prompt=True),
+        _expected(msgs, add_generation_prompt=True),
     )
     text = _tok().decode(r.render_ids(msgs, add_generation_prompt=True))
     assert "<system>" not in text
@@ -96,7 +106,10 @@ def test_empty_system_with_thinking_renders_empty_block():
     ]
     r = _renderer(enable_thinking=True)
     ours = r.render_ids(msgs, add_generation_prompt=True)
-    assert ours == _expected(msgs, add_generation_prompt=True, enable_thinking=True)
+    assert np.array_equal(
+        ours,
+        _expected(msgs, add_generation_prompt=True, enable_thinking=True),
+    )
     assert "<system></system>\n" in _tok().decode(ours)
 
 
@@ -109,7 +122,9 @@ def test_empty_system_with_tools_glues_tools_header():
     ]
     r = _renderer()
     ours = r.render_ids(msgs, tools=TOOLS, add_generation_prompt=True)
-    assert ours == _expected(msgs, tools=TOOLS, add_generation_prompt=True)
+    assert np.array_equal(
+        ours, _expected(msgs, tools=TOOLS, add_generation_prompt=True)
+    )
     assert "<system>### Tools" in _tok().decode(ours)
 
 
@@ -122,7 +137,7 @@ def test_reasoning_dropped_without_thinking():
     ]
     r = _renderer()
     ours = r.render_ids(msgs)
-    assert ours == _expected(msgs)
+    assert np.array_equal(ours, _expected(msgs))
     assert "Simple arithmetic" not in _tok().decode(ours)
 
 
@@ -139,7 +154,7 @@ def test_reasoning_rendered_verbatim_with_thinking():
     ]
     r = _renderer(enable_thinking=True)
     ours = r.render_ids(msgs)
-    assert ours == _expected(msgs, enable_thinking=True)
+    assert np.array_equal(ours, _expected(msgs, enable_thinking=True))
     assert "<think>\n  spaced reasoning  \n</think>" in _tok().decode(ours)
 
     no_reasoning = [
@@ -147,7 +162,7 @@ def test_reasoning_rendered_verbatim_with_thinking():
         {"role": "assistant", "content": "Hello!"},
     ]
     ours = r.render_ids(no_reasoning)
-    assert ours == _expected(no_reasoning, enable_thinking=True)
+    assert np.array_equal(ours, _expected(no_reasoning, enable_thinking=True))
     assert "<think></think>" in _tok().decode(ours)
 
 
@@ -158,7 +173,7 @@ def test_content_rendered_verbatim():
         {"role": "assistant", "content": "\n  keep my whitespace  \n"},
     ]
     r = _renderer()
-    assert r.render_ids(msgs) == _expected(msgs)
+    assert np.array_equal(r.render_ids(msgs), _expected(msgs))
 
 
 def test_multiple_tool_calls_packed_args():
@@ -189,7 +204,9 @@ def test_multiple_tool_calls_packed_args():
     ]
     r = _renderer()
     ours = r.render_ids(msgs, tools=TOOLS, add_generation_prompt=True)
-    assert ours == _expected(msgs, tools=TOOLS, add_generation_prompt=True)
+    assert np.array_equal(
+        ours, _expected(msgs, tools=TOOLS, add_generation_prompt=True)
+    )
     assert (
         "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value>"
         "<arg_key>days</arg_key><arg_value>3</arg_value></tool_call>"
@@ -208,8 +225,9 @@ def test_later_system_message_renders_in_loop():
         {"role": "user", "content": "Why?"},
     ]
     r = _renderer()
-    assert r.render_ids(msgs, add_generation_prompt=True) == _expected(
-        msgs, add_generation_prompt=True
+    assert np.array_equal(
+        r.render_ids(msgs, add_generation_prompt=True),
+        _expected(msgs, add_generation_prompt=True),
     )
 
 
@@ -227,22 +245,22 @@ def test_assistant_prefill_tokens_unsampled():
     for enable_thinking in (False, True):
         r = _renderer(enable_thinking=enable_thinking)
         rendered = r.render(msgs)
-        positions = [k for k, i in enumerate(rendered.message_indices) if i == 1]
-        sampled = [rendered.sampled_mask[k] for k in positions]
+        positions = np.flatnonzero(rendered.message_indices == 1)
+        sampled = rendered.sampled_mask[positions]
         # <assistant> + (<think> | </think>) prefill.
-        assert sampled[:2] == [False, False]
+        assert not np.any(sampled[:2])
         # Everything between the prefill and the inter-turn newline is
         # the model's emission, ending with the sampled </assistant>.
         assert all(sampled[2:-1]), sampled
-        assert sampled[-1] is False  # trailing "\n"
-        assert [rendered.is_content[k] for k in positions] == sampled
+        assert not bool(sampled[-1])  # trailing "\n"
+        assert np.array_equal(rendered.is_content[positions], sampled)
 
 
 # ── Parse ─────────────────────────────────────────────────────────────
 
 
-def _completion_ids(text: str) -> list[int]:
-    return _tok().encode(text, add_special_tokens=False)
+def _completion_ids(text: str) -> np.ndarray:
+    return encode_token_ids(_tok(), text)
 
 
 def test_parse_no_think_completion():
@@ -323,7 +341,7 @@ def test_bridge_user_extension_matches_full_render():
         r = _renderer(enable_thinking=enable_thinking)
         bridged, fresh = _bridge_case(r, prev, asst, ext)
         assert bridged is not None
-        assert bridged.token_ids == fresh
+        assert np.array_equal(bridged.token_ids, fresh)
 
 
 def test_bridge_tool_extension_matches_full_render():
@@ -343,7 +361,7 @@ def test_bridge_tool_extension_matches_full_render():
     r = _renderer()
     bridged, fresh = _bridge_case(r, prev, asst, ext, tools=TOOLS)
     assert bridged is not None
-    assert bridged.token_ids == fresh
+    assert np.array_equal(bridged.token_ids, fresh)
 
 
 def test_bridge_synthesizes_close_on_truncation():
@@ -361,7 +379,7 @@ def test_bridge_synthesizes_close_on_truncation():
     # The synthesised close makes the tape identical to the clean-stop
     # bridge, which matches the fresh render byte-for-byte.
     fresh = r.render_ids([*prev, asst, *ext], add_generation_prompt=True)
-    assert bridged.token_ids == fresh
+    assert np.array_equal(bridged.token_ids, fresh)
 
 
 def test_bridge_rejects_assistant_extension():
@@ -370,7 +388,15 @@ def test_bridge_rejects_assistant_extension():
     pp = r.render_ids(prev, add_generation_prompt=True)
     assert (
         r.bridge_to_next_turn(
-            pp, [r._assistant_end], [{"role": "assistant", "content": "x"}]
+            pp,
+            _single_token(r._assistant_end),
+            [{"role": "assistant", "content": "x"}],
         )
         is None
     )
+
+
+def _single_token(token_id: int) -> np.ndarray:
+    values = np.full(1, token_id, dtype=TOKEN_IDS_DTYPE)
+    values.flags.writeable = False
+    return values

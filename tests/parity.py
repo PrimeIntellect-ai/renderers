@@ -248,12 +248,6 @@ MODEL_CATALOG = (
         oracle_defaults={"date_string": "26 Jul 2024"},
         extra_suites={"llama-checkpoints"},
     ),
-    _model(
-        "openai/gpt-oss-20b",
-        renderer="gpt-oss",
-        bridge=True,
-        excluded={"multi-step-tool-cycle"},
-    ),
     _model("tencent/Hy3", bridge=True),
     _model("thinkingmachines/Inkling", bridge=True),
     _model("thinkingmachines/Inkling-Small", bridge=True),

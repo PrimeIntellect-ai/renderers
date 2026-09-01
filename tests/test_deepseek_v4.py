@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import numpy as np
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
@@ -13,6 +14,7 @@ from renderers import (
     RendererConfig,
     ToolCallParseStatus,
     create_renderer,
+    encode_token_ids,
 )
 from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
 from tests.reference_rendering import render_reference
@@ -32,10 +34,7 @@ TOOLS = [
             "description": "Get weather",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "city": {"type": "string"},
-                    "days": {"type": "integer"},
-                },
+                "properties": {"city": {"type": "string"}, "days": {"type": "integer"}},
                 "required": ["city"],
             },
         },
@@ -49,16 +48,12 @@ def _tokenizer():
 
 
 def _renderer(**config_kwargs):
-    return DeepSeekV4Renderer(
-        _tokenizer(),
-        DeepSeekV4RendererConfig(**config_kwargs),
-    )
+    return DeepSeekV4Renderer(_tokenizer(), DeepSeekV4RendererConfig(**config_kwargs))
 
 
 def _decode(renderer, messages, **kwargs):
     return _tokenizer().decode(
-        renderer.render_ids(messages, **kwargs),
-        skip_special_tokens=False,
+        renderer.render_ids(messages, **kwargs), skip_special_tokens=False
     )
 
 
@@ -88,10 +83,7 @@ def test_config_discriminator_and_template_kwarg_contract():
     assert parsed.reasoning_effort == "max"
 
     with pytest.raises(ValidationError):
-        DeepSeekV4RendererConfig(
-            drop_thinking=False,
-            thinking_retention="tool_cycle",
-        )
+        DeepSeekV4RendererConfig(drop_thinking=False, thinking_retention="tool_cycle")
 
 
 def test_chat_mode_generation_prompt_matches_reference_encoder():
@@ -214,8 +206,9 @@ def test_dsml_roundtrip_preserves_string_and_json_argument_types():
         },
     ]
     rendered = renderer.render_ids(messages)
-    assistant_id = _tokenizer().encode(ASSISTANT, add_special_tokens=False)[0]
-    completion_start = rendered.index(assistant_id) + 2  # skip Assistant + <think>
+    assistant_id = int(encode_token_ids(_tokenizer(), ASSISTANT)[0])
+    assistant_positions = np.flatnonzero(rendered == assistant_id)
+    completion_start = int(assistant_positions[0]) + 2  # skip Assistant + <think>
 
     parsed = renderer.parse_response(rendered[completion_start:])
 
@@ -225,39 +218,22 @@ def test_dsml_roundtrip_preserves_string_and_json_argument_types():
     call = parsed.tool_calls[0]
     assert call.status == ToolCallParseStatus.OK
     assert call.name == "weather"
-    assert call.arguments == {
-        "city": "true",
-        "days": 2,
-        "flags": [True, False],
-    }
-    assert call.token_span is not None
+    assert call.arguments == {"city": "true", "days": 2, "flags": [True, False]}
+    assert parsed.tool_call_token_spans[0, 0] < parsed.tool_call_token_spans[0, 1]
 
 
 @pytest.mark.parametrize(
     "arguments, decoded_type",
-    [
-        ("[]", "list"),
-        ('"value"', "str"),
-        ("1", "int"),
-        ("null", "NoneType"),
-    ],
+    [("[]", "list"), ('"value"', "str"), ("1", "int"), ("null", "NoneType")],
 )
 def test_json_nonobject_tool_arguments_raise_like_reference_encoder(
-    arguments,
-    decoded_type,
+    arguments, decoded_type
 ):
     messages = [
         {"role": "user", "content": "Call it"},
         {
             "role": "assistant",
-            "tool_calls": [
-                {
-                    "function": {
-                        "name": "weather",
-                        "arguments": arguments,
-                    }
-                }
-            ],
+            "tool_calls": [{"function": {"name": "weather", "arguments": arguments}}],
         },
     ]
 
@@ -296,9 +272,7 @@ def test_reference_encoder_drops_stale_developer_messages_without_tools():
     ]
 
     text = _decode(
-        _renderer(enable_thinking=True),
-        messages,
-        add_generation_prompt=True,
+        _renderer(enable_thinking=True), messages, add_generation_prompt=True
     )
 
     assert "stale internal query" not in text
@@ -309,9 +283,8 @@ def test_quick_task_token_renders_without_normal_generation_prompt():
     messages = [{"role": "user", "content": "Search?", "task": "action"}]
 
     renderer = _renderer()
-    assert renderer.render_ids(messages) == render_reference(
-        _tokenizer(),
-        messages,
+    assert np.array_equal(
+        renderer.render_ids(messages), render_reference(_tokenizer(), messages)
     )
     assert _decode(renderer, messages) == (
         f"{BOS}{USER}Search?{ASSISTANT}</think><｜action｜>"
@@ -331,10 +304,8 @@ def test_action_task_assistant_suppresses_thinking_like_reference_encoder():
 
     rendered = renderer.render_ids(messages)
 
-    assert rendered == render_reference(
-        _tokenizer(),
-        messages,
-        enable_thinking=True,
+    assert np.array_equal(
+        rendered, render_reference(_tokenizer(), messages, enable_thinking=True)
     )
     assert _tokenizer().decode(rendered, skip_special_tokens=False) == (
         f"{BOS}{USER}Classify{ASSISTANT}<think><｜action｜>result{EOS}"
@@ -351,15 +322,14 @@ def test_historical_action_task_keeps_reference_encoders_unclosed_think():
 
     rendered = renderer.render_ids(messages, add_generation_prompt=True)
 
-    assert rendered == render_reference(
-        _tokenizer(),
-        messages,
-        add_generation_prompt=True,
-        enable_thinking=True,
+    assert np.array_equal(
+        rendered,
+        render_reference(
+            _tokenizer(), messages, add_generation_prompt=True, enable_thinking=True
+        ),
     )
     assert _tokenizer().decode(rendered, skip_special_tokens=False) == (
-        f"{BOS}{USER}Classify{ASSISTANT}<think><｜action｜>result{EOS}"
-        f"{USER}Continue{ASSISTANT}<think>"
+        f"{BOS}{USER}Classify{ASSISTANT}<think><｜action｜>result{EOS}{USER}Continue{ASSISTANT}<think>"
     )
 
 
@@ -372,16 +342,13 @@ def test_task_before_nonassistant_does_not_emit_task_token():
 
     rendered = renderer.render_ids(messages, add_generation_prompt=True)
 
-    assert rendered == render_reference(
-        _tokenizer(),
-        messages,
-        add_generation_prompt=True,
-        enable_thinking=True,
-    )
-    assert "<｜query｜>" not in _tokenizer().decode(
+    assert np.array_equal(
         rendered,
-        skip_special_tokens=False,
+        render_reference(
+            _tokenizer(), messages, add_generation_prompt=True, enable_thinking=True
+        ),
     )
+    assert "<｜query｜>" not in _tokenizer().decode(rendered, skip_special_tokens=False)
 
 
 def test_tool_result_merges_into_tasked_user_like_reference_encoder():
@@ -398,14 +365,11 @@ def test_tool_result_merges_into_tasked_user_like_reference_encoder():
 
     rendered = renderer.render_ids(messages)
 
-    assert rendered == render_reference(
-        _tokenizer(),
-        messages,
-        enable_thinking=True,
+    assert np.array_equal(
+        rendered, render_reference(_tokenizer(), messages, enable_thinking=True)
     )
     assert _tokenizer().decode(rendered, skip_special_tokens=False) == (
-        f"{BOS}{USER}Classify\n\n<tool_result>done</tool_result>"
-        f"{ASSISTANT}<think><｜action｜>result{EOS}"
+        f"{BOS}{USER}Classify\n\n<tool_result>done</tool_result>{ASSISTANT}<think><｜action｜>result{EOS}"
     )
 
 
@@ -418,11 +382,11 @@ def test_merged_followup_task_is_dropped_like_reference_encoder():
 
     rendered = renderer.render_ids(messages, add_generation_prompt=True)
 
-    assert rendered == render_reference(
-        _tokenizer(),
-        messages,
-        add_generation_prompt=True,
-        enable_thinking=True,
+    assert np.array_equal(
+        rendered,
+        render_reference(
+            _tokenizer(), messages, add_generation_prompt=True, enable_thinking=True
+        ),
     )
     text = _tokenizer().decode(rendered, skip_special_tokens=False)
     assert "<｜action｜>" not in text
@@ -431,18 +395,12 @@ def test_merged_followup_task_is_dropped_like_reference_encoder():
 
 @pytest.mark.parametrize("prefix", ["", "\n"])
 def test_dsml_parser_requires_reference_encoders_two_newlines(prefix):
-    text = (
-        f"{prefix}<｜DSML｜tool_calls>\n"
-        '<｜DSML｜invoke name="weather">\n\n</｜DSML｜invoke>\n'
-        "</｜DSML｜tool_calls>"
-    )
+    text = f'{prefix}<｜DSML｜tool_calls>\n<｜DSML｜invoke name="weather">\n\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>'
 
-    parsed = _renderer().parse_response(
-        _tokenizer().encode(text, add_special_tokens=False)
-    )
+    parsed = _renderer().parse_response(encode_token_ids(_tokenizer(), text))
 
     assert parsed.content == text
-    assert parsed.tool_calls == []
+    assert parsed.tool_calls == ()
 
 
 def test_rendered_masks_keep_dsml_sampled_and_tool_wrappers_scaffolded():
@@ -467,10 +425,7 @@ def test_rendered_masks_keep_dsml_sampled_and_tool_wrappers_scaffolded():
     assert rendered.tokens_by_role(sampled_only=True)["tool"] == 0
     tool_content = rendered.content_mask_for_roles({"tool"})
     assert (
-        _tokenizer().decode(
-            [token for token, keep in zip(rendered.token_ids, tool_content) if keep],
-            skip_special_tokens=False,
-        )
+        _tokenizer().decode(rendered.token_ids[tool_content], skip_special_tokens=False)
         == "sunny"
     )
 
@@ -494,25 +449,19 @@ def test_bridge_extends_a_single_tool_result_exactly():
         {"role": "tool", "tool_call_id": "x", "content": "sunny"}
     ]
     prompt = renderer.render_ids(
-        first_messages[:1],
-        tools=TOOLS,
-        add_generation_prompt=True,
+        first_messages[:1], tools=TOOLS, add_generation_prompt=True
     )
     full_first = renderer.render_ids(first_messages, tools=TOOLS)
     completion = full_first[len(prompt) :]
 
     bridged = renderer.bridge_to_next_turn(
-        prompt,
-        completion,
-        full_messages[-1:],
-        tools=TOOLS,
+        prompt, completion, full_messages[-1:], tools=TOOLS
     )
 
     assert bridged is not None
-    assert bridged.token_ids == renderer.render_ids(
-        full_messages,
-        tools=TOOLS,
-        add_generation_prompt=True,
+    assert np.array_equal(
+        bridged.token_ids,
+        renderer.render_ids(full_messages, tools=TOOLS, add_generation_prompt=True),
     )
 
 
@@ -532,14 +481,14 @@ def test_bridge_declines_at_developer_query_boundary_when_dropping_thinking():
     assert renderer.bridge_to_next_turn(prompt, completion, new_messages) is None
 
     full_messages = [*prior_messages, answer, *new_messages]
-    assert renderer.render_ids(
-        full_messages,
-        add_generation_prompt=True,
-    ) == render_reference(
-        _tokenizer(),
-        full_messages,
-        enable_thinking=True,
-        add_generation_prompt=True,
+    assert np.array_equal(
+        renderer.render_ids(full_messages, add_generation_prompt=True),
+        render_reference(
+            _tokenizer(),
+            full_messages,
+            enable_thinking=True,
+            add_generation_prompt=True,
+        ),
     )
 
 
@@ -559,7 +508,9 @@ def test_bridge_extends_developer_query_when_preserving_all_thinking():
     bridged = renderer.bridge_to_next_turn(prompt, completion, new_messages)
 
     assert bridged is not None
-    assert bridged.token_ids == renderer.render_ids(
-        [*prior_messages, answer, *new_messages],
-        add_generation_prompt=True,
+    assert np.array_equal(
+        bridged.token_ids,
+        renderer.render_ids(
+            [*prior_messages, answer, *new_messages], add_generation_prompt=True
+        ),
     )

@@ -4,8 +4,9 @@ Every valid cell is the product of one model, one shared conversation
 scenario, and all explicit reference-controlled values accepted by that
 model's typed config. Unsupported cells are excluded declaratively in the
 model catalog rather than discovered at runtime through skips or xfails. The
-reference is model-aware: most models use Hugging Face Jinja, DeepSeek V4 uses
-its shipped Python encoder, and GPT-OSS uses Harmony.
+reference is model-aware: most models use Hugging Face Jinja and DeepSeek V4
+uses its shipped Python encoder. GPT-OSS is excluded while Harmony has no
+fixed-width NumPy token ABI.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from types import UnionType
 from typing import Annotated, Any, Literal, Mapping, Union, cast, get_args, get_origin
 
 import pytest
+import numpy as np
 
 from parity import (
     KWARG_VALUES,
@@ -215,7 +217,7 @@ def test_renderer_matches_reference(
         **scenario.render_kwargs,
     )
     got = renderer.render_ids(list(scenario.messages), **scenario.render_kwargs)
-    assert got == expected, (
+    assert np.array_equal(got, expected), (
         f"{case.model} / {scenario.id} / {dict(kwargs)!r}: renderer diverged "
         f"from {case.oracle} oracle (got {len(got)} tokens, expected "
         f"{len(expected)})"

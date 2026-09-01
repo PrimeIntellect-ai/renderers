@@ -50,6 +50,8 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
+
 from renderers.base import (
     Content,
     Message,
@@ -57,7 +59,7 @@ from renderers.base import (
     RenderedTokens,
     ToolSpec,
     Tokenizer,
-    _content_mask_or_empty,
+    _get_offset_tokenizer,
     _infer_offsets_from_decode,
     attribute_text_segments,
     extract_message_tool_names,
@@ -72,6 +74,16 @@ from renderers.configs import (
     LagunaXS21RendererConfig,
 )
 from renderers.parsing import parse_laguna_xs2
+from renderers.token_arrays import (
+    MASK_DTYPE,
+    MESSAGE_INDICES_DTYPE,
+    TOKEN_IDS_DTYPE,
+    FixedWidthArrayBuilder,
+    RenderedTokenBuilder,
+    TextSegmentBuilder,
+    TextSegments,
+    encode_token_ids,
+)
 
 _DEFAULT_SYSTEM_MESSAGE = (
     "You are a helpful, conversationally-fluent assistant made by Poolside. "
@@ -132,9 +144,9 @@ class LagunaXS2Renderer:
         self._tokenizer = tokenizer
         self.config = config or LagunaXS2RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
-            self.config,
-            "all",
+            self.config, "all"
         )
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         # Both templates bake in the same default Poolside system prompt;
         # an empty caller-supplied system message opts out of the
         # <system> block (each variant's render mirrors its own gate).
@@ -154,11 +166,6 @@ class LagunaXS2Renderer:
             f"Special token {token!r} not found in tokenizer vocabulary"
         )
         return tid
-
-    def _encode(self, text: str) -> list[int]:
-        if not text:
-            return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
 
     @staticmethod
     def _visible_text(content: Content | None) -> str:
@@ -198,38 +205,12 @@ class LagunaXS2Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        tokens: list[int] = []
-        indices: list[int] = []
-        sampled: list[bool] = []
-        content_mask: list[bool] = []
-
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            ids = self._encode(text)
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
-        ) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                tokens.append(tok_id)
-                indices.append(msg_idx)
-                sampled.append(is_sampled)
-                content_mask.append(is_content)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
         emit_special(self._eos, -1, is_sampled=False, is_content=False)
 
@@ -289,32 +270,30 @@ class LagunaXS2Renderer:
                         continue
                     # Body = caller's content; the ``<system>...</system>``
                     # wrap and surrounding ``\n``s are scaffold.
-                    sys_segs: list[tuple[str, bool]] = [("<system>\n", False)]
+                    sys_segs = TextSegmentBuilder()
+                    sys_segs.append("<system>\n", is_content=False)
                     if content:
-                        sys_segs.append((content, True))
-                    sys_segs.append(("\n</system>\n", False))
-                    emit_text_segments(sys_segs, i, is_sampled=False)
+                        sys_segs.append(content, is_content=True)
+                    sys_segs.append("\n</system>\n", is_content=False)
+                    emit_text_segments(sys_segs.finish(), i, is_sampled=False)
                 case "user":
-                    user_segs: list[tuple[str, bool]] = [("<user>\n", False)]
+                    user_segs = TextSegmentBuilder()
+                    user_segs.append("<user>\n", is_content=False)
                     if content:
-                        user_segs.append((content, True))
-                    user_segs.append(("\n</user>\n", False))
-                    emit_text_segments(user_segs, i, is_sampled=False)
+                        user_segs.append(content, is_content=True)
+                    user_segs.append("\n</user>\n", is_content=False)
+                    emit_text_segments(user_segs.finish(), i, is_sampled=False)
                 case "assistant":
                     self._render_assistant(
-                        msg,
-                        i,
-                        content,
-                        emit_special=emit_special,
-                        emit_text=emit_text,
-                        emit_text_segments=emit_text_segments,
+                        msg, i, content, emit_special=emit_special, emit_text=emit_text
                     )
                 case "tool":
-                    tool_segs: list[tuple[str, bool]] = [("<tool_response>\n", False)]
+                    tool_segs = TextSegmentBuilder()
+                    tool_segs.append("<tool_response>\n", is_content=False)
                     if content:
-                        tool_segs.append((content, True))
-                    tool_segs.append(("\n</tool_response>\n", False))
-                    emit_text_segments(tool_segs, i, is_sampled=False)
+                        tool_segs.append(content, is_content=True)
+                    tool_segs.append("\n</tool_response>\n", is_content=False)
+                    emit_text_segments(tool_segs.finish(), i, is_sampled=False)
 
         # ── Generation prompt ─────────────────────────────────────────
         if add_generation_prompt:
@@ -325,13 +304,10 @@ class LagunaXS2Renderer:
             else:
                 emit_special(self._think_end, -1, is_sampled=False, is_content=False)
 
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -340,18 +316,13 @@ class LagunaXS2Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
-    ) -> list[int]:
+    ) -> np.ndarray:
         return self.render(
-            messages,
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
         ).token_ids
 
     def parse_response(
-        self,
-        token_ids: list[int],
-        *,
-        tools: list[ToolSpec] | None = None,
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
     ) -> ParsedResponse:
         return parse_laguna_xs2(
             self._tokenizer,
@@ -369,21 +340,20 @@ class LagunaXS2Renderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
         if (
-            not previous_prompt_ids
+            previous_prompt_ids.size == 0
             or not new_messages
             or reject_assistant_in_extension(new_messages)
         ):
             return None
         if should_rerender_for_thinking_retention(
-            self.effective_thinking_retention,
-            new_messages,
+            self.effective_thinking_retention, new_messages
         ):
             return None
 
@@ -391,19 +361,27 @@ class LagunaXS2Renderer:
         # also stops generation; either being the final token means the turn
         # ended cleanly. Truncation (no stop token at the tail) synthesises
         # ``</assistant>\n`` — the same scaffold the template emits.
-        previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
+        previous = FixedWidthArrayBuilder(
+            TOKEN_IDS_DTYPE,
+            initial_capacity=previous_prompt_ids.size
+            + previous_completion_ids.size
+            + 8,
+        )
+        previous.extend(previous_prompt_ids)
+        previous.extend(previous_completion_ids)
         stop_ids = {self._assistant_end, self._eos}
         if (
-            not previous_ids[len(previous_prompt_ids) :]
-            or previous_ids[-1] not in stop_ids
+            previous_completion_ids.size == 0
+            or int(previous_completion_ids[-1]) not in stop_ids
         ):
-            previous_ids.append(self._assistant_end)
-            previous_ids.extend(self._encode("\n"))
+            previous.append(self._assistant_end)
+            previous.extend(encode_token_ids(self._tokenizer, "\n"))
+        previous_ids = previous.finish()
 
-        ext: list[int] = []
-        ext_indices: list[int] = []
-        ext_sampled: list[bool] = []
-        ext_content: list[bool] = []
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
         # and ``sampled_mask`` (uniformly ``False`` — every token the
@@ -411,66 +389,34 @@ class LagunaXS2Renderer:
         # something the model sampled). ``is_content`` follows the same
         # rules as in :meth:`render` so consumers can walk the trajectory
         # and read each step's own body mask.
-        def emit_special(
-            token_id: int,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ext.append(token_id)
-            ext_indices.append(msg_idx)
-            ext_sampled.append(is_sampled)
-            ext_content.append(is_content)
-
-        def emit_text(
-            text: str,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ids = self._encode(text)
-            ext.extend(ids)
-            ext_indices.extend([msg_idx] * len(ids))
-            ext_sampled.extend([is_sampled] * len(ids))
-            ext_content.extend([is_content] * len(ids))
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]],
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-        ) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                ext.append(tok_id)
-                ext_indices.append(msg_idx)
-                ext_sampled.append(is_sampled)
-                ext_content.append(is_content)
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
             content = self._visible_text(msg.get("content"))
             if role == "user":
-                segs: list[tuple[str, bool]] = [("<user>\n", False)]
+                segs = TextSegmentBuilder()
+                segs.append("<user>\n", is_content=False)
                 if content:
-                    segs.append((content, True))
-                segs.append(("\n</user>\n", False))
-                emit_text_segments(segs, i)
+                    segs.append(content, is_content=True)
+                segs.append("\n</user>\n", is_content=False)
+                emit_text_segments(segs.finish(), i)
             elif role == "system":
-                segs = [("<system>\n", False)]
+                segs = TextSegmentBuilder()
+                segs.append("<system>\n", is_content=False)
                 if content:
-                    segs.append((content, True))
-                segs.append(("\n</system>\n", False))
-                emit_text_segments(segs, i)
+                    segs.append(content, is_content=True)
+                segs.append("\n</system>\n", is_content=False)
+                emit_text_segments(segs.finish(), i)
             elif role == "tool":
-                segs = [("<tool_response>\n", False)]
+                segs = TextSegmentBuilder()
+                segs.append("<tool_response>\n", is_content=False)
                 if content:
-                    segs.append((content, True))
-                segs.append(("\n</tool_response>\n", False))
-                emit_text_segments(segs, i)
+                    segs.append(content, is_content=True)
+                segs.append("\n</tool_response>\n", is_content=False)
+                emit_text_segments(segs.finish(), i)
             else:
                 return None
 
@@ -481,36 +427,20 @@ class LagunaXS2Renderer:
         else:
             emit_special(self._think_end, -1)
 
-        total_len = len(previous_ids) + len(ext)
-        return RenderedTokens(
-            token_ids=previous_ids + ext,
-            message_indices=[-1] * len(previous_ids) + ext_indices,
-            sampled_mask=[False] * total_len,
-            is_content=_content_mask_or_empty(
-                self._tokenizer, [False] * len(previous_ids) + ext_content
-            ),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     def _render_assistant(
-        self,
-        msg: Message,
-        msg_idx: int,
-        content: str,
-        *,
-        emit_special,
-        emit_text,
-        emit_text_segments,
+        self, msg: Message, msg_idx: int, content: str, *, emit_special, emit_text
     ) -> None:
         # Raw passthrough is shared by XS.2 and M.1; XS-2.1's config does
         # not expose this template gate.
         if getattr(self.config, "render_assistant_messages_raw", False):
             self._render_assistant_raw(
-                msg_idx,
-                content,
-                emit_special=emit_special,
-                emit_text=emit_text,
+                msg_idx, content, emit_special=emit_special, emit_text=emit_text
             )
             return
 
@@ -594,12 +524,7 @@ class LagunaXS2Renderer:
         return reasoning_content, content
 
     def _render_assistant_raw(
-        self,
-        msg_idx: int,
-        content: str,
-        *,
-        emit_special,
-        emit_text,
+        self, msg_idx: int, content: str, *, emit_special, emit_text
     ) -> None:
         """Passthrough assistant rendering matching the Jinja template's
         ``render_assistant_messages_raw`` branch.
@@ -654,9 +579,7 @@ class LagunaM1Renderer(LagunaXS2Renderer):
     """
 
     def __init__(
-        self,
-        tokenizer: Tokenizer,
-        config: LagunaM1RendererConfig | None = None,
+        self, tokenizer: Tokenizer, config: LagunaM1RendererConfig | None = None
     ):
         super().__init__(tokenizer, config or LagunaM1RendererConfig())
         self._default_system_message = ""
@@ -717,42 +640,22 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         if not messages:
             raise ValueError("No messages provided.")
 
-        tokens: list[int] = []
-        indices: list[int] = []
-        sampled: list[bool] = []
-        content_mask: list[bool] = []
-
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            ids = self._encode(text)
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
 
         def emit_text_segments(
-            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
+            segments: TextSegments, msg_idx: int, *, is_sampled: bool
         ) -> None:
             # Role tags hug the body with no whitespace, so a BPE merge
             # can pull wrap bytes and body bytes into one token —
             # overlap attribution keeps every body byte in the content
             # run.
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments, overlap_is_content=True
-            ):
-                tokens.append(tok_id)
-                indices.append(msg_idx)
-                sampled.append(is_sampled)
-                content_mask.append(is_content)
+            builder.emit_text_segments(
+                segments, msg_idx, is_sampled=is_sampled, overlap_is_content=True
+            )
 
         emit_special(self._eos, -1, is_sampled=False, is_content=False)
 
@@ -773,67 +676,66 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             # exist exactly when the caller supplied the system message
             # (the default prompt is scaffold), so the is_content bit also
             # selects the message index: body → 0, everything else → -1.
-            header_segs: list[tuple[str, bool]] = [("<system>", False)]
+            header_segs = TextSegmentBuilder()
+            header_segs.append("<system>", is_content=False)
+            full_header = "<system>"
+            content_start = -1
+            content_end = -1
             if has_sys_content:
-                header_segs.append((system_content.rstrip(), caller_has_system))
+                body = system_content.rstrip()
+                if caller_has_system:
+                    content_start = len(full_header)
+                full_header += body
+                if caller_has_system:
+                    content_end = len(full_header)
+                header_segs.append(body, is_content=caller_has_system)
                 if tools:
-                    header_segs.append(("\n\n", False))
+                    full_header += "\n\n"
+                    header_segs.append("\n\n", is_content=False)
             if tools:
                 tool_text = _TOOLS_HEADER_XS21
                 for tool in tools:
                     tool_text += json.dumps(tool, ensure_ascii=False) + "\n"
                 tool_text += "</available_tools>"
-                header_segs.append((tool_text, False))
-            header_segs.append(("</system>\n", False))
+                full_header += tool_text
+                header_segs.append(tool_text, is_content=False)
+            full_header += "</system>\n"
+            header_segs.append("</system>\n", is_content=False)
             attributed = attribute_text_segments(
-                self._tokenizer, header_segs, overlap_is_content=True
+                self._tokenizer,
+                header_segs.finish(),
+                overlap_is_content=True,
+                _offset_tokenizer=self._offset_tokenizer,
             )
-            fallback_indices: list[int] | None = None
-            if not attributed.has_content_attribution:
-                full_header = "".join(text for text, _ in header_segs)
+            if attributed.has_content_attribution:
+                message_indices = np.where(attributed.is_content, 0, -1).astype(
+                    MESSAGE_INDICES_DTYPE
+                )
+            else:
                 offsets = _infer_offsets_from_decode(
-                    self._tokenizer,
-                    [token_id for token_id, _ in attributed],
-                    full_header,
+                    self._tokenizer, attributed.token_ids, full_header
                 )
                 if offsets is None:
-                    fallback_index = 0 if caller_has_system and has_sys_content else -1
-                    fallback_indices = [fallback_index] * len(attributed)
+                    message_indices = np.full(
+                        attributed.token_ids.size,
+                        0 if caller_has_system and has_sys_content else -1,
+                        dtype=MESSAGE_INDICES_DTYPE,
+                    )
                 else:
-                    content_spans: list[tuple[int, int]] = []
-                    position = 0
-                    for text, is_content in header_segs:
-                        end = position + len(text)
-                        if is_content:
-                            content_spans.append((position, end))
-                        position = end
-                    fallback_indices = [
-                        0
-                        if (
-                            any(
-                                span_start < end and start < span_end
-                                for span_start, span_end in content_spans
-                            )
-                            if end > start
-                            else any(
-                                span_start <= start < span_end
-                                for span_start, span_end in content_spans
-                            )
-                        )
-                        else -1
-                        for start, end in offsets
-                    ]
-            for position, (tok_id, is_content) in enumerate(attributed):
-                if fallback_indices is not None:
-                    message_index = fallback_indices[position]
-                else:
-                    message_index = 0 if is_content else -1
-                emit_special(
-                    tok_id,
-                    message_index,
-                    is_sampled=False,
-                    is_content=is_content,
-                )
+                    overlaps = (
+                        (offsets[:, 0] < content_end)
+                        & (content_start < offsets[:, 1])
+                        & (content_start >= 0)
+                    )
+                    message_indices = np.where(overlaps, 0, -1).astype(
+                        MESSAGE_INDICES_DTYPE
+                    )
+            builder.emit_aligned(
+                attributed.token_ids,
+                message_indices,
+                np.zeros(attributed.token_ids.size, dtype=MASK_DTYPE),
+                attributed.is_content,
+            )
 
         # ── Per-message loop ──────────────────────────────────────────
         for i, msg in enumerate(messages):
@@ -845,32 +747,30 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
                     # loop (it lives in the header); later ones render.
                     if i == 0:
                         continue
-                    sys_segs: list[tuple[str, bool]] = [("<system>", False)]
+                    sys_segs = TextSegmentBuilder()
+                    sys_segs.append("<system>", is_content=False)
                     if content:
-                        sys_segs.append((content, True))
-                    sys_segs.append(("</system>\n", False))
-                    emit_text_segments(sys_segs, i, is_sampled=False)
+                        sys_segs.append(content, is_content=True)
+                    sys_segs.append("</system>\n", is_content=False)
+                    emit_text_segments(sys_segs.finish(), i, is_sampled=False)
                 case "user":
-                    user_segs: list[tuple[str, bool]] = [("<user>", False)]
+                    user_segs = TextSegmentBuilder()
+                    user_segs.append("<user>", is_content=False)
                     if content:
-                        user_segs.append((content, True))
-                    user_segs.append(("</user>\n", False))
-                    emit_text_segments(user_segs, i, is_sampled=False)
+                        user_segs.append(content, is_content=True)
+                    user_segs.append("</user>\n", is_content=False)
+                    emit_text_segments(user_segs.finish(), i, is_sampled=False)
                 case "assistant":
                     self._render_assistant(
-                        msg,
-                        i,
-                        content,
-                        emit_special=emit_special,
-                        emit_text=emit_text,
-                        emit_text_segments=emit_text_segments,
+                        msg, i, content, emit_special=emit_special, emit_text=emit_text
                     )
                 case "tool":
-                    tool_segs: list[tuple[str, bool]] = [("<tool_response>", False)]
+                    tool_segs = TextSegmentBuilder()
+                    tool_segs.append("<tool_response>", is_content=False)
                     if content:
-                        tool_segs.append((content, True))
-                    tool_segs.append(("</tool_response>\n", False))
-                    emit_text_segments(tool_segs, i, is_sampled=False)
+                        tool_segs.append(content, is_content=True)
+                    tool_segs.append("</tool_response>\n", is_content=False)
+                    emit_text_segments(tool_segs.finish(), i, is_sampled=False)
 
         # ── Generation prompt (no newline after <assistant>) ──────────
         if add_generation_prompt:
@@ -880,20 +780,14 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             else:
                 emit_special(self._think_end, -1, is_sampled=False, is_content=False)
 
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     def parse_response(
-        self,
-        token_ids: list[int],
-        *,
-        tools: list[ToolSpec] | None = None,
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
     ) -> ParsedResponse:
         # The XS-2.1 template renders reasoning and content verbatim (no
         # newline wrapping), so the parse is verbatim too.
@@ -911,21 +805,20 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
         if (
-            not previous_prompt_ids
+            previous_prompt_ids.size == 0
             or not new_messages
             or reject_assistant_in_extension(new_messages)
         ):
             return None
         if should_rerender_for_thinking_retention(
-            self.effective_thinking_retention,
-            new_messages,
+            self.effective_thinking_retention, new_messages
         ):
             return None
 
@@ -934,44 +827,34 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         # synthesises the close. The inter-turn ``\n`` the template puts
         # after ``</assistant>`` is prepended to the first extension
         # message below so the seam encodes with the tag run.
-        previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
+        previous = FixedWidthArrayBuilder(
+            TOKEN_IDS_DTYPE,
+            initial_capacity=previous_prompt_ids.size
+            + previous_completion_ids.size
+            + 1,
+        )
+        previous.extend(previous_prompt_ids)
+        previous.extend(previous_completion_ids)
         stop_ids = {self._assistant_end, self._eos}
         if (
-            not previous_ids[len(previous_prompt_ids) :]
-            or previous_ids[-1] not in stop_ids
+            previous_completion_ids.size == 0
+            or int(previous_completion_ids[-1]) not in stop_ids
         ):
-            previous_ids.append(self._assistant_end)
+            previous.append(self._assistant_end)
+        previous_ids = previous.finish()
 
-        ext: list[int] = []
-        ext_indices: list[int] = []
-        ext_sampled: list[bool] = []
-        ext_content: list[bool] = []
-
-        def emit_special(
-            token_id: int,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ext.append(token_id)
-            ext_indices.append(msg_idx)
-            ext_sampled.append(is_sampled)
-            ext_content.append(is_content)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
+        builder.prepend_prior(previous_ids)
+        emit_special = builder.emit_special
 
         def emit_text_segments(
-            segments: list[tuple[str, bool]],
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
+            segments: TextSegments, msg_idx: int = -1, *, is_sampled: bool = False
         ) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments, overlap_is_content=True
-            ):
-                ext.append(tok_id)
-                ext_indices.append(msg_idx)
-                ext_sampled.append(is_sampled)
-                ext_content.append(is_content)
+            builder.emit_text_segments(
+                segments, msg_idx, is_sampled=is_sampled, overlap_is_content=True
+            )
 
         _OPEN = {"user": "<user>", "system": "<system>", "tool": "<tool_response>"}
         _CLOSE = {
@@ -985,11 +868,12 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
                 return None
             content = self._visible_text(msg.get("content"))
             lead = "\n" if i == 0 else ""
-            segs: list[tuple[str, bool]] = [(lead + _OPEN[role], False)]
+            segs = TextSegmentBuilder()
+            segs.append(lead + _OPEN[role], is_content=False)
             if content:
-                segs.append((content, True))
-            segs.append((_CLOSE[role], False))
-            emit_text_segments(segs, i)
+                segs.append(content, is_content=True)
+            segs.append(_CLOSE[role], is_content=False)
+            emit_text_segments(segs.finish(), i)
 
         emit_special(self._assistant, -1)
         if self.config.enable_thinking:
@@ -997,27 +881,14 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         else:
             emit_special(self._think_end, -1)
 
-        total_len = len(previous_ids) + len(ext)
-        return RenderedTokens(
-            token_ids=previous_ids + ext,
-            message_indices=[-1] * len(previous_ids) + ext_indices,
-            sampled_mask=[False] * total_len,
-            is_content=_content_mask_or_empty(
-                self._tokenizer, [False] * len(previous_ids) + ext_content
-            ),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     def _render_assistant(
-        self,
-        msg: Message,
-        msg_idx: int,
-        content: str,
-        *,
-        emit_special,
-        emit_text,
-        emit_text_segments,
+        self, msg: Message, msg_idx: int, content: str, *, emit_special, emit_text
     ) -> None:
         reasoning_content = ""
         if isinstance(msg.get("reasoning_content"), str):

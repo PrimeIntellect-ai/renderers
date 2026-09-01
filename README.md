@@ -19,13 +19,16 @@ uv add 'renderers[transformers]'
 uv add 'renderers[multimodal]'
 ```
 
-A BYO tokenizer must expose `encode`, `decode`, `convert_tokens_to_ids`, and
-token IDs such as `eos_token_id`. Character offsets are optional: tokenizers
-supporting `return_offsets_mapping=True` also receive precise per-token
-`is_content` attribution; without offsets, renderers return `is_content=[]`.
-`DefaultRenderer` additionally requires `apply_chat_template`. This includes
-text-only Inkling training: `InklingRenderer` loads its Transformers processor
-only when image or audio content is actually rendered.
+A BYO tokenizer must be callable with `return_tensors="np"` and return a NumPy
+`input_ids` array; it must also expose `decode`, `convert_tokens_to_ids`, and
+token IDs such as `eos_token_id`. Legacy tokenizer `encode() -> list[int]`
+custody is rejected before that API is called. Character offsets are optional:
+tokenizers supporting `return_offsets_mapping=True` also receive precise
+per-token `is_content` attribution; without offsets, renderers return an empty
+read-only boolean array. `DefaultRenderer` additionally requires
+`apply_chat_template(..., return_tensors="np")`. This includes text-only
+Inkling training: `InklingRenderer` loads its Transformers processor only when
+image or audio content is actually rendered.
 
 ## At a glance
 
@@ -57,22 +60,42 @@ next_prompt_ids = r.bridge_to_next_turn(
 )
 ```
 
-Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `glm-5`, `glm-5.1`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `deepseek-v4` (V4 Flash 0731), `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `laguna-s-2.1`, `laguna-m.1`, `nemotron-3`, `nemotron-3-ultra`, `nemotron-3.5`, `llama-3`, `gpt-oss`, `hy3`, `inkling` / `inkling-small`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper. `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `kimi-k2.5` / `kimi-k2.6`, and the Inkling checkpoints are multimodal (Inkling handles both image **and** audio).
+Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `glm-5`, `glm-5.1`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `deepseek-v4` (V4 Flash 0731), `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `laguna-s-2.1`, `laguna-m.1`, `nemotron-3`, `nemotron-3-ultra`, `nemotron-3.5`, `llama-3`, `hy3`, `inkling` / `inkling-small`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper. `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `kimi-k2.5` / `kimi-k2.6`, and the Inkling checkpoints are multimodal (Inkling handles both image **and** audio).
+
+`GptOssRenderer` is intentionally fail-closed before importing or calling
+`openai-harmony`: the published Harmony API materializes Python token lists.
+GPT-OSS support will be re-enabled only after Harmony exposes an authoritative
+fixed-width NumPy token ABI.
 
 ## API
 
 ```python
 class Renderer(Protocol):
     def render(messages, *, tools=None, add_generation_prompt=False) -> RenderedTokens: ...
-    def render_ids(messages, *, tools=None, add_generation_prompt=False) -> list[int]: ...
-    def parse_response(token_ids) -> ParsedResponse: ...
+    def render_ids(messages, *, tools=None, add_generation_prompt=False) -> np.ndarray: ...
+    def parse_response(token_ids: np.ndarray) -> ParsedResponse: ...
     def get_stop_token_ids() -> list[int]: ...
-    def bridge_to_next_turn(prev_prompt_ids, prev_completion_ids, new_messages, *, tools=None) -> list[int] | None: ...
+    def bridge_to_next_turn(prev_prompt_ids, prev_completion_ids, new_messages, *, tools=None) -> RenderedTokens | None: ...
 ```
 
-- `RenderedTokens` carries `token_ids` **and** `message_indices` — one entry per token attributing each to its source message (`-1` for structural scaffolding). Lets `build_training_sample` build a per-token loss mask in one render.
-- `ParsedResponse` is `(content, reasoning_content, tool_calls)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
+- `RenderedTokens` carries read-only, aligned fixed-width arrays: `token_ids` (`<i4`), `message_indices` (`<i4`), and boolean `sampled_mask` / `is_content`. It lets `build_training_sample` build a per-token loss mask in one render.
+- `ParsedResponse` carries structural content and an immutable tuple of tool calls plus one read-only `<i8` `tool_call_token_spans` array of shape `(n_calls, 2)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
 - Round-trip: rendering `[user, assistant(content, reasoning, tool_calls)]`, slicing the assistant completion, and feeding it through `parse_response` returns an equivalent structured message. Tested per-renderer in `tests/test_roundtrip.py`.
+
+The typed renderer data-model APIs reject Python-list numeric custody.
+Message counts are read-only integer arrays, span/range APIs are read-only
+`<i8` arrays of shape `(n, 2)`, and multimodal placeholders use one such
+array per modality. Builders grow geometrically and return a read-only view of
+their populated storage, so sealing a render does not add an O(n) final copy.
+
+Dependency boundaries remain explicit and open. The installed Transformers
+tokenizer implementation may internally build Python lists before honoring
+`return_tensors="np"`, and its public `decode` may call `.tolist()` internally.
+The `/inference/v1/generate` client transports token IDs, sampled logprobs, and
+multimodal ranges in versioned fixed-width base64 envelopes; numeric JSON
+arrays are rejected. Released SGLang and Tinker generation results still expose
+list token surfaces, so those examples fail closed until each producer/consumer
+pair is replaced atomically.
 
 ### `bridge_to_next_turn` (the core contract)
 
@@ -119,7 +142,7 @@ Each break fragments a rollout into multiple training samples — every fragment
 
 ## Typed renderer configs
 
-Each renderer accepts a typed pydantic config at construction. Some fields mirror chat-template kwargs; others configure renderer-only behavior such as image caching, parsers, or Harmony preamble construction. `create_renderer` takes one positional `config` argument and an optional keyword-only `chat_template_kwargs` mapping:
+Each renderer accepts a typed pydantic config at construction. Some fields mirror chat-template kwargs; others configure renderer-only behavior such as image caching or parsers. `create_renderer` takes one positional `config` argument and an optional keyword-only `chat_template_kwargs` mapping:
 
 ```python
 from renderers import (
@@ -161,7 +184,7 @@ One shared behaviour flag lives on typed renderer configs: `thinking_retention`,
 - `thinking_retention="tool_cycle"` — bridge within the in-flight tool cycle; a new user query falls back to a full re-render.
 - `thinking_retention="all"` — bridge across user-query boundaries when the bridge is otherwise structurally valid.
 
-Generic `thinking_retention` does **not** change full `render()` output: a full re-render always follows the Python chat-template implementation. Only real template knobs can change full-render thinking behaviour. GLM-5 `clear_thinking=False`, Nemotron-3 `truncate_history_thinking=False`, Qwen3.6 `preserve_thinking=True`, and GPT-OSS `auto_drop_analysis=False` all imply bridge policy `"all"`; no-thinking generation knobs also imply `"all"` when `thinking_retention` is unset. Setting a direct keep/drop template knob and a contradictory `thinking_retention` raises at config-load. The full per-renderer mapping lives in [`docs/renderer-config.md`](docs/renderer-config.md).
+Generic `thinking_retention` does **not** change full `render()` output: a full re-render always follows the Python chat-template implementation. Only real template knobs can change full-render thinking behaviour. GLM-5 `clear_thinking=False`, Nemotron-3 `truncate_history_thinking=False`, and Qwen3.6 `preserve_thinking=True` all imply bridge policy `"all"`; no-thinking generation knobs also imply `"all"` when `thinking_retention` is unset. Setting a direct keep/drop template knob and a contradictory `thinking_retention` raises at config-load. The full per-renderer mapping lives in [`docs/renderer-config.md`](docs/renderer-config.md).
 
 ## `DefaultRenderer`
 
@@ -179,7 +202,7 @@ uv sync --group dev
 uv run pytest
 ```
 
-Round-trip parity (render → parse → original) and token-level parity against each model's independent reference encoder are tested per renderer. Most references use `apply_chat_template`; DeepSeek V4 uses its shipped Python encoder, and GPT-OSS uses Harmony.
+Round-trip parity (render → parse → original) and token-level parity against each model's independent reference encoder are tested per enabled renderer. Most references use `apply_chat_template`; DeepSeek V4 uses its shipped Python encoder. GPT-OSS parity is disabled while the Harmony typed-array ABI is unavailable.
 
 ## License
 

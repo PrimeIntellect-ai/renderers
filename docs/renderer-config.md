@@ -13,8 +13,7 @@ r = create_renderer(tokenizer, chat_template_kwargs={"enable_thinking": False})
 `RendererConfig` is a pydantic discriminated union, one variant per renderer,
 dispatched on the `name` field. Most variants reject unknown fields at
 construction. A field can either mirror a chat-template kwarg or configure a
-renderer-only behavior such as parsing, image caching, or Harmony preamble
-construction.
+renderer-only behavior such as parsing or image caching.
 
 ## Per-renderer configs
 
@@ -35,7 +34,7 @@ product in `tests/test_parity.py`.
 | Gemma 4 | `Gemma4RendererConfig` | `enable_thinking`, `preserve_thinking` | `image_cache_max` |
 | GLM-5 / 5.1 | `GLM5RendererConfig` / `GLM51RendererConfig` | `enable_thinking`, `clear_thinking` | - |
 | GLM-4.5 | `GLM45RendererConfig` | `enable_thinking` | - |
-| gpt-oss | `GptOssRendererConfig` | `reasoning_effort`, `conversation_start_date` | `use_system_prompt`, `knowledge_cutoff`, `model_identity`, `auto_drop_analysis` |
+| gpt-oss (fail-closed) | `GptOssRendererConfig` (reserved) | unavailable | unavailable |
 | Hy3 | `Hy3RendererConfig` | `reasoning_effort`, `preserved_thinking`, `is_training`, `raw_last_assistant`, `fallback_strategy` | - |
 | Kimi K2 | `KimiK2RendererConfig` | - | `enable_thinking` |
 | Kimi K2.5 / 2.6 | `KimiK25RendererConfig` | `thinking` | `image_cache_max` |
@@ -141,7 +140,7 @@ the knobs its template actually exposes:
 | Gemma 4 | `preserve_thinking=True -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | GLM-5 / 5.1 | `clear_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | GLM-4.5 | `enable_thinking=False -> all`, else `tool_cycle` |
-| gpt-oss | `auto_drop_analysis=False -> all`, else `tool_cycle` |
+| gpt-oss | unavailable until openai-harmony provides a fixed-width NumPy token ABI |
 | Hy3 | `preserved_thinking=True -> all`, else `tool_cycle` |
 | Kimi K2.5 / 2.6 | `thinking=False -> all`, else `tool_cycle` |
 | Nemotron-3 / 3.5 | `truncate_history_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |

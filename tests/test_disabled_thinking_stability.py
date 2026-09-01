@@ -24,10 +24,18 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import numpy as np
+
 from parity import models_for
 from renderers import create_renderer
 from renderers.base import load_tokenizer
 from renderers.configs import _config_class_for
+from renderers.token_arrays import (
+    FixedWidthArrayBuilder,
+    TOKEN_IDS_DTYPE,
+    encode_token_ids,
+    owned_token_ids_from_array,
+)
 
 # One representative model per affected renderer family, each with
 # thinking explicitly disabled.
@@ -79,7 +87,7 @@ def test_sampled_stream_is_prefix_of_rerender(dt_model, dt_config):
     for assistant, user in steps:
         convo += [assistant, user]
         cur = renderer.render_ids(convo, add_generation_prompt=True)
-        assert cur[: len(prev)] == prev, (
+        assert np.array_equal(cur[: len(prev)], prev), (
             f"{dt_model}: re-render after appending {assistant['content']!r} "
             "diverged from the earlier generation prompt — historical turn "
             "lost its prefilled empty think wrapper"
@@ -101,7 +109,7 @@ def test_wrapper_reemitted_on_historical_turn(dt_model, dt_config):
             {"role": "user", "content": "Now 3+3?"},
         ]
     )
-    turn = [t for t, i in zip(rendered.token_ids, rendered.message_indices) if i == 1]
+    turn = rendered.token_ids[rendered.message_indices == 1]
     text = tok.decode(turn)
     expected_wrapper = _EMPTY_WRAPPERS.get(dt_model, "<think>\n\n</think>\n\n")
     assert expected_wrapper in text, (
@@ -121,9 +129,13 @@ def test_bridge_and_rerender_agree(dt_model, dt_config):
     msgs = [{"role": "user", "content": "What is the capital of France?"}]
     prompt_ids = renderer.render_ids(msgs, add_generation_prompt=True)
     # Simulate the sampled completion: content tokens then the stop token.
-    completion_ids = tok.encode("Paris.", add_special_tokens=False) + [
-        renderer.get_stop_token_ids()[0]
-    ]
+    content_ids = encode_token_ids(tok, "Paris.")
+    completion_builder = FixedWidthArrayBuilder(
+        TOKEN_IDS_DTYPE, initial_capacity=content_ids.size + 1
+    )
+    completion_builder.extend(content_ids)
+    completion_builder.append(renderer.get_stop_token_ids()[0])
+    completion_ids = completion_builder.finish()
     reminder = {"role": "user", "content": "You are running low on budget."}
 
     bridged = renderer.bridge_to_next_turn(prompt_ids, completion_ids, [reminder])
@@ -136,7 +148,7 @@ def test_bridge_and_rerender_agree(dt_model, dt_config):
         msgs + [{"role": "assistant", "content": "Paris."}, reminder],
         add_generation_prompt=True,
     )
-    assert bridged.token_ids == rerender, (
+    assert np.array_equal(bridged.token_ids, rerender), (
         f"{dt_model}: bridge-extended tokens and full re-render disagree:\n"
         f"bridge:   {tok.decode(bridged.token_ids)!r}\n"
         f"rerender: {tok.decode(rerender)!r}"
@@ -180,7 +192,7 @@ def test_tool_cycle_rerender_stays_prefix_stable(dt_model, dt_config):
         {"role": "tool", "content": '{"temp": 20}'},
     ]
     cur = renderer.render_ids(msgs, tools=tools, add_generation_prompt=True)
-    assert cur[: len(prev)] == prev, (
+    assert np.array_equal(cur[: len(prev)], prev), (
         f"{dt_model}: tool-call turn lost its prefilled empty think wrapper "
         "on re-render"
     )
@@ -190,7 +202,7 @@ def test_tool_cycle_rerender_stays_prefix_stable(dt_model, dt_config):
         {"role": "user", "content": "You are running low on budget."},
     ]
     cur2 = renderer.render_ids(msgs, tools=tools, add_generation_prompt=True)
-    assert cur2[: len(cur)] == cur
+    assert np.array_equal(cur2[: len(cur)], cur)
 
 
 def test_historical_reasoning_stays_template_faithful(dt_model, dt_config):
@@ -215,13 +227,15 @@ def test_historical_reasoning_stays_template_faithful(dt_model, dt_config):
         },
     ]
     ours = renderer.render_ids(msgs)
-    theirs = list(
+    theirs = owned_token_ids_from_array(
+        "apply_chat_template",
         tok.apply_chat_template(
             msgs,
             tokenize=True,
             return_dict=False,
+            return_tensors="np",
             add_generation_prompt=False,
             enable_thinking=False,
-        )
+        ),
     )
-    assert ours == theirs
+    assert np.array_equal(ours, theirs)

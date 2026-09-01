@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 from parity import models_for
+from renderers.token_arrays import encode_token_ids
 
 _ROUNDTRIP_MODELS = [(case.model, case.renderer) for case in models_for("roundtrip")]
 
@@ -308,7 +309,7 @@ def test_default_renderer_fallback_parser_preserves_boundary_whitespace(
     # parse_response. We don't need the template to emit `<think>` here
     # — we only exercise the parser's text-splitting logic.
     text = "<think>reason</think>\nvisible"
-    ids = rt_tokenizer.encode(text, add_special_tokens=False)
+    ids = encode_token_ids(rt_tokenizer, text)
     # If decoding doesn't round-trip the `\n`, the test is N/A for this
     # tokenizer — this is a parser-level invariant, not a tokenizer one.
     if rt_tokenizer.decode(ids, skip_special_tokens=False) != text:

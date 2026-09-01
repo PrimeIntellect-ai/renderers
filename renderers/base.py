@@ -768,6 +768,8 @@ class Tokenizer(Protocol):
     unk_token_id: int | None
     eos_token_id: int | None
 
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
     def decode(self, token_ids: Any, *args: Any, **kwargs: Any) -> str: ...
 
     def convert_tokens_to_ids(self, tokens: Any) -> Any: ...
@@ -782,9 +784,6 @@ class OffsetTokenizer(Tokenizer, Protocol):
     BPE pass. A basic :class:`Tokenizer` remains sufficient for rendering token
     IDs; when offsets are unavailable, renderers leave ``is_content`` empty.
     """
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
-
 
 @runtime_checkable
 class ChatTemplateTokenizer(Tokenizer, Protocol):

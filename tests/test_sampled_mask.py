@@ -15,20 +15,18 @@ exempt from the populated-length check.
 
 from __future__ import annotations
 
+import numpy as np
+
 
 def test_sampled_mask_length_or_empty(model_name, renderer):
     """``sampled_mask`` is either empty (opt-out) or matches token_ids
     length exactly. No partial fills."""
-    msgs = [
-        {"role": "user", "content": "Hi"},
-        {"role": "assistant", "content": "Hello!"},
-    ]
+    msgs = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]
     rendered = renderer.render(msgs)
     n_tokens = len(rendered.token_ids)
     n_mask = len(rendered.sampled_mask)
     assert n_mask == 0 or n_mask == n_tokens, (
-        f"{model_name}: sampled_mask length {n_mask} must be 0 or match "
-        f"token_ids length {n_tokens}"
+        f"{model_name}: sampled_mask length {n_mask} must be 0 or match token_ids length {n_tokens}"
     )
 
 
@@ -43,22 +41,12 @@ def test_sampled_mask_excludes_user_and_system(model_name, renderer):
         {"role": "assistant", "content": "Hello!"},
     ]
     rendered = renderer.render(msgs)
-    if not rendered.sampled_mask:
+    if rendered.sampled_mask.size == 0:
         return  # renderer opted out
 
-    bad = []
-    for k, (msg_idx, is_sampled) in enumerate(
-        zip(rendered.message_indices, rendered.sampled_mask)
-    ):
-        if msg_idx < 0:
-            continue
-        role = msgs[msg_idx].get("role")
-        if role in ("user", "system", "tool") and is_sampled:
-            bad.append((k, role, msg_idx))
-    assert not bad, (
-        f"{model_name}: non-assistant tokens marked is_sampled=True "
-        f"(k, role, msg_idx): {bad[:8]}"
-    )
+    non_assistant = (rendered.message_indices == 0) | (rendered.message_indices == 1)
+    bad = np.flatnonzero(non_assistant & rendered.sampled_mask)
+    assert bad.size == 0, f"{model_name}: non-assistant tokens marked is_sampled=True at positions {bad[:8]}"
 
 
 def test_sampled_mask_excludes_generation_prompt(model_name, renderer):
@@ -67,20 +55,11 @@ def test_sampled_mask_excludes_generation_prompt(model_name, renderer):
     model continues from, not samples."""
     msgs = [{"role": "user", "content": "Hi"}]
     rendered = renderer.render(msgs, add_generation_prompt=True)
-    if not rendered.sampled_mask:
+    if rendered.sampled_mask.size == 0:
         return
 
-    bad = [
-        k
-        for k, (msg_idx, is_sampled) in enumerate(
-            zip(rendered.message_indices, rendered.sampled_mask)
-        )
-        if msg_idx == -1 and is_sampled
-    ]
-    assert not bad, (
-        f"{model_name}: generation-prompt tokens marked is_sampled=True "
-        f"at positions {bad[:8]}"
-    )
+    bad = np.flatnonzero((rendered.message_indices == -1) & rendered.sampled_mask)
+    assert bad.size == 0, f"{model_name}: generation-prompt tokens marked is_sampled=True at positions {bad[:8]}"
 
 
 def test_sampled_mask_assistant_role_tag_excluded(model_name, renderer):
@@ -90,21 +69,14 @@ def test_sampled_mask_assistant_role_tag_excluded(model_name, renderer):
     never samples it. Asserts that the *first* token attributed to an
     assistant message is is_sampled=False; the last token (turn-close
     signal) should be is_sampled=True."""
-    msgs = [
-        {"role": "user", "content": "Hi"},
-        {"role": "assistant", "content": "Hello world!"},
-    ]
+    msgs = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello world!"}]
     rendered = renderer.render(msgs)
-    if not rendered.sampled_mask:
+    if rendered.sampled_mask.size == 0:
         return
 
-    assistant_positions = [
-        k for k, idx in enumerate(rendered.message_indices) if idx == 1
-    ]
-    assert assistant_positions, (
-        f"{model_name}: no tokens attributed to assistant message"
-    )
-    first_k = assistant_positions[0]
+    assistant_positions = np.flatnonzero(rendered.message_indices == 1)
+    assert assistant_positions.size > 0, f"{model_name}: no tokens attributed to assistant message"
+    first_k = int(assistant_positions[0])
     assert not rendered.sampled_mask[first_k], (
         f"{model_name}: first assistant-attributed token at k={first_k} "
         f"should be is_sampled=False (role-tag scaffolding), but was True"
@@ -112,8 +84,6 @@ def test_sampled_mask_assistant_role_tag_excluded(model_name, renderer):
 
     # At least one assistant-attributed token must be is_sampled=True
     # (the content + turn close — otherwise the loss mask is empty).
-    any_sampled = any(rendered.sampled_mask[k] for k in assistant_positions)
-    assert any_sampled, (
-        f"{model_name}: no assistant tokens marked is_sampled=True — the "
-        f"resulting SFT loss mask would be empty"
+    assert np.any(rendered.sampled_mask[assistant_positions]), (
+        f"{model_name}: no assistant tokens marked is_sampled=True — the resulting SFT loss mask would be empty"
     )

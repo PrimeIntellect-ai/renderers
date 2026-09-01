@@ -23,6 +23,7 @@ from renderers.token_arrays import (
     RenderedTokenBuilder,
     TOKEN_IDS_DTYPE,
     TRAINING_TOKEN_IDS_DTYPE,
+    TextSegmentBuilder,
     encode_token_ids,
     owned_offsets_from_array,
     require_1d_array,
@@ -210,6 +211,31 @@ def test_attributed_segments_require_readonly_arrays_and_seal_offsetless_masks()
     assert not attributed.token_ids.flags.writeable
     assert not attributed.is_content.flags.writeable
     assert attributed.has_content_attribution is False
+
+
+def test_dynamic_text_segments_keep_data_scaled_content_flags_fixed_width():
+    class _OffsetTokenizer:
+        def __call__(self, text, *, add_special_tokens, return_tensors, return_offsets_mapping=False):
+            token_ids = _hostile(np.ones((1, len(text)), dtype="<i8"))
+            result = {"input_ids": token_ids}
+            if return_offsets_mapping:
+                offsets = np.empty((1, len(text), 2), dtype="<i8")
+                offsets[0, :, 0] = np.arange(len(text), dtype="<i8")
+                offsets[0, :, 1] = np.arange(1, len(text) + 1, dtype="<i8")
+                result["offset_mapping"] = _hostile(offsets)
+            return result
+
+    segments = TextSegmentBuilder(initial_capacity=1)
+    for index in range(128):
+        segments.append("x", is_content=index % 2 == 0)
+
+    attributed = attribute_text_segments(_OffsetTokenizer(), segments)
+    expected_content = np.arange(128, dtype="<i8") % 2 == 0
+
+    assert attributed.token_ids.size == 128
+    assert np.array_equal(attributed.is_content, expected_content)
+    assert not attributed.token_ids.flags.writeable
+    assert not attributed.is_content.flags.writeable
 
 
 def test_hy3_render_and_bridge_keep_hostile_arrays_typed_across_joined_segments():

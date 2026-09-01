@@ -18,6 +18,7 @@ from renderers.token_arrays import (
     OFFSETS_DTYPE,
     TOKEN_IDS_DTYPE,
     TRAINING_TOKEN_IDS_DTYPE,
+    TextSegmentBuilder,
     encode_token_ids,
     empty_array,
     owned_offsets_from_array,
@@ -1917,7 +1918,7 @@ def _content_mask_or_empty(tokenizer: Tokenizer, content_mask: np.ndarray) -> np
 
 def attribute_text_segments(
     tokenizer: Tokenizer,
-    segments: "list[tuple[str, bool]]",
+    segments: "TextSegmentBuilder | list[tuple[str, bool]]",
     *,
     overlap_is_content: bool = False,
     _offset_tokenizer: OffsetTokenizer | None | object = _OFFSET_CAPABILITY_UNRESOLVED,
@@ -1959,11 +1960,18 @@ def attribute_text_segments(
 
     Empty input or empty joined text returns empty fixed-width arrays.
     """
-    if not segments:
+    if isinstance(segments, TextSegmentBuilder):
+        fixed_segments = segments.finish()
+        texts = fixed_segments.texts
+        segment_content = fixed_segments.is_content
+    else:
+        texts = tuple(text for text, _ in segments)
+        segment_content = np.fromiter((is_content for _, is_content in segments), dtype=MASK_DTYPE, count=len(segments))
+    if not texts:
         return AttributedTextSegments(
             empty_array(TOKEN_IDS_DTYPE), empty_array(MASK_DTYPE), has_content_attribution=True
         )
-    full_text = "".join(text for text, _ in segments)
+    full_text = "".join(texts)
     if not full_text:
         return AttributedTextSegments(
             empty_array(TOKEN_IDS_DTYPE), empty_array(MASK_DTYPE), has_content_attribution=True
@@ -1985,48 +1993,21 @@ def attribute_text_segments(
         type(offset_tokenizer).__name__, encoding["offset_mapping"], token_count=token_ids.size
     )
 
-    # Build segment char-span lookup. Track the half-open span
-    # [seg_start, seg_end) of each segment and its is_content bit.
-    spans: list[tuple[int, int, bool]] = []
-    pos = 0
-    for text, is_content in segments:
-        spans.append((pos, pos + len(text), is_content))
-        pos += len(text)
-    total_len = pos
-
-    out = np.empty(token_ids.size, dtype=MASK_DTYPE)
-    last_is_content = spans[-1][2] if spans else False
-    for token_index in range(token_ids.size):
-        start = int(offsets[token_index, 0])
-        end = int(offsets[token_index, 1])
-        if start >= total_len:
-            # Token's character offset is past every segment (shouldn't
-            # normally happen for add_special_tokens=False, but defensive
-            # against tokenizer-specific edge cases).
-            out[token_index] = last_is_content
-            continue
-        if overlap_is_content and end > start:
-            out[token_index] = any(
-                seg_is_content for seg_start, seg_end, seg_is_content in spans if seg_start < end and start < seg_end
-            )
-            continue
-        # Find the segment that contains `start`. Segments are
-        # contiguous and ordered, so a linear scan is fine — the inner
-        # loop runs at most len(segments) times per token and segments
-        # is typically 2-3 in practice.
-        is_content = last_is_content
-        for seg_start, seg_end, seg_is_content in spans:
-            if seg_start <= start < seg_end:
-                is_content = seg_is_content
-                break
-        else:
-            # start == total_len handled above; the remaining case is
-            # an empty segment in the middle. Empty segments emit no
-            # characters, so no token can land in them; fall through to
-            # the last non-empty segment's bit.
-            pass
-        out[token_index] = is_content
-    token_ids.flags.writeable = False
+    char_lengths = np.fromiter((len(text) for text in texts), dtype=OFFSETS_DTYPE, count=len(texts))
+    segment_ends = np.cumsum(char_lengths, dtype=OFFSETS_DTYPE)
+    token_segments = np.searchsorted(segment_ends, offsets[:, 0], side="right")
+    np.minimum(token_segments, segment_ends.size - 1, out=token_segments)
+    out = np.array(segment_content[token_segments], dtype=MASK_DTYPE, copy=True)
+    if overlap_is_content:
+        last_segments = np.searchsorted(segment_ends, np.maximum(offsets[:, 1] - 1, offsets[:, 0]), side="right")
+        np.minimum(last_segments, segment_ends.size - 1, out=last_segments)
+        content_prefix = np.empty(segment_content.size + 1, dtype=OFFSETS_DTYPE)
+        content_prefix[0] = 0
+        np.cumsum(segment_content, dtype=OFFSETS_DTYPE, out=content_prefix[1:])
+        nonempty_tokens = offsets[:, 1] > offsets[:, 0]
+        out[nonempty_tokens] = (
+            content_prefix[last_segments[nonempty_tokens] + 1] > content_prefix[token_segments[nonempty_tokens]]
+        )
     out.flags.writeable = False
     return AttributedTextSegments(token_ids, out, has_content_attribution=True)
 

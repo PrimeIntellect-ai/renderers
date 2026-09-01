@@ -83,6 +83,7 @@ from renderers.token_arrays import (
     FixedWidthArrayBuilder,
     FixedWidthRangeBuilder,
     RenderedTokenBuilder,
+    TextSegmentBuilder,
     encode_token_ids,
     finish_range_builders,
     merge_range_maps,

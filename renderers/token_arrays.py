@@ -138,6 +138,48 @@ class FixedWidthArrayBuilder:
         return readonly_view(self._buffer[: self._size])
 
 
+class TextSegments:
+    """Structural text chunks aligned with one fixed-width content mask."""
+
+    __slots__ = ("is_content", "texts")
+
+    def __init__(self, texts: tuple[str, ...], is_content: np.ndarray) -> None:
+        require_1d_array("segment is_content", is_content, dtype=MASK_DTYPE)
+        require_readonly("segment is_content", is_content)
+        if len(texts) != is_content.size:
+            raise ValueError("segment texts and content mask must have equal lengths")
+        self.texts = texts
+        self.is_content = is_content
+
+
+class TextSegmentBuilder:
+    """Accumulate structural text while numeric attribution stays fixed-width."""
+
+    __slots__ = ("_content", "_sealed", "_texts")
+
+    def __init__(self, *, initial_capacity: int = 4) -> None:
+        self._texts: list[str] = []
+        self._content = FixedWidthArrayBuilder(MASK_DTYPE, initial_capacity=initial_capacity)
+        self._sealed = False
+
+    def __len__(self) -> int:
+        return len(self._texts)
+
+    def append(self, text: str, *, is_content: bool) -> None:
+        if self._sealed:
+            raise RuntimeError("text segment builder is already sealed")
+        if type(text) is not str:
+            raise TypeError(f"segment text must be str, got {type(text).__name__}")
+        if type(is_content) is not bool:
+            raise TypeError(f"segment is_content must be bool, got {type(is_content).__name__}")
+        self._texts.append(text)
+        self._content.append(is_content)
+
+    def finish(self) -> TextSegments:
+        self._sealed = True
+        return TextSegments(tuple(self._texts), self._content.finish())
+
+
 class FixedWidthRangeBuilder:
     """Grow-as-you-go fixed-width storage for offset/length rows."""
 
@@ -315,7 +357,7 @@ class RenderedTokenBuilder:
 
     def emit_text_segments(
         self,
-        segments: list[tuple[str, bool]],
+        segments: TextSegmentBuilder | list[tuple[str, bool]],
         message_index: int = -1,
         *,
         is_sampled: bool = False,
@@ -335,7 +377,11 @@ class RenderedTokenBuilder:
         return attributed.has_content_attribution
 
     def emit_assistant_segments(
-        self, segments: list[tuple[str, bool]], message_index: int = -1, *, overlap_is_content: bool = False
+        self,
+        segments: TextSegmentBuilder | list[tuple[str, bool]],
+        message_index: int = -1,
+        *,
+        overlap_is_content: bool = False,
     ) -> bool:
         """Emit assistant text, sampling exactly the attributable content tokens."""
         from renderers.base import attribute_text_segments

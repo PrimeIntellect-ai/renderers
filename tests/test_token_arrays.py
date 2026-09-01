@@ -13,8 +13,9 @@ from renderers.base import (
     build_training_sample,
     attribute_text_segments,
 )
-from renderers.configs import Hy3RendererConfig
+from renderers.configs import Hy3RendererConfig, LagunaXS21RendererConfig
 from renderers.hy3 import Hy3Renderer
+from renderers.laguna_xs2 import LagunaXS21Renderer
 from renderers.token_arrays import (
     FixedWidthArrayBuilder,
     FixedWidthRangeBuilder,
@@ -273,7 +274,6 @@ def test_hy3_render_and_bridge_keep_hostile_arrays_typed_across_joined_segments(
     tokenizer = _Tokenizer()
     renderer = Hy3Renderer(tokenizer, Hy3RendererConfig())
     assert tokenizer.offset_probe_calls == 1
-
     rendered = renderer.render(
         [{"role": "system", "content": "policy"}, {"role": "user", "content": "question"}], add_generation_prompt=True
     )
@@ -323,6 +323,51 @@ def test_hy3_render_and_bridge_keep_hostile_arrays_typed_across_joined_segments(
         assert isinstance(values, np.ndarray)
         assert not values.flags.writeable
     assert tokenizer.offset_probe_calls == 1
+
+
+def test_laguna_offsetless_header_keeps_default_scaffold_out_of_message_zero():
+    class _Tokenizer:
+        unk_token_id = -1
+        eos_token_id = None
+
+        def __init__(self):
+            self._specials: dict[str, int] = {}
+
+        def convert_tokens_to_ids(self, token):
+            return self._specials.setdefault(token, 1000 + len(self._specials))
+
+        def __call__(self, text, *, add_special_tokens, return_tensors):
+            return {
+                "input_ids": _hostile(
+                    np.fromiter((ord(char) for char in text), dtype="<i8", count=len(text)).reshape(1, -1)
+                )
+            }
+
+        def decode(self, token_ids, **kwargs):
+            return np.asarray(token_ids, dtype=np.uint8).tobytes().decode()
+
+        def encode(self, *args, **kwargs):
+            raise AssertionError("legacy tokenizer encode must never be called")
+
+    def find_run(result, text):
+        expected = np.fromiter((ord(char) for char in text), dtype=TOKEN_IDS_DTYPE, count=len(text))
+        windows = np.lib.stride_tricks.sliding_window_view(result.token_ids, expected.size)
+        matches = np.flatnonzero(np.all(windows == expected, axis=1))
+        assert matches.size == 1
+        start = int(matches[0])
+        return slice(start, start + expected.size)
+
+    tokenizer = _Tokenizer()
+    renderer = LagunaXS21Renderer(tokenizer, LagunaXS21RendererConfig(enable_thinking=True))
+    default = renderer.render([{"role": "user", "content": "question"}])
+    explicit = renderer.render([{"role": "system", "content": "owned-policy"}, {"role": "user", "content": "question"}])
+
+    default_run = find_run(default, "You are a helpful")
+    explicit_run = find_run(explicit, "owned-policy")
+    assert np.all(default.message_indices[default_run] == -1)
+    assert np.all(explicit.message_indices[explicit_run] == 0)
+    assert default.is_content.size == 0
+    assert explicit.is_content.size == 0
 
 
 def test_training_sample_rejects_mutable_aliases_without_mutating_caller():

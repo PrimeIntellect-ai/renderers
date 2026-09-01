@@ -46,6 +46,7 @@ from renderers.base import (
 )
 from renderers.configs import Gemma4RendererConfig
 from renderers.token_arrays import (
+    MASK_DTYPE,
     TOKEN_IDS_DTYPE,
     FixedWidthArrayBuilder,
     FixedWidthRangeBuilder,
@@ -651,19 +652,18 @@ class Gemma4Renderer:
             em.special(self._turn_end, is_sampled=False, is_content=False)
             em.text("\n", is_sampled=False, is_content=False)
 
-        loop_indices = list(range(loop_start, len(messages)))
-        last_user_pos = -1
-        for pos, msg_idx in enumerate(loop_indices):
+        last_user_index = -1
+        for msg_idx in range(loop_start, len(messages)):
             if messages[msg_idx].get("role") == "user":
-                last_user_pos = pos
+                last_user_index = msg_idx
 
         previous_non_tool_role: str | None = None
-        consumed_tool_indices: set[int] = set()
-        for pos, msg_idx in enumerate(loop_indices):
+        consumed_tool_indices = np.zeros(len(messages), dtype=MASK_DTYPE)
+        for msg_idx in range(loop_start, len(messages)):
             msg = messages[msg_idx]
             role = msg.get("role") or ""
             if role == "tool":
-                if msg_idx not in consumed_tool_indices:
+                if not consumed_tool_indices[msg_idx]:
                     raise ValueError(
                         f"Unconsumed tool message at index {msg_idx}; Gemma 4 tool "
                         "messages must immediately follow an assistant message with "
@@ -681,7 +681,7 @@ class Gemma4Renderer:
 
             is_assistant = role == "assistant"
             thinking = msg.get("reasoning") or msg.get("reasoning_content")
-            thinking_gate = pos > last_user_pos or (self.config.preserve_thinking and bool(msg.get("tool_calls")))
+            thinking_gate = msg_idx > last_user_index or (self.config.preserve_thinking and bool(msg.get("tool_calls")))
             reemit_disabled_thinking_prefill = (
                 is_assistant
                 and not continues_same_model_turn
@@ -735,7 +735,7 @@ class Gemma4Renderer:
                 first_response = True
                 while scan < len(messages) and messages[scan].get("role") == "tool":
                     response_msg = messages[scan]
-                    consumed_tool_indices.add(scan)
+                    consumed_tool_indices[scan] = True
                     name = str(response_msg.get("name") or "unknown")
                     for tool_call in tool_calls:
                         if tool_call.get("id") == response_msg.get("tool_call_id"):
@@ -764,7 +764,7 @@ class Gemma4Renderer:
             has_content = self._emit_content(em, msg.get("content"), role, mm_hashes, mm_placeholders, mm_items)
 
             next_non_tool_role = None
-            for next_idx in loop_indices[pos + 1 :]:
+            for next_idx in range(msg_idx + 1, len(messages)):
                 candidate_role = messages[next_idx].get("role")
                 if candidate_role != "tool":
                     next_non_tool_role = candidate_role

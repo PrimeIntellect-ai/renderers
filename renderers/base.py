@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, TypedDict, c
 import numpy as np
 
 from renderers.token_arrays import (
+    _OFFSET_CAPABILITY_UNRESOLVED,
     COUNTS_DTYPE,
     LOGPROBS_DTYPE,
     MASK_DTYPE,
@@ -19,7 +20,9 @@ from renderers.token_arrays import (
     TRAINING_TOKEN_IDS_DTYPE,
     encode_token_ids,
     empty_array,
+    owned_offsets_from_array,
     owned_readonly_copy,
+    owned_token_ids_from_array,
     readonly_view,
     require_1d_array,
     require_range_array,
@@ -1808,6 +1811,8 @@ class AttributedTextSegments:
             raise ValueError("attributed token_ids and is_content must have equal lengths")
         if type(self.has_content_attribution) is not bool:
             raise TypeError("has_content_attribution must be bool")
+        require_readonly("attributed token_ids", self.token_ids)
+        require_readonly("attributed is_content", self.is_content)
 
     def __len__(self) -> int:
         return self.token_ids.size
@@ -1911,7 +1916,11 @@ def _content_mask_or_empty(tokenizer: Tokenizer, content_mask: np.ndarray) -> np
 
 
 def attribute_text_segments(
-    tokenizer: Tokenizer, segments: "list[tuple[str, bool]]", *, overlap_is_content: bool = False
+    tokenizer: Tokenizer,
+    segments: "list[tuple[str, bool]]",
+    *,
+    overlap_is_content: bool = False,
+    _offset_tokenizer: OffsetTokenizer | None | object = _OFFSET_CAPABILITY_UNRESOLVED,
 ) -> AttributedTextSegments:
     """Tokenize concatenated segments as a single BPE pass and return
     ``(token_id, is_content)`` pairs.
@@ -1960,26 +1969,21 @@ def attribute_text_segments(
             empty_array(TOKEN_IDS_DTYPE), empty_array(MASK_DTYPE), has_content_attribution=True
         )
 
-    offset_tokenizer = _get_offset_tokenizer(tokenizer)
+    offset_tokenizer = (
+        _get_offset_tokenizer(tokenizer)
+        if _offset_tokenizer is _OFFSET_CAPABILITY_UNRESOLVED
+        else cast(OffsetTokenizer | None, _offset_tokenizer)
+    )
     if offset_tokenizer is None:
         token_ids = encode_token_ids(tokenizer, full_text)
-        return AttributedTextSegments(
-            token_ids, np.zeros(token_ids.size, dtype=MASK_DTYPE), has_content_attribution=False
-        )
+        is_content = np.zeros(token_ids.size, dtype=MASK_DTYPE)
+        is_content.flags.writeable = False
+        return AttributedTextSegments(token_ids, is_content, has_content_attribution=False)
     encoding = offset_tokenizer(full_text, add_special_tokens=False, return_offsets_mapping=True, return_tensors="np")
-    raw_token_ids = encoding["input_ids"]
-    raw_offsets = encoding["offset_mapping"]
-    if not isinstance(raw_token_ids, np.ndarray) or not isinstance(raw_offsets, np.ndarray):
-        raise TypeError("offset tokenizer must return NumPy token and offset arrays")
-    if raw_token_ids.ndim == 2 and raw_token_ids.shape[0] == 1:
-        raw_token_ids = raw_token_ids[0]
-    if raw_offsets.ndim == 3 and raw_offsets.shape[0] == 1:
-        raw_offsets = raw_offsets[0]
-    token_ids = np.array(raw_token_ids, dtype=TOKEN_IDS_DTYPE, copy=True, order="C")
-    if token_ids.ndim != 1:
-        raise ValueError(f"offset tokenizer input_ids must be rank 1, got shape {token_ids.shape}")
-    if raw_offsets.ndim != 2 or raw_offsets.shape != (token_ids.size, 2):
-        raise ValueError(f"offset_mapping must have shape [{token_ids.size}, 2], got {raw_offsets.shape}")
+    token_ids = owned_token_ids_from_array(type(offset_tokenizer).__name__, encoding["input_ids"])
+    offsets = owned_offsets_from_array(
+        type(offset_tokenizer).__name__, encoding["offset_mapping"], token_count=token_ids.size
+    )
 
     # Build segment char-span lookup. Track the half-open span
     # [seg_start, seg_end) of each segment and its is_content bit.
@@ -1993,8 +1997,8 @@ def attribute_text_segments(
     out = np.empty(token_ids.size, dtype=MASK_DTYPE)
     last_is_content = spans[-1][2] if spans else False
     for token_index in range(token_ids.size):
-        start = int(raw_offsets[token_index, 0])
-        end = int(raw_offsets[token_index, 1])
+        start = int(offsets[token_index, 0])
+        end = int(offsets[token_index, 1])
         if start >= total_len:
             # Token's character offset is past every segment (shouldn't
             # normally happen for add_special_tokens=False, but defensive

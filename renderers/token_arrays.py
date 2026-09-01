@@ -203,13 +203,23 @@ def merge_range_maps(*maps: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
     return finish_range_builders(builders)
 
 
+_OFFSET_CAPABILITY_UNRESOLVED = object()
+
+
 class RenderedTokenBuilder:
     """Aligned grow-as-you-go storage for every per-token renderer signal."""
 
-    __slots__ = ("_is_content", "_message_indices", "_sampled_mask", "_token_ids", "_tokenizer")
+    __slots__ = ("_is_content", "_message_indices", "_offset_tokenizer", "_sampled_mask", "_token_ids", "_tokenizer")
 
-    def __init__(self, tokenizer: Any = None, *, initial_capacity: int = 64) -> None:
+    def __init__(
+        self,
+        tokenizer: Any = None,
+        *,
+        offset_tokenizer: Any = _OFFSET_CAPABILITY_UNRESOLVED,
+        initial_capacity: int = 64,
+    ) -> None:
         self._tokenizer = tokenizer
+        self._offset_tokenizer = offset_tokenizer
         self._token_ids = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=initial_capacity)
         self._message_indices = FixedWidthArrayBuilder(MESSAGE_INDICES_DTYPE, initial_capacity=initial_capacity)
         self._sampled_mask = FixedWidthArrayBuilder(MASK_DTYPE, initial_capacity=initial_capacity)
@@ -274,6 +284,22 @@ class RenderedTokenBuilder:
         else:
             self._is_content.extend_constant(is_content, token_ids.size)
 
+    def emit_aligned(
+        self, token_ids: np.ndarray, message_indices: np.ndarray, sampled_mask: np.ndarray, is_content: np.ndarray
+    ) -> None:
+        """Append already-aligned fixed-width signals without scalar iteration."""
+        require_1d_array("token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_1d_array("message_indices", message_indices, dtype=MESSAGE_INDICES_DTYPE, minimum=-1)
+        require_1d_array("sampled_mask", sampled_mask, dtype=MASK_DTYPE)
+        require_1d_array("is_content", is_content, dtype=MASK_DTYPE)
+        sizes = {token_ids.size, message_indices.size, sampled_mask.size, is_content.size}
+        if len(sizes) != 1:
+            raise ValueError("aligned token signals must have equal lengths")
+        self._token_ids.extend(token_ids)
+        self._message_indices.extend(message_indices)
+        self._sampled_mask.extend(sampled_mask)
+        self._is_content.extend(is_content)
+
     def prepend_prior(self, token_ids: np.ndarray) -> None:
         self.emit_tokens(token_ids, -1, is_sampled=False, is_content=False)
 
@@ -299,7 +325,12 @@ class RenderedTokenBuilder:
 
         if self._tokenizer is None:
             raise RuntimeError("emit_text_segments requires a tokenizer-bound RenderedTokenBuilder")
-        attributed = attribute_text_segments(self._tokenizer, segments, overlap_is_content=overlap_is_content)
+        attributed = attribute_text_segments(
+            self._tokenizer,
+            segments,
+            overlap_is_content=overlap_is_content,
+            _offset_tokenizer=self._resolved_offset_tokenizer(),
+        )
         self.emit_tokens(attributed.token_ids, message_index, is_sampled=is_sampled, is_content=attributed.is_content)
         return attributed.has_content_attribution
 
@@ -311,11 +342,23 @@ class RenderedTokenBuilder:
 
         if self._tokenizer is None:
             raise RuntimeError("emit_assistant_segments requires a tokenizer-bound builder")
-        attributed = attribute_text_segments(self._tokenizer, segments, overlap_is_content=overlap_is_content)
+        attributed = attribute_text_segments(
+            self._tokenizer,
+            segments,
+            overlap_is_content=overlap_is_content,
+            _offset_tokenizer=self._resolved_offset_tokenizer(),
+        )
         self.emit_tokens(
             attributed.token_ids, message_index, is_sampled=attributed.is_content, is_content=attributed.is_content
         )
         return attributed.has_content_attribution
+
+    def _resolved_offset_tokenizer(self) -> Any:
+        if self._offset_tokenizer is _OFFSET_CAPABILITY_UNRESOLVED:
+            from renderers.base import _get_offset_tokenizer
+
+            self._offset_tokenizer = _get_offset_tokenizer(self._tokenizer)
+        return self._offset_tokenizer
 
     def finish(
         self,
@@ -347,7 +390,8 @@ class RenderedTokenBuilder:
         )
 
 
-def _single_token_sequence(name: str, value: object) -> np.ndarray:
+def owned_token_ids_from_array(name: str, value: object) -> np.ndarray:
+    """Validate fixed-width tokenizer output and take readonly int32 ownership."""
     if not isinstance(value, np.ndarray):
         raise TypeError(
             f"{name} must return NumPy input_ids; legacy {type(value).__name__} token custody is unsupported"
@@ -365,6 +409,23 @@ def _single_token_sequence(name: str, value: object) -> np.ndarray:
     return owned
 
 
+def owned_offsets_from_array(name: str, value: object, *, token_count: int) -> np.ndarray:
+    """Validate tokenizer offsets and take readonly little-endian int64 ownership."""
+    if not isinstance(value, np.ndarray):
+        raise TypeError(f"{name} must return NumPy offsets, got {type(value).__name__}")
+    if value.ndim == 3 and value.shape[0] == 1:
+        value = value[0]
+    if value.shape != (token_count, 2):
+        raise ValueError(f"{name} offsets must have shape [{token_count}, 2], got {value.shape}")
+    if value.dtype.kind not in "iu" or value.dtype.itemsize > 8:
+        raise TypeError(f"{name} offsets must use a fixed-width integer dtype, got {value.dtype}")
+    if value.size and (np.any(value < 0) or np.any(value > np.iinfo(OFFSETS_DTYPE).max)):
+        raise ValueError(f"{name} offsets are outside the non-negative int64 range")
+    owned = np.array(value, dtype=OFFSETS_DTYPE, copy=True, order="C")
+    owned.flags.writeable = False
+    return owned
+
+
 def encode_token_ids(tokenizer: Any, text: str) -> np.ndarray:
     """Encode only through the NumPy tokenizer ABI; never invoke list APIs."""
     if not callable(tokenizer):
@@ -375,4 +436,4 @@ def encode_token_ids(tokenizer: Any, text: str) -> np.ndarray:
         raise TypeError(f"{type(tokenizer).__name__} must support callable NumPy tokenization") from exc
     if not isinstance(encoded, Mapping) or "input_ids" not in encoded:
         raise TypeError(f"{type(tokenizer).__name__} must return a mapping with NumPy input_ids")
-    return _single_token_sequence(type(tokenizer).__name__, encoded["input_ids"])
+    return owned_token_ids_from_array(type(tokenizer).__name__, encoded["input_ids"])

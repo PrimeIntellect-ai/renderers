@@ -27,16 +27,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import numpy as np
+
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
     Tokenizer,
-    _content_mask_or_empty,
     _get_offset_tokenizer,
     _infer_offsets_from_decode,
-    attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -44,6 +44,18 @@ from renderers.base import (
 )
 from renderers.configs import Hy3RendererConfig, ResolvedThinkingRetention
 from renderers.parsing import parse_hy3
+from renderers.token_arrays import (
+    MASK_DTYPE,
+    MESSAGE_INDICES_DTYPE,
+    OFFSETS_DTYPE,
+    TOKEN_IDS_DTYPE,
+    FixedWidthArrayBuilder,
+    RenderedTokenBuilder,
+    encode_token_ids,
+    owned_offsets_from_array,
+    owned_token_ids_from_array,
+    require_1d_array,
+)
 
 # Special-token strings, constructed exactly as the Jinja template does
 # (``'<｜hy_eos{}｜>'.format(':opensource')`` etc.) so ``convert_tokens_to_ids``
@@ -74,11 +86,7 @@ _TOOL_RESPONSE_END = f"</tool_response{_HYTK}>"
 class Hy3Renderer:
     """Deterministic message → token renderer for Tencent Hy3 models."""
 
-    def __init__(
-        self,
-        tokenizer: Tokenizer,
-        config: Hy3RendererConfig | None = None,
-    ):
+    def __init__(self, tokenizer: Tokenizer, config: Hy3RendererConfig | None = None):
         self._tokenizer = tokenizer
         self.config = config or Hy3RendererConfig()
         self._is_training = self.config.is_training
@@ -86,12 +94,8 @@ class Hy3Renderer:
         # ``fallback_strategy="reasoning_toolcall_retry"`` forces high effort and
         # suppresses the generation prompt (template lines 50-53), resolved here
         # so the reasoning-mode marker and gen-prompt polarity see the override.
-        self._force_no_gen_prompt = (
-            self.config.fallback_strategy == "reasoning_toolcall_retry"
-        )
-        self._reasoning_effort = (
-            "high" if self._force_no_gen_prompt else self.config.reasoning_effort
-        )
+        self._force_no_gen_prompt = self.config.fallback_strategy == "reasoning_toolcall_retry"
+        self._reasoning_effort = "high" if self._force_no_gen_prompt else self.config.reasoning_effort
         # ``<think>`` (and, in no_think mode, the matching ``</think>``) are
         # prefilled by the generation prompt, so the model never samples them.
         # Only in low/high mode does the model itself emit the ``</think>``
@@ -105,6 +109,7 @@ class Hy3Renderer:
         # default, so the bridge resolves the policy per call; this attribute
         # holds the no-tools resolution.
         self.effective_thinking_retention = self._thinking_retention_for(None)
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
 
         self._bos = self._token_id(_BOS)
         self._eos = self._token_id(_EOS)
@@ -136,9 +141,7 @@ class Hy3Renderer:
             return bool(tools)
         return self.config.preserved_thinking
 
-    def _thinking_retention_for(
-        self, tools: list[ToolSpec] | None
-    ) -> ResolvedThinkingRetention:
+    def _thinking_retention_for(self, tools: list[ToolSpec] | None) -> ResolvedThinkingRetention:
         implied = "all" if self._preserved_thinking_for(tools) else "tool_cycle"
         return resolve_thinking_retention(self.config, implied)
 
@@ -148,11 +151,6 @@ class Hy3Renderer:
             f"Special token {token!r} not found in tokenizer vocabulary"
         )
         return tid
-
-    def _encode(self, text: str) -> list[int]:
-        if not text:
-            return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
 
     @staticmethod
     def _visible_text(content: Any) -> str:
@@ -194,15 +192,9 @@ class Hy3Renderer:
         Embedded special-token strings (``<tool_calls>`` etc.) tokenize to
         their single ids just as ``apply_chat_template`` produces them.
         """
-        intro = (
-            "# Tools\n\nYou may call one or more functions to assist with the "
-            "user query."
-        )
+        intro = "# Tools\n\nYou may call one or more functions to assist with the user query."
         s = ("\n\n" + intro) if has_system else intro
-        s += (
-            "\n\nYou are provided with function signatures within "
-            "<tools></tools> XML tags:\n<tools>\n"
-        )
+        s += "\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n"
         for idx, tool in enumerate(tools):
             if idx > 0:
                 s += "\n"
@@ -229,80 +221,70 @@ class Hy3Renderer:
         return s
 
     def _attribute_segments(
-        self, segments: list[tuple[str, bool, int]]
-    ) -> list[tuple[int, bool, int]]:
-        """Tokenize concatenated ``(text, is_content, msg_idx)`` segments as one
-        BPE pass, attributing each token to its source segment via offset
-        mapping. Generalises :func:`attribute_text_segments` with a message
-        index — needed where a system blob abuts the tools block with no
-        special-token boundary between them.
-        """
-        segments = [s for s in segments if s[0]]
-        if not segments:
-            return []
-        full_text = "".join(text for text, _, _ in segments)
-        offset_tokenizer = _get_offset_tokenizer(self._tokenizer)
+        self, texts: list[str], segment_content: np.ndarray, segment_indices: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
+        """Tokenize joined text and vectorize token attribution to each segment."""
+        require_1d_array("segment_content", segment_content, dtype=MASK_DTYPE)
+        require_1d_array("segment_indices", segment_indices, dtype=MESSAGE_INDICES_DTYPE, minimum=-1)
+        if len(texts) != segment_content.size or len(texts) != segment_indices.size:
+            raise ValueError("segment text and attribution arrays must have equal lengths")
+        char_lengths = np.fromiter((len(text) for text in texts), dtype=OFFSETS_DTYPE, count=len(texts))
+        nonempty = char_lengths > 0
+        texts = [text for text in texts if text]
+        if not texts:
+            empty_tokens = np.empty(0, dtype=TOKEN_IDS_DTYPE)
+            empty_indices = np.empty(0, dtype=MESSAGE_INDICES_DTYPE)
+            empty_content = np.empty(0, dtype=MASK_DTYPE)
+            for values in (empty_tokens, empty_indices, empty_content):
+                values.flags.writeable = False
+            return empty_tokens, empty_indices, empty_content, True
+        char_lengths = char_lengths[nonempty]
+        segment_content = segment_content[nonempty]
+        segment_indices = segment_indices[nonempty]
+        full_text = "".join(texts)
+        offset_tokenizer = self._offset_tokenizer
         if offset_tokenizer is None:
-            token_ids = self._encode(full_text)
-            offsets = _infer_offsets_from_decode(
-                self._tokenizer,
-                token_ids,
-                full_text,
-            )
+            token_ids = encode_token_ids(self._tokenizer, full_text)
+            offsets = _infer_offsets_from_decode(self._tokenizer, token_ids, full_text)
             if offsets is None:
                 # Token IDs remain exact even when a lossy decoder prevents
                 # reconstructing boundaries. Associate the opaque joined run
                 # with a contributing caller system message rather than
                 # silently classifying its body as global scaffold.
-                fallback_idx = next(
-                    (msg_idx for text, _, msg_idx in segments if text and msg_idx >= 0),
-                    -1,
-                )
-                return [(token_id, False, fallback_idx) for token_id in token_ids]
+                candidates = np.flatnonzero(segment_indices >= 0)
+                fallback_idx = int(segment_indices[candidates[0]]) if candidates.size else -1
+                message_indices = np.full(token_ids.size, fallback_idx, dtype=MESSAGE_INDICES_DTYPE)
+                is_content = np.zeros(token_ids.size, dtype=MASK_DTYPE)
+                message_indices.flags.writeable = False
+                is_content.flags.writeable = False
+                return token_ids, message_indices, is_content, False
             has_content_attribution = False
         else:
             encoding = offset_tokenizer(
-                full_text,
-                add_special_tokens=False,
-                return_offsets_mapping=True,
+                full_text, add_special_tokens=False, return_offsets_mapping=True, return_tensors="np"
             )
-            token_ids = list(encoding["input_ids"])
-            offsets = list(encoding["offset_mapping"])
+            token_ids = owned_token_ids_from_array(type(offset_tokenizer).__name__, encoding["input_ids"])
+            offsets = owned_offsets_from_array(
+                type(offset_tokenizer).__name__, encoding["offset_mapping"], token_count=token_ids.size
+            )
             has_content_attribution = True
-
-        spans: list[tuple[int, int, bool, int]] = []
-        pos = 0
-        for text, is_content, msg_idx in segments:
-            spans.append((pos, pos + len(text), is_content, msg_idx))
-            pos += len(text)
-        total_len = pos
-
-        out: list[tuple[int, bool, int]] = []
-        last = (
-            spans[-1][2] if has_content_attribution else False,
-            spans[-1][3],
+        segment_ends = np.cumsum(char_lengths, dtype=OFFSETS_DTYPE)
+        token_segments = np.searchsorted(segment_ends, offsets[:, 0], side="right")
+        np.minimum(token_segments, segment_ends.size - 1, out=token_segments)
+        message_indices = np.array(segment_indices[token_segments], dtype=MESSAGE_INDICES_DTYPE, copy=True)
+        is_content = (
+            np.array(segment_content[token_segments], dtype=MASK_DTYPE, copy=True)
+            if has_content_attribution
+            else np.zeros(token_ids.size, dtype=MASK_DTYPE)
         )
-        for tok_id, (start, _end) in zip(token_ids, offsets):
-            attr = last
-            if start < total_len:
-                for seg_start, seg_end, seg_is_content, seg_idx in spans:
-                    if seg_start <= start < seg_end:
-                        attr = (
-                            seg_is_content if has_content_attribution else False,
-                            seg_idx,
-                        )
-                        break
-            out.append((tok_id, attr[0], attr[1]))
-        return out
+        for values in (token_ids, message_indices, is_content):
+            values.flags.writeable = False
+        return token_ids, message_indices, is_content, has_content_attribution
 
     # ── render ───────────────────────────────────────────────────────
 
     def render(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolSpec] | None = None,
-        add_generation_prompt: bool = False,
+        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
@@ -311,70 +293,42 @@ class Hy3Renderer:
         if self._force_no_gen_prompt:
             add_generation_prompt = False
 
-        tokens: list[int] = []
-        indices: list[int] = []
-        sampled: list[bool] = []
-        content_mask: list[bool] = []
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            ids = self._encode(text)
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
-        ) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                tokens.append(tok_id)
-                indices.append(msg_idx)
-                sampled.append(is_sampled)
-                content_mask.append(is_content)
-
-        def emit_attributed(segments: list[tuple[str, bool, int]]) -> None:
-            for tok_id, is_content, msg_idx in self._attribute_segments(segments):
-                tokens.append(tok_id)
-                indices.append(msg_idx)
-                sampled.append(False)
-                content_mask.append(is_content)
+        def emit_attributed(texts: list[str], segment_content: np.ndarray, segment_indices: np.ndarray) -> None:
+            token_ids, message_indices, is_content, _ = self._attribute_segments(
+                texts, segment_content, segment_indices
+            )
+            builder.emit_aligned(token_ids, message_indices, np.zeros(token_ids.size, dtype=MASK_DTYPE), is_content)
 
         preserved = self._preserved_thinking_for(tools)
 
         # ── Header: bos + aggregated system + reasoning marker / tools ──
         emit_special(self._bos, -1, is_sampled=False, is_content=False)
 
-        system_segments = [
-            (self._visible_text(m.get("content")), True, i)
-            for i, m in enumerate(messages)
-            if m.get("role") == "system"
-        ]
-        has_system = any(text for text, _, _ in system_segments)
+        system_texts: list[str] = []
+        system_content = FixedWidthArrayBuilder(MASK_DTYPE, initial_capacity=len(messages))
+        system_indices = FixedWidthArrayBuilder(MESSAGE_INDICES_DTYPE, initial_capacity=len(messages))
+        for i, message in enumerate(messages):
+            if message.get("role") == "system":
+                system_texts.append(self._visible_text(message.get("content")))
+                system_content.append(True)
+                system_indices.append(i)
+        has_system = any(system_texts)
 
         if tools:
             tools_text = self._tools_instruction_block(tools, has_system)
-            emit_attributed(system_segments + [(tools_text, False, -1)])
+            system_texts.append(tools_text)
+            system_content.append(False)
+            system_indices.append(-1)
+            emit_attributed(system_texts, system_content.finish(), system_indices.finish())
         else:
-            emit_attributed(system_segments)
+            emit_attributed(system_texts, system_content.finish(), system_indices.finish())
             emit_special(self._reasoning_mode, -1, is_sampled=False, is_content=False)
-            emit_text(
-                "reasoning_effort:" + self._reasoning_effort,
-                -1,
-                is_sampled=False,
-                is_content=False,
-            )
+            emit_text("reasoning_effort:" + self._reasoning_effort, -1, is_sampled=False, is_content=False)
 
         last_ui = self._last_user_index(messages)
         n = len(messages)
@@ -389,23 +343,14 @@ class Hy3Renderer:
 
             if role == "user":
                 if prev_is_tool:
-                    emit_special(
-                        self._tool_responses_end, i, is_sampled=False, is_content=False
-                    )
+                    emit_special(self._tool_responses_end, i, is_sampled=False, is_content=False)
                 emit_special(self._user, i, is_sampled=False, is_content=False)
-                emit_text(
-                    self._visible_text(msg.get("content")),
-                    i,
-                    is_sampled=False,
-                    is_content=True,
-                )
+                emit_text(self._visible_text(msg.get("content")), i, is_sampled=False, is_content=True)
                 prev_is_tool = False
 
             elif role == "assistant":
                 if prev_is_tool:
-                    emit_special(
-                        self._tool_responses_end, i, is_sampled=False, is_content=False
-                    )
+                    emit_special(self._tool_responses_end, i, is_sampled=False, is_content=False)
                 self._render_assistant(
                     msg,
                     i,
@@ -423,31 +368,19 @@ class Hy3Renderer:
 
             elif role == "tool":
                 if is_tool_first:
-                    emit_special(
-                        self._tool_responses, i, is_sampled=False, is_content=False
-                    )
+                    emit_special(self._tool_responses, i, is_sampled=False, is_content=False)
                     emit_text("\n", i, is_sampled=False, is_content=False)
                     is_tool_first = False
                 emit_special(self._tool_response, i, is_sampled=False, is_content=False)
                 emit_text_segments(
-                    [
-                        ("\n", False),
-                        (self._visible_text(msg.get("content")), True),
-                        ("\n", False),
-                    ],
-                    i,
-                    is_sampled=False,
+                    [("\n", False), (self._visible_text(msg.get("content")), True), ("\n", False)], i, is_sampled=False
                 )
-                emit_special(
-                    self._tool_response_end, i, is_sampled=False, is_content=False
-                )
+                emit_special(self._tool_response_end, i, is_sampled=False, is_content=False)
                 emit_text("\n", i, is_sampled=False, is_content=False)
                 prev_is_tool = True
 
         if prev_is_tool:
-            emit_special(
-                self._tool_responses_end, -1, is_sampled=False, is_content=False
-            )
+            emit_special(self._tool_responses_end, -1, is_sampled=False, is_content=False)
 
         # ── Generation prompt ───────────────────────────────────────────
         last_is_assistant = messages[-1].get("role") == "assistant"
@@ -457,24 +390,14 @@ class Hy3Renderer:
             if self._reasoning_effort == "no_think":
                 emit_special(self._think_end, -1, is_sampled=False, is_content=False)
 
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
+            content_available=self._offset_tokenizer is not None,
         )
 
     def _render_assistant(
-        self,
-        msg: Message,
-        msg_idx: int,
-        *,
-        is_last: bool,
-        retain_thinking: bool,
-        emit_special,
-        emit_text,
+        self, msg: Message, msg_idx: int, *, is_last: bool, retain_thinking: bool, emit_special, emit_text
     ) -> None:
         # Invariant on assistant tokens: ``is_content == sampled_mask``.
         # The ``<｜hy_Assistant｜>`` opener and the ``<think>`` opener are both
@@ -497,18 +420,8 @@ class Hy3Renderer:
 
         rc = self._reasoning_content(msg)
         if retain_thinking and rc is not None:
-            emit_text(
-                rc,
-                msg_idx,
-                is_sampled=self._think_is_sampled,
-                is_content=self._think_is_sampled,
-            )
-        emit_special(
-            self._think_end,
-            msg_idx,
-            is_sampled=self._think_is_sampled,
-            is_content=self._think_is_sampled,
-        )
+            emit_text(rc, msg_idx, is_sampled=self._think_is_sampled, is_content=self._think_is_sampled)
+        emit_special(self._think_end, msg_idx, is_sampled=self._think_is_sampled, is_content=self._think_is_sampled)
 
         if tool_calls:
             emit_text(visible, msg_idx, is_sampled=True, is_content=True)
@@ -516,9 +429,7 @@ class Hy3Renderer:
             emit_text("\n", msg_idx, is_sampled=True, is_content=True)
             for tc in tool_calls:
                 self._emit_tool_call(tc, msg_idx, emit_special, emit_text)
-            emit_special(
-                self._tool_calls_end, msg_idx, is_sampled=True, is_content=True
-            )
+            emit_special(self._tool_calls_end, msg_idx, is_sampled=True, is_content=True)
             emit_special(self._eos, msg_idx, is_sampled=True, is_content=True)
         else:
             emit_text(visible, msg_idx, is_sampled=True, is_content=True)
@@ -548,48 +459,26 @@ class Hy3Renderer:
             for key, value in arguments.items():
                 emit_special(self._arg_key, msg_idx, is_sampled=True, is_content=True)
                 emit_text(key, msg_idx, is_sampled=True, is_content=True)
-                emit_special(
-                    self._arg_key_end, msg_idx, is_sampled=True, is_content=True
-                )
+                emit_special(self._arg_key_end, msg_idx, is_sampled=True, is_content=True)
                 emit_text("\n", msg_idx, is_sampled=True, is_content=True)
                 emit_special(self._arg_value, msg_idx, is_sampled=True, is_content=True)
                 if isinstance(value, str):
                     emit_text(value, msg_idx, is_sampled=True, is_content=True)
                 else:
-                    emit_text(
-                        json.dumps(value, ensure_ascii=False),
-                        msg_idx,
-                        is_sampled=True,
-                        is_content=True,
-                    )
-                emit_special(
-                    self._arg_value_end, msg_idx, is_sampled=True, is_content=True
-                )
+                    emit_text(json.dumps(value, ensure_ascii=False), msg_idx, is_sampled=True, is_content=True)
+                emit_special(self._arg_value_end, msg_idx, is_sampled=True, is_content=True)
                 emit_text("\n", msg_idx, is_sampled=True, is_content=True)
         emit_special(self._tool_call_end, msg_idx, is_sampled=True, is_content=True)
         emit_text("\n", msg_idx, is_sampled=True, is_content=True)
 
     def render_ids(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolSpec] | None = None,
-        add_generation_prompt: bool = False,
-    ) -> list[int]:
-        return self.render(
-            messages,
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
-        ).token_ids
+        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+    ) -> np.ndarray:
+        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
 
     # ── parse ────────────────────────────────────────────────────────
 
-    def parse_response(
-        self,
-        token_ids: list[int],
-        *,
-        tools: list[ToolSpec] | None = None,
-    ) -> ParsedResponse:
+    def parse_response(self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None) -> ParsedResponse:
         return parse_hy3(
             self._tokenizer,
             token_ids,
@@ -615,29 +504,22 @@ class Hy3Renderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
-        if (
-            not previous_prompt_ids
-            or not new_messages
-            or reject_assistant_in_extension(new_messages)
-        ):
+        if previous_prompt_ids.size == 0 or not new_messages or reject_assistant_in_extension(new_messages):
             return None
 
-        if should_rerender_for_thinking_retention(
-            self._thinking_retention_for(tools),
-            new_messages,
-        ):
+        if should_rerender_for_thinking_retention(self._thinking_retention_for(tools), new_messages):
             return None
 
         # A bridge extends a *sampled* assistant turn; with no completion there
         # is no turn to extend (and no way to tell a pending assistant turn from
         # a closed tool section), so decline and let the caller re-render.
-        if not previous_completion_ids:
+        if previous_completion_ids.size == 0:
             return None
 
         # Anchor on the canonical turn close (``<｜hy_eos｜>``). The model only
@@ -648,34 +530,27 @@ class Hy3Renderer:
         # section closed, reachable when the prior prompt suppressed the
         # generation prompt) — an unconditional eos there would wedge a
         # spurious stop token before the extension.
-        previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
-        if previous_ids[-1] not in (self._eos, self._tool_responses_end):
-            previous_ids.append(self._eos)
+        previous = FixedWidthArrayBuilder(
+            TOKEN_IDS_DTYPE, initial_capacity=previous_prompt_ids.size + previous_completion_ids.size + 1
+        )
+        previous.extend(previous_prompt_ids)
+        previous.extend(previous_completion_ids)
+        final_token = int(previous_completion_ids[-1])
+        if final_token not in (self._eos, self._tool_responses_end):
+            previous.append(self._eos)
+        previous_ids = previous.finish()
 
-        ext: list[int] = []
-        ext_indices: list[int] = []
-        ext_content: list[bool] = []
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder.prepend_prior(previous_ids)
 
         def emit_special(token_id: int, msg_idx: int = -1) -> None:
-            ext.append(token_id)
-            ext_indices.append(msg_idx)
-            ext_content.append(False)
+            builder.emit_special(token_id, msg_idx)
 
-        def emit_text(
-            text: str, msg_idx: int = -1, *, is_content: bool = False
-        ) -> None:
-            ids = self._encode(text)
-            ext.extend(ids)
-            ext_indices.extend([msg_idx] * len(ids))
-            ext_content.extend([is_content] * len(ids))
+        def emit_text(text: str, msg_idx: int = -1, *, is_content: bool = False) -> None:
+            builder.emit_text(text, msg_idx, is_content=is_content)
 
         def emit_text_segments(segments: list[tuple[str, bool]], msg_idx: int) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                ext.append(tok_id)
-                ext_indices.append(msg_idx)
-                ext_content.append(is_content)
+            builder.emit_text_segments(segments, msg_idx)
 
         # The stream above ends on eos or </tool_responses> — never inside an
         # open tool group. ``is_tool_first`` mirrors the template's state
@@ -724,14 +599,8 @@ class Hy3Renderer:
             if self._reasoning_effort == "no_think":
                 emit_special(self._think_end, -1)
 
-        total_len = len(previous_ids) + len(ext)
-        return RenderedTokens(
-            token_ids=previous_ids + ext,
-            message_indices=[-1] * len(previous_ids) + ext_indices,
-            sampled_mask=[False] * total_len,
-            is_content=_content_mask_or_empty(
-                self._tokenizer, [False] * len(previous_ids) + ext_content
-            ),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
+            content_available=self._offset_tokenizer is not None,
         )

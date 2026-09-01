@@ -4,13 +4,17 @@ import numpy as np
 import pytest
 
 from renderers.base import (
+    AttributedTextSegments,
     MultiModalData,
     PlaceholderRange,
     RenderedConversation,
     RenderedTokens,
     RenderedTrainingSample,
     build_training_sample,
+    attribute_text_segments,
 )
+from renderers.configs import Hy3RendererConfig
+from renderers.hy3 import Hy3Renderer
 from renderers.token_arrays import (
     FixedWidthArrayBuilder,
     FixedWidthRangeBuilder,
@@ -20,6 +24,7 @@ from renderers.token_arrays import (
     TOKEN_IDS_DTYPE,
     TRAINING_TOKEN_IDS_DTYPE,
     encode_token_ids,
+    owned_offsets_from_array,
     require_1d_array,
 )
 
@@ -98,6 +103,12 @@ def test_range_builder_grows_without_object_rows_or_final_copy():
         FixedWidthRangeBuilder().extend([(1, 2)])  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="non-negative integer"):
         FixedWidthRangeBuilder().append(np.iinfo(np.int64).max + 1, 1)
+
+
+def test_offset_ownership_rejects_uint64_values_before_narrowing():
+    offsets = _hostile(np.asarray([[0, np.iinfo(np.uint64).max]], dtype=np.uint64))
+    with pytest.raises(ValueError, match="outside the non-negative int64 range"):
+        owned_offsets_from_array("hostile", offsets, token_count=1)
 
 
 def test_hostile_render_span_training_and_multimodal_seams_stay_vectorized():
@@ -179,6 +190,87 @@ def test_rendered_token_builder_rejects_list_and_misaligned_mask_custody():
             is_content=[True, False],  # type: ignore[arg-type]
         )
     assert len(builder) == 0
+
+
+def test_attributed_segments_require_readonly_arrays_and_seal_offsetless_masks():
+    mutable_tokens = np.asarray([1], dtype=TOKEN_IDS_DTYPE)
+    readonly_mask = np.asarray([False], dtype=MASK_DTYPE)
+    readonly_mask.flags.writeable = False
+    with pytest.raises(ValueError, match="must already be read-only"):
+        AttributedTextSegments(mutable_tokens, readonly_mask, True)
+
+    class _OffsetlessTokenizer:
+        def __call__(self, text, *, add_special_tokens, return_tensors):
+            return {"input_ids": _hostile(np.asarray([[2, 3]], dtype="<i8"))}
+
+    attributed = attribute_text_segments(_OffsetlessTokenizer(), [("ab", True)])
+
+    assert np.array_equal(attributed.token_ids, np.asarray([2, 3], dtype=TOKEN_IDS_DTYPE))
+    assert np.array_equal(attributed.is_content, np.asarray([False, False], dtype=MASK_DTYPE))
+    assert not attributed.token_ids.flags.writeable
+    assert not attributed.is_content.flags.writeable
+    assert attributed.has_content_attribution is False
+
+
+def test_hy3_render_and_bridge_keep_hostile_arrays_typed_across_joined_segments():
+    class _Tokenizer:
+        unk_token_id = -1
+        eos_token_id = None
+
+        def __init__(self):
+            self._specials: dict[str, int] = {}
+            self.offset_probe_calls = 0
+
+        def convert_tokens_to_ids(self, token):
+            return self._specials.setdefault(token, 1000 + len(self._specials))
+
+        def __call__(self, text, *, add_special_tokens, return_tensors, return_offsets_mapping=False):
+            assert add_special_tokens is False
+            assert return_tensors == "np"
+            if text == "a" and return_offsets_mapping:
+                self.offset_probe_calls += 1
+            token_ids = _hostile(np.fromiter((ord(char) for char in text), dtype="<i8", count=len(text)).reshape(1, -1))
+            result = {"input_ids": token_ids}
+            if return_offsets_mapping:
+                offsets = np.empty((1, len(text), 2), dtype="<i8")
+                offsets[0, :, 0] = np.arange(len(text), dtype="<i8")
+                offsets[0, :, 1] = np.arange(1, len(text) + 1, dtype="<i8")
+                result["offset_mapping"] = _hostile(offsets)
+            return result
+
+        def encode(self, *args, **kwargs):
+            raise AssertionError("legacy tokenizer encode must never be called")
+
+        def decode(self, *args, **kwargs):
+            raise AssertionError("native offsets make decode fallback unreachable")
+
+    tokenizer = _Tokenizer()
+    renderer = Hy3Renderer(tokenizer, Hy3RendererConfig())
+    assert tokenizer.offset_probe_calls == 1
+
+    rendered = renderer.render(
+        [{"role": "system", "content": "policy"}, {"role": "user", "content": "question"}], add_generation_prompt=True
+    )
+    completion = _readonly_hostile(np.asarray([renderer._eos], dtype=TOKEN_IDS_DTYPE))
+    bridged = renderer.bridge_to_next_turn(
+        _readonly_hostile(rendered.token_ids), completion, [{"role": "tool", "content": "answer"}]
+    )
+
+    assert bridged is not None
+    assert np.array_equal(bridged.token_ids[: rendered.token_ids.size], rendered.token_ids)
+    for values in (
+        rendered.token_ids,
+        rendered.message_indices,
+        rendered.sampled_mask,
+        rendered.is_content,
+        bridged.token_ids,
+        bridged.message_indices,
+        bridged.sampled_mask,
+        bridged.is_content,
+    ):
+        assert isinstance(values, np.ndarray)
+        assert not values.flags.writeable
+    assert tokenizer.offset_probe_calls == 1
 
 
 def test_training_sample_rejects_mutable_aliases_without_mutating_caller():

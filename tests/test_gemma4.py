@@ -4,7 +4,7 @@ from functools import lru_cache
 
 import numpy as np
 import pytest
-from tests.parity import models_for
+from parity import models_for
 
 from renderers import Gemma4Renderer, create_renderer
 from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS, load_tokenizer

@@ -4,23 +4,27 @@ import enum
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Literal,
-    Protocol,
-    TypedDict,
-    cast,
-    runtime_checkable,
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, TypedDict, cast, runtime_checkable
+
+import numpy as np
+
+from renderers.token_arrays import (
+    LOGPROBS_DTYPE,
+    MASK_DTYPE,
+    MESSAGE_INDICES_DTYPE,
+    MM_TOKEN_TYPE_IDS_DTYPE,
+    OFFSETS_DTYPE,
+    TOKEN_IDS_DTYPE,
+    TRAINING_TOKEN_IDS_DTYPE,
+    encode_token_ids,
+    empty_array,
+    readonly_view,
+    require_1d_array,
+    require_readonly,
 )
 
 if TYPE_CHECKING:
-    from renderers.configs import (
-        AutoRendererConfig,
-        RendererConfig,
-        ResolvedThinkingRetention,
-    )
+    from renderers.configs import AutoRendererConfig, RendererConfig, ResolvedThinkingRetention
 
 logger = logging.getLogger("renderers.base")
 
@@ -306,17 +310,34 @@ class RenderedTokens:
     text-only renderers leave it as ``None``.
     """
 
-    token_ids: list[int] = field(default_factory=list)
-    message_indices: list[int] = field(default_factory=list)
-    sampled_mask: list[bool] = field(default_factory=list)
-    is_content: list[bool] = field(default_factory=list)
+    token_ids: np.ndarray = field(default_factory=lambda: empty_array(TOKEN_IDS_DTYPE))
+    message_indices: np.ndarray = field(default_factory=lambda: empty_array(MESSAGE_INDICES_DTYPE))
+    sampled_mask: np.ndarray = field(default_factory=lambda: empty_array(MASK_DTYPE))
+    is_content: np.ndarray = field(default_factory=lambda: empty_array(MASK_DTYPE))
     message_roles: list[str] = field(default_factory=list)
     message_tool_names: list[str | None] = field(default_factory=list)
     multi_modal_data: "MultiModalData | None" = None
 
-    def tokens_per_message(
-        self, n_messages: int | None = None, *, sampled_only: bool = False
-    ) -> list[int]:
+    def __post_init__(self) -> None:
+        require_1d_array("token_ids", self.token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_1d_array("message_indices", self.message_indices, dtype=MESSAGE_INDICES_DTYPE, minimum=-1)
+        require_1d_array("sampled_mask", self.sampled_mask, dtype=MASK_DTYPE)
+        require_1d_array("is_content", self.is_content, dtype=MASK_DTYPE)
+        token_count = self.token_ids.size
+        if self.message_indices.size != token_count:
+            raise ValueError("message_indices length must match token_ids")
+        for name, values in (("sampled_mask", self.sampled_mask), ("is_content", self.is_content)):
+            if values.size not in (0, token_count):
+                raise ValueError(f"{name} length must be zero or match token_ids")
+        for name, values in (
+            ("token_ids", self.token_ids),
+            ("message_indices", self.message_indices),
+            ("sampled_mask", self.sampled_mask),
+            ("is_content", self.is_content),
+        ):
+            require_readonly(name, values)
+
+    def tokens_per_message(self, n_messages: int | None = None, *, sampled_only: bool = False) -> list[int]:
         """Count rendered tokens attributed to each caller-relative message.
 
         ``out[i]`` is the number of tokens with ``message_indices[k] == i``,
@@ -496,7 +517,7 @@ class RenderedTokens:
         computation returned as a per-token bool list.
         """
         out: dict[str, list[tuple[int, int]]] = {}
-        if not self.is_content or not self.message_roles:
+        if self.is_content.size == 0 or not self.message_roles:
             return out
         n = len(self.token_ids)
         if len(self.is_content) != n or len(self.message_indices) != n:
@@ -521,12 +542,12 @@ class RenderedTokens:
                 bucket.append((run_start, end))
         return out
 
-    def content_mask_for_roles(self, roles: "set[str] | frozenset[str]") -> list[bool]:
-        """Per-token bool list: ``True`` iff the token is body of a
+    def content_mask_for_roles(self, roles: "set[str] | frozenset[str]") -> np.ndarray:
+        """Per-token bool array: ``True`` iff the token is body of a
         message whose role is in ``roles``.
 
         Length matches :attr:`token_ids`. Returns an all-``False``
-        list of that length when :attr:`is_content` or
+        array of that length when :attr:`is_content` or
         :attr:`message_roles` is empty — consumers can AND this with
         their own attribution masks without length checks.
 
@@ -540,8 +561,8 @@ class RenderedTokens:
         for s, mi in zip(rendered.sampled_mask, rendered.message_indices)]``.
         """
         n = len(self.token_ids)
-        mask = [False] * n
-        if not self.is_content or not self.message_roles:
+        mask = np.zeros(n, dtype=MASK_DTYPE)
+        if self.is_content.size == 0 or not self.message_roles:
             return mask
         if len(self.is_content) != n or len(self.message_indices) != n:
             return mask
@@ -638,27 +659,39 @@ class ParsedResponse:
 class RenderedConversation:
     """Exact token state for a rendered conversation."""
 
-    prompt_ids: list[int]
-    completion_ids: list[int] = field(default_factory=list)
-    completion_logprobs: list[float] = field(default_factory=list)
+    prompt_ids: np.ndarray
+    completion_ids: np.ndarray = field(default_factory=lambda: empty_array(TOKEN_IDS_DTYPE))
+    completion_logprobs: np.ndarray = field(default_factory=lambda: empty_array(LOGPROBS_DTYPE))
     messages: list[Message] = field(default_factory=list)
     parsed_completion: ParsedResponse | None = None
 
     @property
-    def token_ids(self) -> list[int]:
-        return self.prompt_ids + self.completion_ids
+    def __post_init__(self) -> None:
+        require_1d_array("prompt_ids", self.prompt_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_1d_array("completion_ids", self.completion_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_1d_array("completion_logprobs", self.completion_logprobs, dtype=LOGPROBS_DTYPE)
+        if self.completion_logprobs.size not in (0, self.completion_ids.size):
+            raise ValueError("completion_logprobs length must be zero or match completion_ids")
+
+    @property
+    def token_ids(self) -> np.ndarray:
+        combined = np.concatenate((self.prompt_ids, self.completion_ids), dtype=TOKEN_IDS_DTYPE)
+        combined.flags.writeable = False
+        return combined
 
     def with_completion(
         self,
-        completion_ids: list[int],
+        completion_ids: np.ndarray,
         *,
-        completion_logprobs: list[float] | None = None,
+        completion_logprobs: np.ndarray | None = None,
         parsed_completion: ParsedResponse | None = None,
     ) -> "RenderedConversation":
         return RenderedConversation(
-            prompt_ids=list(self.prompt_ids),
-            completion_ids=list(completion_ids),
-            completion_logprobs=list(completion_logprobs or []),
+            prompt_ids=self.prompt_ids.copy(),
+            completion_ids=completion_ids.copy(),
+            completion_logprobs=(
+                completion_logprobs.copy() if completion_logprobs is not None else empty_array(LOGPROBS_DTYPE)
+            ),
             messages=list(self.messages),
             parsed_completion=parsed_completion,
         )
@@ -679,7 +712,7 @@ class Tokenizer(Protocol):
     unk_token_id: int | None
     eos_token_id: int | None
 
-    def encode(self, text: str, *args: Any, **kwargs: Any) -> list[int]: ...
+    def encode(self, text: str, *args: Any, **kwargs: Any) -> np.ndarray: ...
 
     def decode(self, token_ids: Any, *args: Any, **kwargs: Any) -> str: ...
 
@@ -711,11 +744,7 @@ class Renderer(Protocol):
     """Owns message ↔ token conversion for a specific model family."""
 
     def render(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolSpec] | None = None,
-        add_generation_prompt: bool = False,
+        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
     ) -> RenderedTokens:
         """Render messages to token IDs with per-token message attribution.
 
@@ -729,21 +758,12 @@ class Renderer(Protocol):
         ...
 
     def render_ids(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolSpec] | None = None,
-        add_generation_prompt: bool = False,
-    ) -> list[int]:
+        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+    ) -> np.ndarray:
         """Render messages to token IDs (without attribution metadata)."""
         ...
 
-    def parse_response(
-        self,
-        token_ids: list[int],
-        *,
-        tools: list[ToolSpec] | None = None,
-    ) -> ParsedResponse:
+    def parse_response(self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None) -> ParsedResponse:
         """Parse completion tokens back into a structured message.
 
         ``tools`` is the same list passed to ``render`` for this turn.
@@ -763,8 +783,8 @@ class Renderer(Protocol):
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
@@ -857,8 +877,8 @@ class MultimodalRenderer(Renderer, Protocol):
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
@@ -1091,9 +1111,7 @@ def _require_transformers(feature: str) -> Any:
     try:
         import transformers
     except ImportError as exc:
-        raise ImportError(
-            f"{feature} requires Transformers. {_TRANSFORMERS_INSTALL_HINT}"
-        ) from exc
+        raise ImportError(f"{feature} requires Transformers. {_TRANSFORMERS_INSTALL_HINT}") from exc
     return transformers
 
 
@@ -1124,9 +1142,7 @@ def _model_has_vision_config(model_name: str) -> bool:
             "model."
         ) from exc
     try:
-        cfg = transformers.AutoConfig.from_pretrained(
-            model_name, trust_remote_code=False
-        )
+        cfg = transformers.AutoConfig.from_pretrained(model_name, trust_remote_code=False)
     except Exception:
         return False
     # Most VLM configs nest a vision tower as ``vision_config`` (Qwen-VL,
@@ -1181,12 +1197,7 @@ def _tokenizer_load_kwargs(model_name_or_path: str) -> dict[str, Any]:
     return {"trust_remote_code": False}
 
 
-def _preserve_requested_tokenizer_name(
-    tokenizer,
-    *,
-    requested_name_or_path: str,
-    loaded_name_or_path: str,
-):
+def _preserve_requested_tokenizer_name(tokenizer, *, requested_name_or_path: str, loaded_name_or_path: str):
     if requested_name_or_path == loaded_name_or_path:
         return tokenizer
 
@@ -1206,9 +1217,7 @@ def _preserve_requested_tokenizer_name(
     return tokenizer
 
 
-def _load_fast_tokenizer_directly(
-    model_name_or_path: str, revision: str | None
-) -> Any | None:
+def _load_fast_tokenizer_directly(model_name_or_path: str, revision: str | None) -> Any | None:
     """Load a self-contained fast tokenizer without building the model config.
 
     ``AutoTokenizer.from_pretrained`` eagerly constructs the *model* config to
@@ -1230,9 +1239,7 @@ def _load_fast_tokenizer_directly(
     try:
         if "auto_map" in get_tokenizer_config(model_name_or_path, revision=revision):
             return None
-        return PreTrainedTokenizerFast.from_pretrained(
-            model_name_or_path, revision=revision
-        )
+        return PreTrainedTokenizerFast.from_pretrained(model_name_or_path, revision=revision)
     except Exception:
         return None
 
@@ -1250,9 +1257,7 @@ def _load_tokenizer_via_auto(model_name_or_path: str, **kwargs) -> Any:
     try:
         return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
     except Exception as exc:
-        tok = _load_fast_tokenizer_directly(
-            model_name_or_path, revision=kwargs.get("revision")
-        )
+        tok = _load_fast_tokenizer_directly(model_name_or_path, revision=kwargs.get("revision"))
         if tok is None:
             raise
         logger.debug(
@@ -1291,9 +1296,7 @@ def load_tokenizer(model_name_or_path: str):
     kwargs = _tokenizer_load_kwargs(load_name_or_path)
     tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
     return _preserve_requested_tokenizer_name(
-        tok,
-        requested_name_or_path=model_name_or_path,
-        loaded_name_or_path=load_name_or_path,
+        tok, requested_name_or_path=model_name_or_path, loaded_name_or_path=load_name_or_path
     )
 
 
@@ -1313,18 +1316,10 @@ def _populate_registry():
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
     from renderers.laguna_s21 import LagunaS21Renderer
-    from renderers.laguna_xs2 import (
-        LagunaM1Renderer,
-        LagunaXS2Renderer,
-        LagunaXS21Renderer,
-    )
+    from renderers.laguna_xs2 import LagunaM1Renderer, LagunaXS2Renderer, LagunaXS21Renderer
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
-    from renderers.nemotron3 import (
-        Nemotron3Renderer,
-        Nemotron3UltraRenderer,
-        Nemotron35Renderer,
-    )
+    from renderers.nemotron3 import Nemotron3Renderer, Nemotron3UltraRenderer, Nemotron35Renderer
     from renderers.prime_qwen3 import PrimeQwen3Renderer
     from renderers.qwen3 import Qwen3Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
@@ -1367,10 +1362,7 @@ def _populate_registry():
 
 
 def create_renderer(
-    tokenizer,
-    config: RendererConfig | None = None,
-    *,
-    chat_template_kwargs: Mapping[str, Any] | None = None,
+    tokenizer, config: RendererConfig | None = None, *, chat_template_kwargs: Mapping[str, Any] | None = None
 ) -> Renderer:
     """Create a Renderer from a typed config.
 
@@ -1400,22 +1392,15 @@ def create_renderer(
     """
     _populate_registry()
 
-    config = _resolve_renderer_config(
-        tokenizer,
-        config,
-        chat_template_kwargs=chat_template_kwargs,
-    )
+    config = _resolve_renderer_config(tokenizer, config, chat_template_kwargs=chat_template_kwargs)
     cls = RENDERER_REGISTRY.get(config.name)
     if cls is None:
-        raise ValueError(
-            f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
-        )
+        raise ValueError(f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}")
     return cls(tokenizer, config)
 
 
 def _merge_chat_template_kwargs(
-    config: RendererConfig,
-    chat_template_kwargs: Mapping[str, Any] | None,
+    config: RendererConfig, chat_template_kwargs: Mapping[str, Any] | None
 ) -> RendererConfig:
     if not chat_template_kwargs:
         return config
@@ -1449,10 +1434,7 @@ def _merge_chat_template_kwargs(
 
 
 def _resolve_renderer_config(
-    tokenizer,
-    config: RendererConfig | None,
-    *,
-    chat_template_kwargs: Mapping[str, Any] | None = None,
+    tokenizer, config: RendererConfig | None, *, chat_template_kwargs: Mapping[str, Any] | None = None
 ) -> RendererConfig:
     """Resolve auto/default config and merge chat-template kwargs."""
     from renderers.configs import AutoRendererConfig
@@ -1461,20 +1443,13 @@ def _resolve_renderer_config(
         config = AutoRendererConfig()
 
     if isinstance(config, AutoRendererConfig):
-        return _resolve_auto_config(
-            tokenizer,
-            config,
-            chat_template_kwargs=chat_template_kwargs,
-        )
+        return _resolve_auto_config(tokenizer, config, chat_template_kwargs=chat_template_kwargs)
 
     return _merge_chat_template_kwargs(config, chat_template_kwargs)
 
 
 def _resolve_auto_config(
-    tokenizer,
-    auto: AutoRendererConfig,
-    *,
-    chat_template_kwargs: Mapping[str, Any] | None = None,
+    tokenizer, auto: AutoRendererConfig, *, chat_template_kwargs: Mapping[str, Any] | None = None
 ) -> RendererConfig:
     """Map ``AutoRendererConfig`` → concrete typed config via the
     tokenizer's ``name_or_path``.
@@ -1495,10 +1470,7 @@ def _resolve_auto_config(
 
     if renderer_name is not None:
         cfg_cls = _config_class_for(renderer_name)
-        return _merge_chat_template_kwargs(
-            cfg_cls(**preserve_carry),
-            chat_template_kwargs,
-        )
+        return _merge_chat_template_kwargs(cfg_cls(**preserve_carry), chat_template_kwargs)
 
     if chat_template_kwargs:
         raise ValueError(
@@ -1562,17 +1534,28 @@ class RenderedTrainingSample:
     text-only samples through a VLM renderer), so the text path is unchanged.
     """
 
-    token_ids: list[int]
-    loss_mask: list[bool]
+    token_ids: np.ndarray
+    loss_mask: np.ndarray
     multi_modal_data: "MultiModalData | None" = None
-    mm_token_type_ids: list[int] | None = None
+    mm_token_type_ids: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        require_1d_array("training token_ids", self.token_ids, dtype=TRAINING_TOKEN_IDS_DTYPE, minimum=0)
+        require_1d_array("training loss_mask", self.loss_mask, dtype=MASK_DTYPE)
+        if self.loss_mask.size != self.token_ids.size:
+            raise ValueError("training loss_mask length must match token_ids")
+        if self.mm_token_type_ids is not None:
+            require_1d_array("mm_token_type_ids", self.mm_token_type_ids, dtype=MM_TOKEN_TYPE_IDS_DTYPE, minimum=0)
+            if self.mm_token_type_ids.size != self.token_ids.size:
+                raise ValueError("mm_token_type_ids length must match token_ids")
+        for values in (self.token_ids, self.loss_mask, self.mm_token_type_ids):
+            if values is not None:
+                values.flags.writeable = False
 
 
-def _build_mm_token_type_ids(
-    mm_placeholders: dict[str, list[PlaceholderRange]], length: int
-) -> list[int]:
+def _build_mm_token_type_ids(mm_placeholders: dict[str, list[PlaceholderRange]], length: int) -> np.ndarray:
     """Per-token modality flags (0=text, 1=image, 2=video) from placeholder ranges."""
-    ids = [0] * length
+    ids = np.zeros(length, dtype=MM_TOKEN_TYPE_IDS_DTYPE)
     for modality, ranges in mm_placeholders.items():
         type_id = _MM_TYPE_ID.get(modality, 0)
         if type_id == 0:
@@ -1675,10 +1658,9 @@ def build_training_sample(
             "lambda m: m['role'] == 'assistant') for this renderer."
         )
 
-    loss_mask: list[bool] = []
+    loss_mask = np.zeros(rendered.token_ids.size, dtype=MASK_DTYPE)
     for k, msg_idx in enumerate(rendered.message_indices):
         if msg_idx < 0:
-            loss_mask.append(False)
             continue
         msg = messages[msg_idx]
         # Body-only path for opt-in roles. Fires only on tokens whose
@@ -1686,19 +1668,19 @@ def build_training_sample(
         # message, so the model isn't supervised on emitting the role
         # tags / wraps that would derail a rollout.
         if body_roles and msg.get("role") in body_roles:
-            loss_mask.append(rendered.is_content[k])
+            loss_mask[k] = rendered.is_content[k]
             continue
         if has_sampled_info and not rendered.sampled_mask[k]:
-            loss_mask.append(False)
+            continue
         elif role_to_mask is None:
             # sampled_mask alone gates the loss when no role filter is
             # supplied. ``sampled_mask[k]`` is True here (handled by the
             # branch above), so this token is trainable.
-            loss_mask.append(True)
+            loss_mask[k] = True
         else:
-            loss_mask.append(role_to_mask(msg))
+            loss_mask[k] = role_to_mask(msg)
 
-    token_ids = list(rendered.token_ids)
+    token_ids = rendered.token_ids.astype(TRAINING_TOKEN_IDS_DTYPE, copy=True)
     # Requires sampled_mask (opaque templates hide the assistant close)
     # and a final assistant message the role filter trains.
     if (
@@ -1708,14 +1690,18 @@ def build_training_sample(
         and (role_to_mask is None or role_to_mask(messages[-1]))
     ):
         stop_ids = set(renderer.get_stop_token_ids())
-        last_trainable = next(
-            (k for k in range(len(loss_mask) - 1, -1, -1) if loss_mask[k]), None
-        )
+        last_trainable = next((k for k in range(len(loss_mask) - 1, -1, -1) if loss_mask[k]), None)
         if last_trainable is None or token_ids[last_trainable] not in stop_ids:
-            token_ids.append(renderer.get_stop_token_ids()[0])
+            extended_ids = np.empty(token_ids.size + 1, dtype=TRAINING_TOKEN_IDS_DTYPE)
+            extended_ids[:-1] = token_ids
+            extended_ids[-1] = renderer.get_stop_token_ids()[0]
+            token_ids = extended_ids
             # loss_mask=True marks the token as trainable — the appended
             # stop is a training target, like any sampled token.
-            loss_mask.append(True)
+            extended_mask = np.empty(loss_mask.size + 1, dtype=MASK_DTYPE)
+            extended_mask[:-1] = loss_mask
+            extended_mask[-1] = True
+            loss_mask = extended_mask
 
     # Surface the multimodal payload for VLM renderers. ``None`` for text
     # renderers and for text-only samples (empty media) so downstream
@@ -1724,19 +1710,16 @@ def build_training_sample(
     if mm is not None and mm.is_empty():
         mm = None
     mm_token_type_ids = (
-        _build_mm_token_type_ids(mm.mm_placeholders, len(token_ids))
-        if mm is not None and mm.mm_placeholders
-        else None
+        _build_mm_token_type_ids(mm.mm_placeholders, len(token_ids)) if mm is not None and mm.mm_placeholders else None
     )
     return RenderedTrainingSample(
-        token_ids=token_ids,
-        loss_mask=loss_mask,
-        multi_modal_data=mm,
-        mm_token_type_ids=mm_token_type_ids,
+        token_ids=token_ids, loss_mask=loss_mask, multi_modal_data=mm, mm_token_type_ids=mm_token_type_ids
     )
 
 
-def _common_prefix_len(a: list[int], b: list[int]) -> int:
+def _common_prefix_len(a: np.ndarray, b: np.ndarray) -> int:
+    require_1d_array("prefix a", a, dtype=TOKEN_IDS_DTYPE, minimum=0)
+    require_1d_array("prefix b", b, dtype=TOKEN_IDS_DTYPE, minimum=0)
     max_len = min(len(a), len(b))
     for idx in range(max_len):
         if a[idx] != b[idx]:
@@ -1745,12 +1728,12 @@ def _common_prefix_len(a: list[int], b: list[int]) -> int:
 
 
 def trim_to_turn_close(
-    previous_prompt_ids: list[int],
-    previous_completion_ids: list[int],
+    previous_prompt_ids: np.ndarray,
+    previous_completion_ids: np.ndarray,
     close_token_ids: set[int],
     *,
     synthesize_close: int | None = None,
-) -> list[int] | None:
+) -> np.ndarray | None:
     """Return the longest prefix of ``prev_prompt + prev_completion`` that
     ends at a turn-close token, or ``None`` if none exists and
     ``synthesize_close`` is not provided.
@@ -1769,27 +1752,39 @@ def trim_to_turn_close(
     it doesn't call this — it returns ``None`` from ``bridge_to_next_turn``
     unconditionally.
     """
-    previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
+    require_1d_array("previous_prompt_ids", previous_prompt_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+    require_1d_array("previous_completion_ids", previous_completion_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+    previous_ids = np.concatenate((previous_prompt_ids, previous_completion_ids), dtype=TOKEN_IDS_DTYPE)
     for idx in range(len(previous_ids) - 1, len(previous_prompt_ids) - 1, -1):
         if previous_ids[idx] in close_token_ids:
-            return previous_ids[: idx + 1]
+            return readonly_view(previous_ids[: idx + 1])
     if synthesize_close is None:
         return None
-    previous_ids.append(synthesize_close)
-    return previous_ids
+    extended = np.empty(previous_ids.size + 1, dtype=TOKEN_IDS_DTYPE)
+    extended[:-1] = previous_ids
+    extended[-1] = synthesize_close
+    extended.flags.writeable = False
+    return extended
 
 
-class AttributedTextSegments(list[tuple[int, bool]]):
-    """Token/content pairs with an explicit attribution-availability flag."""
+@dataclass(frozen=True)
+class AttributedTextSegments:
+    """Aligned fixed-width token/content arrays from one segmented BPE pass."""
 
-    def __init__(
-        self,
-        values=(),
-        *,
-        has_content_attribution: bool,
-    ) -> None:
-        super().__init__(values)
-        self.has_content_attribution = has_content_attribution
+    token_ids: np.ndarray
+    is_content: np.ndarray
+    has_content_attribution: bool
+
+    def __post_init__(self) -> None:
+        require_1d_array("attributed token_ids", self.token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_1d_array("attributed is_content", self.is_content, dtype=MASK_DTYPE)
+        if self.token_ids.size != self.is_content.size:
+            raise ValueError("attributed token_ids and is_content must have equal lengths")
+        if type(self.has_content_attribution) is not bool:
+            raise TypeError("has_content_attribution must be bool")
+
+    def __len__(self) -> int:
+        return self.token_ids.size
 
 
 def _get_offset_tokenizer(tokenizer: Tokenizer) -> OffsetTokenizer | None:
@@ -1802,23 +1797,20 @@ def _get_offset_tokenizer(tokenizer: Tokenizer) -> OffsetTokenizer | None:
     loaded via :func:`load_tokenizer` are ``PreTrainedTokenizerFast``
     instances that satisfy this capability, but BYO tokenizers need not.
     """
-    call = getattr(tokenizer, "__call__", None)
-    if not callable(call):
+    if not callable(tokenizer):
         return None
     try:
-        encoding = call("a", add_special_tokens=False, return_offsets_mapping=True)
-        encoding["input_ids"]
-        encoding["offset_mapping"]
+        encoding = tokenizer("a", add_special_tokens=False, return_offsets_mapping=True, return_tensors="np")
+        if not isinstance(encoding["input_ids"], np.ndarray):
+            return None
+        if not isinstance(encoding["offset_mapping"], np.ndarray):
+            return None
     except (KeyError, NotImplementedError, TypeError, ValueError):
         return None
     return cast(OffsetTokenizer, tokenizer)
 
 
-def _infer_offsets_from_decode(
-    tokenizer: Tokenizer,
-    token_ids: list[int],
-    text: str,
-) -> list[tuple[int, int]] | None:
+def _infer_offsets_from_decode(tokenizer: Tokenizer, token_ids: np.ndarray, text: str) -> np.ndarray | None:
     """Recover token character spans from an exact decoder round-trip.
 
     This is a narrow fallback for metadata that does not require exposing
@@ -1835,7 +1827,9 @@ def _infer_offsets_from_decode(
     remains unavailable without native offsets.
     """
 
-    def decode(ids: list[int]) -> str | None:
+    require_1d_array("decode token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+
+    def decode(ids: np.ndarray) -> str | None:
         variants = (
             {"skip_special_tokens": False, "clean_up_tokenization_spaces": False},
             {"skip_special_tokens": False},
@@ -1852,48 +1846,46 @@ def _infer_offsets_from_decode(
         return None
 
     pieces: list[str] = []
-    for token_id in token_ids:
-        piece = decode([token_id])
+    for token_index in range(token_ids.size):
+        piece = decode(token_ids[token_index : token_index + 1])
         if piece is None:
             break
         pieces.append(piece)
     if len(pieces) == len(token_ids) and "".join(pieces) == text:
-        offsets: list[tuple[int, int]] = []
+        offsets = np.empty((token_ids.size, 2), dtype=OFFSETS_DTYPE)
         position = 0
-        for piece in pieces:
+        for token_index, piece in enumerate(pieces):
             end = position + len(piece)
-            offsets.append((position, end))
+            offsets[token_index] = (position, end)
             position = end
+        offsets.flags.writeable = False
         return offsets
 
-    offsets = []
+    offsets = np.empty((token_ids.size, 2), dtype=OFFSETS_DTYPE)
     previous_end = 0
     for end_index in range(1, len(token_ids) + 1):
         prefix = decode(token_ids[:end_index])
         if prefix is None or len(prefix) < previous_end or not text.startswith(prefix):
             return None
         current_end = len(prefix)
-        offsets.append((previous_end, current_end))
+        offsets[end_index - 1] = (previous_end, current_end)
         previous_end = current_end
     if previous_end != len(text):
         return None
+    offsets.flags.writeable = False
     return offsets
 
 
-def _content_mask_or_empty(
-    tokenizer: Tokenizer, content_mask: list[bool]
-) -> list[bool]:
-    """Return exact content attribution, or the empty-list unavailable sentinel."""
+def _content_mask_or_empty(tokenizer: Tokenizer, content_mask: np.ndarray) -> np.ndarray:
+    """Return exact content attribution, or an empty fixed-width sentinel."""
+    require_1d_array("is_content", content_mask, dtype=MASK_DTYPE)
     if _get_offset_tokenizer(tokenizer) is None:
-        return []
+        return empty_array(MASK_DTYPE)
     return content_mask
 
 
 def attribute_text_segments(
-    tokenizer: Tokenizer,
-    segments: "list[tuple[str, bool]]",
-    *,
-    overlap_is_content: bool = False,
+    tokenizer: Tokenizer, segments: "list[tuple[str, bool]]", *, overlap_is_content: bool = False
 ) -> AttributedTextSegments:
     """Tokenize concatenated segments as a single BPE pass and return
     ``(token_id, is_content)`` pairs.
@@ -1930,28 +1922,38 @@ def attribute_text_segments(
     empty ``RenderedTokens.is_content`` list rather than exposing a partial or
     inaccurate mask.
 
-    Empty input or empty joined text returns an empty list.
+    Empty input or empty joined text returns empty fixed-width arrays.
     """
     if not segments:
-        return AttributedTextSegments([], has_content_attribution=True)
+        return AttributedTextSegments(
+            empty_array(TOKEN_IDS_DTYPE), empty_array(MASK_DTYPE), has_content_attribution=True
+        )
     full_text = "".join(text for text, _ in segments)
     if not full_text:
-        return AttributedTextSegments([], has_content_attribution=True)
+        return AttributedTextSegments(
+            empty_array(TOKEN_IDS_DTYPE), empty_array(MASK_DTYPE), has_content_attribution=True
+        )
 
     offset_tokenizer = _get_offset_tokenizer(tokenizer)
     if offset_tokenizer is None:
-        token_ids = tokenizer.encode(full_text, add_special_tokens=False)
+        token_ids = encode_token_ids(tokenizer, full_text)
         return AttributedTextSegments(
-            ((token_id, False) for token_id in token_ids),
-            has_content_attribution=False,
+            token_ids, np.zeros(token_ids.size, dtype=MASK_DTYPE), has_content_attribution=False
         )
-    encoding = offset_tokenizer(
-        full_text,
-        add_special_tokens=False,
-        return_offsets_mapping=True,
-    )
-    token_ids = list(encoding["input_ids"])
-    offsets = list(encoding["offset_mapping"])
+    encoding = offset_tokenizer(full_text, add_special_tokens=False, return_offsets_mapping=True, return_tensors="np")
+    raw_token_ids = encoding["input_ids"]
+    raw_offsets = encoding["offset_mapping"]
+    if not isinstance(raw_token_ids, np.ndarray) or not isinstance(raw_offsets, np.ndarray):
+        raise TypeError("offset tokenizer must return NumPy token and offset arrays")
+    if raw_token_ids.ndim == 2 and raw_token_ids.shape[0] == 1:
+        raw_token_ids = raw_token_ids[0]
+    if raw_offsets.ndim == 3 and raw_offsets.shape[0] == 1:
+        raw_offsets = raw_offsets[0]
+    token_ids = np.array(raw_token_ids, dtype=TOKEN_IDS_DTYPE, copy=True, order="C")
+    if token_ids.ndim != 1:
+        raise ValueError(f"offset tokenizer input_ids must be rank 1, got shape {token_ids.shape}")
+    if raw_offsets.ndim != 2 or raw_offsets.shape != (token_ids.size, 2):
+        raise ValueError(f"offset_mapping must have shape [{token_ids.size}, 2], got {raw_offsets.shape}")
 
     # Build segment char-span lookup. Track the half-open span
     # [seg_start, seg_end) of each segment and its is_content bit.
@@ -1962,25 +1964,20 @@ def attribute_text_segments(
         pos += len(text)
     total_len = pos
 
-    out: list[tuple[int, bool]] = []
+    out = np.empty(token_ids.size, dtype=MASK_DTYPE)
     last_is_content = spans[-1][2] if spans else False
-    for tok_id, (start, end) in zip(token_ids, offsets):
+    for token_index in range(token_ids.size):
+        start = int(raw_offsets[token_index, 0])
+        end = int(raw_offsets[token_index, 1])
         if start >= total_len:
             # Token's character offset is past every segment (shouldn't
             # normally happen for add_special_tokens=False, but defensive
             # against tokenizer-specific edge cases).
-            out.append((tok_id, last_is_content))
+            out[token_index] = last_is_content
             continue
         if overlap_is_content and end > start:
-            out.append(
-                (
-                    tok_id,
-                    any(
-                        seg_is_content
-                        for seg_start, seg_end, seg_is_content in spans
-                        if seg_start < end and start < seg_end
-                    ),
-                )
+            out[token_index] = any(
+                seg_is_content for seg_start, seg_end, seg_is_content in spans if seg_start < end and start < seg_end
             )
             continue
         # Find the segment that contains `start`. Segments are
@@ -1998,8 +1995,10 @@ def attribute_text_segments(
             # characters, so no token can land in them; fall through to
             # the last non-empty segment's bit.
             pass
-        out.append((tok_id, is_content))
-    return AttributedTextSegments(out, has_content_attribution=True)
+        out[token_index] = is_content
+    token_ids.flags.writeable = False
+    out.flags.writeable = False
+    return AttributedTextSegments(token_ids, out, has_content_attribution=True)
 
 
 def reject_assistant_in_extension(new_messages: list[Message]) -> bool:
@@ -2017,9 +2016,7 @@ def _is_user_message(message: Message) -> bool:
 
 
 def introduces_user_query(
-    new_messages: list[Message],
-    *,
-    is_user_query: Callable[[Message], bool] = _is_user_message,
+    new_messages: list[Message], *, is_user_query: Callable[[Message], bool] = _is_user_message
 ) -> bool:
     """Return True if ``new_messages`` opens a new user-query turn.
 
@@ -2030,10 +2027,7 @@ def introduces_user_query(
     return any(is_user_query(m) for m in new_messages)
 
 
-def resolve_thinking_retention(
-    config: Any,
-    implied: ResolvedThinkingRetention,
-) -> ResolvedThinkingRetention:
+def resolve_thinking_retention(config: Any, implied: ResolvedThinkingRetention) -> ResolvedThinkingRetention:
     """Resolve the effective bridge policy for a renderer instance.
 
     ``config.thinking_retention is None`` means "derive from template knobs";
@@ -2079,9 +2073,7 @@ def build_trajectory_step(
     the completion).
     """
     has_completion = len(completion_messages) > 0
-    prompt_ids = renderer.render_ids(
-        prompt_messages, tools=tools, add_generation_prompt=has_completion
-    )
+    prompt_ids = renderer.render_ids(prompt_messages, tools=tools, add_generation_prompt=has_completion)
     full_rendered = renderer.render(prompt_messages + completion_messages, tools=tools)
     full_ids = full_rendered.token_ids
 
@@ -2090,16 +2082,13 @@ def build_trajectory_step(
 
     out: dict[str, Any] = {
         "prompt_ids": full_ids[:split_idx],
-        "prompt_mask": [False] * split_idx,
+        "prompt_mask": np.zeros(split_idx, dtype=MASK_DTYPE),
         "completion_ids": completion_ids,
-        "completion_mask": [True] * len(completion_ids),
-        "completion_logprobs": [0.0] * len(completion_ids),
+        "completion_mask": np.ones(len(completion_ids), dtype=MASK_DTYPE),
+        "completion_logprobs": np.zeros(len(completion_ids), dtype=LOGPROBS_DTYPE),
         "routed_experts": None,
         "kept_tokens": None,
     }
-    if (
-        full_rendered.multi_modal_data is not None
-        and not full_rendered.multi_modal_data.is_empty()
-    ):
+    if full_rendered.multi_modal_data is not None and not full_rendered.multi_modal_data.is_empty():
         out["multi_modal_data"] = full_rendered.multi_modal_data
     return out

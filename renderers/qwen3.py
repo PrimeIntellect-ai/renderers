@@ -20,14 +20,15 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
+
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
     Tokenizer,
-    _content_mask_or_empty,
-    attribute_text_segments,
+    _get_offset_tokenizer,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -36,6 +37,7 @@ from renderers.base import (
 )
 from renderers.configs import Qwen3RendererConfig
 from renderers.parsing import parse_qwen3
+from renderers.token_arrays import RenderedTokenBuilder
 
 _TOOLS_HEADER = (
     "# Tools\n\n"
@@ -57,16 +59,11 @@ _TOOLS_FOOTER = (
 class Qwen3Renderer:
     """Deterministic message → token renderer for Qwen3 models."""
 
-    def __init__(
-        self,
-        tokenizer: Tokenizer,
-        config: Qwen3RendererConfig | None = None,
-    ):
+    def __init__(self, tokenizer: Tokenizer, config: Qwen3RendererConfig | None = None):
         self._tokenizer = tokenizer
         self.config = config or Qwen3RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
-            self.config,
-            "all" if not self.config.enable_thinking else "tool_cycle",
+            self.config, "all" if not self.config.enable_thinking else "tool_cycle"
         )
 
         self._im_start = self._token_id("<|im_start|>")
@@ -84,11 +81,6 @@ class Qwen3Renderer:
             f"Special token {token!r} not found in tokenizer vocabulary"
         )
         return tid
-
-    def _encode(self, text: str) -> list[int]:
-        if not text:
-            return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
 
     @staticmethod
     def _query_boundary_text(content) -> str:
@@ -109,10 +101,7 @@ class Qwen3Renderer:
         if msg.get("role") != "user":
             return False
         content = Qwen3Renderer._query_boundary_text(msg.get("content"))
-        return not (
-            content.startswith("<tool_response>")
-            and content.endswith("</tool_response>")
-        )
+        return not (content.startswith("<tool_response>") and content.endswith("</tool_response>"))
 
     @staticmethod
     def _last_query_index(messages: list[Message]) -> int:
@@ -122,54 +111,15 @@ class Qwen3Renderer:
         return len(messages) - 1
 
     def render(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolSpec] | None = None,
-        add_generation_prompt: bool = False,
+        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
 
-        tokens: list[int] = []
-        indices: list[int] = []
-        sampled: list[bool] = []
-        content_mask: list[bool] = []
-
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            tokens.append(token_id)
-            indices.append(msg_idx)
-            sampled.append(is_sampled)
-            content_mask.append(is_content)
-
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
-            ids = self._encode(text)
-            tokens.extend(ids)
-            indices.extend([msg_idx] * len(ids))
-            sampled.extend([is_sampled] * len(ids))
-            content_mask.extend([is_content] * len(ids))
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
-        ) -> None:
-            """Tokenize concatenated segments as one BPE pass; per-token
-            ``is_content`` follows each token's source segment.
-
-            Lets call sites express "this wrap + this body, joined the
-            same way as the chat template, but attributed separately"
-            without splitting the encode call (which could shift BPE
-            merges at the boundary)."""
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                tokens.append(tok_id)
-                indices.append(msg_idx)
-                sampled.append(is_sampled)
-                content_mask.append(is_content)
+        builder = RenderedTokenBuilder(self._tokenizer)
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
         # ── 1. System + tools ───────────────────────────────────────
         first_is_system = messages[0].get("role") == "system"
@@ -261,35 +211,22 @@ class Qwen3Renderer:
             emit_special(self._im_start, -1, is_sampled=False, is_content=False)
             emit_text("assistant\n", -1, is_sampled=False, is_content=False)
             if not self.config.enable_thinking:
-                emit_text(
-                    "<think>\n\n</think>\n\n", -1, is_sampled=False, is_content=False
-                )
+                emit_text("<think>\n\n</think>\n\n", -1, is_sampled=False, is_content=False)
 
-        return RenderedTokens(
-            token_ids=tokens,
-            message_indices=indices,
-            sampled_mask=sampled,
-            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
+            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
         )
 
     def render_ids(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolSpec] | None = None,
-        add_generation_prompt: bool = False,
-    ) -> list[int]:
-        return self.render(
-            messages,
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
-        ).token_ids
+        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+    ) -> np.ndarray:
+        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
 
     def parse_response(
         self,
-        token_ids: list[int],
+        token_ids: np.ndarray,
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — hermes wire format quotes strings, schema not needed
     ) -> ParsedResponse:
@@ -307,39 +244,28 @@ class Qwen3Renderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
-        if (
-            not previous_prompt_ids
-            or not new_messages
-            or reject_assistant_in_extension(new_messages)
-        ):
+        if len(previous_prompt_ids) == 0 or not new_messages or reject_assistant_in_extension(new_messages):
             return None
 
         if should_rerender_for_thinking_retention(
-            self.effective_thinking_retention,
-            new_messages,
-            is_user_query=self._is_user_query_message,
+            self.effective_thinking_retention, new_messages, is_user_query=self._is_user_query_message
         ):
             return None
 
         previous_ids = trim_to_turn_close(
-            previous_prompt_ids,
-            previous_completion_ids,
-            {self._im_end, self._endoftext},
-            synthesize_close=self._im_end,
+            previous_prompt_ids, previous_completion_ids, {self._im_end, self._endoftext}, synthesize_close=self._im_end
         )
         if previous_ids is None:
             return None
 
-        ext: list[int] = []
-        ext_indices: list[int] = []
-        ext_sampled: list[bool] = []
-        ext_content: list[bool] = []
+        builder = RenderedTokenBuilder(self._tokenizer, initial_capacity=len(previous_ids) + 64)
+        builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
         # and ``sampled_mask`` (uniformly ``False`` — every token the
@@ -349,44 +275,9 @@ class Qwen3Renderer:
         # and read each step's own body mask. Downstream consumers can
         # run :meth:`RenderedTokens.tokens_per_message` on the bridge
         # output to get per-new-message token counts without re-rendering.
-        def emit_special(
-            token_id: int,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ext.append(token_id)
-            ext_indices.append(msg_idx)
-            ext_sampled.append(is_sampled)
-            ext_content.append(is_content)
-
-        def emit_text(
-            text: str,
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-            is_content: bool = False,
-        ) -> None:
-            ids = self._encode(text)
-            ext.extend(ids)
-            ext_indices.extend([msg_idx] * len(ids))
-            ext_sampled.extend([is_sampled] * len(ids))
-            ext_content.extend([is_content] * len(ids))
-
-        def emit_text_segments(
-            segments: list[tuple[str, bool]],
-            msg_idx: int = -1,
-            *,
-            is_sampled: bool = False,
-        ) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
-                ext.append(tok_id)
-                ext_indices.append(msg_idx)
-                ext_sampled.append(is_sampled)
-                ext_content.append(is_content)
+        emit_special = builder.emit_special
+        emit_text = builder.emit_text
+        emit_text_segments = builder.emit_text_segments
 
         # Trailing ``\n`` after the turn-close token. ``render()`` emits this
         # as part of the prior turn, but vLLM stops on ``<|im_end|>`` so the
@@ -429,29 +320,14 @@ class Qwen3Renderer:
         if not self.config.enable_thinking:
             emit_text("<think>\n\n</think>\n\n", -1)
 
-        total_len = len(previous_ids) + len(ext)
-        return RenderedTokens(
-            token_ids=previous_ids + ext,
-            message_indices=[-1] * len(previous_ids) + ext_indices,
-            sampled_mask=[False] * total_len,
-            is_content=_content_mask_or_empty(
-                self._tokenizer, [False] * len(previous_ids) + ext_content
-            ),
+        return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
+            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
         )
 
     def _render_assistant(
-        self,
-        msg,
-        msg_idx,
-        content,
-        last_query_index,
-        is_last,
-        *,
-        emit_special,
-        emit_text,
-        emit_text_segments,
+        self, msg, msg_idx, content, last_query_index, is_last, *, emit_special, emit_text, emit_text_segments
     ):
         reasoning_content = ""
         if isinstance(msg.get("reasoning_content"), str):
@@ -485,9 +361,7 @@ class Qwen3Renderer:
         # sampled token is body, every scaffold token isn't.
         tool_calls = msg.get("tool_calls") or []
 
-        emit_in_template_window = msg_idx > last_query_index and (
-            is_last or reasoning_content
-        )
+        emit_in_template_window = msg_idx > last_query_index and (is_last or reasoning_content)
         # With thinking disabled, the generation prompt prefilled the empty
         # ``<think>\n\n</think>\n\n`` wrapper, so it is part of every sampled
         # turn's token stream. Re-emit it on historical turns — deviating
@@ -495,16 +369,9 @@ class Qwen3Renderer:
         # the last user query — so re-renders stay token-stable with what
         # the model actually sampled. Turns that carry reasoning_content
         # were not sampled under this config; those stay template-faithful.
-        emit_thinking = emit_in_template_window or (
-            not self.config.enable_thinking and not reasoning_content
-        )
+        emit_thinking = emit_in_template_window or (not self.config.enable_thinking and not reasoning_content)
         if emit_thinking:
-            body = (
-                "<think>\n"
-                + reasoning_content.strip("\n")
-                + "\n</think>\n\n"
-                + content.lstrip("\n")
-            )
+            body = "<think>\n" + reasoning_content.strip("\n") + "\n</think>\n\n" + content.lstrip("\n")
         else:
             body = content
 
@@ -515,18 +382,12 @@ class Qwen3Renderer:
                 func = tc.get("function") or tc
                 name = func.get("name", "")
                 arguments = func.get("arguments", {})
-                args_str = (
-                    json.dumps(arguments, ensure_ascii=False)
-                    if not isinstance(arguments, str)
-                    else arguments
-                )
+                args_str = json.dumps(arguments, ensure_ascii=False) if not isinstance(arguments, str) else arguments
 
                 # Text before this tool_call (includes separator)
                 if tc_idx == 0:
                     separator = "\n" if content else ""
-                    emit_text(
-                        body + separator, msg_idx, is_sampled=True, is_content=True
-                    )
+                    emit_text(body + separator, msg_idx, is_sampled=True, is_content=True)
                 else:
                     emit_text("\n", msg_idx, is_sampled=True, is_content=True)
 
@@ -537,9 +398,7 @@ class Qwen3Renderer:
                     is_sampled=True,
                     is_content=True,
                 )
-                emit_special(
-                    self._tool_call_end, msg_idx, is_sampled=True, is_content=True
-                )
+                emit_special(self._tool_call_end, msg_idx, is_sampled=True, is_content=True)
 
         # ``<|im_end|>`` is the model's stop signal — it samples this to
         # end its turn, so it is part of the sampled stream (and the
@@ -549,14 +408,7 @@ class Qwen3Renderer:
         emit_text("\n", msg_idx, is_sampled=False, is_content=False)
 
     def _render_tool(
-        self,
-        messages: list[Message],
-        msg_idx: int,
-        content: str,
-        *,
-        emit_special,
-        emit_text,
-        emit_text_segments,
+        self, messages: list[Message], msg_idx: int, content: str, *, emit_special, emit_text, emit_text_segments
     ) -> None:
         # Tool messages are conversation history injected by the runtime
         # between assistant turns — the model never samples any of these
@@ -566,9 +418,7 @@ class Qwen3Renderer:
         # ``<|tool_response>`` specials — is scaffold so the SFT mask
         # for tool body never trains the model to emit them.
         prev_is_tool = msg_idx > 0 and messages[msg_idx - 1]["role"] == "tool"
-        next_is_tool = (
-            msg_idx + 1 < len(messages) and messages[msg_idx + 1]["role"] == "tool"
-        )
+        next_is_tool = msg_idx + 1 < len(messages) and messages[msg_idx + 1]["role"] == "tool"
 
         if not prev_is_tool:
             emit_special(self._im_start, msg_idx, is_sampled=False, is_content=False)
@@ -581,14 +431,8 @@ class Qwen3Renderer:
         # merges (Qwen3 keeps ``\n`` as its own token, so this is
         # mostly a no-op, but we route through segments anyway so the
         # attribution doesn't depend on tokenizer-specific behaviour).
-        emit_text_segments(
-            [("\n", False), (content, True), ("\n", False)],
-            msg_idx,
-            is_sampled=False,
-        )
-        emit_special(
-            self._tool_response_end, msg_idx, is_sampled=False, is_content=False
-        )
+        emit_text_segments([("\n", False), (content, True), ("\n", False)], msg_idx, is_sampled=False)
+        emit_special(self._tool_response_end, msg_idx, is_sampled=False, is_content=False)
 
         if not next_is_tool:
             emit_special(self._im_end, msg_idx, is_sampled=False, is_content=False)

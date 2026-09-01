@@ -69,8 +69,8 @@ def test_rendered_token_builder_keeps_all_signals_aligned_and_fixed_width():
     tokens = _hostile(np.asarray([11, 13], dtype=TOKEN_IDS_DTYPE))
     content = _hostile(np.asarray([False, True], dtype=MASK_DTYPE))
 
-    builder.emit_special(7, -1, sampled=False, content=False)
-    builder.emit_tokens(tokens, 0, sampled=True, content=content)
+    builder.emit_special(7, -1, is_sampled=False, is_content=False)
+    builder.emit_tokens(tokens, 0, is_sampled=True, is_content=content)
     rendered = builder.finish(message_roles=["assistant"])
 
     assert np.array_equal(rendered.token_ids, np.asarray([7, 11, 13], dtype="<i4"))
@@ -86,18 +86,21 @@ def test_rendered_token_builder_keeps_all_signals_aligned_and_fixed_width():
 def test_rendered_token_builder_rejects_list_and_misaligned_mask_custody():
     builder = RenderedTokenBuilder()
     with pytest.raises(TypeError, match="must be a NumPy array"):
-        builder.emit_tokens([1, 2], 0, sampled=False, content=False)  # type: ignore[arg-type]
+        builder.emit_tokens([1, 2], 0, is_sampled=False, is_content=False)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="does not match"):
-        builder.emit_tokens(
-            np.asarray([1, 2], dtype=TOKEN_IDS_DTYPE), 0, sampled=False, content=np.asarray([True], dtype=MASK_DTYPE)
-        )
-    assert len(builder) == 0
-    with pytest.raises(TypeError, match="content must be bool"):
         builder.emit_tokens(
             np.asarray([1, 2], dtype=TOKEN_IDS_DTYPE),
             0,
-            sampled=False,
-            content=[True, False],  # type: ignore[arg-type]
+            is_sampled=False,
+            is_content=np.asarray([True], dtype=MASK_DTYPE),
+        )
+    assert len(builder) == 0
+    with pytest.raises(TypeError, match="is_content must be bool"):
+        builder.emit_tokens(
+            np.asarray([1, 2], dtype=TOKEN_IDS_DTYPE),
+            0,
+            is_sampled=False,
+            is_content=[True, False],  # type: ignore[arg-type]
         )
     assert len(builder) == 0
 

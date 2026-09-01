@@ -54,6 +54,7 @@ def _hostile(values: np.ndarray) -> np.ndarray:
 
 def _readonly_hostile(values: np.ndarray) -> np.ndarray:
     hostile = _hostile(values)
+    values.flags.writeable = False
     hostile.flags.writeable = False
     return hostile
 
@@ -72,6 +73,29 @@ def test_builder_grows_and_seals_without_iterating_or_copying_at_finish():
     assert not result.flags.writeable
     with pytest.raises(RuntimeError, match="already sealed"):
         builder.append(23)
+
+
+def test_builder_finish_freezes_the_exposed_base_chain():
+    builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=8)
+    builder.append(17)
+
+    result = builder.finish()
+
+    assert isinstance(result.base, np.ndarray)
+    assert not result.base.flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        result.base[0] = 99
+
+
+def test_rendered_tokens_reject_readonly_view_over_writable_storage():
+    backing = np.asarray([11], dtype=TOKEN_IDS_DTYPE)
+    escaped = backing.view()
+    escaped.flags.writeable = False
+    message_indices = np.asarray([0], dtype="<i4")
+    message_indices.flags.writeable = False
+
+    with pytest.raises(ValueError, match="writable base storage"):
+        RenderedTokens(token_ids=escaped, message_indices=message_indices)
 
 
 def test_builder_and_validator_reject_legacy_lists():

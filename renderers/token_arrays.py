@@ -31,16 +31,26 @@ def require_1d_array(name: str, value: object, *, dtype: np.dtype, minimum: int 
 
 
 def readonly_view(value: np.ndarray) -> np.ndarray:
-    """Return a read-only view; callers must already own the source buffer."""
+    """Freeze owned storage and return a view with no writable base escape."""
+    root = value
+    while isinstance(root.base, np.ndarray):
+        root = root.base
+    root.flags.writeable = False
+    value.flags.writeable = False
     view = value.view()
     view.flags.writeable = False
     return view
 
 
 def require_readonly(name: str, value: np.ndarray) -> np.ndarray:
-    """Reject externally mutable custody rather than mutating caller ownership."""
+    """Reject externally mutable custody, including writable ndarray bases."""
     if value.flags.writeable:
         raise ValueError(f"{name} must already be read-only")
+    base = value.base
+    while isinstance(base, np.ndarray):
+        if base.flags.writeable:
+            raise ValueError(f"{name} must not expose writable base storage")
+        base = base.base
     return value
 
 

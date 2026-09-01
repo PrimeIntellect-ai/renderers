@@ -75,6 +75,7 @@ from renderers.configs import (
     Qwen3VLRendererConfig,
     RendererConfig,
 )
+from renderers.token_arrays import RenderedTokenBuilder
 
 # Concrete renderer classes are lazy-loaded so that consumers needing only the
 # config layer (``RendererConfig`` discriminated union) don't import every
@@ -205,6 +206,7 @@ __all__ = [
     "Qwen3VLRendererConfig",
     "RenderedConversation",
     "RenderedTokens",
+    "RenderedTokenBuilder",
     "RenderedTrainingSample",
     "Renderer",
     "RendererConfig",

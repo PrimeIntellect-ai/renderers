@@ -75,7 +75,18 @@ from renderers.configs import (
     Qwen3VLRendererConfig,
     RendererConfig,
 )
-from renderers.token_arrays import RenderedTokenBuilder
+from renderers.token_arrays import (
+    MASK_DTYPE,
+    MESSAGE_INDICES_DTYPE,
+    OFFSETS_DTYPE,
+    TOKEN_IDS_DTYPE,
+    FixedWidthArrayBuilder,
+    FixedWidthRangeBuilder,
+    RenderedTokenBuilder,
+    encode_token_ids,
+    finish_range_builders,
+    merge_range_maps,
+)
 
 # Concrete renderer classes are lazy-loaded so that consumers needing only the
 # config layer (``RendererConfig`` discriminated union) don't import every
@@ -151,6 +162,8 @@ __all__ = [
     "GLM51RendererConfig",
     "GLM5Renderer",
     "GLM5RendererConfig",
+    "FixedWidthRangeBuilder",
+    "FixedWidthArrayBuilder",
     "Gemma4Renderer",
     "Gemma4RendererConfig",
     "GptOssRenderer",
@@ -175,6 +188,8 @@ __all__ = [
     "Llama3Renderer",
     "Llama3RendererConfig",
     "MULTIMODAL_MODELS",
+    "MASK_DTYPE",
+    "MESSAGE_INDICES_DTYPE",
     "MalformedGenerateResponseError",
     "Message",
     "MiniMaxM2Renderer",
@@ -188,6 +203,7 @@ __all__ = [
     "Nemotron3UltraRenderer",
     "Nemotron3UltraRendererConfig",
     "OffsetTokenizer",
+    "OFFSETS_DTYPE",
     "OverlongPromptError",
     "ParsedResponse",
     "ParsedToolCall",
@@ -217,6 +233,7 @@ __all__ = [
     "ToolCallFunction",
     "ToolCallParseStatus",
     "ToolSpec",
+    "TOKEN_IDS_DTYPE",
     "VideoPart",
     "__version__",
     "attribute_text_segments",
@@ -225,7 +242,10 @@ __all__ = [
     "config_from_name",
     "create_renderer",
     "extract_message_tool_names",
+    "encode_token_ids",
+    "finish_range_builders",
     "is_multimodal",
+    "merge_range_maps",
     "reject_assistant_in_extension",
     "trim_to_turn_close",
 ]

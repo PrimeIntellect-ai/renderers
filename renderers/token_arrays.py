@@ -12,6 +12,7 @@ MESSAGE_INDICES_DTYPE = np.dtype("<i4")
 MASK_DTYPE = np.dtype(np.bool_)
 LOGPROBS_DTYPE = np.dtype("<f8")
 OFFSETS_DTYPE = np.dtype("<i8")
+COUNTS_DTYPE = np.dtype("<i8")
 TRAINING_TOKEN_IDS_DTYPE = np.dtype("<i8")
 MM_TOKEN_TYPE_IDS_DTYPE = np.dtype("<i8")
 
@@ -40,6 +41,19 @@ def require_readonly(name: str, value: np.ndarray) -> np.ndarray:
     """Reject externally mutable custody rather than mutating caller ownership."""
     if value.flags.writeable:
         raise ValueError(f"{name} must already be read-only")
+    return value
+
+
+def require_range_array(name: str, value: object) -> np.ndarray:
+    """Validate fixed-width ``[offset, length]`` rows without object custody."""
+    if not isinstance(value, np.ndarray):
+        raise TypeError(f"{name} must be a NumPy array, got {type(value).__name__}")
+    if value.ndim != 2 or value.shape[1:] != (2,):
+        raise ValueError(f"{name} must have shape [items, 2], got {value.shape}")
+    if value.dtype != OFFSETS_DTYPE:
+        raise TypeError(f"{name} must have dtype {OFFSETS_DTYPE.str}, got {value.dtype.str}")
+    if value.size and np.any(value < 0):
+        raise ValueError(f"{name} offsets and lengths must be non-negative")
     return value
 
 
@@ -114,6 +128,71 @@ class FixedWidthArrayBuilder:
         """Seal and return the populated prefix without an O(n) final copy."""
         self._sealed = True
         return readonly_view(self._buffer[: self._size])
+
+
+class FixedWidthRangeBuilder:
+    """Grow-as-you-go fixed-width storage for offset/length rows."""
+
+    __slots__ = ("_buffer", "_sealed", "_size")
+
+    def __init__(self, *, initial_capacity: int = 4) -> None:
+        if type(initial_capacity) is not int or initial_capacity < 0:
+            raise TypeError("initial_capacity must be a non-negative integer")
+        self._buffer = np.empty((initial_capacity, 2), dtype=OFFSETS_DTYPE)
+        self._size = 0
+        self._sealed = False
+
+    def __len__(self) -> int:
+        return self._size
+
+    def _reserve(self, additional: int) -> None:
+        if type(additional) is not int or additional < 0:
+            raise TypeError("additional capacity must be a non-negative integer")
+        if self._sealed:
+            raise RuntimeError("fixed-width range builder is already sealed")
+        required = self._size + additional
+        if required <= self._buffer.shape[0]:
+            return
+        capacity = max(required, 1, self._buffer.shape[0] * 2)
+        grown = np.empty((capacity, 2), dtype=OFFSETS_DTYPE)
+        grown[: self._size] = self._buffer[: self._size]
+        self._buffer = grown
+
+    def append(self, offset: int, length: int) -> None:
+        upper_bound = np.iinfo(OFFSETS_DTYPE).max
+        for name, value in (("offset", offset), ("length", length)):
+            if type(value) is not int or value < 0 or value > upper_bound:
+                raise TypeError(f"{name} must be a non-negative integer")
+        self._reserve(1)
+        self._buffer[self._size, 0] = offset
+        self._buffer[self._size, 1] = length
+        self._size += 1
+
+    def extend(self, values: np.ndarray) -> None:
+        require_range_array("range builder values", values)
+        count = values.shape[0]
+        self._reserve(count)
+        self._buffer[self._size : self._size + count] = values
+        self._size += count
+
+    def finish(self) -> np.ndarray:
+        self._sealed = True
+        return readonly_view(self._buffer[: self._size])
+
+
+def finish_range_builders(builders: Mapping[str, FixedWidthRangeBuilder]) -> dict[str, np.ndarray]:
+    """Seal a structural modality map without numeric list intermediates."""
+    return {modality: builder.finish() for modality, builder in builders.items()}
+
+
+def merge_range_maps(*maps: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Merge bridge-owned range maps into new fixed-width custody."""
+    builders: dict[str, FixedWidthRangeBuilder] = {}
+    for values_by_modality in maps:
+        for modality, values in values_by_modality.items():
+            require_range_array(f"mm_placeholders[{modality!r}]", values)
+            builders.setdefault(modality, FixedWidthRangeBuilder()).extend(values)
+    return finish_range_builders(builders)
 
 
 class RenderedTokenBuilder:

@@ -3,9 +3,16 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from renderers.base import RenderedTrainingSample
+from renderers.base import (
+    MultiModalData,
+    PlaceholderRange,
+    RenderedTokens,
+    RenderedTrainingSample,
+    build_training_sample,
+)
 from renderers.token_arrays import (
     FixedWidthArrayBuilder,
+    FixedWidthRangeBuilder,
     MASK_DTYPE,
     RenderedTokenBuilder,
     TOKEN_IDS_DTYPE,
@@ -19,9 +26,18 @@ class _NoIterationArray(np.ndarray):
     def __iter__(self):
         raise AssertionError("numeric payload iteration is forbidden")
 
+    def tolist(self):
+        raise AssertionError("numeric payload tolist is forbidden")
+
 
 def _hostile(values: np.ndarray) -> np.ndarray:
     return values.view(_NoIterationArray)
+
+
+def _readonly_hostile(values: np.ndarray) -> np.ndarray:
+    hostile = _hostile(values)
+    hostile.flags.writeable = False
+    return hostile
 
 
 def test_builder_grows_and_seals_without_iterating_or_copying_at_finish():
@@ -64,6 +80,62 @@ def test_builder_rejects_scalar_dtype_compatibility():
         tokens.append(True)
     with pytest.raises(TypeError, match="must be bool"):
         mask.append(1)
+
+
+def test_range_builder_grows_without_object_rows_or_final_copy():
+    builder = FixedWidthRangeBuilder(initial_capacity=1)
+    builder.append(3, 5)
+    values = _hostile(np.asarray([[11, 2], [17, 7]], dtype="<i8"))
+    builder.extend(values)
+
+    result = builder.finish()
+
+    assert np.array_equal(result, np.asarray([[3, 5], [11, 2], [17, 7]], dtype="<i8"))
+    assert not result.flags.writeable
+    with pytest.raises(TypeError, match="must be a NumPy array"):
+        FixedWidthRangeBuilder().extend([(1, 2)])  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="non-negative integer"):
+        FixedWidthRangeBuilder().append(np.iinfo(np.int64).max + 1, 1)
+
+
+def test_hostile_render_span_training_and_multimodal_seams_stay_vectorized():
+    ranges = _readonly_hostile(np.asarray([[1, 2], [np.iinfo(np.int64).max, np.iinfo(np.int64).max]], dtype="<i8"))
+    multimodal = MultiModalData(mm_placeholders={"image": ranges})
+    rendered = RenderedTokens(
+        token_ids=_readonly_hostile(np.asarray([11, 13, 17, 19], dtype=TOKEN_IDS_DTYPE)),
+        message_indices=_readonly_hostile(np.asarray([0, 0, 1, 1], dtype="<i4")),
+        sampled_mask=_readonly_hostile(np.asarray([False, True, False, True], dtype=MASK_DTYPE)),
+        is_content=_readonly_hostile(np.asarray([False, True, True, False], dtype=MASK_DTYPE)),
+        message_roles=["user", "assistant"],
+        multi_modal_data=multimodal,
+    )
+
+    assert np.array_equal(rendered.tokens_per_message(), np.asarray([2, 2], dtype="<i8"))
+    assert np.array_equal(rendered.message_token_spans(), np.asarray([[0, 2], [2, 4]], dtype="<i8"))
+    assert np.array_equal(rendered.role_token_spans()["assistant"], np.asarray([[2, 4]], dtype="<i8"))
+    assert np.array_equal(rendered.content_token_spans_by_role()["assistant"], np.asarray([[2, 3]], dtype="<i8"))
+
+    class _Renderer:
+        def render(self, messages, *, tools=None):
+            return rendered
+
+        def get_stop_token_ids(self):
+            return [19]
+
+    training = build_training_sample(
+        _Renderer(),
+        [{"role": "user", "content": "u"}, {"role": "assistant", "content": "a"}],
+        role_to_mask=lambda message: message["role"] == "assistant",
+    )
+    assert np.array_equal(training.token_ids, np.asarray([11, 13, 17, 19], dtype="<i8"))
+    assert np.array_equal(training.loss_mask, np.asarray([False, False, False, True]))
+    assert np.array_equal(training.mm_token_type_ids, np.asarray([0, 1, 1, 0], dtype="<i8"))
+    assert all(
+        not values.flags.writeable for values in (training.token_ids, training.loss_mask, training.mm_token_type_ids)
+    )
+
+    with pytest.raises(TypeError, match="non-negative integer"):
+        PlaceholderRange(np.iinfo(np.int64).max + 1, 1)
 
 
 def test_rendered_token_builder_keeps_all_signals_aligned_and_fixed_width():

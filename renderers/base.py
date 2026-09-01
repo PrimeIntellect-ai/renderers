@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, TypedDict, c
 import numpy as np
 
 from renderers.token_arrays import (
+    COUNTS_DTYPE,
     LOGPROBS_DTYPE,
     MASK_DTYPE,
     MESSAGE_INDICES_DTYPE,
@@ -20,6 +21,7 @@ from renderers.token_arrays import (
     empty_array,
     readonly_view,
     require_1d_array,
+    require_range_array,
     require_readonly,
 )
 
@@ -190,7 +192,7 @@ def extract_message_tool_names(messages: list[Message]) -> list[str | None]:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class PlaceholderRange:
     """Where a single multimodal item's placeholder tokens sit in the stream.
 
@@ -202,6 +204,19 @@ class PlaceholderRange:
 
     offset: int
     length: int
+
+    def __post_init__(self) -> None:
+        upper_bound = np.iinfo(OFFSETS_DTYPE).max
+        for name, value in (("offset", self.offset), ("length", self.length)):
+            if type(value) is not int or value < 0 or value > upper_bound:
+                raise TypeError(f"{name} must be a non-negative integer")
+
+    def as_array(self) -> np.ndarray:
+        """Create the one-item public representation without object accumulation."""
+        value = np.empty((1, 2), dtype=OFFSETS_DTYPE)
+        value[0] = (self.offset, self.length)
+        value.flags.writeable = False
+        return value
 
 
 @dataclass
@@ -217,8 +232,13 @@ class MultiModalData:
     """
 
     mm_hashes: dict[str, list[str]] = field(default_factory=dict)
-    mm_placeholders: dict[str, list[PlaceholderRange]] = field(default_factory=dict)
+    mm_placeholders: dict[str, np.ndarray] = field(default_factory=dict)
     mm_items: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for modality, values in self.mm_placeholders.items():
+            require_range_array(f"mm_placeholders[{modality!r}]", values)
+            require_readonly(f"mm_placeholders[{modality!r}]", values)
 
     def is_empty(self) -> bool:
         return not (self.mm_hashes or self.mm_placeholders or self.mm_items)
@@ -337,7 +357,7 @@ class RenderedTokens:
         ):
             require_readonly(name, values)
 
-    def tokens_per_message(self, n_messages: int | None = None, *, sampled_only: bool = False) -> list[int]:
+    def tokens_per_message(self, n_messages: int | None = None, *, sampled_only: bool = False) -> np.ndarray:
         """Count rendered tokens attributed to each caller-relative message.
 
         ``out[i]`` is the number of tokens with ``message_indices[k] == i``,
@@ -367,7 +387,7 @@ class RenderedTokens:
         — indices outside ``[0, n_messages)`` are ignored, so passing a
         smaller value won't raise; it just drops the tail. Values larger
         than ``len(self.message_roles)`` are clamped, so the returned
-        list never claims more messages than the renderer attributed.
+        array never claims more messages than the renderer attributed.
 
         Works on results from both :meth:`Renderer.render` and
         :meth:`Renderer.bridge_to_next_turn`. For a bridge result the
@@ -376,30 +396,27 @@ class RenderedTokens:
         ``-1`` (and ``sampled_mask`` uniformly ``False``), so it
         contributes nothing to either count.
         """
-        if n_messages is None:
-            n_messages = len(self.message_roles)
-        else:
-            n_messages = min(n_messages, len(self.message_roles))
-        out = [0] * n_messages
+        if n_messages is not None and (type(n_messages) is not int or n_messages < 0):
+            raise TypeError("n_messages must be a non-negative integer")
+        n_messages = len(self.message_roles) if n_messages is None else min(n_messages, len(self.message_roles))
+        out = np.zeros(n_messages, dtype=COUNTS_DTYPE)
+        valid = (self.message_indices >= 0) & (self.message_indices < n_messages)
         if sampled_only:
-            if len(self.sampled_mask) != len(self.token_ids):
+            if self.sampled_mask.size != self.token_ids.size:
+                out.flags.writeable = False
                 return out
-            for idx, sampled in zip(self.message_indices, self.sampled_mask):
-                if sampled and 0 <= idx < n_messages:
-                    out[idx] += 1
-        else:
-            for idx in self.message_indices:
-                if 0 <= idx < n_messages:
-                    out[idx] += 1
+            valid &= self.sampled_mask
+        np.add.at(out, self.message_indices[valid], 1)
+        out.flags.writeable = False
         return out
 
-    def message_token_spans(self) -> list[tuple[int, int] | None]:
+    def message_token_spans(self) -> np.ndarray:
         """Per-message ``(start, end)`` slices into :attr:`token_ids`.
 
         ``out[i]`` is the half-open span ``[start, end)`` such that
         ``token_ids[start:end]`` are the tokens attributed to
         ``messages[i]`` (or ``new_messages[i]`` for a bridge result).
-        Messages that contributed no tokens get ``None``. Renderer
+        Messages that contributed no tokens get the ``[-1, -1]`` sentinel. Renderer
         scaffolding outside any message (``message_indices[k] == -1``)
         is not represented.
 
@@ -418,35 +435,28 @@ class RenderedTokens:
         Cheap to call: single pass over ``message_indices``. Re-call
         rather than caching the result if you mutate the dataclass.
         """
-        if self.message_roles:
-            n_messages = len(self.message_roles)
-        else:
-            max_idx = -1
-            for idx in self.message_indices:
-                if idx > max_idx:
-                    max_idx = idx
-            n_messages = max_idx + 1
-
-        firsts: list[int] = [-1] * n_messages
-        lasts: list[int] = [-1] * n_messages
-        for k, idx in enumerate(self.message_indices):
-            if 0 <= idx < n_messages:
-                if firsts[idx] == -1:
-                    firsts[idx] = k
-                lasts[idx] = k
-
-        out: list[tuple[int, int] | None] = []
-        for i in range(n_messages):
-            if firsts[i] == -1:
-                out.append(None)
-            else:
-                out.append((firsts[i], lasts[i] + 1))
+        n_messages = len(self.message_roles)
+        if not self.message_roles and self.message_indices.size:
+            n_messages = max(0, int(self.message_indices.max()) + 1)
+        out = np.full((n_messages, 2), -1, dtype=OFFSETS_DTYPE)
+        valid = (self.message_indices >= 0) & (self.message_indices < n_messages)
+        if np.any(valid):
+            indices = self.message_indices[valid]
+            positions = np.arange(self.message_indices.size, dtype=OFFSETS_DTYPE)[valid]
+            firsts = np.full(n_messages, self.message_indices.size, dtype=OFFSETS_DTYPE)
+            lasts = np.full(n_messages, -1, dtype=OFFSETS_DTYPE)
+            np.minimum.at(firsts, indices, positions)
+            np.maximum.at(lasts, indices, positions)
+            present = lasts >= 0
+            out[present, 0] = firsts[present]
+            out[present, 1] = lasts[present] + 1
+        out.flags.writeable = False
         return out
 
-    def role_token_spans(self) -> dict[str, list[tuple[int, int]]]:
+    def role_token_spans(self) -> dict[str, np.ndarray]:
         """:meth:`message_token_spans` regrouped by ``message_roles``.
 
-        Maps each role appearing in :attr:`message_roles` to a list of
+        Maps each role appearing in :attr:`message_roles` to a fixed-width array of
         ``(start, end)`` spans — one per occurrence of that role, in
         message order. Messages with no contributed tokens are skipped.
         Returns an empty dict if :attr:`message_roles` is empty.
@@ -457,12 +467,12 @@ class RenderedTokens:
         ``attention[start:end]`` for tool-response attention analysis.
         """
         spans = self.message_token_spans()
-        out: dict[str, list[tuple[int, int]]] = {}
-        for role, span in zip(self.message_roles, spans):
-            if span is None:
-                out.setdefault(role, [])
-                continue
-            out.setdefault(role, []).append(span)
+        out: dict[str, np.ndarray] = {}
+        for role in dict.fromkeys(self.message_roles):
+            role_mask = np.fromiter((value == role for value in self.message_roles), dtype=MASK_DTYPE)
+            values = spans[role_mask & (spans[:, 0] >= 0)].copy()
+            values.flags.writeable = False
+            out[role] = values
         return out
 
     def tokens_by_role(self, *, sampled_only: bool = False) -> dict[str, int]:
@@ -484,11 +494,11 @@ class RenderedTokens:
         """
         counts = self.tokens_per_message(sampled_only=sampled_only)
         out: dict[str, int] = {}
-        for role, n in zip(self.message_roles, counts):
-            out[role] = out.get(role, 0) + n
+        for message_index, role in enumerate(self.message_roles):
+            out[role] = out.get(role, 0) + int(counts[message_index])
         return out
 
-    def content_token_spans_by_role(self) -> dict[str, list[tuple[int, int]]]:
+    def content_token_spans_by_role(self) -> dict[str, np.ndarray]:
         """Per-role spans of contiguous body-only tokens (``is_content=True``).
 
         Maps each role appearing in :attr:`message_roles` to a list of
@@ -508,38 +518,39 @@ class RenderedTokens:
         case::
 
             spans = rendered.content_token_spans_by_role()
-            tool_sft_mask = [False] * len(rendered.token_ids)
-            for s, e in spans.get("tool", []):
+            tool_sft_mask = np.zeros(len(rendered.token_ids), dtype=np.bool_)
+            for s, e in spans.get("tool", np.empty((0, 2), dtype=np.int64)):
                 for k in range(s, e):
                     tool_sft_mask[k] = True
 
         See also :meth:`content_mask_for_roles` for the same
-        computation returned as a per-token bool list.
+        computation returned as a per-token bool array.
         """
-        out: dict[str, list[tuple[int, int]]] = {}
+        out: dict[str, np.ndarray] = {}
         if self.is_content.size == 0 or not self.message_roles:
             return out
         n = len(self.token_ids)
         if len(self.is_content) != n or len(self.message_indices) != n:
             return out
 
-        msg_spans = self.message_token_spans()
-        for role, span in zip(self.message_roles, msg_spans):
-            bucket = out.setdefault(role, [])
-            if span is None:
-                continue
-            start, end = span
-            run_start: int | None = None
-            for k in range(start, end):
-                if self.is_content[k]:
-                    if run_start is None:
-                        run_start = k
-                else:
-                    if run_start is not None:
-                        bucket.append((run_start, k))
-                        run_start = None
-            if run_start is not None:
-                bucket.append((run_start, end))
+        valid_message = (self.message_indices >= 0) & (self.message_indices < len(self.message_roles))
+        safe_message_indices = np.where(valid_message, self.message_indices, 0)
+        for role in dict.fromkeys(self.message_roles):
+            message_has_role = np.fromiter((value == role for value in self.message_roles), dtype=MASK_DTYPE)
+            active = valid_message & self.is_content & message_has_role[safe_message_indices]
+            previous_active = np.empty(n, dtype=MASK_DTYPE)
+            previous_active[0] = False
+            previous_active[1:] = active[:-1] & (self.message_indices[1:] == self.message_indices[:-1])
+            next_active = np.empty(n, dtype=MASK_DTYPE)
+            next_active[-1] = False
+            next_active[:-1] = active[1:] & (self.message_indices[:-1] == self.message_indices[1:])
+            starts = np.flatnonzero(active & ~previous_active).astype(OFFSETS_DTYPE, copy=False)
+            ends = (np.flatnonzero(active & ~next_active) + 1).astype(OFFSETS_DTYPE, copy=False)
+            spans = np.empty((starts.size, 2), dtype=OFFSETS_DTYPE)
+            spans[:, 0] = starts
+            spans[:, 1] = ends
+            spans.flags.writeable = False
+            out[role] = spans
         return out
 
     def content_mask_for_roles(self, roles: "set[str] | frozenset[str]") -> np.ndarray:
@@ -555,25 +566,22 @@ class RenderedTokens:
         cover the trainable-role question; this one covers the
         complementary "body-only" question. The two compose: SFT mask
         on tool body is
-        ``rendered.content_mask_for_roles({"tool"})``; RL mask on
-        assistant tokens stays
-        ``[s and (mi >= 0 and rendered.message_roles[mi] == "assistant")
-        for s, mi in zip(rendered.sampled_mask, rendered.message_indices)]``.
+        ``rendered.content_mask_for_roles({"tool"})``; consumers should keep
+        any further per-token mask composition in NumPy as well.
         """
         n = len(self.token_ids)
         mask = np.zeros(n, dtype=MASK_DTYPE)
         if self.is_content.size == 0 or not self.message_roles:
+            mask.flags.writeable = False
             return mask
         if len(self.is_content) != n or len(self.message_indices) != n:
+            mask.flags.writeable = False
             return mask
 
-        for k, msg_idx in enumerate(self.message_indices):
-            if msg_idx < 0:
-                continue
-            if msg_idx >= len(self.message_roles):
-                continue
-            if self.message_roles[msg_idx] in roles and self.is_content[k]:
-                mask[k] = True
+        valid = (self.message_indices >= 0) & (self.message_indices < len(self.message_roles))
+        message_selected = np.fromiter((role in roles for role in self.message_roles), dtype=MASK_DTYPE)
+        mask[valid] = self.is_content[valid] & message_selected[self.message_indices[valid]]
+        mask.flags.writeable = False
         return mask
 
 
@@ -1557,17 +1565,21 @@ class RenderedTrainingSample:
                 require_readonly(name, values)
 
 
-def _build_mm_token_type_ids(mm_placeholders: dict[str, list[PlaceholderRange]], length: int) -> np.ndarray:
+def _build_mm_token_type_ids(mm_placeholders: dict[str, np.ndarray], length: int) -> np.ndarray:
     """Per-token modality flags (0=text, 1=image, 2=video) from placeholder ranges."""
     ids = np.zeros(length, dtype=MM_TOKEN_TYPE_IDS_DTYPE)
     for modality, ranges in mm_placeholders.items():
+        require_range_array(f"mm_placeholders[{modality!r}]", ranges)
         type_id = _MM_TYPE_ID.get(modality, 0)
         if type_id == 0:
             continue
-        for r in ranges:
-            end = min(r.offset + r.length, length)
-            for i in range(r.offset, end):
-                ids[i] = type_id
+        starts = np.minimum(ranges[:, 0], length)
+        clipped_lengths = np.minimum(ranges[:, 1], length - starts)
+        ends = starts + clipped_lengths
+        coverage_delta = np.zeros(length + 1, dtype=COUNTS_DTYPE)
+        np.add.at(coverage_delta, starts, 1)
+        np.add.at(coverage_delta, ends, -1)
+        ids[np.cumsum(coverage_delta[:-1]) > 0] = type_id
     return ids
 
 
@@ -1663,26 +1675,26 @@ def build_training_sample(
         )
 
     loss_mask = np.zeros(rendered.token_ids.size, dtype=MASK_DTYPE)
-    for k, msg_idx in enumerate(rendered.message_indices):
-        if msg_idx < 0:
-            continue
-        msg = messages[msg_idx]
-        # Body-only path for opt-in roles. Fires only on tokens whose
-        # is_content bit is set; never adds the scaffolding around the
-        # message, so the model isn't supervised on emitting the role
-        # tags / wraps that would derail a rollout.
-        if body_roles and msg.get("role") in body_roles:
-            loss_mask[k] = rendered.is_content[k]
-            continue
-        if has_sampled_info and not rendered.sampled_mask[k]:
-            continue
-        elif role_to_mask is None:
-            # sampled_mask alone gates the loss when no role filter is
-            # supplied. ``sampled_mask[k]`` is True here (handled by the
-            # branch above), so this token is trainable.
-            loss_mask[k] = True
-        else:
-            loss_mask[k] = role_to_mask(msg)
+    valid_message = (rendered.message_indices >= 0) & (rendered.message_indices < len(messages))
+    safe_message_indices = np.where(valid_message, rendered.message_indices, 0)
+    body_tokens = np.zeros(rendered.token_ids.size, dtype=MASK_DTYPE)
+    if body_roles:
+        message_is_body_role = np.fromiter(
+            (message.get("role") in body_roles for message in messages), dtype=MASK_DTYPE, count=len(messages)
+        )
+        body_tokens = valid_message & message_is_body_role[safe_message_indices]
+        loss_mask[body_tokens] = rendered.is_content[body_tokens]
+
+    remaining = valid_message & ~body_tokens
+    if has_sampled_info:
+        remaining &= rendered.sampled_mask
+    if role_to_mask is None:
+        loss_mask[remaining] = True
+    else:
+        message_is_trainable = np.fromiter(
+            (role_to_mask(message) for message in messages), dtype=MASK_DTYPE, count=len(messages)
+        )
+        loss_mask[remaining] = message_is_trainable[safe_message_indices[remaining]]
 
     token_ids = rendered.token_ids.astype(TRAINING_TOKEN_IDS_DTYPE, copy=True)
     # Requires sampled_mask (opaque templates hide the assistant close)
@@ -1694,7 +1706,8 @@ def build_training_sample(
         and (role_to_mask is None or role_to_mask(messages[-1]))
     ):
         stop_ids = set(renderer.get_stop_token_ids())
-        last_trainable = next((k for k in range(len(loss_mask) - 1, -1, -1) if loss_mask[k]), None)
+        trainable_positions = np.flatnonzero(loss_mask)
+        last_trainable = int(trainable_positions[-1]) if trainable_positions.size else None
         if last_trainable is None or token_ids[last_trainable] not in stop_ids:
             extended_ids = np.empty(token_ids.size + 1, dtype=TRAINING_TOKEN_IDS_DTYPE)
             extended_ids[:-1] = token_ids
@@ -1729,10 +1742,8 @@ def _common_prefix_len(a: np.ndarray, b: np.ndarray) -> int:
     require_1d_array("prefix a", a, dtype=TOKEN_IDS_DTYPE, minimum=0)
     require_1d_array("prefix b", b, dtype=TOKEN_IDS_DTYPE, minimum=0)
     max_len = min(len(a), len(b))
-    for idx in range(max_len):
-        if a[idx] != b[idx]:
-            return idx
-    return max_len
+    mismatches = np.flatnonzero(a[:max_len] != b[:max_len])
+    return int(mismatches[0]) if mismatches.size else max_len
 
 
 def trim_to_turn_close(
@@ -1763,9 +1774,10 @@ def trim_to_turn_close(
     require_1d_array("previous_prompt_ids", previous_prompt_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
     require_1d_array("previous_completion_ids", previous_completion_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
     previous_ids = np.concatenate((previous_prompt_ids, previous_completion_ids), dtype=TOKEN_IDS_DTYPE)
-    for idx in range(len(previous_ids) - 1, len(previous_prompt_ids) - 1, -1):
-        if previous_ids[idx] in close_token_ids:
-            return readonly_view(previous_ids[: idx + 1])
+    close_positions = np.flatnonzero(np.isin(previous_completion_ids, tuple(close_token_ids), assume_unique=True))
+    if close_positions.size:
+        end = previous_prompt_ids.size + int(close_positions[-1]) + 1
+        return readonly_view(previous_ids[:end])
     if synthesize_close is None:
         return None
     extended = np.empty(previous_ids.size + 1, dtype=TOKEN_IDS_DTYPE)

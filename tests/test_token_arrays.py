@@ -13,7 +13,8 @@ from renderers.base import (
     build_training_sample,
     attribute_text_segments,
 )
-from renderers.configs import Hy3RendererConfig, LagunaXS21RendererConfig
+from renderers.configs import DefaultRendererConfig, Hy3RendererConfig, LagunaXS21RendererConfig
+from renderers.default import DefaultRenderer
 from renderers.hy3 import Hy3Renderer
 from renderers.laguna_xs2 import LagunaXS21Renderer
 from renderers.token_arrays import (
@@ -368,6 +369,32 @@ def test_laguna_offsetless_header_keeps_default_scaffold_out_of_message_zero():
     assert np.all(explicit.message_indices[explicit_run] == 0)
     assert default.is_content.size == 0
     assert explicit.is_content.size == 0
+
+
+def test_default_renderer_requests_numpy_and_builds_attribution_without_lists():
+    class _Tokenizer:
+        eos_token_id = None
+        all_special_tokens = []
+
+        def apply_chat_template(self, messages, **kwargs):
+            assert kwargs["return_tensors"] == "np"
+            assert kwargs["return_dict"] is False
+            count = len(messages) + int(kwargs["add_generation_prompt"])
+            return _hostile(np.arange(1, count + 1, dtype="<i8").reshape(1, -1))
+
+        def decode(self, token_ids, **kwargs):
+            assert isinstance(token_ids, np.ndarray)
+            return "decoded"
+
+    renderer = DefaultRenderer(_Tokenizer(), DefaultRendererConfig())
+    rendered = renderer.render(
+        [{"role": "user", "content": "u"}, {"role": "assistant", "content": "a"}], add_generation_prompt=True
+    )
+
+    assert np.array_equal(rendered.token_ids, np.arange(1, 4, dtype=TOKEN_IDS_DTYPE))
+    assert np.array_equal(rendered.message_indices, np.fromiter((0, 1, -1), dtype="<i4", count=3))
+    assert not rendered.token_ids.flags.writeable
+    assert not rendered.message_indices.flags.writeable
 
 
 def test_training_sample_rejects_mutable_aliases_without_mutating_caller():

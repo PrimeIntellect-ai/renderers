@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import numpy as np
+
 from renderers.base import (
     ChatTemplateTokenizer,
     Message,
@@ -21,9 +23,13 @@ from renderers.base import (
     resolve_thinking_retention,
 )
 from renderers.configs import DefaultRendererConfig
-from renderers.parsers import (
-    get_reasoning_parser,
-    get_tool_parser,
+from renderers.parsers import get_reasoning_parser, get_tool_parser
+from renderers.token_arrays import (
+    MESSAGE_INDICES_DTYPE,
+    TOKEN_IDS_DTYPE,
+    FixedWidthArrayBuilder,
+    empty_array,
+    owned_token_ids_from_array,
 )
 
 
@@ -89,11 +95,7 @@ class DefaultRenderer:
     :class:`renderers.DefaultRendererConfig`).
     """
 
-    def __init__(
-        self,
-        tokenizer: ChatTemplateTokenizer,
-        config: DefaultRendererConfig | None = None,
-    ):
+    def __init__(self, tokenizer: ChatTemplateTokenizer, config: DefaultRendererConfig | None = None):
         cfg = config or DefaultRendererConfig()
         if cfg.thinking_retention is not None:
             raise ValueError(
@@ -101,88 +103,74 @@ class DefaultRenderer:
                 "bridge policy because its template close/turn structure is "
                 "opaque. Use a typed renderer for this model."
             )
-        self.effective_thinking_retention = resolve_thinking_retention(
-            cfg,
-            "template",
-        )
+        self.effective_thinking_retention = resolve_thinking_retention(cfg, "template")
         self._tokenizer = tokenizer
         self.config = cfg
         self._tool_parser = _resolve_parser(cfg.tool_parser, tokenizer, get_tool_parser)
-        self._reasoning_parser = _resolve_parser(
-            cfg.reasoning_parser, tokenizer, get_reasoning_parser
-        )
+        self._reasoning_parser = _resolve_parser(cfg.reasoning_parser, tokenizer, get_reasoning_parser)
 
     @property
     def supports_tools(self) -> bool:
         return self._tool_parser is not None
 
     def render(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolSpec] | None = None,
-        add_generation_prompt: bool = False,
+        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
     ) -> RenderedTokens:
         # Incremental rendering to get per-token message attribution
-        token_ids: list[int] = []
-        message_indices: list[int] = []
+        token_ids = empty_array(TOKEN_IDS_DTYPE)
+        message_indices = FixedWidthArrayBuilder(MESSAGE_INDICES_DTYPE)
         prev_len = 0
 
         for idx, message in enumerate(messages):
             cur_ids = self._apply(messages[: idx + 1], tools=tools)
             new_tokens = cur_ids[prev_len:]
             token_ids = cur_ids
-            message_indices.extend([idx] * len(new_tokens))
-            prev_len = len(cur_ids)
+            message_indices.extend_constant(idx, new_tokens.size)
+            prev_len = cur_ids.size
 
         if add_generation_prompt:
             full_ids = self._apply(messages, tools=tools, add_generation_prompt=True)
             gen_tokens = full_ids[prev_len:]
             token_ids = full_ids
-            message_indices.extend([-1] * len(gen_tokens))
+            message_indices.extend_constant(-1, gen_tokens.size)
 
         message_roles = [m.get("role") or "" for m in messages]
         return RenderedTokens(
             token_ids=token_ids,
-            message_indices=message_indices,
+            message_indices=message_indices.finish(),
             message_roles=message_roles,
             message_tool_names=extract_message_tool_names(messages),
         )
 
-    def _apply(self, messages, *, tools=None, add_generation_prompt=False) -> list[int]:
+    def _apply(self, messages, *, tools=None, add_generation_prompt=False) -> np.ndarray:
         kwargs = dict(self.config.model_extra or {})
         kwargs["add_generation_prompt"] = add_generation_prompt
         kwargs["tokenize"] = True
         if tools is not None:
             kwargs["tools"] = tools
         kwargs["return_dict"] = False
+        kwargs["return_tensors"] = "np"
         messages = _decode_tool_call_arguments(messages)
         result = self._tokenizer.apply_chat_template(messages, **kwargs)
-        return list(result)
+        return owned_token_ids_from_array(type(self._tokenizer).__name__, result)
 
     def render_ids(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolSpec] | None = None,
-        add_generation_prompt: bool = False,
-    ) -> list[int]:
-        return self._apply(
-            messages, tools=tools, add_generation_prompt=add_generation_prompt
-        )
+        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+    ) -> np.ndarray:
+        return self._apply(messages, tools=tools, add_generation_prompt=add_generation_prompt)
 
     def parse_response(
         self,
-        token_ids: list[int],
+        token_ids: np.ndarray,
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — DefaultRenderer relies on configured tool_parser, schema not consulted here
     ) -> ParsedResponse:
         # 1. Extract tool calls while we still have token ids (most formats
         #    use special-token delimiters, so id-level matching is reliable).
         if self._tool_parser is not None:
-            content_ids, tool_calls = self._tool_parser.extract(list(token_ids))
+            content_ids, tool_calls = self._tool_parser.extract(token_ids)
         else:
-            content_ids = list(token_ids)
+            content_ids = token_ids
             tool_calls = []
 
         # 2. Decode (keep special tokens so a downstream reasoning parser can
@@ -217,9 +205,7 @@ class DefaultRenderer:
         text = _strip_special_tokens(self._tokenizer, text)
 
         return ParsedResponse(
-            content=text,
-            reasoning_content=reasoning_content if reasoning_content else None,
-            tool_calls=tool_calls,
+            content=text, reasoning_content=reasoning_content if reasoning_content else None, tool_calls=tool_calls
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -230,8 +216,8 @@ class DefaultRenderer:
 
     def bridge_to_next_turn(
         self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
+        previous_prompt_ids: np.ndarray,
+        previous_completion_ids: np.ndarray,
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,

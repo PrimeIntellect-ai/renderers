@@ -9,6 +9,7 @@ with Meta license access.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from parity import models_for
 
@@ -20,15 +21,13 @@ from renderers.base import (
     ToolCallParseStatus,
     load_tokenizer,
 )
+from renderers.token_arrays import FixedWidthArrayBuilder, TOKEN_IDS_DTYPE, encode_token_ids, owned_token_ids_from_array
 
 # Pinned date for byte-parity tests. Matches the chat template's
 # strftime fallback so we don't have to override on the apply side.
 _PINNED_DATE = "26 Jul 2024"
 
-_MODEL_PAIRS = [
-    (case.model, TOKENIZER_SOURCE_OVERRIDES[case.model])
-    for case in models_for("llama-checkpoints")
-]
+_MODEL_PAIRS = [(case.model, TOKENIZER_SOURCE_OVERRIDES[case.model]) for case in models_for("llama-checkpoints")]
 
 
 @pytest.fixture(scope="module", params=_MODEL_PAIRS, ids=[m for m, _ in _MODEL_PAIRS])
@@ -46,9 +45,7 @@ def llama_pair(request):
 
 def test_canonical_meta_llama_paths_route_to_llama_3():
     for canonical, _ in _MODEL_PAIRS:
-        assert MODEL_RENDERER_MAP.get(canonical) == "llama-3", (
-            f"{canonical}: expected to route to 'llama-3'"
-        )
+        assert MODEL_RENDERER_MAP.get(canonical) == "llama-3", f"{canonical}: expected to route to 'llama-3'"
 
 
 def test_create_renderer_via_explicit_config(llama_pair):
@@ -87,19 +84,13 @@ def test_preserve_thinking_flags_are_noops(llama_pair):
     _, _, tok, _ = llama_pair
     msgs = [
         {"role": "user", "content": "Hi."},
-        {
-            "role": "assistant",
-            "reasoning_content": "internal musings",
-            "content": "Hello!",
-        },
+        {"role": "assistant", "reasoning_content": "internal musings", "content": "Hello!"},
     ]
     base = Llama3Renderer(tok).render_ids(msgs)
     for level in ("tool_cycle", "all"):
         r = Llama3Renderer(tok, Llama3RendererConfig(thinking_retention=level))
         assert r.config.thinking_retention == level
-        assert r.render_ids(msgs) == base, (
-            f"thinking_retention={level!r} must be a no-op for Llama-3"
-        )
+        assert np.array_equal(r.render_ids(msgs), base), f"thinking_retention={level!r} must be a no-op for Llama-3"
 
 
 # ---------------------------------------------------------------------------
@@ -110,9 +101,11 @@ def test_preserve_thinking_flags_are_noops(llama_pair):
 def _expected(tok, messages, **kwargs):
     kwargs.setdefault("add_generation_prompt", False)
     kwargs.setdefault("date_string", _PINNED_DATE)
-    return list(
-        tok.apply_chat_template(messages, tokenize=True, return_dict=False, **kwargs)
-    )
+    result = tok.apply_chat_template(messages, tokenize=True, return_dict=True, return_tensors="np", **kwargs)
+    token_ids = result["input_ids"]
+    if token_ids.ndim == 2:
+        token_ids = token_ids[0]
+    return owned_token_ids_from_array("template input_ids", token_ids)
 
 
 def test_parity_tool_response_dict_content(llama_pair):
@@ -121,14 +114,11 @@ def test_parity_tool_response_dict_content(llama_pair):
     _, _, tok, r = llama_pair
     msgs = [
         {"role": "user", "content": "x"},
-        {
-            "role": "assistant",
-            "tool_calls": [{"function": {"name": "f", "arguments": {}}}],
-        },
+        {"role": "assistant", "tool_calls": [{"function": {"name": "f", "arguments": {}}}]},
         {"role": "tool", "content": {"k": "v", "n": 42}},
         {"role": "assistant", "content": "ok"},
     ]
-    assert r.render_ids(msgs) == _expected(tok, msgs)
+    assert np.array_equal(r.render_ids(msgs), _expected(tok, msgs))
 
 
 def test_render_raises_on_multiple_tool_calls(llama_pair):
@@ -139,10 +129,7 @@ def test_render_raises_on_multiple_tool_calls(llama_pair):
         {"role": "user", "content": "x"},
         {
             "role": "assistant",
-            "tool_calls": [
-                {"function": {"name": "f", "arguments": {}}},
-                {"function": {"name": "g", "arguments": {}}},
-            ],
+            "tool_calls": [{"function": {"name": "f", "arguments": {}}}, {"function": {"name": "g", "arguments": {}}}],
         },
     ]
     with pytest.raises(ValueError, match="single tool call"):
@@ -154,24 +141,38 @@ def test_render_raises_on_multiple_tool_calls(llama_pair):
 # ---------------------------------------------------------------------------
 
 
-def _tokens_for(tok, text: str) -> list[int]:
-    return tok.encode(text, add_special_tokens=False)
+def _tokens_for(tok, text: str) -> np.ndarray:
+    return encode_token_ids(tok, text)
+
+
+def _append_token(token_ids: np.ndarray, token_id: int) -> np.ndarray:
+    builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=len(token_ids) + 1)
+    builder.extend(token_ids)
+    builder.append(token_id)
+    return builder.finish()
+
+
+def _concat_token_ids(*arrays: np.ndarray) -> np.ndarray:
+    builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=sum(len(values) for values in arrays))
+    for values in arrays:
+        builder.extend(values)
+    return builder.finish()
 
 
 def test_parse_response_plain_content(llama_pair):
     _, _, tok, r = llama_pair
-    ids = _tokens_for(tok, "Hello, world!") + [r._eot]
+    ids = _append_token(_tokens_for(tok, "Hello, world!"), r._eot)
     out = r.parse_response(ids)
     assert isinstance(out, ParsedResponse)
     assert out.content == "Hello, world!"
-    assert out.tool_calls == []
+    assert out.tool_calls == ()
     assert out.reasoning_content is None
 
 
 def test_parse_response_tool_call(llama_pair):
     _, _, tok, r = llama_pair
     body = '{"name": "get_weather", "parameters": {"city": "NYC"}}'
-    ids = _tokens_for(tok, body) + [r._eot]
+    ids = _append_token(_tokens_for(tok, body), r._eot)
     out = r.parse_response(ids)
     assert out.content == ""
     assert len(out.tool_calls) == 1
@@ -186,9 +187,9 @@ def test_parse_response_malformed_tool_call_falls_through_to_content(llama_pair)
     in content rather than dropping silently."""
     _, _, tok, r = llama_pair
     body = '{"name": "x", broken'
-    ids = _tokens_for(tok, body) + [r._eot]
+    ids = _append_token(_tokens_for(tok, body), r._eot)
     out = r.parse_response(ids)
-    assert out.tool_calls == []
+    assert out.tool_calls == ()
     assert "{" in out.content
 
 
@@ -198,24 +199,16 @@ def test_parse_response_malformed_tool_call_falls_through_to_content(llama_pair)
 
 
 def _simulate_prior_turn(r):
-    prior = [
-        {"role": "system", "content": "You are helpful."},
-        {"role": "user", "content": "Hi."},
-    ]
+    prior = [{"role": "system", "content": "You are helpful."}, {"role": "user", "content": "Hi."}]
     asst = [{"role": "assistant", "content": "Hello!"}]
 
     prev_prompt = r.render_ids(prior, add_generation_prompt=True)
     full = r.render_ids(prior + asst, add_generation_prompt=False)
-    prev_completion = list(full[len(prev_prompt) :])
+    prev_completion = full[len(prev_prompt) :]
 
-    stop = set(r.get_stop_token_ids())
-    last = -1
-    for i in range(len(prev_completion) - 1, -1, -1):
-        if prev_completion[i] in stop:
-            last = i
-            break
-    if last >= 0:
-        prev_completion = prev_completion[: last + 1]
+    stop_positions = np.flatnonzero(np.isin(prev_completion, np.asarray(r.get_stop_token_ids(), dtype=TOKEN_IDS_DTYPE)))
+    if stop_positions.size:
+        prev_completion = prev_completion[: int(stop_positions[-1]) + 1]
     return prev_prompt, prev_completion
 
 
@@ -225,8 +218,8 @@ def test_bridge_extends_prev_verbatim_on_clean_stop(llama_pair):
     new_messages = [{"role": "user", "content": "What's 2+2?"}]
     bridged = r.bridge_to_next_turn(prev_prompt, prev_completion, new_messages)
     assert bridged is not None
-    prev = prev_prompt + prev_completion
-    assert bridged.token_ids[: len(prev)] == prev
+    prev = _concat_token_ids(prev_prompt, prev_completion)
+    assert np.array_equal(bridged.token_ids[: len(prev)], prev)
     assert len(bridged.token_ids) > len(prev)
 
 
@@ -235,27 +228,20 @@ def test_bridge_matches_fresh_render_on_clean_stop(llama_pair):
     a fresh render of the full message list — except sampled tokens are
     kept verbatim rather than re-rendered."""
     _, _, _, r = llama_pair
-    prior = [
-        {"role": "system", "content": "You are helpful."},
-        {"role": "user", "content": "Hi."},
-    ]
+    prior = [{"role": "system", "content": "You are helpful."}, {"role": "user", "content": "Hi."}]
     asst = [{"role": "assistant", "content": "Hello!"}]
     new_messages = [{"role": "user", "content": "What's 2+2?"}]
 
     prev_prompt, prev_completion = _simulate_prior_turn(r)
     bridged = r.bridge_to_next_turn(prev_prompt, prev_completion, new_messages)
     fresh = r.render_ids(prior + asst + new_messages, add_generation_prompt=True)
-    assert bridged.token_ids == fresh
+    assert np.array_equal(bridged.token_ids, fresh)
 
 
 def test_bridge_rejects_assistant_in_extension(llama_pair):
     _, _, _, r = llama_pair
     prev_prompt, prev_completion = _simulate_prior_turn(r)
-    bridged = r.bridge_to_next_turn(
-        prev_prompt,
-        prev_completion,
-        [{"role": "assistant", "content": "forbidden"}],
-    )
+    bridged = r.bridge_to_next_turn(prev_prompt, prev_completion, [{"role": "assistant", "content": "forbidden"}])
     assert bridged is None
 
 
@@ -263,12 +249,10 @@ def test_bridge_synthesises_close_on_truncation(llama_pair):
     _, _, _, r = llama_pair
     prev_prompt, prev_completion = _simulate_prior_turn(r)
     trunc = prev_completion[:-1]
-    if not trunc:
+    if trunc.size == 0:
         pytest.skip("simulated prior had no completion tokens to truncate")
-    bridged = r.bridge_to_next_turn(
-        prev_prompt, trunc, [{"role": "user", "content": "ping"}]
-    )
+    bridged = r.bridge_to_next_turn(prev_prompt, trunc, [{"role": "user", "content": "ping"}])
     assert bridged is not None
-    base = prev_prompt + trunc
-    assert bridged.token_ids[: len(base)] == base
+    base = _concat_token_ids(prev_prompt, trunc)
+    assert np.array_equal(bridged.token_ids[: len(base)], base)
     assert len(bridged.token_ids) > len(base)

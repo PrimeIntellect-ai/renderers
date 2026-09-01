@@ -4,7 +4,26 @@ These test that parse_response never crashes and returns sensible results
 even with adversarial or truncated model output.
 """
 
+import numpy as np
+
 from renderers.base import ParsedResponse, ParsedToolCall
+from renderers.token_arrays import FixedWidthArrayBuilder, TOKEN_IDS_DTYPE, encode_token_ids
+
+
+def _ids(tokenizer, text: str) -> np.ndarray:
+    return encode_token_ids(tokenizer, text)
+
+
+def _empty_ids() -> np.ndarray:
+    values = np.empty(0, dtype=TOKEN_IDS_DTYPE)
+    values.flags.writeable = False
+    return values
+
+
+def _one_id(token_id: int) -> np.ndarray:
+    builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=1)
+    builder.append(token_id)
+    return builder.finish()
 
 
 # ── Truncation ───────────────────────────────────────────────────────
@@ -13,7 +32,7 @@ from renderers.base import ParsedResponse, ParsedToolCall
 def test_truncated_mid_thinking(model_name, tokenizer, renderer):
     """Model was cut off mid-thinking (no </think> found)."""
     text = "Let me think about this carefully. The problem requires"
-    ids = tokenizer.encode(text, add_special_tokens=False)
+    ids = _ids(tokenizer, text)
     parsed = renderer.parse_response(ids)
     assert isinstance(parsed, ParsedResponse)
     # Content or reasoning should contain the text
@@ -23,7 +42,7 @@ def test_truncated_mid_thinking(model_name, tokenizer, renderer):
 def test_truncated_after_think_tag(model_name, tokenizer, renderer):
     """Model emitted <think> but was cut off before </think>."""
     text = "<think>Let me reason about"
-    ids = tokenizer.encode(text, add_special_tokens=False)
+    ids = _ids(tokenizer, text)
     parsed = renderer.parse_response(ids)
     assert isinstance(parsed, ParsedResponse)
 
@@ -31,7 +50,7 @@ def test_truncated_after_think_tag(model_name, tokenizer, renderer):
 def test_truncated_mid_tool_call(model_name, tokenizer, renderer):
     """Model started a tool call but was cut off."""
     text = 'Checking the weather.\n<tool_call>\n{"name": "get'
-    ids = tokenizer.encode(text, add_special_tokens=False)
+    ids = _ids(tokenizer, text)
     parsed = renderer.parse_response(ids)
     assert isinstance(parsed, ParsedResponse)
     # Should recover content before the tool call
@@ -39,8 +58,8 @@ def test_truncated_mid_tool_call(model_name, tokenizer, renderer):
 
 
 def test_empty_completion(model_name, tokenizer, renderer):
-    """Empty token list."""
-    parsed = renderer.parse_response([])
+    """Empty fixed-width token array."""
+    parsed = renderer.parse_response(_empty_ids())
     assert isinstance(parsed, ParsedResponse)
     assert parsed.content is not None
 
@@ -49,7 +68,7 @@ def test_single_eos_token(model_name, tokenizer, renderer):
     """Just an EOS token."""
     stop_ids = renderer.get_stop_token_ids()
     if stop_ids:
-        parsed = renderer.parse_response(stop_ids[:1])
+        parsed = renderer.parse_response(_one_id(stop_ids[0]))
         assert isinstance(parsed, ParsedResponse)
 
 
@@ -59,7 +78,7 @@ def test_single_eos_token(model_name, tokenizer, renderer):
 def test_empty_thinking_block(model_name, tokenizer, renderer):
     """<think></think> with no content (common pattern)."""
     text = "<think></think>Hello!"
-    ids = tokenizer.encode(text, add_special_tokens=False)
+    ids = _ids(tokenizer, text)
     parsed = renderer.parse_response(ids)
     assert "Hello" in parsed.content
 
@@ -67,7 +86,7 @@ def test_empty_thinking_block(model_name, tokenizer, renderer):
 def test_thinking_with_newlines(model_name, tokenizer, renderer):
     """Thinking block with various newline patterns."""
     text = "Step 1: Calculate\nStep 2: Verify\n</think>\n\nThe answer is 42."
-    ids = tokenizer.encode(text, add_special_tokens=False)
+    ids = _ids(tokenizer, text)
     parsed = renderer.parse_response(ids)
     assert "42" in parsed.content
 
@@ -75,10 +94,10 @@ def test_thinking_with_newlines(model_name, tokenizer, renderer):
 def test_content_only_no_thinking(model_name, tokenizer, renderer):
     """Plain content with no thinking markers."""
     text = "Hello! How can I help you today?"
-    ids = tokenizer.encode(text, add_special_tokens=False)
+    ids = _ids(tokenizer, text)
     parsed = renderer.parse_response(ids)
     assert "Hello" in parsed.content
-    assert parsed.tool_calls == []
+    assert parsed.tool_calls == ()
 
 
 # ── Tool call edge cases ─────────────────────────────────────────────
@@ -88,7 +107,7 @@ def test_tool_call_with_complex_json(model_name, tokenizer, renderer):
     """Tool call with nested JSON arguments."""
     # This is a generic test — the exact format varies per model
     text = "Here are the results."
-    ids = tokenizer.encode(text, add_special_tokens=False)
+    ids = _ids(tokenizer, text)
     parsed = renderer.parse_response(ids)
     assert isinstance(parsed, ParsedResponse)
 
@@ -96,7 +115,7 @@ def test_tool_call_with_complex_json(model_name, tokenizer, renderer):
 def test_content_with_special_chars(model_name, tokenizer, renderer):
     """Content containing angle brackets, quotes, etc."""
     text = 'The formula is x < y and a > b. Use "quotes" freely.'
-    ids = tokenizer.encode(text, add_special_tokens=False)
+    ids = _ids(tokenizer, text)
     parsed = renderer.parse_response(ids)
     assert parsed.content  # Should not crash on angle brackets
 
@@ -104,7 +123,7 @@ def test_content_with_special_chars(model_name, tokenizer, renderer):
 def test_very_long_content(model_name, tokenizer, renderer):
     """Long content string."""
     text = "word " * 500
-    ids = tokenizer.encode(text, add_special_tokens=False)
+    ids = _ids(tokenizer, text)
     parsed = renderer.parse_response(ids)
     assert len(parsed.content) > 100
 
@@ -115,7 +134,7 @@ def test_very_long_content(model_name, tokenizer, renderer):
 def test_content_is_always_string(model_name, tokenizer, renderer):
     """content must always be a string, never None."""
     for text in ["Hello", "", "<think></think>", "<think>x</think>"]:
-        ids = tokenizer.encode(text, add_special_tokens=False) if text else []
+        ids = _ids(tokenizer, text) if text else _empty_ids()
         parsed = renderer.parse_response(ids)
         assert isinstance(parsed.content, str)
 
@@ -123,21 +142,21 @@ def test_content_is_always_string(model_name, tokenizer, renderer):
 def test_reasoning_is_string_or_none(model_name, tokenizer, renderer):
     """reasoning_content must be str or None."""
     text = "Some text"
-    ids = tokenizer.encode(text, add_special_tokens=False)
+    ids = _ids(tokenizer, text)
     parsed = renderer.parse_response(ids)
     assert parsed.reasoning_content is None or isinstance(parsed.reasoning_content, str)
 
 
-def test_tool_calls_is_list_of_parsed_tool_call(model_name, tokenizer, renderer):
-    """tool_calls is always a (possibly empty) list of ParsedToolCall — never None.
+def test_tool_calls_is_immutable_tuple_of_parsed_tool_call(model_name, tokenizer, renderer):
+    """tool_calls is always a (possibly empty) tuple of ParsedToolCall — never None.
 
-    Empty list = "model did not emit any tool calls". A list with non-OK
+    Empty tuple = "model did not emit any tool calls". A tuple with non-OK
     entries = "model tried and the parser caught the failure"; those are
     deliberately preserved so verifier / RL-loss code can see them.
     """
     text = "Hello!"
-    ids = tokenizer.encode(text, add_special_tokens=False)
+    ids = _ids(tokenizer, text)
     parsed = renderer.parse_response(ids)
-    assert isinstance(parsed.tool_calls, list)
+    assert isinstance(parsed.tool_calls, tuple)
     for tc in parsed.tool_calls:
         assert isinstance(tc, ParsedToolCall)

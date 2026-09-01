@@ -6,6 +6,9 @@ import pytest
 from renderers.base import (
     AttributedTextSegments,
     MultiModalData,
+    ParsedResponse,
+    ParsedToolCall,
+    ParsedToolCallBuilder,
     PlaceholderRange,
     RenderedConversation,
     RenderedTokens,
@@ -207,7 +210,9 @@ def test_attributed_segments_require_readonly_arrays_and_seal_offsetless_masks()
         def __call__(self, text, *, add_special_tokens, return_tensors):
             return {"input_ids": _hostile(np.asarray([[2, 3]], dtype="<i8"))}
 
-    attributed = attribute_text_segments(_OffsetlessTokenizer(), [("ab", True)])
+    segments = TextSegmentBuilder()
+    segments.append("ab", is_content=True)
+    attributed = attribute_text_segments(_OffsetlessTokenizer(), segments.finish())
 
     assert np.array_equal(attributed.token_ids, np.asarray([2, 3], dtype=TOKEN_IDS_DTYPE))
     assert np.array_equal(attributed.is_content, np.asarray([False, False], dtype=MASK_DTYPE))
@@ -232,13 +237,32 @@ def test_dynamic_text_segments_keep_data_scaled_content_flags_fixed_width():
     for index in range(128):
         segments.append("x", is_content=index % 2 == 0)
 
-    attributed = attribute_text_segments(_OffsetTokenizer(), segments)
+    attributed = attribute_text_segments(_OffsetTokenizer(), segments.finish())
     expected_content = np.arange(128, dtype="<i8") % 2 == 0
 
     assert attributed.token_ids.size == 128
     assert np.array_equal(attributed.is_content, expected_content)
     assert not attributed.token_ids.flags.writeable
     assert not attributed.is_content.flags.writeable
+
+
+def test_parsed_calls_are_immutably_aligned_with_one_packed_span_array():
+    builder = ParsedToolCallBuilder()
+    builder.append(ParsedToolCall(raw="first"), 2, 5)
+    builder.append(ParsedToolCall(raw="unknown"))
+    calls, spans = builder.finish()
+    parsed = ParsedResponse(content="", tool_calls=calls, tool_call_token_spans=spans)
+
+    assert type(parsed.tool_calls) is tuple
+    assert np.array_equal(parsed.tool_call_token_spans, np.asarray([[2, 5], [-1, -1]], dtype="<i8"))
+    assert not parsed.tool_call_token_spans.flags.writeable
+    with pytest.raises(AttributeError):
+        parsed.tool_calls = ()  # type: ignore[misc]
+    with pytest.raises(TypeError, match="immutable tuple"):
+        ParsedResponse(content="", tool_calls=[ParsedToolCall(raw="legacy")])  # type: ignore[arg-type]
+    mutable_spans = np.asarray([[0, 1]], dtype="<i8")
+    with pytest.raises(ValueError, match="read-only"):
+        ParsedResponse(content="", tool_calls=(ParsedToolCall(raw="mutable"),), tool_call_token_spans=mutable_spans)
 
 
 def test_hy3_render_and_bridge_keep_hostile_arrays_typed_across_joined_segments():

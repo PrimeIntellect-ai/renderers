@@ -127,7 +127,7 @@ def _load_inkling_image(part: Any):
 def _load_audio(part: Any) -> tuple[np.ndarray, int]:
     """Resolve an audio content part to ``(waveform, sampling_rate)``.
 
-    Accepts a raw mono waveform (``np.ndarray`` / list of floats) or a
+    Accepts a fixed-width float32 mono waveform or a
     HuggingFace-``datasets``-style ``{"array", "sampling_rate"}`` dict, under
     ``part["audio"]`` / ``["input_audio"]`` / ``["audio_url"]`` or the part
     itself. Decoding bytes / paths / URLs is out of scope (the processor's
@@ -150,7 +150,15 @@ def _load_audio(part: Any) -> tuple[np.ndarray, int]:
             "{'array', 'sampling_rate'} dict); byte/path/URL decoding is not "
             "supported here."
         )
-    return np.asarray(data, dtype=np.float32), sampling_rate
+    if not isinstance(data, np.ndarray):
+        raise TypeError(f"audio waveform must be a NumPy array, got {type(data).__name__}")
+    if data.ndim != 1:
+        raise ValueError(f"audio waveform must be rank 1, got shape {data.shape}")
+    if data.dtype != np.dtype("<f4"):
+        raise TypeError(f"audio waveform must have dtype <f4, got {data.dtype.str}")
+    waveform = np.array(data, dtype=np.dtype("<f4"), copy=True, order="C")
+    waveform.flags.writeable = False
+    return waveform, sampling_rate
 
 
 def _audio_hash(wav: np.ndarray, sampling_rate: int) -> str:

@@ -2,12 +2,14 @@
 
 from functools import lru_cache
 
+import numpy as np
 import pytest
-from parity import models_for
+from tests.parity import models_for
 
 from renderers import Gemma4Renderer, create_renderer
 from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS, load_tokenizer
 from renderers.configs import Gemma4RendererConfig
+from renderers.token_arrays import TOKEN_IDS_DTYPE, FixedWidthArrayBuilder, encode_token_ids, owned_token_ids_from_array
 
 
 _MODELS = tuple(case.model for case in models_for("gemma-checkpoints"))
@@ -30,8 +32,7 @@ def test_disabled_thinking_prefill_tracks_template_revision(monkeypatch):
     messages = [{"role": "user", "content": "Hello"}]
 
     current_text = tokenizer.decode(
-        current_renderer.render_ids(messages, add_generation_prompt=True),
-        skip_special_tokens=False,
+        current_renderer.render_ids(messages, add_generation_prompt=True), skip_special_tokens=False
     )
     assert current_text.endswith("<|channel>thought\n<channel|>")
 
@@ -41,41 +42,27 @@ def test_disabled_thinking_prefill_tracks_template_revision(monkeypatch):
     monkeypatch.setattr(tokenizer, "chat_template", "")
     earlier_renderer = Gemma4Renderer(tokenizer)
     earlier_text = tokenizer.decode(
-        earlier_renderer.render_ids(messages, add_generation_prompt=True),
-        skip_special_tokens=False,
+        earlier_renderer.render_ids(messages, add_generation_prompt=True), skip_special_tokens=False
     )
     assert earlier_text.endswith("<|turn>model\n")
 
 
 def test_preserve_thinking_controls_derived_retention_and_rejects_conflicts():
     tokenizer, _ = _gemma4()
-    preserved = Gemma4Renderer(
-        tokenizer,
-        Gemma4RendererConfig(enable_thinking=True, preserve_thinking=True),
-    )
+    preserved = Gemma4Renderer(tokenizer, Gemma4RendererConfig(enable_thinking=True, preserve_thinking=True))
     assert preserved.effective_thinking_retention == "all"
 
     with pytest.raises(ValueError, match="preserve_thinking=True implies"):
-        Gemma4RendererConfig(
-            preserve_thinking=True,
-            thinking_retention="tool_cycle",
-        )
+        Gemma4RendererConfig(preserve_thinking=True, thinking_retention="tool_cycle")
 
 
 @pytest.mark.parametrize(
     "messages",
     [
         [{"role": "tool", "content": "orphan"}],
+        [{"role": "assistant", "content": "No call."}, {"role": "tool", "content": "orphan"}],
         [
-            {"role": "assistant", "content": "No call."},
-            {"role": "tool", "content": "orphan"},
-        ],
-        [
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_responses": [{"name": "legacy", "response": "done"}],
-            },
+            {"role": "assistant", "content": "", "tool_responses": [{"name": "legacy", "response": "done"}]},
             {"role": "tool", "content": "still orphaned"},
         ],
     ],
@@ -89,9 +76,7 @@ def test_unconsumed_tool_messages_raise(messages):
 @pytest.mark.parametrize("enable_thinking", [False, True])
 def test_tool_cycle_matches_canonical_template(enable_thinking):
     tokenizer, _ = _gemma4()
-    renderer = Gemma4Renderer(
-        tokenizer, Gemma4RendererConfig(enable_thinking=enable_thinking)
-    )
+    renderer = Gemma4Renderer(tokenizer, Gemma4RendererConfig(enable_thinking=enable_thinking))
     tools = [
         {
             "type": "function",
@@ -100,9 +85,7 @@ def test_tool_cycle_matches_canonical_template(enable_thinking):
                 "description": "Look up the weather.",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "city": {"type": "string", "description": "City name"}
-                    },
+                    "properties": {"city": {"type": "string", "description": "City name"}},
                     "required": ["city"],
                 },
             },
@@ -112,26 +95,13 @@ def test_tool_cycle_matches_canonical_template(enable_thinking):
         {"role": "user", "content": "Weather in Berlin?"},
         {
             "role": "assistant",
-            "reasoning_content": "I should call the weather tool."
-            if not enable_thinking
-            else None,
+            "reasoning_content": "I should call the weather tool." if not enable_thinking else None,
             "content": "",
             "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {
-                        "name": "weather",
-                        "arguments": {"city": "Berlin"},
-                    },
-                }
+                {"id": "call-1", "type": "function", "function": {"name": "weather", "arguments": {"city": "Berlin"}}}
             ],
         },
-        {
-            "role": "tool",
-            "tool_call_id": "call-1",
-            "content": '{"temperature": 24, "unit": "C"}',
-        },
+        {"role": "tool", "tool_call_id": "call-1", "content": '{"temperature": 24, "unit": "C"}'},
         {
             "role": "assistant",
             "reasoning_content": "I can now answer." if not enable_thinking else None,
@@ -146,8 +116,9 @@ def test_tool_cycle_matches_canonical_template(enable_thinking):
         add_generation_prompt=False,
         enable_thinking=enable_thinking,
         return_dict=False,
+        return_tensors="np",
     )
-    assert renderer.render_ids(messages, tools=tools) == list(expected)
+    assert np.array_equal(renderer.render_ids(messages, tools=tools), owned_token_ids_from_array("expected", expected))
 
 
 def test_disabled_thinking_post_tool_completion_matches_sampled_stream():
@@ -165,11 +136,7 @@ def test_disabled_thinking_post_tool_completion_matches_sampled_stream():
             "function": {
                 "name": "weather",
                 "description": "Look up the weather.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"city": {"type": "string"}},
-                    "required": ["city"],
-                },
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
             },
         }
     ]
@@ -178,57 +145,33 @@ def test_disabled_thinking_post_tool_completion_matches_sampled_stream():
         "role": "assistant",
         "content": "",
         "tool_calls": [
-            {
-                "id": "call-1",
-                "type": "function",
-                "function": {
-                    "name": "weather",
-                    "arguments": {"city": "Berlin"},
-                },
-            }
+            {"id": "call-1", "type": "function", "function": {"name": "weather", "arguments": {"city": "Berlin"}}}
         ],
     }
-    tool_response = {
-        "role": "tool",
-        "tool_call_id": "call-1",
-        "content": '{"temperature": 24}',
-    }
+    tool_response = {"role": "tool", "tool_call_id": "call-1", "content": '{"temperature": 24}'}
     final = {"role": "assistant", "content": "It is 24 C."}
 
-    initial_prompt = renderer.render_ids(
-        [user], tools=tools, add_generation_prompt=True
-    )
-    tool_call_prompt = renderer.render_ids(
-        [user, tool_call], tools=tools, add_generation_prompt=True
-    )
-    assert tool_call_prompt[: len(initial_prompt)] == initial_prompt
+    initial_prompt = renderer.render_ids([user], tools=tools, add_generation_prompt=True)
+    tool_call_prompt = renderer.render_ids([user, tool_call], tools=tools, add_generation_prompt=True)
+    assert np.array_equal(tool_call_prompt[: len(initial_prompt)], initial_prompt)
     tool_call_completion = tool_call_prompt[len(initial_prompt) :]
 
-    post_tool_prompt = renderer.bridge_to_next_turn(
-        initial_prompt,
-        tool_call_completion,
-        [tool_response],
-        tools=tools,
-    )
+    post_tool_prompt = renderer.bridge_to_next_turn(initial_prompt, tool_call_completion, [tool_response], tools=tools)
     assert post_tool_prompt is not None
 
-    final_completion = tokenizer.encode(final["content"], add_special_tokens=False) + [
-        renderer.get_stop_token_ids()[0]
-    ]
+    final_completion_builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE)
+    final_completion_builder.extend(encode_token_ids(tokenizer, final["content"]))
+    final_completion_builder.append(renderer.get_stop_token_ids()[0])
+    final_completion = final_completion_builder.finish()
     reminder = {"role": "user", "content": "Please summarize."}
     extended_stream = renderer.bridge_to_next_turn(
-        post_tool_prompt.token_ids,
-        final_completion,
-        [reminder],
-        tools=tools,
+        post_tool_prompt.token_ids, final_completion, [reminder], tools=tools
     )
     assert extended_stream is not None
     rerendered = renderer.render_ids(
-        [user, tool_call, tool_response, final, reminder],
-        tools=tools,
-        add_generation_prompt=True,
+        [user, tool_call, tool_response, final, reminder], tools=tools, add_generation_prompt=True
     )
-    assert rerendered == extended_stream.token_ids
+    assert np.array_equal(rerendered, extended_stream.token_ids)
 
 
 def test_parser_extracts_reasoning_and_multiple_typed_tool_calls():
@@ -239,7 +182,7 @@ def test_parser_extracts_reasoning_and_multiple_typed_tool_calls():
         "<tool_call|>"
         "<|tool_call>call:flags{enabled:true,values:[1,null]}<tool_call|>"
     )
-    parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
+    parsed = renderer.parse_response(encode_token_ids(tokenizer, text))
 
     assert parsed.reasoning_content == "I need two lookups."
     assert parsed.content == ""
@@ -252,11 +195,7 @@ def test_parser_extracts_reasoning_and_multiple_typed_tool_calls():
 def test_parser_recovers_prompt_opened_post_tool_reasoning():
     tokenizer, _ = _gemma4()
     renderer = Gemma4Renderer(tokenizer, Gemma4RendererConfig(enable_thinking=True))
-    tool_call = {
-        "id": "call-1",
-        "type": "function",
-        "function": {"name": "weather", "arguments": {"city": "Berlin"}},
-    }
+    tool_call = {"id": "call-1", "type": "function", "function": {"name": "weather", "arguments": {"city": "Berlin"}}}
     messages = [
         {"role": "user", "content": "Weather?"},
         {"role": "assistant", "content": "", "tool_calls": [tool_call]},
@@ -268,29 +207,23 @@ def test_parser_recovers_prompt_opened_post_tool_reasoning():
         add_generation_prompt=True,
         enable_thinking=True,
         return_dict=False,
+        return_tensors="np",
     )
     prompt = renderer.render_ids(messages, add_generation_prompt=True)
 
-    assert prompt == list(expected_prompt)
-    assert tokenizer.decode(prompt, skip_special_tokens=False).endswith(
-        "<|channel>thought\n"
-    )
+    assert np.array_equal(prompt, owned_token_ids_from_array("expected_prompt", expected_prompt))
+    assert tokenizer.decode(prompt, skip_special_tokens=False).endswith("<|channel>thought\n")
 
-    completion = tokenizer.encode(
-        "Need synthesize.\n<channel|>It is sunny.<turn|>",
-        add_special_tokens=False,
-    )
+    completion = encode_token_ids(tokenizer, "Need synthesize.\n<channel|>It is sunny.<turn|>")
 
     parsed = renderer.parse_response(completion)
 
     assert parsed.reasoning_content == "Need synthesize."
     assert parsed.content == "It is sunny."
-    assert parsed.tool_calls == []
+    assert parsed.tool_calls == ()
 
     # Initial-turn content without a channel closer remains ordinary content.
-    direct = renderer.parse_response(
-        tokenizer.encode("Direct answer.<turn|>", add_special_tokens=False)
-    )
+    direct = renderer.parse_response(encode_token_ids(tokenizer, "Direct answer.<turn|>"))
     assert direct.reasoning_content is None
     assert direct.content == "Direct answer."
 
@@ -320,9 +253,7 @@ def test_real_processor_keeps_one_batched_row_per_image(size):
 
     _, renderer = _image_renderer()
     image = Image.new("RGB", size, color=(128, 192, 255))
-    rendered = renderer.render(
-        [{"role": "user", "content": [{"type": "image", "image": image}]}]
-    )
+    rendered = renderer.render([{"role": "user", "content": [{"type": "image", "image": image}]}])
     item = rendered.multi_modal_data.mm_items["image"][0]
     placeholder = rendered.multi_modal_data.mm_placeholders["image"][0]
 
@@ -341,13 +272,7 @@ def test_schema_unified_image_parts_still_expand_image_tokens():
     tokenizer, renderer = _image_renderer()
     image = _tiny_image()
     plain = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": "What is this?"},
-            ],
-        }
+        {"role": "user", "content": [{"type": "image", "image": image}, {"type": "text", "text": "What is this?"}]}
     ]
     schema_unified = [
         {
@@ -365,13 +290,8 @@ def test_schema_unified_image_parts_still_expand_image_tokens():
     image_id = tokenizer.convert_tokens_to_ids("<|image|>")
     assert baseline.token_ids.count(image_id) > 0
     assert roundtripped.token_ids == baseline.token_ids
-    assert (
-        roundtripped.multi_modal_data.mm_hashes == baseline.multi_modal_data.mm_hashes
-    )
-    assert (
-        roundtripped.multi_modal_data.mm_placeholders
-        == baseline.multi_modal_data.mm_placeholders
-    )
+    assert roundtripped.multi_modal_data.mm_hashes == baseline.multi_modal_data.mm_hashes
+    assert roundtripped.multi_modal_data.mm_placeholders == baseline.multi_modal_data.mm_placeholders
 
 
 def test_schema_unified_tool_response_image_parts_survive():
@@ -384,13 +304,7 @@ def test_schema_unified_tool_response_image_parts_survive():
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "screenshot", "arguments": {}},
-                }
-            ],
+            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "screenshot", "arguments": {}}}],
         },
         {
             "role": "tool",
@@ -417,19 +331,9 @@ def test_untyped_text_parts_render_in_tool_responses():
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "check", "arguments": {}},
-                }
-            ],
+            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "check", "arguments": {}}}],
         },
-        {
-            "role": "tool",
-            "tool_call_id": "call-1",
-            "content": [{"text": "all good"}],
-        },
+        {"role": "tool", "tool_call_id": "call-1", "content": [{"text": "all good"}]},
     ]
     text = tokenizer.decode(renderer.render_ids(messages), skip_special_tokens=False)
     assert "all good" in text
@@ -441,10 +345,7 @@ def test_system_content_lists_reject_media_parts():
     tokenizer, _ = _gemma4()
     renderer = Gemma4Renderer(tokenizer)
     messages = [
-        {
-            "role": "system",
-            "content": [{"type": "image", "image": object(), "text": None}],
-        },
+        {"role": "system", "content": [{"type": "image", "image": object(), "text": None}]},
         {"role": "user", "content": "Hi"},
     ]
     with pytest.raises(ValueError, match="text parts only"):
@@ -456,11 +357,7 @@ def test_legacy_assistant_tool_responses_preserve_mask_contract():
     renderer = Gemma4Renderer(tokenizer)
     messages = [
         {"role": "user", "content": "Check."},
-        {
-            "role": "assistant",
-            "content": "Done.",
-            "tool_responses": [{"name": "check", "response": {"ok": True}}],
-        },
+        {"role": "assistant", "content": "Done.", "tool_responses": [{"name": "check", "response": {"ok": True}}]},
     ]
     rendered = renderer.render(messages)
 

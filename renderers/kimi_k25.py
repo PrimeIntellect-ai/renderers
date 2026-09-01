@@ -32,6 +32,7 @@ from renderers.base import (
     MultiModalData,
     ParsedResponse,
     ParsedToolCall,
+    ParsedToolCallBuilder,
     RenderedTokens,
     ToolCallParseStatus,
     ToolSpec,
@@ -48,11 +49,16 @@ from renderers.configs import KimiK25RendererConfig
 from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
 from renderers.qwen3_vl import _image_hash, _is_image_part, _is_video_part, _load_pil_image
 from renderers.token_arrays import (
+    OFFSETS_DTYPE,
+    TOKEN_IDS_DTYPE,
+    FixedWidthArrayBuilder,
     FixedWidthRangeBuilder,
     RenderedTokenBuilder,
     encode_token_ids,
     finish_range_builders,
     merge_range_maps,
+    require_1d_array,
+    require_readonly,
 )
 
 # ---------------------------------------------------------------------------
@@ -375,11 +381,9 @@ _TOOL_CALL_RE = re.compile(
 
 def _parse_kimi_k2_response(
     tokenizer,
-    token_ids: list[int],
+    token_ids: np.ndarray,
     *,
     stop_ids: set[int],
-    think_open_ids: list[int],
-    think_close_ids: list[int],
     tool_calls_section_begin_id: int | None,
     tool_calls_section_end_id: int | None,
     tool_call_begin_id: int | None,
@@ -388,9 +392,8 @@ def _parse_kimi_k2_response(
 ) -> ParsedResponse:
     """Parse Kimi K2/K2.5 completion tokens.
 
-    Primary path: walk token IDs via :func:`parse_kimi_k2_section`. That gives
-    every ``ParsedToolCall`` a ``token_span`` pointing back into the
-    (stop-stripped) input — what the trainer needs for selective loss masking.
+    Primary path walks token IDs via :func:`parse_kimi_k2_section`, producing
+    one packed response-level span array over the stop-stripped input.
 
     Fallback path: regex on decoded text. Only used when none of the section
     delimiters appear as special tokens, which in practice means the model
@@ -402,12 +405,11 @@ def _parse_kimi_k2_response(
     ``<think>...</think>`` is always text-extracted from the content slice
     (K2.5 emits them as plain text, not special tokens).
     """
-    # Strip stop token
-    ids = list(token_ids)
-    for i, t in enumerate(ids):
-        if t in stop_ids:
-            ids = ids[:i]
-            break
+    require_1d_array("token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+    require_readonly("token_ids", token_ids)
+    stop_values = np.fromiter(stop_ids, dtype=TOKEN_IDS_DTYPE)
+    stop_positions = np.flatnonzero(np.isin(token_ids, stop_values))
+    ids = token_ids[: int(stop_positions[0])] if stop_positions.size else token_ids
 
     # Reasoning first: a tool-call section the model drafts *inside* its
     # <think> trace must not be parsed as a real call (regression #78 — cf.
@@ -418,7 +420,7 @@ def _parse_kimi_k2_response(
 
     # Token-ID path — produces spans. Only run if every relevant special
     # token resolved at init (i.e. is in the tokenizer's vocab).
-    tool_calls: list[ParsedToolCall] = []
+    tool_calls = ParsedToolCallBuilder()
     have_special_tokens = (
         tool_calls_section_begin_id is not None
         and tool_calls_section_end_id is not None
@@ -427,7 +429,7 @@ def _parse_kimi_k2_response(
         and tool_call_end_id is not None
     )
     if have_special_tokens:
-        content_ids, tool_calls = parse_kimi_k2_section(
+        parsed_tools = parse_kimi_k2_section(
             tokenizer,
             ids,
             tool_calls_section_begin_ids={tool_calls_section_begin_id},
@@ -437,15 +439,17 @@ def _parse_kimi_k2_response(
             tool_call_end_id=tool_call_end_id,
             scan_start=reasoning_end,
         )
-        text = tokenizer.decode(content_ids, skip_special_tokens=False) if content_ids else ""
+        content_ids = parsed_tools.content_ids
+        tool_calls.extend(parsed_tools.tool_calls, parsed_tools.tool_call_token_spans)
+        text = tokenizer.decode(content_ids, skip_special_tokens=False) if content_ids.size else ""
     else:
-        text = tokenizer.decode(ids, skip_special_tokens=False) if ids else ""
+        text = tokenizer.decode(ids, skip_special_tokens=False) if ids.size else ""
 
     # Fallback path: model emitted literal-text section delimiters (singular
     # variant) rather than special tokens. Spans unavailable here. Start the
     # search past the first </think> so a literal section drafted inside the
     # reasoning trace isn't matched as a real call (regression #78).
-    if not tool_calls:
+    if len(tool_calls) == 0:
         think_close = text.find("</think>")
         search_from = think_close + len("</think>") if think_close != -1 else 0
         tc_match = _TOOL_CALLS_SECTION_RE.search(text, search_from)
@@ -490,7 +494,7 @@ def _parse_kimi_k2_response(
         else:
             # Truncated reasoning (no closing tag) — discard any partial
             # tool-call attempts since the model never finished thinking.
-            return ParsedResponse(content="", reasoning_content=after_open.strip() or None, tool_calls=[])
+            return ParsedResponse(content="", reasoning_content=after_open.strip() or None)
     elif "</think>" in text:
         # Sampler stripped the prefilled <think> open tag — see
         # _normalize_response_tokens. Keep prior behaviour: everything
@@ -499,8 +503,12 @@ def _parse_kimi_k2_response(
         reasoning = before.strip("\n") or None
         text = after.strip("\n")
 
+    calls, spans = tool_calls.finish()
     return ParsedResponse(
-        content=text.strip(), reasoning_content=reasoning.strip() if reasoning else None, tool_calls=tool_calls
+        content=text.strip(),
+        reasoning_content=reasoning.strip() if reasoning else None,
+        tool_calls=calls,
+        tool_call_token_spans=spans,
     )
 
 
@@ -840,18 +848,18 @@ class KimiK25Renderer:
             stop_ids.add(self._endoftext)
 
         # Restore the synthetic <think> prefill if it was stripped by the
-        # sampler. ``parse`` then walks ``normalized``, so any token_span we
-        # emit is in the *normalized* frame. We track the prepend offset and
+        # sampler. ``parse`` then walks ``normalized``, so packed spans are in
+        # the *normalized* frame. We track the prepend offset and
         # shift spans back so they refer to the caller's ``token_ids``.
-        normalized = self._normalize_response_tokens(list(token_ids))
+        require_1d_array("token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_readonly("token_ids", token_ids)
+        normalized = self._normalize_response_tokens(token_ids)
         prepend_offset = len(normalized) - len(token_ids)
 
         parsed = _parse_kimi_k2_response(
             self._tokenizer,
             normalized,
             stop_ids=stop_ids,
-            think_open_ids=self._think_open_ids,
-            think_close_ids=self._think_close_ids,
             tool_calls_section_begin_id=self._tool_calls_section_begin,
             tool_calls_section_end_id=self._tool_calls_section_end,
             tool_call_begin_id=self._tool_call_begin,
@@ -860,10 +868,18 @@ class KimiK25Renderer:
         )
 
         if prepend_offset:
-            for tc in parsed.tool_calls:
-                if tc.token_span is not None:
-                    start, end = tc.token_span
-                    tc.token_span = (start - prepend_offset, end - prepend_offset)
+            spans = np.array(parsed.tool_call_token_spans, dtype=OFFSETS_DTYPE, copy=True)
+            known = np.all(spans >= 0, axis=1)
+            spans[known] -= prepend_offset
+            if spans.size and np.any(spans[known] < 0):
+                raise ValueError("normalized tool-call spans precede the caller token frame")
+            spans.flags.writeable = False
+            parsed = ParsedResponse(
+                content=parsed.content,
+                reasoning_content=parsed.reasoning_content,
+                tool_calls=parsed.tool_calls,
+                tool_call_token_spans=spans,
+            )
 
         return parsed
 
@@ -1178,7 +1194,7 @@ class KimiK25Renderer:
                 content, msg_idx, emit_special, emit_text, emit_image=emit_image, is_sampled=False, is_content=True
             )
 
-    def _normalize_response_tokens(self, response: list[int]) -> list[int]:
+    def _normalize_response_tokens(self, response: np.ndarray) -> np.ndarray:
         """Restore the synthetic ``<think>`` prefill if the sampler stripped it.
 
         When thinking is enabled the generation prompt ends with a ``<think>``
@@ -1187,29 +1203,34 @@ class KimiK25Renderer:
         start with ``<think>`` (encoded tokens), we prepend the ``<think>``
         tokens so the downstream text-based parser sees a complete block.
         """
-        if not response:
+        require_1d_array("response", response, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_readonly("response", response)
+        if response.size == 0:
             return response
 
         open_ids = self._think_open_ids
         close_ids = self._think_close_ids
 
-        if not open_ids or not close_ids:
+        if open_ids.size == 0 or close_ids.size == 0:
             return response
 
         # Check whether <think> appears anywhere in the response. Checking
         # anywhere (not just the start) avoids false positives when the
         # caller's slicing happens to include earlier scaffolding tokens
         # (e.g. the assistant role tag) before the open tag.
-        contains_open = any(
-            response[j : j + len(open_ids)] == open_ids for j in range(len(response) - len(open_ids) + 1)
+        contains_open = response.size >= open_ids.size and bool(
+            np.any(np.all(np.lib.stride_tricks.sliding_window_view(response, open_ids.size) == open_ids, axis=1))
         )
 
         # Check whether </think> appears anywhere in the response
-        contains_close = any(
-            response[j : j + len(close_ids)] == close_ids for j in range(len(response) - len(close_ids) + 1)
+        contains_close = response.size >= close_ids.size and bool(
+            np.any(np.all(np.lib.stride_tricks.sliding_window_view(response, close_ids.size) == close_ids, axis=1))
         )
 
         if not contains_open and contains_close:
-            return open_ids + response
+            combined = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=open_ids.size + response.size)
+            combined.extend(open_ids)
+            combined.extend(response)
+            return combined.finish()
 
         return response

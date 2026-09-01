@@ -178,7 +178,7 @@ def test_dsml_roundtrip_preserves_string_and_json_argument_types():
     assert call.status == ToolCallParseStatus.OK
     assert call.name == "weather"
     assert call.arguments == {"city": "true", "days": 2, "flags": [True, False]}
-    assert call.token_span is not None
+    assert parsed.tool_call_token_spans[0, 0] < parsed.tool_call_token_spans[0, 1]
 
 
 @pytest.mark.parametrize(
@@ -315,7 +315,7 @@ def test_dsml_parser_requires_reference_encoders_two_newlines(prefix):
     parsed = _renderer().parse_response(encode_token_ids(_tokenizer(), text))
 
     assert parsed.content == text
-    assert parsed.tool_calls == []
+    assert parsed.tool_calls == ()
 
 
 def test_rendered_masks_keep_dsml_sampled_and_tool_wrappers_scaffolded():

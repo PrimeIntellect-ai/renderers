@@ -52,6 +52,7 @@ from renderers.token_arrays import (
     FixedWidthArrayBuilder,
     RenderedTokenBuilder,
     TextSegmentBuilder,
+    TextSegments,
     encode_token_ids,
     owned_offsets_from_array,
     owned_token_ids_from_array,
@@ -377,7 +378,7 @@ class Hy3Renderer:
                 tool_segments.append("\n", is_content=False)
                 tool_segments.append(self._visible_text(msg.get("content")), is_content=True)
                 tool_segments.append("\n", is_content=False)
-                emit_text_segments(tool_segments, i, is_sampled=False)
+                emit_text_segments(tool_segments.finish(), i, is_sampled=False)
                 emit_special(self._tool_response_end, i, is_sampled=False, is_content=False)
                 emit_text("\n", i, is_sampled=False, is_content=False)
                 prev_is_tool = True
@@ -552,7 +553,7 @@ class Hy3Renderer:
         def emit_text(text: str, msg_idx: int = -1, *, is_content: bool = False) -> None:
             builder.emit_text(text, msg_idx, is_content=is_content)
 
-        def emit_text_segments(segments: TextSegmentBuilder, msg_idx: int) -> None:
+        def emit_text_segments(segments: TextSegments, msg_idx: int) -> None:
             builder.emit_text_segments(segments, msg_idx)
 
         # The stream above ends on eos or </tool_responses> — never inside an
@@ -588,7 +589,7 @@ class Hy3Renderer:
                 tool_segments.append("\n", is_content=False)
                 tool_segments.append(content, is_content=True)
                 tool_segments.append("\n", is_content=False)
-                emit_text_segments(tool_segments, i)
+                emit_text_segments(tool_segments.finish(), i)
                 emit_special(self._tool_response_end, i)
                 emit_text("\n", i)
                 prev_is_tool = True

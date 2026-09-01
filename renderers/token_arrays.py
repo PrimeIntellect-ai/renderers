@@ -63,6 +63,28 @@ def empty_array(dtype: np.dtype) -> np.ndarray:
     return value
 
 
+def empty_span_array() -> np.ndarray:
+    value = np.empty((0, 2), dtype=OFFSETS_DTYPE)
+    value.flags.writeable = False
+    return value
+
+
+def require_span_array(name: str, value: object) -> np.ndarray:
+    """Validate packed half-open spans with ``[-1, -1]`` as unknown."""
+    if not isinstance(value, np.ndarray):
+        raise TypeError(f"{name} must be a NumPy array, got {type(value).__name__}")
+    if value.ndim != 2 or value.shape[1:] != (2,):
+        raise ValueError(f"{name} must have shape [items, 2], got {value.shape}")
+    if value.dtype != OFFSETS_DTYPE:
+        raise TypeError(f"{name} must have dtype {OFFSETS_DTYPE.str}, got {value.dtype.str}")
+    if value.size:
+        unknown = np.all(value == -1, axis=1)
+        known = np.all(value >= 0, axis=1) & (value[:, 0] <= value[:, 1])
+        if not np.all(unknown | known):
+            raise ValueError(f"{name} rows must be [-1, -1] or non-negative half-open spans")
+    return value
+
+
 def owned_readonly_copy(name: str, value: object, *, dtype: np.dtype, minimum: int | None = None) -> np.ndarray:
     """Validate then take explicit immutable ownership at a public boundary."""
     source = require_1d_array(name, value, dtype=dtype, minimum=minimum)
@@ -230,6 +252,61 @@ class FixedWidthRangeBuilder:
         return readonly_view(self._buffer[: self._size])
 
 
+class FixedWidthSpanBuilder:
+    """Grow packed half-open spans without numeric tuple/list custody."""
+
+    __slots__ = ("_buffer", "_sealed", "_size")
+
+    def __init__(self, *, initial_capacity: int = 4) -> None:
+        if type(initial_capacity) is not int or initial_capacity < 0:
+            raise TypeError("initial_capacity must be a non-negative integer")
+        self._buffer = np.empty((initial_capacity, 2), dtype=OFFSETS_DTYPE)
+        self._size = 0
+        self._sealed = False
+
+    def __len__(self) -> int:
+        return self._size
+
+    def _reserve(self) -> None:
+        if self._sealed:
+            raise RuntimeError("fixed-width span builder is already sealed")
+        if self._size < self._buffer.shape[0]:
+            return
+        grown = np.empty((max(1, self._size * 2), 2), dtype=OFFSETS_DTYPE)
+        grown[: self._size] = self._buffer[: self._size]
+        self._buffer = grown
+
+    def append(self, start: int = -1, end: int = -1) -> None:
+        upper_bound = np.iinfo(OFFSETS_DTYPE).max
+        if type(start) is not int or type(end) is not int:
+            raise TypeError("span boundaries must be integers")
+        unknown = start == -1 and end == -1
+        if not unknown and not (0 <= start <= end <= upper_bound):
+            raise ValueError("span must be [-1, -1] or a non-negative half-open interval")
+        self._reserve()
+        self._buffer[self._size, 0] = start
+        self._buffer[self._size, 1] = end
+        self._size += 1
+
+    def extend(self, values: np.ndarray) -> None:
+        require_span_array("span builder values", values)
+        if self._sealed:
+            raise RuntimeError("fixed-width span builder is already sealed")
+        count = values.shape[0]
+        required = self._size + count
+        if required > self._buffer.shape[0]:
+            capacity = max(required, 1, self._buffer.shape[0] * 2)
+            grown = np.empty((capacity, 2), dtype=OFFSETS_DTYPE)
+            grown[: self._size] = self._buffer[: self._size]
+            self._buffer = grown
+        self._buffer[self._size : self._size + count] = values
+        self._size += count
+
+    def finish(self) -> np.ndarray:
+        self._sealed = True
+        return readonly_view(self._buffer[: self._size])
+
+
 def finish_range_builders(builders: Mapping[str, FixedWidthRangeBuilder]) -> dict[str, np.ndarray]:
     """Seal a structural modality map without numeric list intermediates."""
     return {modality: builder.finish() for modality, builder in builders.items()}
@@ -357,7 +434,7 @@ class RenderedTokenBuilder:
 
     def emit_text_segments(
         self,
-        segments: TextSegmentBuilder | list[tuple[str, bool]],
+        segments: TextSegments,
         message_index: int = -1,
         *,
         is_sampled: bool = False,
@@ -377,11 +454,7 @@ class RenderedTokenBuilder:
         return attributed.has_content_attribution
 
     def emit_assistant_segments(
-        self,
-        segments: TextSegmentBuilder | list[tuple[str, bool]],
-        message_index: int = -1,
-        *,
-        overlap_is_content: bool = False,
+        self, segments: TextSegments, message_index: int = -1, *, overlap_is_content: bool = False
     ) -> bool:
         """Emit assistant text, sampling exactly the attributable content tokens."""
         from renderers.base import attribute_text_segments

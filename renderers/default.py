@@ -29,7 +29,10 @@ from renderers.token_arrays import (
     TOKEN_IDS_DTYPE,
     FixedWidthArrayBuilder,
     empty_array,
+    empty_span_array,
     owned_token_ids_from_array,
+    require_1d_array,
+    require_readonly,
 )
 
 
@@ -165,13 +168,19 @@ class DefaultRenderer:
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — DefaultRenderer relies on configured tool_parser, schema not consulted here
     ) -> ParsedResponse:
+        require_1d_array("token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_readonly("token_ids", token_ids)
         # 1. Extract tool calls while we still have token ids (most formats
         #    use special-token delimiters, so id-level matching is reliable).
         if self._tool_parser is not None:
-            content_ids, tool_calls = self._tool_parser.extract(token_ids)
+            parsed_tools = self._tool_parser.extract(token_ids)
+            content_ids = parsed_tools.content_ids
+            tool_calls = parsed_tools.tool_calls
+            tool_call_token_spans = parsed_tools.tool_call_token_spans
         else:
             content_ids = token_ids
-            tool_calls = []
+            tool_calls = ()
+            tool_call_token_spans = empty_span_array()
 
         # 2. Decode (keep special tokens so a downstream reasoning parser can
         #    still see things like <think>/</think> when they're tokens).
@@ -205,7 +214,10 @@ class DefaultRenderer:
         text = _strip_special_tokens(self._tokenizer, text)
 
         return ParsedResponse(
-            content=text, reasoning_content=reasoning_content if reasoning_content else None, tool_calls=tool_calls
+            content=text,
+            reasoning_content=reasoning_content if reasoning_content else None,
+            tool_calls=tool_calls,
+            tool_call_token_spans=tool_call_token_spans,
         )
 
     def get_stop_token_ids(self) -> list[int]:

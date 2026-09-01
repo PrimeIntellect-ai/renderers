@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import numpy as np
 
 from renderers.base import ToolCallParseStatus, load_tokenizer
 from renderers.parsers import (
@@ -13,6 +14,7 @@ from renderers.parsers import (
     get_reasoning_parser,
     get_tool_parser,
 )
+from renderers.token_arrays import encode_token_ids
 
 
 def test_registries_nonempty():
@@ -38,14 +40,15 @@ def test_qwen3_tool_parser_roundtrip():
     assert isinstance(parser, Qwen3ToolParser)
 
     completion_text = 'hello\n<tool_call>\n{"name": "search", "arguments": {"q": "rain"}}\n</tool_call>'
-    token_ids = tok.encode(completion_text, add_special_tokens=False)
-    content_ids, tool_calls = parser.extract(list(token_ids))
+    token_ids = encode_token_ids(tok, completion_text)
+    result = parser.extract(token_ids)
+    content_ids, tool_calls = result.content_ids, result.tool_calls
     assert len(tool_calls) == 1
     tc = tool_calls[0]
     assert tc.status == ToolCallParseStatus.OK
     assert tc.name == "search"
     assert tc.arguments == {"q": "rain"}
-    assert tc.token_span is not None and tc.token_span[0] < tc.token_span[1]
+    assert result.tool_call_token_spans[0, 0] < result.tool_call_token_spans[0, 1]
     # content_ids should cover everything up to (but not including) <tool_call>
     content_text = tok.decode(content_ids, skip_special_tokens=False)
     assert "hello" in content_text
@@ -55,21 +58,19 @@ def test_qwen3_tool_parser_roundtrip():
 def test_qwen3_tool_parser_no_tool_call():
     tok = load_tokenizer("Qwen/Qwen3-0.6B")
     parser = get_tool_parser("qwen3", tok)
-    ids = tok.encode("just plain text response", add_special_tokens=False)
-    content_ids, tool_calls = parser.extract(list(ids))
-    assert tool_calls == []
-    assert content_ids == list(ids)
+    ids = encode_token_ids(tok, "just plain text response")
+    result = parser.extract(ids)
+    assert result.tool_calls == ()
+    assert np.array_equal(result.content_ids, ids)
 
 
 def test_qwen3_tool_parser_records_invalid_json():
     """Malformed JSON in a <tool_call> block surfaces as INVALID_JSON, not silently dropped."""
     tok = load_tokenizer("Qwen/Qwen3-0.6B")
     parser = get_tool_parser("qwen3", tok)
-    completion = (
-        'hi\n<tool_call>\n{"name": "f", "arguments": {broken json\n</tool_call>'
-    )
-    ids = tok.encode(completion, add_special_tokens=False)
-    _, tool_calls = parser.extract(list(ids))
+    completion = 'hi\n<tool_call>\n{"name": "f", "arguments": {broken json\n</tool_call>'
+    ids = encode_token_ids(tok, completion)
+    tool_calls = parser.extract(ids).tool_calls
     assert len(tool_calls) == 1
     assert tool_calls[0].status == ToolCallParseStatus.INVALID_JSON
     assert tool_calls[0].raw  # raw block text preserved
@@ -85,8 +86,8 @@ def test_qwen3_tool_parser_parallel_partial_success():
         "<tool_call>\n{broken\n</tool_call>\n"
         '<tool_call>\n{"name": "c", "arguments": {"x": 1}}\n</tool_call>'
     )
-    ids = tok.encode(completion, add_special_tokens=False)
-    _, tool_calls = parser.extract(list(ids))
+    ids = encode_token_ids(tok, completion)
+    tool_calls = parser.extract(ids).tool_calls
     assert [tc.status for tc in tool_calls] == [
         ToolCallParseStatus.OK,
         ToolCallParseStatus.INVALID_JSON,
@@ -117,15 +118,12 @@ def test_default_renderer_uses_parsers():
     from renderers import DefaultRendererConfig, create_renderer
 
     tok = load_tokenizer("Qwen/Qwen3-0.6B")
-    renderer = create_renderer(
-        tok,
-        DefaultRendererConfig(tool_parser="qwen3", reasoning_parser="think"),
-    )
+    renderer = create_renderer(tok, DefaultRendererConfig(tool_parser="qwen3", reasoning_parser="think"))
     assert renderer.supports_tools is True
 
     completion = '<think>think</think>ok\n<tool_call>\n{"name": "f", "arguments": {}}\n</tool_call>'
-    ids = tok.encode(completion, add_special_tokens=False)
-    parsed = renderer.parse_response(list(ids))
+    ids = encode_token_ids(tok, completion)
+    parsed = renderer.parse_response(ids)
     assert parsed.reasoning_content == "think"
     assert parsed.content.startswith("ok")
     assert len(parsed.tool_calls) == 1
@@ -141,8 +139,8 @@ def test_default_renderer_without_parsers_is_backward_compatible():
     renderer = create_renderer(tok, DefaultRendererConfig())
     assert renderer.supports_tools is False
 
-    ids = tok.encode("<think>r</think>a", add_special_tokens=False)
-    parsed = renderer.parse_response(list(ids))
+    ids = encode_token_ids(tok, "<think>r</think>a")
+    parsed = renderer.parse_response(ids)
     assert parsed.reasoning_content == "r"
     assert parsed.content == "a"
-    assert parsed.tool_calls == []
+    assert parsed.tool_calls == ()

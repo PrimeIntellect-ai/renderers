@@ -11,6 +11,7 @@ import numpy as np
 from renderers.token_arrays import (
     _OFFSET_CAPABILITY_UNRESOLVED,
     COUNTS_DTYPE,
+    FixedWidthSpanBuilder,
     LOGPROBS_DTYPE,
     MASK_DTYPE,
     MESSAGE_INDICES_DTYPE,
@@ -19,8 +20,10 @@ from renderers.token_arrays import (
     TOKEN_IDS_DTYPE,
     TRAINING_TOKEN_IDS_DTYPE,
     TextSegmentBuilder,
+    TextSegments,
     encode_token_ids,
     empty_array,
+    empty_span_array,
     owned_offsets_from_array,
     owned_readonly_copy,
     owned_token_ids_from_array,
@@ -28,6 +31,7 @@ from renderers.token_arrays import (
     require_1d_array,
     require_range_array,
     require_readonly,
+    require_span_array,
 )
 
 if TYPE_CHECKING:
@@ -631,13 +635,6 @@ class ParsedToolCall:
     response, so ``[OK, INVALID_JSON, OK]`` is a faithful record of "the
     model emitted three parallel calls; the second was broken."
 
-    ``token_span`` is a half-open ``[start, end)`` slice into the
-    completion's stripped token id stream (i.e. ``token_ids`` after
-    ``_strip_stop_tokens``); some text-based parsers can't cheaply
-    recover token offsets and leave it ``None``. Useful for trainer-side
-    selective loss masking: zero the mask over the spans of non-OK
-    entries to avoid reinforcing malformed structures.
-
     ``raw`` is the decoded text of the block as the model emitted it
     (before any JSON normalization). Always populated — for failed
     attempts it's the only way to see what actually went wrong.
@@ -646,26 +643,65 @@ class ParsedToolCall:
     raw: str
     name: str | None = None
     arguments: dict[str, Any] | str | None = None
-    token_span: tuple[int, int] | None = None
     status: ToolCallParseStatus = ToolCallParseStatus.OK
     id: str | None = None  # native tool-call id when the format carries one (Kimi K2)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ParsedResponse:
     """Result of parsing completion tokens back into a structured message.
 
-    ``tool_calls`` is a list of every parse attempt — successful and
+    ``tool_calls`` is an immutable tuple of every parse attempt — successful and
     malformed alike. Filter with ``[tc for tc in r.tool_calls if
     tc.status == ToolCallParseStatus.OK]`` to get only the calls that
-    came out clean. Empty list = the model didn't emit any tool calls
-    (different from "tried and failed entirely", which produces a list
+    came out clean. An empty tuple means the model didn't emit any tool calls
+    (different from "tried and failed entirely", which produces a tuple
     with non-OK entries).
     """
 
     content: str
     reasoning_content: str | None = None
-    tool_calls: list[ParsedToolCall] = field(default_factory=list)
+    tool_calls: tuple[ParsedToolCall, ...] = ()
+    tool_call_token_spans: np.ndarray = field(default_factory=empty_span_array)
+
+    def __post_init__(self) -> None:
+        require_span_array("tool_call_token_spans", self.tool_call_token_spans)
+        require_readonly("tool_call_token_spans", self.tool_call_token_spans)
+        if type(self.tool_calls) is not tuple:
+            raise TypeError("tool_calls must be an immutable tuple")
+        if self.tool_call_token_spans.shape[0] != len(self.tool_calls):
+            raise ValueError("tool_call_token_spans must align one-to-one with tool_calls")
+
+
+class ParsedToolCallBuilder:
+    """Keep semantic calls aligned with one packed fixed-width span array."""
+
+    __slots__ = ("_calls", "_spans")
+
+    def __init__(self) -> None:
+        self._calls: list[ParsedToolCall] = []
+        self._spans = FixedWidthSpanBuilder()
+
+    def __len__(self) -> int:
+        return len(self._calls)
+
+    def append(self, call: ParsedToolCall, start: int = -1, end: int = -1) -> None:
+        if not isinstance(call, ParsedToolCall):
+            raise TypeError(f"call must be ParsedToolCall, got {type(call).__name__}")
+        self._spans.append(start, end)
+        self._calls.append(call)
+
+    def extend(self, calls: tuple[ParsedToolCall, ...], spans: np.ndarray) -> None:
+        if type(calls) is not tuple or not all(isinstance(call, ParsedToolCall) for call in calls):
+            raise TypeError("calls must be an immutable tuple of ParsedToolCall values")
+        require_span_array("tool_call_token_spans", spans)
+        if len(calls) != spans.shape[0]:
+            raise ValueError("tool_call_token_spans must align one-to-one with tool_calls")
+        self._spans.extend(spans)
+        self._calls.extend(calls)
+
+    def finish(self) -> tuple[tuple[ParsedToolCall, ...], np.ndarray]:
+        return tuple(self._calls), self._spans.finish()
 
 
 @dataclass
@@ -1918,7 +1954,7 @@ def _content_mask_or_empty(tokenizer: Tokenizer, content_mask: np.ndarray) -> np
 
 def attribute_text_segments(
     tokenizer: Tokenizer,
-    segments: "TextSegmentBuilder | list[tuple[str, bool]]",
+    segments: TextSegments,
     *,
     overlap_is_content: bool = False,
     _offset_tokenizer: OffsetTokenizer | None | object = _OFFSET_CAPABILITY_UNRESOLVED,
@@ -1926,9 +1962,8 @@ def attribute_text_segments(
     """Tokenize concatenated segments as a single BPE pass and return
     ``(token_id, is_content)`` pairs.
 
-    ``segments`` is a list of ``(text, is_content)`` chunks the renderer
-    wants to emit contiguously — for example ``[("user\\n", False),
-    (content, True)]`` for a user message. Concatenation is done before
+    ``segments`` owns structural text chunks aligned with one read-only
+    fixed-width content mask. Concatenation is done before
     encoding to preserve BPE merges across the wrap/body boundary; the
     resulting tokens are then attributed back to their source segment
     via the fast tokenizer's ``offset_mapping``.
@@ -1955,18 +1990,15 @@ def attribute_text_segments(
     basic :class:`Tokenizer`, the joined text is still encoded in one pass so
     token IDs remain identical, but the bools are placeholders and
     ``has_content_attribution`` is false. Renderers propagate that state as an
-    empty ``RenderedTokens.is_content`` list rather than exposing a partial or
+    empty ``RenderedTokens.is_content`` array rather than exposing a partial or
     inaccurate mask.
 
     Empty input or empty joined text returns empty fixed-width arrays.
     """
-    if isinstance(segments, TextSegmentBuilder):
-        fixed_segments = segments.finish()
-        texts = fixed_segments.texts
-        segment_content = fixed_segments.is_content
-    else:
-        texts = tuple(text for text, _ in segments)
-        segment_content = np.fromiter((is_content for _, is_content in segments), dtype=MASK_DTYPE, count=len(segments))
+    if not isinstance(segments, TextSegments):
+        raise TypeError(f"segments must be TextSegments, got {type(segments).__name__}")
+    texts = segments.texts
+    segment_content = segments.is_content
     if not texts:
         return AttributedTextSegments(
             empty_array(TOKEN_IDS_DTYPE), empty_array(MASK_DTYPE), has_content_attribution=True

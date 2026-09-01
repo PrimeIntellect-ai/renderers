@@ -81,6 +81,7 @@ from renderers.token_arrays import (
     FixedWidthArrayBuilder,
     RenderedTokenBuilder,
     TextSegmentBuilder,
+    TextSegments,
     encode_token_ids,
 )
 
@@ -253,14 +254,14 @@ class LagunaXS2Renderer:
                     if content:
                         sys_segs.append(content, is_content=True)
                     sys_segs.append("\n</system>\n", is_content=False)
-                    emit_text_segments(sys_segs, i, is_sampled=False)
+                    emit_text_segments(sys_segs.finish(), i, is_sampled=False)
                 case "user":
                     user_segs = TextSegmentBuilder()
                     user_segs.append("<user>\n", is_content=False)
                     if content:
                         user_segs.append(content, is_content=True)
                     user_segs.append("\n</user>\n", is_content=False)
-                    emit_text_segments(user_segs, i, is_sampled=False)
+                    emit_text_segments(user_segs.finish(), i, is_sampled=False)
                 case "assistant":
                     self._render_assistant(msg, i, content, emit_special=emit_special, emit_text=emit_text)
                 case "tool":
@@ -269,7 +270,7 @@ class LagunaXS2Renderer:
                     if content:
                         tool_segs.append(content, is_content=True)
                     tool_segs.append("\n</tool_response>\n", is_content=False)
-                    emit_text_segments(tool_segs, i, is_sampled=False)
+                    emit_text_segments(tool_segs.finish(), i, is_sampled=False)
 
         # ── Generation prompt ─────────────────────────────────────────
         if add_generation_prompt:
@@ -356,21 +357,21 @@ class LagunaXS2Renderer:
                 if content:
                     segs.append(content, is_content=True)
                 segs.append("\n</user>\n", is_content=False)
-                emit_text_segments(segs, i)
+                emit_text_segments(segs.finish(), i)
             elif role == "system":
                 segs = TextSegmentBuilder()
                 segs.append("<system>\n", is_content=False)
                 if content:
                     segs.append(content, is_content=True)
                 segs.append("\n</system>\n", is_content=False)
-                emit_text_segments(segs, i)
+                emit_text_segments(segs.finish(), i)
             elif role == "tool":
                 segs = TextSegmentBuilder()
                 segs.append("<tool_response>\n", is_content=False)
                 if content:
                     segs.append(content, is_content=True)
                 segs.append("\n</tool_response>\n", is_content=False)
-                emit_text_segments(segs, i)
+                emit_text_segments(segs.finish(), i)
             else:
                 return None
 
@@ -571,7 +572,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         emit_special = builder.emit_special
         emit_text = builder.emit_text
 
-        def emit_text_segments(segments: TextSegmentBuilder, msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_text_segments(segments: TextSegments, msg_idx: int, *, is_sampled: bool) -> None:
             # Role tags hug the body with no whitespace, so a BPE merge
             # can pull wrap bytes and body bytes into one token —
             # overlap attribution keeps every body byte in the content
@@ -623,7 +624,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             full_header += "</system>\n"
             header_segs.append("</system>\n", is_content=False)
             attributed = attribute_text_segments(
-                self._tokenizer, header_segs, overlap_is_content=True, _offset_tokenizer=self._offset_tokenizer
+                self._tokenizer, header_segs.finish(), overlap_is_content=True, _offset_tokenizer=self._offset_tokenizer
             )
             if attributed.has_content_attribution:
                 message_indices = np.where(attributed.is_content, 0, -1).astype(MESSAGE_INDICES_DTYPE)
@@ -660,14 +661,14 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
                     if content:
                         sys_segs.append(content, is_content=True)
                     sys_segs.append("</system>\n", is_content=False)
-                    emit_text_segments(sys_segs, i, is_sampled=False)
+                    emit_text_segments(sys_segs.finish(), i, is_sampled=False)
                 case "user":
                     user_segs = TextSegmentBuilder()
                     user_segs.append("<user>", is_content=False)
                     if content:
                         user_segs.append(content, is_content=True)
                     user_segs.append("</user>\n", is_content=False)
-                    emit_text_segments(user_segs, i, is_sampled=False)
+                    emit_text_segments(user_segs.finish(), i, is_sampled=False)
                 case "assistant":
                     self._render_assistant(msg, i, content, emit_special=emit_special, emit_text=emit_text)
                 case "tool":
@@ -676,7 +677,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
                     if content:
                         tool_segs.append(content, is_content=True)
                     tool_segs.append("</tool_response>\n", is_content=False)
-                    emit_text_segments(tool_segs, i, is_sampled=False)
+                    emit_text_segments(tool_segs.finish(), i, is_sampled=False)
 
         # ── Generation prompt (no newline after <assistant>) ──────────
         if add_generation_prompt:
@@ -739,7 +740,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         builder.prepend_prior(previous_ids)
         emit_special = builder.emit_special
 
-        def emit_text_segments(segments: TextSegmentBuilder, msg_idx: int = -1, *, is_sampled: bool = False) -> None:
+        def emit_text_segments(segments: TextSegments, msg_idx: int = -1, *, is_sampled: bool = False) -> None:
             builder.emit_text_segments(segments, msg_idx, is_sampled=is_sampled, overlap_is_content=True)
 
         _OPEN = {"user": "<user>", "system": "<system>", "tool": "<tool_response>"}
@@ -755,7 +756,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             if content:
                 segs.append(content, is_content=True)
             segs.append(_CLOSE[role], is_content=False)
-            emit_text_segments(segs, i)
+            emit_text_segments(segs.finish(), i)
 
         emit_special(self._assistant, -1)
         if self.config.enable_thinking:

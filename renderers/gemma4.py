@@ -31,6 +31,7 @@ from renderers.base import (
     MultiModalData,
     ParsedResponse,
     ParsedToolCall,
+    ParsedToolCallBuilder,
     RenderedTokens,
     ToolCallParseStatus,
     ToolSpec,
@@ -45,12 +46,16 @@ from renderers.base import (
 )
 from renderers.configs import Gemma4RendererConfig
 from renderers.token_arrays import (
+    TOKEN_IDS_DTYPE,
+    FixedWidthArrayBuilder,
     FixedWidthRangeBuilder,
     RenderedTokenBuilder,
     TextSegmentBuilder,
     encode_token_ids,
     finish_range_builders,
     merge_range_maps,
+    require_1d_array,
+    require_readonly,
 )
 from renderers.qwen3_vl import _image_hash, _is_image_part, _is_video_part, _load_pil_image
 
@@ -816,19 +821,17 @@ class Gemma4Renderer:
             return ""
         return self._tokenizer.decode(token_ids, skip_special_tokens=False)
 
-    def _parse_tool_call(self, raw: str, span: tuple[int, int], tools: list[ToolSpec] | None) -> ParsedToolCall:
+    def _parse_tool_call(self, raw: str, tools: list[ToolSpec] | None) -> ParsedToolCall:
         if not raw.startswith("call:") or "{" not in raw or not raw.endswith("}"):
-            return ParsedToolCall(raw=raw, token_span=span, status=ToolCallParseStatus.MALFORMED_STRUCTURE)
+            return ParsedToolCall(raw=raw, status=ToolCallParseStatus.MALFORMED_STRUCTURE)
         head, _, argument_body = raw[5:].partition("{")
         name = head.strip()
         try:
             arguments = _ArgumentParser("{" + argument_body).parse()
         except ValueError:
-            return ParsedToolCall(raw=raw, name=name or None, token_span=span, status=ToolCallParseStatus.INVALID_JSON)
+            return ParsedToolCall(raw=raw, name=name or None, status=ToolCallParseStatus.INVALID_JSON)
         if not name:
-            return ParsedToolCall(
-                raw=raw, arguments=arguments, token_span=span, status=ToolCallParseStatus.MISSING_NAME
-            )
+            return ParsedToolCall(raw=raw, arguments=arguments, status=ToolCallParseStatus.MISSING_NAME)
         declared = None
         if tools:
             declared = {str(_unwrap_tool(tool).get("name")) for tool in tools if _unwrap_tool(tool).get("name")}
@@ -837,7 +840,7 @@ class Gemma4Renderer:
             if declared is not None and name not in declared
             else ToolCallParseStatus.OK
         )
-        return ParsedToolCall(raw=raw, name=name, arguments=arguments, token_span=span, status=status)
+        return ParsedToolCall(raw=raw, name=name, arguments=arguments, status=status)
 
     def parse_response(self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None) -> ParsedResponse:
         """Parse a Gemma 4 completion without access to its prompt context.
@@ -848,31 +851,36 @@ class Gemma4Renderer:
         reasoning. This is necessarily heuristic: without the prompt, a
         malformed first-turn completion with a stray closer is ambiguous.
         """
-        stop_ids = {self._turn_end, self._tool_response_start, self._eos}
-        end = len(token_ids)
-        for i, token_id in enumerate(token_ids):
-            if token_id in stop_ids:
-                end = i
-                break
-        ids = list(token_ids[:end])
+        require_1d_array("token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_readonly("token_ids", token_ids)
+        stop_ids = np.fromiter((self._turn_end, self._tool_response_start, self._eos), dtype=TOKEN_IDS_DTYPE, count=3)
+        stop_positions = np.flatnonzero(np.isin(token_ids, stop_ids))
+        end = int(stop_positions[0]) if stop_positions.size else token_ids.size
+        ids = token_ids[:end]
 
-        prefix = [self._turn_start, *self._model_prefix]
+        prefix_size = 1 + self._model_prefix.size
         base_offset = 0
-        if ids[: len(prefix)] == prefix:
-            ids = ids[len(prefix) :]
-            base_offset = len(prefix)
+        if (
+            ids.size >= prefix_size
+            and ids[0] == self._turn_start
+            and np.array_equal(ids[1:prefix_size], self._model_prefix)
+        ):
+            ids = ids[prefix_size:]
+            base_offset = prefix_size
 
         reasoning: str | None = None
-        content_ids: list[int] = []
+        content_ids = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE)
         cursor = 0
-        if ids and ids[0] == self._channel_start:
-            channel_end = next((i for i in range(1, len(ids)) if ids[i] == self._channel_end), -1)
+        if ids.size and ids[0] == self._channel_start:
+            positions = np.flatnonzero(ids[1:] == self._channel_end)
+            channel_end = 1 + int(positions[0]) if positions.size else -1
             thought_start = 1
-            if ids[thought_start : thought_start + len(self._thought_prefix)] == (self._thought_prefix):
-                thought_start += len(self._thought_prefix)
+            thought_end = thought_start + self._thought_prefix.size
+            if np.array_equal(ids[thought_start:thought_end], self._thought_prefix):
+                thought_start = thought_end
             if channel_end == -1:
                 reasoning = self._decode(ids[thought_start:]).strip()
-                return ParsedResponse(content="", reasoning_content=reasoning, tool_calls=[])
+                return ParsedResponse(content="", reasoning_content=reasoning)
             reasoning = self._decode(ids[thought_start:channel_end]).strip()
             cursor = channel_end + 1
         elif self.config.enable_thinking:
@@ -881,37 +889,40 @@ class Gemma4Renderer:
             # starts with the thought body and contains only the closing
             # ``<channel|>`` marker. A lone closer distinguishes that continuation
             # from a normal thinking completion, which samples its own opener.
-            channel_end = next((i for i, token_id in enumerate(ids) if token_id == self._channel_end), -1)
+            positions = np.flatnonzero(ids == self._channel_end)
+            channel_end = int(positions[0]) if positions.size else -1
             if channel_end != -1:
                 reasoning = self._decode(ids[:channel_end]).strip()
                 cursor = channel_end + 1
 
-        tool_calls: list[ParsedToolCall] = []
+        tool_calls = ParsedToolCallBuilder()
         while cursor < len(ids):
-            try:
-                start = ids.index(self._tool_call_start, cursor)
-            except ValueError:
+            positions = np.flatnonzero(ids[cursor:] == self._tool_call_start)
+            if positions.size == 0:
                 content_ids.extend(ids[cursor:])
                 break
+            start = cursor + int(positions[0])
             content_ids.extend(ids[cursor:start])
-            try:
-                call_end = ids.index(self._tool_call_end, start + 1)
-            except ValueError:
+            end_positions = np.flatnonzero(ids[start + 1 :] == self._tool_call_end)
+            if end_positions.size == 0:
                 raw = self._decode(ids[start + 1 :]).strip()
                 tool_calls.append(
-                    ParsedToolCall(
-                        raw=raw,
-                        token_span=(base_offset + start, base_offset + len(ids)),
-                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
-                    )
+                    ParsedToolCall(raw=raw, status=ToolCallParseStatus.UNCLOSED_BLOCK),
+                    base_offset + start,
+                    base_offset + len(ids),
                 )
                 break
+            call_end = start + 1 + int(end_positions[0])
             raw = self._decode(ids[start + 1 : call_end]).strip()
-            tool_calls.append(self._parse_tool_call(raw, (base_offset + start, base_offset + call_end + 1), tools))
+            tool_calls.append(self._parse_tool_call(raw, tools), base_offset + start, base_offset + call_end + 1)
             cursor = call_end + 1
 
+        calls, spans = tool_calls.finish()
         return ParsedResponse(
-            content=self._decode(content_ids).strip(), reasoning_content=reasoning, tool_calls=tool_calls
+            content=self._decode(content_ids.finish()).strip(),
+            reasoning_content=reasoning,
+            tool_calls=calls,
+            tool_call_token_spans=spans,
         )
 
     def get_stop_token_ids(self) -> list[int]:

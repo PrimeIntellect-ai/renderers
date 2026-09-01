@@ -114,3 +114,20 @@ def test_non_canonical_structured_shapes_are_rejected(message, match):
             supports_reasoning_content=True,
             renderer_name="TestRenderer",
         )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        ["<think>legacy</think>answer"],
+        [{"text": "<think>legacy</think>answer"}],
+        [{"type": "input_text", "text": "<think>legacy</think>answer"}],
+    ],
+)
+def test_inline_markup_is_rejected_in_every_text_list_shape(content):
+    with pytest.raises(ValueError, match="normalize legacy.*reasoning_content"):
+        validate_canonical_messages(
+            [{"role": "assistant", "content": content}],
+            supports_reasoning_content=True,
+            renderer_name="TestRenderer",
+        )

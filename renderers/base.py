@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 import logging
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -120,7 +120,7 @@ def validate_canonical_messages(
     *,
     supports_reasoning_content: bool,
     renderer_name: str,
-    allow_inline_reasoning_markup: bool = False,
+    allow_inline_reasoning_markup: bool | Collection[int] = False,
 ) -> None:
     """Validate the canonical message boundary before rendering.
 
@@ -131,7 +131,8 @@ def validate_canonical_messages(
     discarding it.
 
     ``allow_inline_reasoning_markup`` is reserved for explicit raw native-wire
-    passthrough modes. It must not be used to accept legacy dataset records.
+    passthrough modes. Pass a collection of message indices when only specific
+    messages are raw. It must not be used to accept legacy dataset records.
     """
     for message_index, message in enumerate(messages):
         if message.get("role") != "assistant":
@@ -163,6 +164,9 @@ def validate_canonical_messages(
             text_fragments.append(content)
         elif isinstance(content, list):
             for part in content:
+                if isinstance(part, str):
+                    text_fragments.append(part)
+                    continue
                 if not isinstance(part, Mapping):
                     continue
                 if part.get("type") == "thinking":
@@ -171,11 +175,16 @@ def validate_canonical_messages(
                         "uses a non-canonical 'thinking' content part; normalize "
                         "it to 'reasoning_content' before rendering"
                     )
+                part_type = part.get("type")
                 text = part.get("text")
-                if part.get("type") == "text" and isinstance(text, str):
+                if part_type in (None, "text", "input_text") and isinstance(text, str):
                     text_fragments.append(text)
 
-        if not allow_inline_reasoning_markup and any(
+        if isinstance(allow_inline_reasoning_markup, bool):
+            inline_markup_allowed = allow_inline_reasoning_markup
+        else:
+            inline_markup_allowed = message_index in allow_inline_reasoning_markup
+        if not inline_markup_allowed and any(
             "<think>" in fragment or "</think>" in fragment
             for fragment in text_fragments
         ):

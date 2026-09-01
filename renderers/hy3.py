@@ -306,6 +306,14 @@ class Hy3Renderer:
             messages,
             supports_reasoning_content=self.supports_reasoning_content,
             renderer_name=type(self).__name__,
+            allow_inline_reasoning_markup=(
+                {len(messages) - 1}
+                if self._raw_last_assistant
+                and messages
+                and messages[-1].get("role") == "assistant"
+                and not messages[-1].get("tool_calls")
+                else False
+            ),
         )
         if (
             self._raw_last_assistant

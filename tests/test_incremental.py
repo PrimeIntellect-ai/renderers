@@ -89,9 +89,7 @@ def test_trim_to_turn_close_returns_none_on_truncation_without_synth():
 
 def test_trim_to_turn_close_accepts_multiple_close_tokens():
     # Multiple close tokens: pick the LAST one that appears in completion.
-    result = trim_to_turn_close(
-        _tokens("1"), _tokens("3 50 4 99 30"), {50, 99}
-    )
+    result = trim_to_turn_close(_tokens("1"), _tokens("3 50 4 99 30"), {50, 99})
     assert np.array_equal(result, _tokens("1 3 50 4 99"))
 
 

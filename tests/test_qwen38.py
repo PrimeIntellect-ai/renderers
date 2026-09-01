@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import numpy as np
 import pytest
 from pydantic import TypeAdapter
 
@@ -153,7 +154,7 @@ def test_qwen38_text_and_tool_parity(config_kwargs, qwen38_model):
             **config_kwargs,
             **render_kwargs,
         )
-        assert renderer.render_ids(messages, **render_kwargs) == expected
+        assert np.array_equal(renderer.render_ids(messages, **render_kwargs), expected)
 
 
 @pytest.mark.parametrize("qwen38_model", QWEN38_MODELS)
@@ -167,7 +168,7 @@ def test_qwen38_keeps_inline_think_markup_in_visible_content(qwen38_model):
         },
     ]
 
-    assert renderer.render_ids(messages) == _expected(tokenizer, messages)
+    assert np.array_equal(renderer.render_ids(messages), _expected(tokenizer, messages))
 
 
 @pytest.mark.parametrize("qwen38_model", QWEN38_MODELS)

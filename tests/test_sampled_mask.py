@@ -21,7 +21,10 @@ import numpy as np
 def test_sampled_mask_length_or_empty(model_name, renderer):
     """``sampled_mask`` is either empty (opt-out) or matches token_ids
     length exactly. No partial fills."""
-    msgs = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]
+    msgs = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
     rendered = renderer.render(msgs)
     n_tokens = len(rendered.token_ids)
     n_mask = len(rendered.sampled_mask)
@@ -46,7 +49,9 @@ def test_sampled_mask_excludes_user_and_system(model_name, renderer):
 
     non_assistant = (rendered.message_indices == 0) | (rendered.message_indices == 1)
     bad = np.flatnonzero(non_assistant & rendered.sampled_mask)
-    assert bad.size == 0, f"{model_name}: non-assistant tokens marked is_sampled=True at positions {bad[:8]}"
+    assert bad.size == 0, (
+        f"{model_name}: non-assistant tokens marked is_sampled=True at positions {bad[:8]}"
+    )
 
 
 def test_sampled_mask_excludes_generation_prompt(model_name, renderer):
@@ -59,7 +64,9 @@ def test_sampled_mask_excludes_generation_prompt(model_name, renderer):
         return
 
     bad = np.flatnonzero((rendered.message_indices == -1) & rendered.sampled_mask)
-    assert bad.size == 0, f"{model_name}: generation-prompt tokens marked is_sampled=True at positions {bad[:8]}"
+    assert bad.size == 0, (
+        f"{model_name}: generation-prompt tokens marked is_sampled=True at positions {bad[:8]}"
+    )
 
 
 def test_sampled_mask_assistant_role_tag_excluded(model_name, renderer):
@@ -69,13 +76,18 @@ def test_sampled_mask_assistant_role_tag_excluded(model_name, renderer):
     never samples it. Asserts that the *first* token attributed to an
     assistant message is is_sampled=False; the last token (turn-close
     signal) should be is_sampled=True."""
-    msgs = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello world!"}]
+    msgs = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello world!"},
+    ]
     rendered = renderer.render(msgs)
     if rendered.sampled_mask.size == 0:
         return
 
     assistant_positions = np.flatnonzero(rendered.message_indices == 1)
-    assert assistant_positions.size > 0, f"{model_name}: no tokens attributed to assistant message"
+    assert assistant_positions.size > 0, (
+        f"{model_name}: no tokens attributed to assistant message"
+    )
     first_k = int(assistant_positions[0])
     assert not rendered.sampled_mask[first_k], (
         f"{model_name}: first assistant-attributed token at k={first_k} "

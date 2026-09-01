@@ -73,9 +73,7 @@ def _processor_token_ids(output) -> np.ndarray:
 
 def _completion_with_close(tokenizer, text: str, close_id: int) -> np.ndarray:
     content = encode_token_ids(tokenizer, text)
-    builder = FixedWidthArrayBuilder(
-        TOKEN_IDS_DTYPE, initial_capacity=content.size + 1
-    )
+    builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=content.size + 1)
     builder.extend(content)
     builder.append(close_id)
     return builder.finish()
@@ -283,9 +281,7 @@ def _inkling_audio_processor_input_ids(processor, messages, add_gp):
                 if key in item:
                     audios.append(item[key])
                     break
-    return _processor_token_ids(
-        processor(audio=audios, text=text, return_tensors="pt")
-    )
+    return _processor_token_ids(processor(audio=audios, text=text, return_tensors="pt"))
 
 
 def _kimi_processor_input_ids(processor, messages, add_gp):
@@ -818,15 +814,13 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     # per-modality lists, so the carried-forward item doesn't grow the
     # caller's previous_multi_modal_data in place.
     current_counts = np.empty(3, dtype=OFFSETS_DTYPE)
-    current_counts[0] = len(
-        prior_mm.mm_placeholders.get(modality, empty_span_array())
-    )
+    current_counts[0] = len(prior_mm.mm_placeholders.get(modality, empty_span_array()))
     current_counts[1] = len(prior_mm.mm_items.get(modality, []))
     current_counts[2] = len(prior_mm.mm_hashes.get(modality, []))
     current_counts.flags.writeable = False
-    assert np.array_equal(current_counts, prior_counts) and np.all(
-        prior_counts == 1
-    ), f"{mm_model_name} / {modality}: bridge mutated previous_multi_modal_data"
+    assert np.array_equal(current_counts, prior_counts) and np.all(prior_counts == 1), (
+        f"{mm_model_name} / {modality}: bridge mutated previous_multi_modal_data"
+    )
 
     # (3) Extension contains the new turn's pad run, and its
     # placeholder offset lands inside the extension region.
@@ -865,9 +859,7 @@ def test_inkling_bridge_does_not_mutate_prior_mm_data(tiny_image):
     assert prior is not None and len(prior.mm_placeholders["image"]) == 1
 
     close_id = renderer.get_stop_token_ids()[0]
-    completion_ids = _completion_with_close(
-        processor.tokenizer, "Saw it.", close_id
-    )
+    completion_ids = _completion_with_close(processor.tokenizer, "Saw it.", close_id)
     new = [
         {
             "role": "user",

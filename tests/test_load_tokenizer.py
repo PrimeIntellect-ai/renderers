@@ -29,7 +29,11 @@ def test_trusted_revisions_only_kimi_family():
     Python at ``from_pretrained`` time. Adding a new entry here means
     the renderers package is opting into arbitrary-code execution for
     that model — should require deliberate review."""
-    assert set(TRUSTED_REVISIONS) == {"moonshotai/Kimi-K2-Instruct", "moonshotai/Kimi-K2.5", "moonshotai/Kimi-K2.6"}
+    assert set(TRUSTED_REVISIONS) == {
+        "moonshotai/Kimi-K2-Instruct",
+        "moonshotai/Kimi-K2.5",
+        "moonshotai/Kimi-K2.6",
+    }
 
 
 def test_trusted_revisions_are_full_shas():
@@ -65,7 +69,10 @@ def test_kimi_loads_with_pinned_revision(mock_from_pretrained):
     load_tokenizer("moonshotai/Kimi-K2.5")
     args, kwargs = mock_from_pretrained.call_args
     assert args == ("moonshotai/Kimi-K2.5",)
-    assert kwargs == {"trust_remote_code": True, "revision": TRUSTED_REVISIONS["moonshotai/Kimi-K2.5"]}
+    assert kwargs == {
+        "trust_remote_code": True,
+        "revision": TRUSTED_REVISIONS["moonshotai/Kimi-K2.5"],
+    }
 
 
 @patch("transformers.AutoTokenizer.from_pretrained")
@@ -102,7 +109,9 @@ def test_unknown_path_falls_through_to_no_remote_code(mock_from_pretrained):
         load_tokenizer(name)
         args, kwargs = mock_from_pretrained.call_args
         assert args == (name,)
-        assert kwargs == {"trust_remote_code": False}, f"{name}: unlisted path leaked trust_remote_code=True"
+        assert kwargs == {"trust_remote_code": False}, (
+            f"{name}: unlisted path leaked trust_remote_code=True"
+        )
 
 
 def test_tokenizer_source_overrides_are_exact_llama_mirrors():
@@ -123,7 +132,14 @@ def test_offsetless_byo_preserves_ids_without_content_attribution():
         def encode(self, *args, **kwargs):
             raise AssertionError("legacy list-producing encode must not be called")
 
-        def __call__(self, text, *, add_special_tokens, return_tensors, return_offsets_mapping=False):
+        def __call__(
+            self,
+            text,
+            *,
+            add_special_tokens,
+            return_tensors,
+            return_offsets_mapping=False,
+        ):
             assert add_special_tokens is False
             assert return_tensors == "np"
             if return_offsets_mapping:
@@ -140,7 +156,9 @@ def test_offsetless_byo_preserves_ids_without_content_attribution():
     segments.append("hello", is_content=True)
     attributed = base.attribute_text_segments(tokenizer, segments.finish())
 
-    assert np.array_equal(attributed.token_ids, np.fromiter((10,), dtype=TOKEN_IDS_DTYPE, count=1))
+    assert np.array_equal(
+        attributed.token_ids, np.fromiter((10,), dtype=TOKEN_IDS_DTYPE, count=1)
+    )
     assert attributed.is_content.shape == (1,)
     assert not np.any(attributed.is_content)
     assert not attributed.is_content.flags.writeable

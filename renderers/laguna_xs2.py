@@ -134,12 +134,18 @@ class LagunaXS2Renderer:
         self,
         tokenizer: Tokenizer,
         config: (
-            LagunaXS2RendererConfig | LagunaM1RendererConfig | LagunaXS21RendererConfig | LagunaS21RendererConfig | None
+            LagunaXS2RendererConfig
+            | LagunaM1RendererConfig
+            | LagunaXS21RendererConfig
+            | LagunaS21RendererConfig
+            | None
         ) = None,
     ):
         self._tokenizer = tokenizer
         self.config = config or LagunaXS2RendererConfig()
-        self.effective_thinking_retention = resolve_thinking_retention(self.config, "all")
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config, "all"
+        )
         self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         # Both templates bake in the same default Poolside system prompt;
         # an empty caller-supplied system message opts out of the
@@ -190,12 +196,18 @@ class LagunaXS2Renderer:
         return "".join(parts)
 
     def render(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         emit_special = builder.emit_special
         emit_text = builder.emit_text
         emit_text_segments = builder.emit_text_segments
@@ -224,12 +236,21 @@ class LagunaXS2Renderer:
                 # If the caller provided system content, it's body bytes;
                 # otherwise this is the default system prompt (scaffold).
                 sys_is_content = caller_has_system
-                emit_text(system_content.rstrip(), system_msg_idx, is_sampled=False, is_content=sys_is_content)
+                emit_text(
+                    system_content.rstrip(),
+                    system_msg_idx,
+                    is_sampled=False,
+                    is_content=sys_is_content,
+                )
             if tools:
                 tool_text = _TOOLS_HEADER
                 for tool in tools:
                     tool_text += json.dumps(tool, ensure_ascii=False) + "\n"
-                tool_text += _TOOLS_FOOTER_THINKING if self.config.enable_thinking else _TOOLS_FOOTER_NO_THINKING
+                tool_text += (
+                    _TOOLS_FOOTER_THINKING
+                    if self.config.enable_thinking
+                    else _TOOLS_FOOTER_NO_THINKING
+                )
                 if not has_sys_content:
                     # No system body: ``<system>\n`` runs straight into the
                     # tools header's ``\n\n`` — encode them together so BPE
@@ -263,7 +284,9 @@ class LagunaXS2Renderer:
                     user_segs.append("\n</user>\n", is_content=False)
                     emit_text_segments(user_segs.finish(), i, is_sampled=False)
                 case "assistant":
-                    self._render_assistant(msg, i, content, emit_special=emit_special, emit_text=emit_text)
+                    self._render_assistant(
+                        msg, i, content, emit_special=emit_special, emit_text=emit_text
+                    )
                 case "tool":
                     tool_segs = TextSegmentBuilder()
                     tool_segs.append("<tool_response>\n", is_content=False)
@@ -288,11 +311,19 @@ class LagunaXS2Renderer:
         )
 
     def render_ids(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> np.ndarray:
-        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
+        return self.render(
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
+        ).token_ids
 
-    def parse_response(self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None) -> ParsedResponse:
+    def parse_response(
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
+    ) -> ParsedResponse:
         return parse_laguna_xs2(
             self._tokenizer,
             token_ids,
@@ -315,9 +346,15 @@ class LagunaXS2Renderer:
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
-        if previous_prompt_ids.size == 0 or not new_messages or reject_assistant_in_extension(new_messages):
+        if (
+            previous_prompt_ids.size == 0
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
             return None
-        if should_rerender_for_thinking_retention(self.effective_thinking_retention, new_messages):
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention, new_messages
+        ):
             return None
 
         # The canonical assistant-turn close is ``</assistant>``. ``〈|EOS|〉``
@@ -325,17 +362,25 @@ class LagunaXS2Renderer:
         # ended cleanly. Truncation (no stop token at the tail) synthesises
         # ``</assistant>\n`` — the same scaffold the template emits.
         previous = FixedWidthArrayBuilder(
-            TOKEN_IDS_DTYPE, initial_capacity=previous_prompt_ids.size + previous_completion_ids.size + 8
+            TOKEN_IDS_DTYPE,
+            initial_capacity=previous_prompt_ids.size
+            + previous_completion_ids.size
+            + 8,
         )
         previous.extend(previous_prompt_ids)
         previous.extend(previous_completion_ids)
         stop_ids = {self._assistant_end, self._eos}
-        if previous_completion_ids.size == 0 or int(previous_completion_ids[-1]) not in stop_ids:
+        if (
+            previous_completion_ids.size == 0
+            or int(previous_completion_ids[-1]) not in stop_ids
+        ):
             previous.append(self._assistant_end)
             previous.extend(encode_token_ids(self._tokenizer, "\n"))
         previous_ids = previous.finish()
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
@@ -388,11 +433,15 @@ class LagunaXS2Renderer:
             content_available=self._offset_tokenizer is not None,
         )
 
-    def _render_assistant(self, msg: Message, msg_idx: int, content: str, *, emit_special, emit_text) -> None:
+    def _render_assistant(
+        self, msg: Message, msg_idx: int, content: str, *, emit_special, emit_text
+    ) -> None:
         # Raw passthrough is shared by XS.2 and M.1; XS-2.1's config does
         # not expose this template gate.
         if getattr(self.config, "render_assistant_messages_raw", False):
-            self._render_assistant_raw(msg_idx, content, emit_special=emit_special, emit_text=emit_text)
+            self._render_assistant_raw(
+                msg_idx, content, emit_special=emit_special, emit_text=emit_text
+            )
             return
 
         reasoning_content, content = self._assistant_reasoning_and_content(msg, content)
@@ -409,7 +458,12 @@ class LagunaXS2Renderer:
 
         if reasoning_content:
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
-            emit_text("\n" + reasoning_content.strip() + "\n", msg_idx, is_sampled=True, is_content=True)
+            emit_text(
+                "\n" + reasoning_content.strip() + "\n",
+                msg_idx,
+                is_sampled=True,
+                is_content=True,
+            )
             emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
         else:
             emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
@@ -453,7 +507,9 @@ class LagunaXS2Renderer:
         emit_special(self._assistant_end, msg_idx, is_sampled=True, is_content=True)
         emit_text("\n", msg_idx, is_sampled=False, is_content=False)
 
-    def _assistant_reasoning_and_content(self, msg: Message, content: str) -> tuple[str, str]:
+    def _assistant_reasoning_and_content(
+        self, msg: Message, content: str
+    ) -> tuple[str, str]:
         """Return the reasoning/body pair used by the XS.2 template."""
         reasoning_content = ""
         if isinstance(msg.get("reasoning_content"), str):
@@ -467,7 +523,9 @@ class LagunaXS2Renderer:
                 reasoning_content = part_thinking
         return reasoning_content, content
 
-    def _render_assistant_raw(self, msg_idx: int, content: str, *, emit_special, emit_text) -> None:
+    def _render_assistant_raw(
+        self, msg_idx: int, content: str, *, emit_special, emit_text
+    ) -> None:
         """Passthrough assistant rendering matching the Jinja template's
         ``render_assistant_messages_raw`` branch.
 
@@ -501,7 +559,9 @@ class LagunaXS2Renderer:
                 emit_special(self._think, msg_idx, is_sampled=False, is_content=False)
         else:
             if not content.startswith("</think>"):
-                emit_special(self._think_end, msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._think_end, msg_idx, is_sampled=False, is_content=False
+                )
 
         emit_text(content, msg_idx, is_sampled=True, is_content=True)
 
@@ -518,11 +578,15 @@ class LagunaM1Renderer(LagunaXS2Renderer):
     system prompt and assistant-reasoning precedence are M.1-specific.
     """
 
-    def __init__(self, tokenizer: Tokenizer, config: LagunaM1RendererConfig | None = None):
+    def __init__(
+        self, tokenizer: Tokenizer, config: LagunaM1RendererConfig | None = None
+    ):
         super().__init__(tokenizer, config or LagunaM1RendererConfig())
         self._default_system_message = ""
 
-    def _assistant_reasoning_and_content(self, msg: Message, content: str) -> tuple[str, str]:
+    def _assistant_reasoning_and_content(
+        self, msg: Message, content: str
+    ) -> tuple[str, str]:
         # Match the official Jinja exactly: ``reasoning`` wins whenever it
         # is a string (including the empty string), then
         # ``reasoning_content`` is considered. An inline </think> block is
@@ -552,7 +616,11 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
     the assistant emit implement this template's format.
     """
 
-    def __init__(self, tokenizer: Tokenizer, config: LagunaXS21RendererConfig | LagunaS21RendererConfig | None = None):
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        config: LagunaXS21RendererConfig | LagunaS21RendererConfig | None = None,
+    ):
         super().__init__(tokenizer, config or LagunaXS21RendererConfig())
 
     def _render_history_reasoning(self) -> bool:
@@ -563,21 +631,31 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         return self.config.enable_thinking
 
     def render(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         emit_special = builder.emit_special
         emit_text = builder.emit_text
 
-        def emit_text_segments(segments: TextSegments, msg_idx: int, *, is_sampled: bool) -> None:
+        def emit_text_segments(
+            segments: TextSegments, msg_idx: int, *, is_sampled: bool
+        ) -> None:
             # Role tags hug the body with no whitespace, so a BPE merge
             # can pull wrap bytes and body bytes into one token —
             # overlap attribution keeps every body byte in the content
             # run.
-            builder.emit_text_segments(segments, msg_idx, is_sampled=is_sampled, overlap_is_content=True)
+            builder.emit_text_segments(
+                segments, msg_idx, is_sampled=is_sampled, overlap_is_content=True
+            )
 
         emit_special(self._eos, -1, is_sampled=False, is_content=False)
 
@@ -624,12 +702,19 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             full_header += "</system>\n"
             header_segs.append("</system>\n", is_content=False)
             attributed = attribute_text_segments(
-                self._tokenizer, header_segs.finish(), overlap_is_content=True, _offset_tokenizer=self._offset_tokenizer
+                self._tokenizer,
+                header_segs.finish(),
+                overlap_is_content=True,
+                _offset_tokenizer=self._offset_tokenizer,
             )
             if attributed.has_content_attribution:
-                message_indices = np.where(attributed.is_content, 0, -1).astype(MESSAGE_INDICES_DTYPE)
+                message_indices = np.where(attributed.is_content, 0, -1).astype(
+                    MESSAGE_INDICES_DTYPE
+                )
             else:
-                offsets = _infer_offsets_from_decode(self._tokenizer, attributed.token_ids, full_header)
+                offsets = _infer_offsets_from_decode(
+                    self._tokenizer, attributed.token_ids, full_header
+                )
                 if offsets is None:
                     message_indices = np.full(
                         attributed.token_ids.size,
@@ -637,8 +722,14 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
                         dtype=MESSAGE_INDICES_DTYPE,
                     )
                 else:
-                    overlaps = (offsets[:, 0] < content_end) & (content_start < offsets[:, 1]) & (content_start >= 0)
-                    message_indices = np.where(overlaps, 0, -1).astype(MESSAGE_INDICES_DTYPE)
+                    overlaps = (
+                        (offsets[:, 0] < content_end)
+                        & (content_start < offsets[:, 1])
+                        & (content_start >= 0)
+                    )
+                    message_indices = np.where(overlaps, 0, -1).astype(
+                        MESSAGE_INDICES_DTYPE
+                    )
             builder.emit_aligned(
                 attributed.token_ids,
                 message_indices,
@@ -670,7 +761,9 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
                     user_segs.append("</user>\n", is_content=False)
                     emit_text_segments(user_segs.finish(), i, is_sampled=False)
                 case "assistant":
-                    self._render_assistant(msg, i, content, emit_special=emit_special, emit_text=emit_text)
+                    self._render_assistant(
+                        msg, i, content, emit_special=emit_special, emit_text=emit_text
+                    )
                 case "tool":
                     tool_segs = TextSegmentBuilder()
                     tool_segs.append("<tool_response>", is_content=False)
@@ -693,7 +786,9 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             content_available=self._offset_tokenizer is not None,
         )
 
-    def parse_response(self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None) -> ParsedResponse:
+    def parse_response(
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
+    ) -> ParsedResponse:
         # The XS-2.1 template renders reasoning and content verbatim (no
         # newline wrapping), so the parse is verbatim too.
         return parse_laguna_xs2(
@@ -716,9 +811,15 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
-        if previous_prompt_ids.size == 0 or not new_messages or reject_assistant_in_extension(new_messages):
+        if (
+            previous_prompt_ids.size == 0
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
             return None
-        if should_rerender_for_thinking_retention(self.effective_thinking_retention, new_messages):
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention, new_messages
+        ):
             return None
 
         # ``</assistant>`` is the canonical turn close; ``〈|EOS|〉`` also
@@ -727,24 +828,40 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         # after ``</assistant>`` is prepended to the first extension
         # message below so the seam encodes with the tag run.
         previous = FixedWidthArrayBuilder(
-            TOKEN_IDS_DTYPE, initial_capacity=previous_prompt_ids.size + previous_completion_ids.size + 1
+            TOKEN_IDS_DTYPE,
+            initial_capacity=previous_prompt_ids.size
+            + previous_completion_ids.size
+            + 1,
         )
         previous.extend(previous_prompt_ids)
         previous.extend(previous_completion_ids)
         stop_ids = {self._assistant_end, self._eos}
-        if previous_completion_ids.size == 0 or int(previous_completion_ids[-1]) not in stop_ids:
+        if (
+            previous_completion_ids.size == 0
+            or int(previous_completion_ids[-1]) not in stop_ids
+        ):
             previous.append(self._assistant_end)
         previous_ids = previous.finish()
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         builder.prepend_prior(previous_ids)
         emit_special = builder.emit_special
 
-        def emit_text_segments(segments: TextSegments, msg_idx: int = -1, *, is_sampled: bool = False) -> None:
-            builder.emit_text_segments(segments, msg_idx, is_sampled=is_sampled, overlap_is_content=True)
+        def emit_text_segments(
+            segments: TextSegments, msg_idx: int = -1, *, is_sampled: bool = False
+        ) -> None:
+            builder.emit_text_segments(
+                segments, msg_idx, is_sampled=is_sampled, overlap_is_content=True
+            )
 
         _OPEN = {"user": "<user>", "system": "<system>", "tool": "<tool_response>"}
-        _CLOSE = {"user": "</user>\n", "system": "</system>\n", "tool": "</tool_response>\n"}
+        _CLOSE = {
+            "user": "</user>\n",
+            "system": "</system>\n",
+            "tool": "</tool_response>\n",
+        }
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
             if role not in _OPEN:
@@ -770,7 +887,9 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             content_available=self._offset_tokenizer is not None,
         )
 
-    def _render_assistant(self, msg: Message, msg_idx: int, content: str, *, emit_special, emit_text) -> None:
+    def _render_assistant(
+        self, msg: Message, msg_idx: int, content: str, *, emit_special, emit_text
+    ) -> None:
         reasoning_content = ""
         if isinstance(msg.get("reasoning_content"), str):
             reasoning_content = msg["reasoning_content"]

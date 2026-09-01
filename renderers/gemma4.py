@@ -58,7 +58,12 @@ from renderers.token_arrays import (
     require_1d_array,
     require_readonly,
 )
-from renderers.qwen3_vl import _image_hash, _is_image_part, _is_video_part, _load_pil_image
+from renderers.qwen3_vl import (
+    _image_hash,
+    _is_image_part,
+    _is_video_part,
+    _load_pil_image,
+)
 
 _ESCAPE = '<|"|>'
 _EMPTY_THOUGHT_PREFILL_MODELS = {"google/gemma-4-26B-A4B-it", "google/gemma-4-31B-it"}
@@ -68,7 +73,9 @@ class _Emitter:
     """BPE-safe token emitter with per-token attribution side channels."""
 
     def __init__(self, tokenizer, *, offset_tokenizer, msg_idx: int = -1):
-        self._builder = RenderedTokenBuilder(tokenizer, offset_tokenizer=offset_tokenizer)
+        self._builder = RenderedTokenBuilder(
+            tokenizer, offset_tokenizer=offset_tokenizer
+        )
         self._segments = TextSegmentBuilder()
         self._buf_idx = msg_idx
         self._buf_sampled = False
@@ -83,7 +90,9 @@ class _Emitter:
     def text(self, text: str, *, is_sampled: bool, is_content: bool) -> None:
         if not text:
             return
-        if self._segments and (self._buf_idx != self.msg_idx or self._buf_sampled != is_sampled):
+        if self._segments and (
+            self._buf_idx != self.msg_idx or self._buf_sampled != is_sampled
+        ):
             self._flush()
         if not self._segments:
             self._buf_idx = self.msg_idx
@@ -93,7 +102,9 @@ class _Emitter:
     def special(self, token_id: int, *, is_sampled: bool, is_content: bool) -> None:
         if self._segments:
             self._flush()
-        self._builder.emit_special(token_id, self.msg_idx, is_sampled=is_sampled, is_content=is_content)
+        self._builder.emit_special(
+            token_id, self.msg_idx, is_sampled=is_sampled, is_content=is_content
+        )
 
     def cursor(self) -> int:
         if self._segments:
@@ -122,10 +133,15 @@ class _Emitter:
         first_content = bool(segments.is_content[0])
         if np.all(segments.is_content == first_content):
             self._builder.emit_text(
-                "".join(segments.texts), self._buf_idx, is_sampled=self._buf_sampled, is_content=first_content
+                "".join(segments.texts),
+                self._buf_idx,
+                is_sampled=self._buf_sampled,
+                is_content=first_content,
             )
             return
-        self._builder.emit_text_segments(segments, self._buf_idx, is_sampled=self._buf_sampled)
+        self._builder.emit_text_segments(
+            segments, self._buf_idx, is_sampled=self._buf_sampled
+        )
 
 
 def _dictsort(value: Mapping[str, Any]):
@@ -145,15 +161,28 @@ def _format_argument(argument: Any, *, escape_keys: bool = True) -> str:
         fields = []
         for key, value in _dictsort(argument):
             rendered_key = f"{_ESCAPE}{key}{_ESCAPE}" if escape_keys else str(key)
-            fields.append(f"{rendered_key}:{_format_argument(value, escape_keys=escape_keys)}")
+            fields.append(
+                f"{rendered_key}:{_format_argument(value, escape_keys=escape_keys)}"
+            )
         return "{" + ",".join(fields) + "}"
-    if isinstance(argument, Sequence) and not isinstance(argument, (str, bytes, bytearray)):
-        return "[" + ",".join(_format_argument(item, escape_keys=escape_keys) for item in argument) + "]"
+    if isinstance(argument, Sequence) and not isinstance(
+        argument, (str, bytes, bytearray)
+    ):
+        return (
+            "["
+            + ",".join(
+                _format_argument(item, escape_keys=escape_keys) for item in argument
+            )
+            + "]"
+        )
     return str(argument)
 
 
 def _format_parameters(
-    properties: Mapping[str, Any], required: Sequence[str] | None, *, filter_keys: bool = False
+    properties: Mapping[str, Any],
+    required: Sequence[str] | None,
+    *,
+    filter_keys: bool = False,
 ) -> str:
     standard_keys = {"description", "type", "properties", "required", "nullable"}
     rendered: list[str] = []
@@ -187,7 +216,9 @@ def _format_parameters(
                         item_fields.append(f"required:[{vals}]")
                     elif item_key == "type":
                         upper = (
-                            item_value.upper() if isinstance(item_value, str) else [str(v).upper() for v in item_value]
+                            item_value.upper()
+                            if isinstance(item_value, str)
+                            else [str(v).upper() for v in item_value]
                         )
                         item_fields.append(f"type:{_format_argument(upper)}")
                     else:
@@ -198,13 +229,19 @@ def _format_parameters(
         if value_type == "OBJECT":
             nested_properties = value.get("properties")
             if isinstance(nested_properties, Mapping):
-                nested = _format_parameters(nested_properties, value.get("required") or [])
+                nested = _format_parameters(
+                    nested_properties, value.get("required") or []
+                )
                 fields.append(f"properties:{{{nested}}}")
             elif isinstance(value, Mapping):
-                nested = _format_parameters(value, value.get("required") or [], filter_keys=True)
+                nested = _format_parameters(
+                    value, value.get("required") or [], filter_keys=True
+                )
                 fields.append(f"properties:{{{nested}}}")
             if value.get("required"):
-                vals = ",".join(f"{_ESCAPE}{item}{_ESCAPE}" for item in value["required"])
+                vals = ",".join(
+                    f"{_ESCAPE}{item}{_ESCAPE}" for item in value["required"]
+                )
                 fields.append(f"required:[{vals}]")
         fields.append(f"type:{_ESCAPE}{value_type}{_ESCAPE}")
         rendered.append(f"{key}:{{{','.join(fields)}}}")
@@ -228,7 +265,11 @@ def _format_function_declaration(tool: ToolSpec) -> str:
         param_fields: list[str] = []
         properties = params.get("properties")
         if isinstance(properties, Mapping) and properties:
-            param_fields.append("properties:{" + _format_parameters(properties, params.get("required") or []) + "}")
+            param_fields.append(
+                "properties:{"
+                + _format_parameters(properties, params.get("required") or [])
+                + "}"
+            )
         required = params.get("required")
         if required:
             vals = ",".join(f"{_ESCAPE}{item}{_ESCAPE}" for item in required)
@@ -241,7 +282,9 @@ def _format_function_declaration(tool: ToolSpec) -> str:
         response = response if isinstance(response, Mapping) else {}
         response_fields: list[str] = []
         if response.get("description"):
-            response_fields.append(f"description:{_ESCAPE}{response['description']}{_ESCAPE}")
+            response_fields.append(
+                f"description:{_ESCAPE}{response['description']}{_ESCAPE}"
+            )
         if str(response.get("type") or "").upper() == "OBJECT":
             response_fields.append(f"type:{_ESCAPE}OBJECT{_ESCAPE}")
         out += ",response:{" + ",".join(response_fields) + "}"
@@ -267,7 +310,9 @@ def _coerce_tool_arguments(arguments: Any) -> Mapping[str, Any]:
         try:
             parsed = json.loads(arguments)
         except json.JSONDecodeError as exc:
-            raise TypeError("Gemma 4 tool_calls[].function.arguments must be a JSON object.") from exc
+            raise TypeError(
+                "Gemma 4 tool_calls[].function.arguments must be a JSON object."
+            ) from exc
         if isinstance(parsed, Mapping):
             return parsed
     raise TypeError("Gemma 4 tool_calls[].function.arguments must be a JSON object.")
@@ -392,7 +437,13 @@ class Gemma4Renderer:
 
     _config_cls = Gemma4RendererConfig
 
-    def __init__(self, tokenizer: Tokenizer, config: Gemma4RendererConfig | None = None, *, processor: Any = None):
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        config: Gemma4RendererConfig | None = None,
+        *,
+        processor: Any = None,
+    ):
         self._tokenizer = tokenizer
         self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self._processor = processor
@@ -406,7 +457,8 @@ class Gemma4Renderer:
         # probe is only a compatibility fallback for renamed checkpoints and
         # is intentionally narrow; template whitespace/reformatting may defeat it.
         self._prefill_empty_thought = (
-            model_name in _EMPTY_THOUGHT_PREFILL_MODELS or "<|channel>thought\\n<channel|>" in chat_template
+            model_name in _EMPTY_THOUGHT_PREFILL_MODELS
+            or "<|channel>thought\\n<channel|>" in chat_template
         )
         if self.config.preserve_thinking:
             default_retention = "all"
@@ -414,7 +466,9 @@ class Gemma4Renderer:
             default_retention = "all"
         else:
             default_retention = "tool_cycle"
-        self.effective_thinking_retention = resolve_thinking_retention(self.config, default_retention)
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config, default_retention
+        )
 
         self._bos = self._required_id("<bos>")
         self._eos = self._required_id("<eos>")
@@ -478,7 +532,9 @@ class Gemma4Renderer:
         output = processor.image_processor(images=[pil], return_tensors="np")
         counts = output.get("num_soft_tokens_per_image")
         if counts is None:
-            raise RuntimeError("Gemma4ImageProcessor did not return num_soft_tokens_per_image.")
+            raise RuntimeError(
+                "Gemma4ImageProcessor did not return num_soft_tokens_per_image."
+            )
         count = int(counts[0])
         if len(self._image_cache) >= self.config.image_cache_max:
             self._image_cache.pop(next(iter(self._image_cache)))
@@ -506,9 +562,14 @@ class Gemma4Renderer:
             em.special(self._image, is_sampled=assistant_body, is_content=True)
         em.special(self._eoi, is_sampled=assistant_body, is_content=assistant_body)
         mm_hashes.setdefault("image", []).append(image_hash)
-        mm_placeholders.setdefault("image", FixedWidthRangeBuilder()).append(offset, count)
+        mm_placeholders.setdefault("image", FixedWidthRangeBuilder()).append(
+            offset, count
+        )
         mm_items.setdefault("image", []).append(
-            {"pixel_values": output["pixel_values"], "image_position_ids": output["image_position_ids"]}
+            {
+                "pixel_values": output["pixel_values"],
+                "image_position_ids": output["image_position_ids"],
+            }
         )
 
     def _emit_content(
@@ -542,7 +603,14 @@ class Gemma4Renderer:
             # ``text`` would swallow images and skip token expansion.
             part = dict(item)
             if _is_image_part(part):
-                self._emit_image(em, part, mm_hashes, mm_placeholders, mm_items, assistant_body=is_assistant)
+                self._emit_image(
+                    em,
+                    part,
+                    mm_hashes,
+                    mm_placeholders,
+                    mm_items,
+                    assistant_body=is_assistant,
+                )
                 has_content = True
             elif _is_video_part(part) or part.get("type") in ("audio", "input_audio"):
                 raise NotImplementedError(
@@ -570,7 +638,11 @@ class Gemma4Renderer:
     ) -> None:
         em.set_msg_idx(source_idx)
         if emit_start:
-            em.special(self._tool_response_start, is_sampled=assistant_body, is_content=assistant_body)
+            em.special(
+                self._tool_response_start,
+                is_sampled=assistant_body,
+                is_content=assistant_body,
+            )
 
         media: list[dict[str, Any]] = []
         if isinstance(response, list):
@@ -583,25 +655,59 @@ class Gemma4Renderer:
                 part = dict(raw_part)
                 if _is_image_part(part):
                     media.append(part)
-                elif _is_video_part(part) or part.get("type") in ("audio", "input_audio"):
-                    raise NotImplementedError("Gemma4Renderer tool responses currently support images only.")
+                elif _is_video_part(part) or part.get("type") in (
+                    "audio",
+                    "input_audio",
+                ):
+                    raise NotImplementedError(
+                        "Gemma4Renderer tool responses currently support images only."
+                    )
                 elif part.get("type") == "text" or "text" in part:
                     text += str(part.get("text") or "")
             response = text
 
         if isinstance(response, Mapping):
-            em.text(f"response:{name}", is_sampled=assistant_body, is_content=assistant_body)
-            em.text(_format_argument(response, escape_keys=False), is_sampled=assistant_body, is_content=True)
+            em.text(
+                f"response:{name}", is_sampled=assistant_body, is_content=assistant_body
+            )
+            em.text(
+                _format_argument(response, escape_keys=False),
+                is_sampled=assistant_body,
+                is_content=True,
+            )
         else:
-            em.text(f"response:{name}{{value:", is_sampled=assistant_body, is_content=assistant_body)
-            em.text(_format_argument(response, escape_keys=False), is_sampled=assistant_body, is_content=True)
+            em.text(
+                f"response:{name}{{value:",
+                is_sampled=assistant_body,
+                is_content=assistant_body,
+            )
+            em.text(
+                _format_argument(response, escape_keys=False),
+                is_sampled=assistant_body,
+                is_content=True,
+            )
             em.text("}", is_sampled=assistant_body, is_content=assistant_body)
-        em.special(self._tool_response_end, is_sampled=assistant_body, is_content=assistant_body)
+        em.special(
+            self._tool_response_end,
+            is_sampled=assistant_body,
+            is_content=assistant_body,
+        )
         for part in media:
-            self._emit_image(em, part, mm_hashes, mm_placeholders, mm_items, assistant_body=assistant_body)
+            self._emit_image(
+                em,
+                part,
+                mm_hashes,
+                mm_placeholders,
+                mm_items,
+                assistant_body=assistant_body,
+            )
 
     def render(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
@@ -638,15 +744,30 @@ class Gemma4Renderer:
                         # image part (which carries ``text: None``) and silently
                         # drop the image, so reject media parts explicitly.
                         part = dict(item) if isinstance(item, Mapping) else {}
-                        if not part or "text" not in part or _is_image_part(part) or _is_video_part(part):
-                            raise ValueError("Gemma 4 system content lists may contain text parts only.")
-                        em.text(str(part.get("text") or "").strip() + " ", is_sampled=False, is_content=True)
+                        if (
+                            not part
+                            or "text" not in part
+                            or _is_image_part(part)
+                            or _is_video_part(part)
+                        ):
+                            raise ValueError(
+                                "Gemma 4 system content lists may contain text parts only."
+                            )
+                        em.text(
+                            str(part.get("text") or "").strip() + " ",
+                            is_sampled=False,
+                            is_content=True,
+                        )
             if tools:
                 for tool in tools:
                     if tool.get("type") not in (None, "function"):
                         continue
                     em.special(self._tool_start, is_sampled=False, is_content=False)
-                    em.text(_format_function_declaration(tool), is_sampled=False, is_content=False)
+                    em.text(
+                        _format_function_declaration(tool),
+                        is_sampled=False,
+                        is_content=False,
+                    )
                     em.special(self._tool_end, is_sampled=False, is_content=False)
                 previous_message_type = "tool"
             em.special(self._turn_end, is_sampled=False, is_content=False)
@@ -673,7 +794,9 @@ class Gemma4Renderer:
 
             previous_message_type = None
             wire_role = "model" if role == "assistant" else role
-            continues_same_model_turn = wire_role == "model" and previous_non_tool_role == "assistant"
+            continues_same_model_turn = (
+                wire_role == "model" and previous_non_tool_role == "assistant"
+            )
             em.set_msg_idx(msg_idx)
             if not continues_same_model_turn:
                 em.special(self._turn_start, is_sampled=False, is_content=False)
@@ -681,7 +804,9 @@ class Gemma4Renderer:
 
             is_assistant = role == "assistant"
             thinking = msg.get("reasoning") or msg.get("reasoning_content")
-            thinking_gate = msg_idx > last_user_index or (self.config.preserve_thinking and bool(msg.get("tool_calls")))
+            thinking_gate = msg_idx > last_user_index or (
+                self.config.preserve_thinking and bool(msg.get("tool_calls"))
+            )
             reemit_disabled_thinking_prefill = (
                 is_assistant
                 and not continues_same_model_turn
@@ -693,13 +818,27 @@ class Gemma4Renderer:
                 # The 26B/31B generation prompt already contains this empty
                 # thought channel. It is part of the byte prefix under which
                 # the completion was sampled, so preserve it in later renders.
-                em.special(self._channel_start, is_sampled=is_assistant, is_content=is_assistant)
+                em.special(
+                    self._channel_start,
+                    is_sampled=is_assistant,
+                    is_content=is_assistant,
+                )
                 em.text("thought\n", is_sampled=is_assistant, is_content=is_assistant)
-                em.special(self._channel_end, is_sampled=is_assistant, is_content=is_assistant)
+                em.special(
+                    self._channel_end, is_sampled=is_assistant, is_content=is_assistant
+                )
             elif thinking and thinking_gate:
-                em.special(self._channel_start, is_sampled=is_assistant, is_content=is_assistant)
-                em.text(f"thought\n{thinking}\n", is_sampled=is_assistant, is_content=True)
-                em.special(self._channel_end, is_sampled=is_assistant, is_content=is_assistant)
+                em.special(
+                    self._channel_start,
+                    is_sampled=is_assistant,
+                    is_content=is_assistant,
+                )
+                em.text(
+                    f"thought\n{thinking}\n", is_sampled=is_assistant, is_content=True
+                )
+                em.special(
+                    self._channel_end, is_sampled=is_assistant, is_content=is_assistant
+                )
 
             tool_calls = msg.get("tool_calls") or []
             if tool_calls:
@@ -707,10 +846,20 @@ class Gemma4Renderer:
                     function = tool_call.get("function") or tool_call
                     name = function.get("name") or ""
                     arguments = _coerce_tool_arguments(function.get("arguments"))
-                    body = "call:" + name + _format_argument(arguments, escape_keys=False)
-                    em.special(self._tool_call_start, is_sampled=is_assistant, is_content=is_assistant)
+                    body = (
+                        "call:" + name + _format_argument(arguments, escape_keys=False)
+                    )
+                    em.special(
+                        self._tool_call_start,
+                        is_sampled=is_assistant,
+                        is_content=is_assistant,
+                    )
                     em.text(body, is_sampled=is_assistant, is_content=is_assistant)
-                    em.special(self._tool_call_end, is_sampled=is_assistant, is_content=is_assistant)
+                    em.special(
+                        self._tool_call_end,
+                        is_sampled=is_assistant,
+                        is_content=is_assistant,
+                    )
                 previous_message_type = "tool_call"
 
             rendered_tool_response = False
@@ -744,7 +893,11 @@ class Gemma4Renderer:
 
                     if first_response:
                         em.set_msg_idx(msg_idx)
-                        em.special(self._tool_response_start, is_sampled=is_assistant, is_content=is_assistant)
+                        em.special(
+                            self._tool_response_start,
+                            is_sampled=is_assistant,
+                            is_content=is_assistant,
+                        )
                     self._emit_tool_response_body(
                         em,
                         name,
@@ -761,7 +914,9 @@ class Gemma4Renderer:
                     scan += 1
 
             em.set_msg_idx(msg_idx)
-            has_content = self._emit_content(em, msg.get("content"), role, mm_hashes, mm_placeholders, mm_items)
+            has_content = self._emit_content(
+                em, msg.get("content"), role, mm_hashes, mm_placeholders, mm_items
+            )
 
             next_non_tool_role = None
             for next_idx in range(msg_idx + 1, len(messages)):
@@ -776,11 +931,21 @@ class Gemma4Renderer:
             )
 
             if previous_message_type == "tool_call" and not rendered_tool_response:
-                em.special(self._tool_response_start, is_sampled=is_assistant, is_content=is_assistant)
+                em.special(
+                    self._tool_response_start,
+                    is_sampled=is_assistant,
+                    is_content=is_assistant,
+                )
             elif continues_into_next:
                 pass
-            elif not (rendered_tool_response and not has_content and next_non_tool_role is None):
-                em.special(self._turn_end, is_sampled=is_assistant, is_content=is_assistant)
+            elif not (
+                rendered_tool_response
+                and not has_content
+                and next_non_tool_role is None
+            ):
+                em.special(
+                    self._turn_end, is_sampled=is_assistant, is_content=is_assistant
+                )
                 em.text("\n", is_sampled=False, is_content=False)
 
             previous_non_tool_role = role
@@ -794,7 +959,9 @@ class Gemma4Renderer:
                     em.special(self._channel_start, is_sampled=False, is_content=False)
                     em.text("thought\n", is_sampled=False, is_content=False)
                     em.special(self._channel_end, is_sampled=False, is_content=False)
-            elif previous_message_type == "tool_response" and self.config.enable_thinking:
+            elif (
+                previous_message_type == "tool_response" and self.config.enable_thinking
+            ):
                 em.special(self._channel_start, is_sampled=False, is_content=False)
                 em.text("thought\n", is_sampled=False, is_content=False)
 
@@ -802,7 +969,9 @@ class Gemma4Renderer:
         multi_modal_data = None
         if mm_hashes or finished_placeholders or mm_items:
             multi_modal_data = MultiModalData(
-                mm_hashes=mm_hashes, mm_placeholders=finished_placeholders, mm_items=mm_items
+                mm_hashes=mm_hashes,
+                mm_placeholders=finished_placeholders,
+                mm_items=mm_items,
             )
         return em.finish(
             message_roles=[m.get("role") or "" for m in messages],
@@ -812,29 +981,47 @@ class Gemma4Renderer:
         )
 
     def render_ids(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> np.ndarray:
-        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
+        return self.render(
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
+        ).token_ids
 
     def _decode(self, token_ids: np.ndarray) -> str:
         if token_ids.size == 0:
             return ""
         return self._tokenizer.decode(token_ids, skip_special_tokens=False)
 
-    def _parse_tool_call(self, raw: str, tools: list[ToolSpec] | None) -> ParsedToolCall:
+    def _parse_tool_call(
+        self, raw: str, tools: list[ToolSpec] | None
+    ) -> ParsedToolCall:
         if not raw.startswith("call:") or "{" not in raw or not raw.endswith("}"):
-            return ParsedToolCall(raw=raw, status=ToolCallParseStatus.MALFORMED_STRUCTURE)
+            return ParsedToolCall(
+                raw=raw, status=ToolCallParseStatus.MALFORMED_STRUCTURE
+            )
         head, _, argument_body = raw[5:].partition("{")
         name = head.strip()
         try:
             arguments = _ArgumentParser("{" + argument_body).parse()
         except ValueError:
-            return ParsedToolCall(raw=raw, name=name or None, status=ToolCallParseStatus.INVALID_JSON)
+            return ParsedToolCall(
+                raw=raw, name=name or None, status=ToolCallParseStatus.INVALID_JSON
+            )
         if not name:
-            return ParsedToolCall(raw=raw, arguments=arguments, status=ToolCallParseStatus.MISSING_NAME)
+            return ParsedToolCall(
+                raw=raw, arguments=arguments, status=ToolCallParseStatus.MISSING_NAME
+            )
         declared = None
         if tools:
-            declared = {str(_unwrap_tool(tool).get("name")) for tool in tools if _unwrap_tool(tool).get("name")}
+            declared = {
+                str(_unwrap_tool(tool).get("name"))
+                for tool in tools
+                if _unwrap_tool(tool).get("name")
+            }
         status = (
             ToolCallParseStatus.UNKNOWN_TOOL
             if declared is not None and name not in declared
@@ -842,7 +1029,9 @@ class Gemma4Renderer:
         )
         return ParsedToolCall(raw=raw, name=name, arguments=arguments, status=status)
 
-    def parse_response(self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None) -> ParsedResponse:
+    def parse_response(
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
+    ) -> ParsedResponse:
         """Parse a Gemma 4 completion without access to its prompt context.
 
         After a tool response with thinking enabled, the prompt already emits
@@ -853,7 +1042,11 @@ class Gemma4Renderer:
         """
         require_1d_array("token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
         require_readonly("token_ids", token_ids)
-        stop_ids = np.fromiter((self._turn_end, self._tool_response_start, self._eos), dtype=TOKEN_IDS_DTYPE, count=3)
+        stop_ids = np.fromiter(
+            (self._turn_end, self._tool_response_start, self._eos),
+            dtype=TOKEN_IDS_DTYPE,
+            count=3,
+        )
         stop_positions = np.flatnonzero(np.isin(token_ids, stop_ids))
         end = int(stop_positions[0]) if stop_positions.size else token_ids.size
         ids = token_ids[:end]
@@ -914,7 +1107,11 @@ class Gemma4Renderer:
                 break
             call_end = start + 1 + int(end_positions[0])
             raw = self._decode(ids[start + 1 : call_end]).strip()
-            tool_calls.append(self._parse_tool_call(raw, tools), base_offset + start, base_offset + call_end + 1)
+            tool_calls.append(
+                self._parse_tool_call(raw, tools),
+                base_offset + start,
+                base_offset + call_end + 1,
+            )
             cursor = call_end + 1
 
         calls, spans = tool_calls.finish()
@@ -935,16 +1132,30 @@ class Gemma4Renderer:
         placeholders: dict[str, np.ndarray],
         items: dict[str, list[dict[str, Any]]],
     ) -> MultiModalData | None:
-        merged_hashes = {key: list(value) for key, value in previous.mm_hashes.items()} if previous else {}
-        merged_placeholders = merge_range_maps(previous.mm_placeholders if previous else {}, placeholders)
-        merged_items = {key: list(value) for key, value in previous.mm_items.items()} if previous else {}
+        merged_hashes = (
+            {key: list(value) for key, value in previous.mm_hashes.items()}
+            if previous
+            else {}
+        )
+        merged_placeholders = merge_range_maps(
+            previous.mm_placeholders if previous else {}, placeholders
+        )
+        merged_items = (
+            {key: list(value) for key, value in previous.mm_items.items()}
+            if previous
+            else {}
+        )
         for key, value in hashes.items():
             merged_hashes.setdefault(key, []).extend(value)
         for key, value in items.items():
             merged_items.setdefault(key, []).extend(value)
         if not (merged_hashes or merged_placeholders or merged_items):
             return None
-        return MultiModalData(mm_hashes=merged_hashes, mm_placeholders=merged_placeholders, mm_items=merged_items)
+        return MultiModalData(
+            mm_hashes=merged_hashes,
+            mm_placeholders=merged_placeholders,
+            mm_items=merged_items,
+        )
 
     def bridge_to_next_turn(
         self,
@@ -955,10 +1166,16 @@ class Gemma4Renderer:
         tools: list[ToolSpec] | None = None,
         previous_multi_modal_data: MultiModalData | None = None,
     ) -> RenderedTokens | None:
-        if len(previous_prompt_ids) == 0 or not new_messages or reject_assistant_in_extension(new_messages):
+        if (
+            len(previous_prompt_ids) == 0
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
             return None
         if should_rerender_for_thinking_retention(
-            self.effective_thinking_retention, new_messages, is_user_query=self._is_user_query_message
+            self.effective_thinking_retention,
+            new_messages,
+            is_user_query=self._is_user_query_message,
         ):
             return None
 
@@ -981,7 +1198,11 @@ class Gemma4Renderer:
             if any(message.get("role") != "tool" for message in new_messages):
                 return None
             parsed_calls = [
-                call for call in self.parse_response(previous_completion_ids, tools=tools).tool_calls if call.name
+                call
+                for call in self.parse_response(
+                    previous_completion_ids, tools=tools
+                ).tool_calls
+                if call.name
             ]
             if not parsed_calls and any(not m.get("name") for m in new_messages):
                 return None
@@ -995,7 +1216,14 @@ class Gemma4Renderer:
                     else:
                         return None
                 self._emit_tool_response_body(
-                    em, str(name), message.get("content"), i, hashes, placeholder_builders, items, emit_start=i > 0
+                    em,
+                    str(name),
+                    message.get("content"),
+                    i,
+                    hashes,
+                    placeholder_builders,
+                    items,
+                    emit_start=i > 0,
                 )
             em.set_msg_idx(-1)
             if self.config.enable_thinking:
@@ -1011,7 +1239,14 @@ class Gemma4Renderer:
                 em.set_msg_idx(i)
                 em.special(self._turn_start, is_sampled=False, is_content=False)
                 em.text(f"{role}\n", is_sampled=False, is_content=False)
-                self._emit_content(em, message.get("content"), role, hashes, placeholder_builders, items)
+                self._emit_content(
+                    em,
+                    message.get("content"),
+                    role,
+                    hashes,
+                    placeholder_builders,
+                    items,
+                )
                 em.special(self._turn_end, is_sampled=False, is_content=False)
                 em.text("\n", is_sampled=False, is_content=False)
             em.set_msg_idx(-1)
@@ -1026,7 +1261,9 @@ class Gemma4Renderer:
         return em.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
-            multi_modal_data=self._merge_multi_modal_data(previous_multi_modal_data, hashes, placeholders, items),
+            multi_modal_data=self._merge_multi_modal_data(
+                previous_multi_modal_data, hashes, placeholders, items
+            ),
             content_available=self._offset_tokenizer is not None,
         )
 

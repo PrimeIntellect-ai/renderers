@@ -74,7 +74,9 @@ def print_parsed(label: str, turn: str, parsed) -> None:
 
 def completion_ids_from_tensor(name: str, value: torch.Tensor) -> np.ndarray:
     """Take immutable fixed-width ownership without a Python-list phase."""
-    return owned_token_ids_from_array(name, value.detach().to(device="cpu", dtype=torch.int32).numpy())
+    return owned_token_ids_from_array(
+        name, value.detach().to(device="cpu", dtype=torch.int32).numpy()
+    )
 
 
 def main() -> None:
@@ -96,11 +98,17 @@ def main() -> None:
             targets.append((model, None))
 
     for model, enable_thinking in targets:
-        label = model if enable_thinking is None else f"{model} enable_thinking={enable_thinking}"
+        label = (
+            model
+            if enable_thinking is None
+            else f"{model} enable_thinking={enable_thinking}"
+        )
         print(f"\n=== {label} ===")
 
         renderer, tokenizer = make_renderer(model, enable_thinking)
-        hf_model = AutoModelForCausalLM.from_pretrained(model, dtype=torch.bfloat16, trust_remote_code=False).to("cuda")
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            model, dtype=torch.bfloat16, trust_remote_code=False
+        ).to("cuda")
         hf_model.eval()
 
         stop_token_ids = renderer.get_stop_token_ids()
@@ -108,13 +116,20 @@ def main() -> None:
 
         messages = [
             {"role": "system", "content": "You are a concise tool-using assistant."},
-            {"role": "user", "content": "Use the multiply tool for 17 * 23, then summarize."},
+            {
+                "role": "user",
+                "content": "Use the multiply tool for 17 * 23, then summarize.",
+            },
         ]
 
         # Turn 1: render locally and pass token IDs to Transformers. The model
         # receives input_ids, not messages or a chat template.
-        prompt_ids = renderer.render_ids(messages, tools=TOOLS, add_generation_prompt=True)
-        input_ids = torch.tensor(prompt_ids, device="cuda", dtype=torch.int32).unsqueeze(0)
+        prompt_ids = renderer.render_ids(
+            messages, tools=TOOLS, add_generation_prompt=True
+        )
+        input_ids = torch.tensor(
+            prompt_ids, device="cuda", dtype=torch.int32
+        ).unsqueeze(0)
         attention_mask = torch.ones_like(input_ids)
         output1 = hf_model.generate(
             input_ids=input_ids,
@@ -124,7 +139,9 @@ def main() -> None:
             eos_token_id=stop_token_ids,
             pad_token_id=pad_token_id,
         )[0]
-        completion1 = completion_ids_from_tensor("Transformers completion token IDs", output1[input_ids.shape[-1] :])
+        completion1 = completion_ids_from_tensor(
+            "Transformers completion token IDs", output1[input_ids.shape[-1] :]
+        )
         parsed1 = renderer.parse_response(completion1)
         print_parsed(label, "turn 1", parsed1)
 
@@ -139,7 +156,9 @@ def main() -> None:
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        "arguments": tc.arguments if isinstance(tc.arguments, str) else json.dumps(tc.arguments),
+                        "arguments": tc.arguments
+                        if isinstance(tc.arguments, str)
+                        else json.dumps(tc.arguments),
                     },
                 }
                 for idx, tc in enumerate(parsed1.tool_calls)
@@ -157,23 +176,31 @@ def main() -> None:
                         "role": "tool",
                         "tool_call_id": tool_call.id or f"call_{idx}",
                         "name": tool_call.name or "multiply",
-                        "content": json.dumps({"result": int(tool_args["a"]) * int(tool_args["b"])}),
+                        "content": json.dumps(
+                            {"result": int(tool_args["a"]) * int(tool_args["b"])}
+                        ),
                     }
                 )
         else:
-            new_messages = [{"role": "user", "content": "Give the final answer in one sentence."}]
+            new_messages = [
+                {"role": "user", "content": "Give the final answer in one sentence."}
+            ]
 
         # Turn 2: bridge extends prompt_ids + completion1 exactly.
         # ``bridge_to_next_turn`` returns a ``RenderedTokens`` (or None); the
         # extended id stream is on ``.token_ids``.
-        bridged = renderer.bridge_to_next_turn(prompt_ids, completion1, new_messages, tools=TOOLS)
+        bridged = renderer.bridge_to_next_turn(
+            prompt_ids, completion1, new_messages, tools=TOOLS
+        )
         if bridged is None:
             raise RuntimeError("bridge_to_next_turn returned None")
         bridged_ids = bridged.token_ids
         expected_prefix = np.concatenate((prompt_ids, completion1))
         assert np.array_equal(bridged_ids[: expected_prefix.size], expected_prefix)
 
-        bridged_input_ids = torch.tensor(bridged_ids, device="cuda", dtype=torch.int32).unsqueeze(0)
+        bridged_input_ids = torch.tensor(
+            bridged_ids, device="cuda", dtype=torch.int32
+        ).unsqueeze(0)
         bridged_attention_mask = torch.ones_like(bridged_input_ids)
         output2 = hf_model.generate(
             input_ids=bridged_input_ids,

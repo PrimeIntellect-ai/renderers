@@ -7,13 +7,15 @@ messages → Renderer.render_ids() → token IDs → POST /inference/v1/generate
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
-import math
 from collections.abc import Mapping
 from typing import Any, cast
 
 import httpx
+import numpy as np
 from openai import AsyncOpenAI
 
 from renderers.base import (
@@ -25,6 +27,14 @@ from renderers.base import (
     ToolSpec,
     _require_transformers,
 )
+from renderers.token_arrays import (
+    LOGPROBS_DTYPE,
+    OFFSETS_DTYPE,
+    TOKEN_IDS_DTYPE,
+    require_1d_array,
+    require_readonly,
+    require_range_array,
+)
 
 _request_logger = logging.getLogger("renderers.client")
 ROUTED_EXPERTS_DATA_PREFIX = b'"routed_experts":{"data":"'
@@ -32,6 +42,7 @@ KEPT_TOKENS_IDS_PREFIX = b'"kept_tokens":{"ids":"'
 # vLLM uses this value both when sampled-token evidence is missing and as a
 # lower-bound clamp, so receiving it cannot prove the real logprob was returned.
 VLLM_LOGPROB_SENTINEL = -9999.0
+_BASE64_ALPHABET = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
 
 class OverlongPromptError(Exception):
@@ -138,57 +149,159 @@ def parse_generate_response(raw: bytes) -> dict[str, Any]:
     return payload
 
 
-def _parse_completion_logprobs(
-    choice: Mapping[str, Any], completion_ids: list[int]
-) -> list[float]:
-    raw_logprobs = choice.get("logprobs")
-    if not isinstance(raw_logprobs, Mapping):
-        raise MalformedGenerateResponseError(
-            "Engine response choice.logprobs must be an object."
-        )
+def _encode_fixed_width_array(
+    name: str,
+    value: np.ndarray,
+    *,
+    dtype: np.dtype,
+    rank: int,
+    columns: int | None = None,
+    minimum: int | None = None,
+) -> dict[str, Any]:
+    expected_dtype = np.dtype(dtype)
+    if rank == 1:
+        require_1d_array(name, value, dtype=expected_dtype, minimum=minimum)
+        if columns is not None:
+            raise ValueError(f"{name} rank-1 arrays cannot declare columns")
+    elif rank == 2 and columns == 2:
+        require_range_array(name, value)
+    else:
+        raise ValueError(f"{name} has unsupported fixed-width shape metadata")
+    require_readonly(name, value)
+    if not value.flags.c_contiguous:
+        raise ValueError(f"{name} must be C-contiguous")
+    raw: bytes | memoryview = b"" if value.nbytes == 0 else memoryview(value).cast("B")
+    envelope: dict[str, Any] = {
+        "version": 1,
+        "encoding": "base64",
+        "dtype": expected_dtype.str,
+        "count": value.shape[0],
+        "data": base64.b64encode(raw).decode("ascii"),
+    }
+    if columns is not None:
+        envelope["columns"] = columns
+    return envelope
 
-    content = raw_logprobs.get("content")
-    if not isinstance(content, list):
+
+def _decode_fixed_width_array(
+    name: str,
+    value: object,
+    *,
+    dtype: np.dtype,
+    rank: int,
+    columns: int | None = None,
+    minimum: int | None = None,
+) -> np.ndarray:
+    expected_dtype = np.dtype(dtype)
+    required = {"version", "encoding", "dtype", "count", "data"}
+    expected = required | ({"columns"} if columns is not None else set())
+    if not isinstance(value, Mapping) or set(value) != expected:
         raise MalformedGenerateResponseError(
-            "Engine response choice.logprobs.content must be a list."
+            f"Engine response {name} has invalid envelope fields."
         )
-    if len(content) != len(completion_ids):
+    if value["version"] != 1 or type(value["version"]) is not int:
+        raise MalformedGenerateResponseError(
+            f"Engine response {name}.version must be 1."
+        )
+    if value["encoding"] != "base64":
+        raise MalformedGenerateResponseError(
+            f"Engine response {name}.encoding must be 'base64'."
+        )
+    if value["dtype"] != expected_dtype.str:
+        raise MalformedGenerateResponseError(
+            f"Engine response {name}.dtype must be {expected_dtype.str!r}."
+        )
+    count = value["count"]
+    if type(count) is not int or count < 0:
+        raise MalformedGenerateResponseError(
+            f"Engine response {name}.count must be non-negative."
+        )
+    if columns is not None and (
+        type(value["columns"]) is not int or value["columns"] != columns
+    ):
+        raise MalformedGenerateResponseError(
+            f"Engine response {name}.columns must be {columns}."
+        )
+    if rank not in (1, 2) or (rank == 2 and columns is None):
+        raise ValueError(f"{name} has unsupported fixed-width shape metadata")
+    item_count = count * (columns if columns is not None else 1)
+    expected_bytes = item_count * expected_dtype.itemsize
+    encoded = value["data"]
+    if not isinstance(encoded, str):
+        raise MalformedGenerateResponseError(
+            f"Engine response {name}.data must be canonical base64."
+        )
+    try:
+        supplied = encoded.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise MalformedGenerateResponseError(
+            f"Engine response {name}.data must be canonical base64."
+        ) from exc
+    expected_encoded_bytes = 4 * ((expected_bytes + 2) // 3)
+    if len(supplied) != expected_encoded_bytes:
+        raise MalformedGenerateResponseError(
+            f"Engine response {name}.data length does not match count and dtype."
+        )
+    remainder = expected_bytes % 3
+    padding = 0 if remainder == 0 else 3 - remainder
+    if (
+        padding
+        and (not supplied.endswith(b"=" * padding) or b"=" in supplied[:-padding])
+    ) or (not padding and b"=" in supplied):
+        raise MalformedGenerateResponseError(
+            f"Engine response {name}.data must be canonical base64."
+        )
+    try:
+        raw = base64.b64decode(supplied, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise MalformedGenerateResponseError(
+            f"Engine response {name}.data must be canonical base64."
+        ) from exc
+    if len(raw) != expected_bytes:
+        raise MalformedGenerateResponseError(
+            f"Engine response {name}.data length does not match count and dtype."
+        )
+    if remainder:
+        final_sextet = _BASE64_ALPHABET.find(supplied[-(padding + 1)])
+        unused_mask = 0x0F if remainder == 1 else 0x03
+        if final_sextet < 0 or final_sextet & unused_mask:
+            raise MalformedGenerateResponseError(
+                f"Engine response {name}.data must be canonical base64."
+            )
+    result = np.frombuffer(raw, dtype=expected_dtype)
+    if rank == 2:
+        assert columns is not None
+        result = result.reshape(count, columns)
+    if minimum is not None and result.size and np.any(result < minimum):
+        raise MalformedGenerateResponseError(
+            f"Engine response {name} values must be >= {minimum}."
+        )
+    result.flags.writeable = False
+    return result
+
+
+def _parse_completion_logprobs(
+    choice: Mapping[str, Any], completion_ids: np.ndarray
+) -> np.ndarray:
+    completion_logprobs = _decode_fixed_width_array(
+        "choice.completion_logprobs",
+        choice.get("completion_logprobs"),
+        dtype=LOGPROBS_DTYPE,
+        rank=1,
+    )
+    if completion_logprobs.size != completion_ids.size:
         raise MalformedGenerateResponseError(
             "Engine response completion token count "
-            f"({len(completion_ids)}) does not match logprob count ({len(content)})."
+            f"({completion_ids.size}) does not match logprob count ({completion_logprobs.size})."
         )
-
-    completion_logprobs: list[float] = []
-    for index, entry in enumerate(content):
-        if not isinstance(entry, Mapping):
-            raise MalformedGenerateResponseError(
-                f"Engine response choice.logprobs.content[{index}] must be an object."
-            )
-        expected_token = f"token_id:{completion_ids[index]}"
-        if entry.get("token") != expected_token:
-            raise MalformedGenerateResponseError(
-                f"Engine response choice.logprobs.content[{index}].token must be {expected_token!r}."
-            )
-        raw_logprob = entry.get("logprob")
-        if isinstance(raw_logprob, bool) or not isinstance(raw_logprob, (int, float)):
-            raise MalformedGenerateResponseError(
-                f"Engine response choice.logprobs.content[{index}].logprob must be a number."
-            )
-        try:
-            logprob = float(raw_logprob)
-        except OverflowError as exc:
-            raise MalformedGenerateResponseError(
-                f"Engine response choice.logprobs.content[{index}].logprob must be finite."
-            ) from exc
-        if not math.isfinite(logprob):
-            raise MalformedGenerateResponseError(
-                f"Engine response choice.logprobs.content[{index}].logprob must be finite."
-            )
-        if logprob == VLLM_LOGPROB_SENTINEL:
-            raise MalformedGenerateResponseError(
-                f"Engine response choice.logprobs.content[{index}].logprob does not contain sampling evidence."
-            )
-        completion_logprobs.append(logprob)
+    if not np.all(np.isfinite(completion_logprobs)):
+        raise MalformedGenerateResponseError(
+            "Engine response completion_logprobs must be finite."
+        )
+    if np.any(completion_logprobs == VLLM_LOGPROB_SENTINEL):
+        raise MalformedGenerateResponseError(
+            "Engine response completion_logprobs does not contain sampling evidence."
+        )
     return completion_logprobs
 
 
@@ -198,7 +311,7 @@ async def generate(
     renderer: Renderer,
     messages: list[Message],
     model: str,
-    prompt_ids: list[int] | None = None,
+    prompt_ids: np.ndarray | None = None,
     multi_modal_data: MultiModalData | None = None,
     prompt_attribution: RenderedTokens | None = None,
     tools: list[ToolSpec] | None = None,
@@ -224,12 +337,9 @@ async def generate(
 
     For multimodal renderers (e.g. ``Qwen3VLRenderer``), the call goes
     through ``renderer.render(...)`` to recover the ``multi_modal_data``
-    sidecar, then serializes it to vLLM's ``features`` schema (mm_hashes,
-    mm_placeholders, kwargs_data) before POSTing. The serializer imports
-    ``vllm.*`` lazily so text-only consumers never pay for the import.
-    With ``process_multimodal=False``, rendering skips image processing and
-    the request carries ``content_parts`` instead; vLLM must return the
-    expanded prompt as ``prompt_token_ids``.
+    sidecar, then serializes it to vLLM's fixed-width ``features`` schema.
+    The serializer imports ``vllm.*`` lazily so text-only consumers never
+    pay for the import.
 
     ``max_prompt_len`` controls the pre-flight overflow check. When the
     rendered prompt is strictly longer than the cap, the request is never
@@ -240,15 +350,11 @@ async def generate(
     cache a ``None`` cap and the pre-flight silently disables. Engine 4xx
     that still slip through propagate raw — converting them into a domain
     error is the calling client's job (its error shape is engine-specific).
-    Calls with ``process_multimodal=False`` skip this pre-flight because only
-    vLLM knows the expanded prompt length.
-
     Returns a dict with: request_id, prompt_ids, renderer_prompt_ids,
     mm_placeholders, completion_ids, completion_logprobs, content,
     reasoning_content, tool_calls, finish_reason, routed_experts,
-    multi_modal_data, prompt_attribution. ``renderer_prompt_ids`` is the
-    unexpanded logical prompt when ``process_multimodal=False`` and ``None``
-    otherwise.
+    multi_modal_data, prompt_attribution. ``renderer_prompt_ids`` is reserved
+    for a future typed deferred-multimodal transport and is currently ``None``.
 
     ``prompt_attribution`` is the renderer's :class:`RenderedTokens` for
     the prompt — either the one this call computed via
@@ -267,11 +373,9 @@ async def generate(
             f"{type(renderer).__name__} does not support tools. "
             "Choose a model-specific renderer instead of the default fallback."
         )
-    if not process_multimodal and not getattr(
-        renderer, "supports_process_multimodal", False
-    ):
+    if not process_multimodal:
         raise NotImplementedError(
-            f"{type(renderer).__name__} does not support process_multimodal=False"
+            "The fixed-width generate protocol does not support deferred multimodal processing."
         )
 
     def _prepare():
@@ -279,20 +383,22 @@ async def generate(
             # Caller-supplied prompt; if they also gave us pre-computed
             # attribution (e.g. the bridge path in verifiers), thread it
             # through unchanged.
+            require_1d_array("prompt_ids", prompt_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+            require_readonly("prompt_ids", prompt_ids)
+            if prompt_attribution is not None and not np.array_equal(
+                prompt_attribution.token_ids, prompt_ids
+            ):
+                raise ValueError("prompt_attribution.token_ids must match prompt_ids")
             return (
-                list(prompt_ids),
+                prompt_ids,
                 renderer.get_stop_token_ids(),
                 multi_modal_data,
                 prompt_attribution,
             )
-        render_kwargs: dict[str, Any] = {}
-        if not process_multimodal:
-            render_kwargs["process_multimodal"] = False
         rendered = renderer.render(
             messages,
             tools=tools,
             add_generation_prompt=True,
-            **render_kwargs,
         )
         return (
             rendered.token_ids,
@@ -303,13 +409,12 @@ async def generate(
 
     prompt_ids, stop_token_ids, mm_data, prompt_attr = _prepare()
 
-    if process_multimodal:
-        if max_prompt_len is None:
-            max_prompt_len = await _resolve_max_prompt_len(client, model)
-        if max_prompt_len is not None and len(prompt_ids) > max_prompt_len:
-            raise OverlongPromptError(
-                prompt_len=len(prompt_ids), max_prompt_len=max_prompt_len
-            )
+    if max_prompt_len is None:
+        max_prompt_len = await _resolve_max_prompt_len(client, model)
+    if max_prompt_len is not None and len(prompt_ids) > max_prompt_len:
+        raise OverlongPromptError(
+            prompt_len=len(prompt_ids), max_prompt_len=max_prompt_len
+        )
 
     sp: dict[str, Any] = dict(sampling_params or {})
     sp["stop_token_ids"] = stop_token_ids
@@ -318,17 +423,16 @@ async def generate(
 
     body: dict[str, Any] = {
         "model": model,
-        "token_ids": prompt_ids,
+        "token_ids": _encode_fixed_width_array(
+            "token_ids", prompt_ids, dtype=TOKEN_IDS_DTYPE, rank=1, minimum=0
+        ),
         "sampling_params": sp,
     }
-    content_parts = _content_parts(messages) if not process_multimodal else None
     features = (
         _build_mm_features(renderer, mm_data)
-        if process_multimodal and mm_data and not mm_data.is_empty()
+        if mm_data and not mm_data.is_empty()
         else None
     )
-    if content_parts:
-        body["content_parts"] = content_parts
     if features is not None:
         body["features"] = features
     if cache_salt is not None:
@@ -357,17 +461,44 @@ async def generate(
     data = parse_generate_response(raw_response.content)
 
     choice = (data.get("choices") or [{}])[0]
-    completion_ids = choice.get("token_ids") or []
-    effective_prompt_ids = data.get("prompt_token_ids")
-    if content_parts and not isinstance(effective_prompt_ids, list):
+    completion_ids = _decode_fixed_width_array(
+        "choice.token_ids",
+        choice.get("token_ids"),
+        dtype=TOKEN_IDS_DTYPE,
+        rank=1,
+        minimum=0,
+    )
+    raw_effective_prompt_ids = data.get("prompt_token_ids")
+    if raw_effective_prompt_ids is None:
         raise MalformedGenerateResponseError(
-            "Engine response must include prompt_token_ids when process_multimodal=False."
+            "Engine response must include prompt_token_ids."
         )
-    mm_placeholders = data.get("mm_placeholders")
-    if content_parts and not isinstance(mm_placeholders, dict):
+    effective_prompt_ids = _decode_fixed_width_array(
+        "prompt_token_ids",
+        raw_effective_prompt_ids,
+        dtype=TOKEN_IDS_DTYPE,
+        rank=1,
+        minimum=0,
+    )
+    if not np.array_equal(effective_prompt_ids, prompt_ids):
         raise MalformedGenerateResponseError(
-            "Engine response must include mm_placeholders when process_multimodal=False."
+            "Engine response prompt_token_ids does not match the requested prompt."
         )
+    raw_mm_placeholders = data.get("mm_placeholders")
+    mm_placeholders = (
+        {
+            modality: _decode_fixed_width_array(
+                f"mm_placeholders[{modality!r}]",
+                envelope,
+                dtype=OFFSETS_DTYPE,
+                rank=2,
+                columns=2,
+            )
+            for modality, envelope in raw_mm_placeholders.items()
+        }
+        if isinstance(raw_mm_placeholders, Mapping)
+        else None
+    )
 
     completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
 
@@ -393,10 +524,10 @@ async def generate(
 
     return {
         "request_id": data.get("request_id") or "",
-        "prompt_ids": list(effective_prompt_ids or prompt_ids),
-        "renderer_prompt_ids": list(prompt_ids) if content_parts else None,
+        "prompt_ids": effective_prompt_ids,
+        "renderer_prompt_ids": None,
         "mm_placeholders": mm_placeholders,
-        "completion_ids": list(completion_ids),
+        "completion_ids": completion_ids,
         "completion_logprobs": completion_logprobs,
         "content": parsed.content,
         "reasoning_content": parsed.reasoning_content,
@@ -417,43 +548,6 @@ async def generate(
         # when the caller passed prompt_ids without attribution.
         "prompt_attribution": prompt_attr,
     }
-
-
-_MEDIA_URL_TYPES = {
-    "image": "image_url",
-    "image_url": "image_url",
-    "audio": "audio_url",
-    "audio_url": "audio_url",
-    "video": "video_url",
-    "video_url": "video_url",
-}
-
-
-def _content_parts(messages: list[Message]) -> list[dict[str, Any]]:
-    """Flatten raw media in prompt order for vLLM's token generate endpoint."""
-    parts: list[dict[str, Any]] = []
-    for message in messages:
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, Mapping):
-                continue
-            part_type = part.get("type")
-            if part_type is None:
-                part_type = next(
-                    (key for key in _MEDIA_URL_TYPES if part.get(key)), None
-                )
-            if not isinstance(part_type, str) or part_type not in _MEDIA_URL_TYPES:
-                continue
-            source = part.get(part_type)
-            if source is None:
-                source = part.get(_MEDIA_URL_TYPES[part_type]) or part.get("url")
-            url = source.get("url") if isinstance(source, Mapping) else source
-            if not isinstance(url, str) or not url:
-                raise ValueError(f"{part_type} content part is missing a URL")
-            parts.append({"type": _MEDIA_URL_TYPES[part_type], "url": url})
-    return parts
 
 
 def _build_mm_features(
@@ -513,7 +607,7 @@ def _build_gemma4_features(mm_data: MultiModalData) -> dict[str, Any]:
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature
-        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+        from vllm.entrypoints.serve.disagg.mm_serde import (
             encode_mm_kwargs_item,
         )
         from vllm.multimodal.inputs import (
@@ -555,10 +649,15 @@ def _build_gemma4_features(mm_data: MultiModalData) -> dict[str, Any]:
             encode_mm_kwargs_item(item) for item in kwargs_items["image"]
         ]
         out["mm_hashes"]["image"] = list(mm_data.mm_hashes.get("image") or [])
-        out["mm_placeholders"]["image"] = [
-            {"offset": placeholder.offset, "length": placeholder.length}
-            for placeholder in mm_data.mm_placeholders.get("image") or []
-        ]
+        placeholders = mm_data.mm_placeholders.get("image")
+        if placeholders is not None:
+            out["mm_placeholders"]["image"] = _encode_fixed_width_array(
+                "mm_placeholders['image']",
+                placeholders,
+                dtype=OFFSETS_DTYPE,
+                rank=2,
+                columns=2,
+            )
 
     if not any(out["kwargs_data"].values()):
         out["kwargs_data"] = None
@@ -582,7 +681,7 @@ def _build_qwen_vl_features(
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature
-        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+        from vllm.entrypoints.serve.disagg.mm_serde import (
             encode_mm_kwargs_item,
         )
         from vllm.model_executor.models.qwen2_vl import _create_qwen2vl_field_factory
@@ -619,10 +718,15 @@ def _build_qwen_vl_features(
         encoded = [encode_mm_kwargs_item(it) for it in kwargs_items["image"]]
         out["kwargs_data"]["image"] = encoded
         out["mm_hashes"]["image"] = list(mm_data.mm_hashes.get("image") or [])
-        out["mm_placeholders"]["image"] = [
-            {"offset": p.offset, "length": p.length}
-            for p in mm_data.mm_placeholders.get("image") or []
-        ]
+        placeholders = mm_data.mm_placeholders.get("image")
+        if placeholders is not None:
+            out["mm_placeholders"]["image"] = _encode_fixed_width_array(
+                "mm_placeholders['image']",
+                placeholders,
+                dtype=OFFSETS_DTYPE,
+                rank=2,
+                columns=2,
+            )
 
     # If kwargs_data is empty across all modalities, drop the key so vLLM
     # falls back to the hash-only (cache-hit) path. Otherwise hand it the

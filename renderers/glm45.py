@@ -29,7 +29,11 @@ from renderers.base import (
 )
 from renderers.configs import GLM45RendererConfig
 from renderers.parsing import parse_glm
-from renderers.token_arrays import RenderedTokenBuilder, TextSegmentBuilder, TOKEN_IDS_DTYPE
+from renderers.token_arrays import (
+    RenderedTokenBuilder,
+    TextSegmentBuilder,
+    TOKEN_IDS_DTYPE,
+)
 
 _TOOLS_HEADER = (
     "\n# Tools\n\n"
@@ -110,12 +114,18 @@ class GLM45Renderer:
         return -1
 
     def render(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         emit_special = builder.emit_special
         emit_text = builder.emit_text
         emit_text_segments = builder.emit_text_segments
@@ -170,7 +180,9 @@ class GLM45Renderer:
                 emit_text_segments(system_segments.finish(), i, is_sampled=False)
 
             elif role == "user":
-                emit_special(self._user, i, is_sampled=closes_assistant_turn, is_content=False)
+                emit_special(
+                    self._user, i, is_sampled=closes_assistant_turn, is_content=False
+                )
                 # ``\n`` is scaffold; ``content`` is body; the optional
                 # ``/nothink`` suffix is scaffold the renderer injects
                 # when ``enable_thinking=False``.
@@ -217,11 +229,19 @@ class GLM45Renderer:
         )
 
     def render_ids(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> np.ndarray:
-        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
+        return self.render(
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
+        ).token_ids
 
-    def parse_response(self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None) -> ParsedResponse:
+    def parse_response(
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
+    ) -> ParsedResponse:
         return parse_glm(
             self._tokenizer,
             token_ids,
@@ -248,15 +268,23 @@ class GLM45Renderer:
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
-        if len(previous_prompt_ids) == 0 or not new_messages or reject_assistant_in_extension(new_messages):
+        if (
+            len(previous_prompt_ids) == 0
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
             return None
 
-        if should_rerender_for_thinking_retention(self.effective_thinking_retention, new_messages):
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention, new_messages
+        ):
             return None
 
         # Same next-turn-marker scheme as GLM-5, but role markers are
         # followed by a literal ``\n`` in the prompt text.
-        previous_ids = np.concatenate((previous_prompt_ids, previous_completion_ids), dtype=TOKEN_IDS_DTYPE)
+        previous_ids = np.concatenate(
+            (previous_prompt_ids, previous_completion_ids), dtype=TOKEN_IDS_DTYPE
+        )
         stop_ids = {self._endoftext, self._user, self._observation}
         if previous_completion_ids.size == 0 or int(previous_ids[-1]) not in stop_ids:
             closed = np.empty(previous_ids.size + 1, dtype=TOKEN_IDS_DTYPE)
@@ -265,7 +293,9 @@ class GLM45Renderer:
             previous_ids = closed
 
         last_prev = int(previous_ids[-1])
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
@@ -340,7 +370,17 @@ class GLM45Renderer:
             content_available=self._offset_tokenizer is not None,
         )
 
-    def _render_assistant(self, msg, msg_idx, content, last_user_index, *, emit_special, emit_text, emit_text_segments):
+    def _render_assistant(
+        self,
+        msg,
+        msg_idx,
+        content,
+        last_user_index,
+        *,
+        emit_special,
+        emit_text,
+        emit_text_segments,
+    ):
         reasoning_content = ""
         if isinstance(msg.get("reasoning_content"), str):
             reasoning_content = msg["reasoning_content"]
@@ -376,7 +416,9 @@ class GLM45Renderer:
 
         if msg_idx > last_user_index and reasoning_content:
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
-            emit_text(reasoning_content.strip(), msg_idx, is_sampled=True, is_content=True)
+            emit_text(
+                reasoning_content.strip(), msg_idx, is_sampled=True, is_content=True
+            )
             emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
         else:
             emit_special(self._think, msg_idx, is_sampled=True, is_content=True)
@@ -385,7 +427,9 @@ class GLM45Renderer:
         # Tool calls — keep content + \n contiguous to preserve BPE merges
         tool_calls = msg.get("tool_calls") or []
         if content.strip() and tool_calls:
-            emit_text("\n" + content.strip() + "\n", msg_idx, is_sampled=True, is_content=True)
+            emit_text(
+                "\n" + content.strip() + "\n", msg_idx, is_sampled=True, is_content=True
+            )
         elif content.strip():
             emit_text("\n" + content.strip(), msg_idx, is_sampled=True, is_content=True)
 
@@ -407,21 +451,43 @@ class GLM45Renderer:
                     arguments = {}
             if isinstance(arguments, dict):
                 for arg_name, arg_value in arguments.items():
-                    emit_special(self._arg_key, msg_idx, is_sampled=True, is_content=True)
+                    emit_special(
+                        self._arg_key, msg_idx, is_sampled=True, is_content=True
+                    )
                     emit_text(arg_name, msg_idx, is_sampled=True, is_content=True)
-                    emit_special(self._arg_key_end, msg_idx, is_sampled=True, is_content=True)
+                    emit_special(
+                        self._arg_key_end, msg_idx, is_sampled=True, is_content=True
+                    )
                     emit_text("\n", msg_idx, is_sampled=True, is_content=True)
-                    emit_special(self._arg_value, msg_idx, is_sampled=True, is_content=True)
+                    emit_special(
+                        self._arg_value, msg_idx, is_sampled=True, is_content=True
+                    )
                     if isinstance(arg_value, str):
                         emit_text(arg_value, msg_idx, is_sampled=True, is_content=True)
                     else:
-                        emit_text(json.dumps(arg_value, ensure_ascii=False), msg_idx, is_sampled=True, is_content=True)
-                    emit_special(self._arg_value_end, msg_idx, is_sampled=True, is_content=True)
+                        emit_text(
+                            json.dumps(arg_value, ensure_ascii=False),
+                            msg_idx,
+                            is_sampled=True,
+                            is_content=True,
+                        )
+                    emit_special(
+                        self._arg_value_end, msg_idx, is_sampled=True, is_content=True
+                    )
                     emit_text("\n", msg_idx, is_sampled=True, is_content=True)
-            emit_special(self._tool_call_end_tok, msg_idx, is_sampled=True, is_content=True)
+            emit_special(
+                self._tool_call_end_tok, msg_idx, is_sampled=True, is_content=True
+            )
 
     def _render_tool(
-        self, messages: list[Message], msg_idx: int, content: str, *, emit_special, emit_text, emit_text_segments
+        self,
+        messages: list[Message],
+        msg_idx: int,
+        content: str,
+        *,
+        emit_special,
+        emit_text,
+        emit_text_segments,
     ) -> None:
         # Tool body bytes get ``is_content=True``; the wraps are
         # scaffold. The ``<|observation|>`` role tag is scaffold too
@@ -435,7 +501,12 @@ class GLM45Renderer:
         closes_assistant_turn = prev_role == "assistant"
 
         if prev_role != "tool":
-            emit_special(self._observation, msg_idx, is_sampled=closes_assistant_turn, is_content=False)
+            emit_special(
+                self._observation,
+                msg_idx,
+                is_sampled=closes_assistant_turn,
+                is_content=False,
+            )
 
         tool_segments = TextSegmentBuilder()
         tool_segments.append("\n<tool_response>\n", is_content=False)

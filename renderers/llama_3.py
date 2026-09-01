@@ -93,7 +93,9 @@ _TOOLS_IN_USER_INTRO = (
 class Llama3Renderer:
     """Deterministic message → token renderer for Llama-3.x Instruct models."""
 
-    def __init__(self, tokenizer: Tokenizer, config: Llama3RendererConfig | None = None):
+    def __init__(
+        self, tokenizer: Tokenizer, config: Llama3RendererConfig | None = None
+    ):
         # ``thinking_retention`` is accepted but a no-op: Llama-3 ships no
         # reasoning_content channel, so there's never any past-assistant
         # thinking to retain or drop. The level is stored on ``self.config``
@@ -103,7 +105,9 @@ class Llama3Renderer:
         self._tokenizer = tokenizer
         self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self.config = config or Llama3RendererConfig()
-        self.effective_thinking_retention = resolve_thinking_retention(self.config, "all")
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config, "all"
+        )
 
         self._bos = self._token_id("<|begin_of_text|>")
         self._start_header = self._token_id("<|start_header_id|>")
@@ -166,12 +170,18 @@ class Llama3Renderer:
     # ------------------------------------------------------------------
 
     def render(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         emit_special = builder.emit_special
         emit_text = builder.emit_text
         emit_text_segments = builder.emit_text_segments
@@ -182,7 +192,11 @@ class Llama3Renderer:
         # ── 1. System block (always emitted) ────────────────────────
         first_is_system = messages[0].get("role") == "system"
         sys_idx = 0 if first_is_system else -1
-        sys_text = self._content_str(messages[0].get("content")).strip() if first_is_system else ""
+        sys_text = (
+            self._content_str(messages[0].get("content")).strip()
+            if first_is_system
+            else ""
+        )
 
         emit_special(self._start_header, sys_idx, is_sampled=False, is_content=False)
         emit_text("system", sys_idx, is_sampled=False, is_content=False)
@@ -216,7 +230,9 @@ class Llama3Renderer:
         #     into a special block with the tools description prepended.
         if tools is not None and self.config.tools_in_user_message:
             if i >= len(body_messages):
-                raise ValueError("Cannot place tools in the first user message — no user message was provided.")
+                raise ValueError(
+                    "Cannot place tools in the first user message — no user message was provided."
+                )
             first_user = body_messages[i]
             if first_user.get("role") != "user":
                 raise ValueError(
@@ -224,7 +240,9 @@ class Llama3Renderer:
                     f"message to be 'user'; got {first_user.get('role')!r}."
                 )
             user_idx = i + offset
-            emit_special(self._start_header, user_idx, is_sampled=False, is_content=False)
+            emit_special(
+                self._start_header, user_idx, is_sampled=False, is_content=False
+            )
             emit_text("user", user_idx, is_sampled=False, is_content=False)
             emit_special(self._end_header, user_idx, is_sampled=False, is_content=False)
             user_preamble = "\n\n" + _TOOLS_IN_USER_INTRO
@@ -250,9 +268,13 @@ class Llama3Renderer:
                 # Tool responses are conversation history the model never
                 # samples; the response body is caller content, the wrap is
                 # scaffold.
-                emit_special(self._start_header, msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._start_header, msg_idx, is_sampled=False, is_content=False
+                )
                 emit_text("ipython", msg_idx, is_sampled=False, is_content=False)
-                emit_special(self._end_header, msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._end_header, msg_idx, is_sampled=False, is_content=False
+                )
                 tool_body = self._tool_response_str(msg.get("content"))
                 tool_segments = TextSegmentBuilder()
                 tool_segments.append("\n\n", is_content=False)
@@ -262,7 +284,9 @@ class Llama3Renderer:
                 emit_special(self._eot, msg_idx, is_sampled=False, is_content=False)
             elif tool_calls:
                 if len(tool_calls) != 1:
-                    raise ValueError("Llama-3 chat template only supports a single tool call per assistant message.")
+                    raise ValueError(
+                        "Llama-3 chat template only supports a single tool call per assistant message."
+                    )
                 tc = tool_calls[0]
                 func = tc.get("function") or tc
                 name = func.get("name", "")
@@ -271,9 +295,13 @@ class Llama3Renderer:
                     args_str = arguments
                 else:
                     args_str = json.dumps(arguments, ensure_ascii=False)
-                emit_special(self._start_header, msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._start_header, msg_idx, is_sampled=False, is_content=False
+                )
                 emit_text("assistant", msg_idx, is_sampled=False, is_content=False)
-                emit_special(self._end_header, msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._end_header, msg_idx, is_sampled=False, is_content=False
+                )
                 # The ``\n\n`` after the header is gen-prompt scaffold the
                 # model never samples; the JSON tool-call body and the
                 # closing ``<|eot_id|>`` are the model's sampled emission.
@@ -287,9 +315,13 @@ class Llama3Renderer:
                 emit_special(self._eot, msg_idx, is_sampled=True, is_content=True)
             elif role == "assistant":
                 content = self._content_str(msg.get("content")).strip()
-                emit_special(self._start_header, msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._start_header, msg_idx, is_sampled=False, is_content=False
+                )
                 emit_text("assistant", msg_idx, is_sampled=False, is_content=False)
-                emit_special(self._end_header, msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._end_header, msg_idx, is_sampled=False, is_content=False
+                )
                 # ``\n\n`` separator is scaffold (it's the generation prompt);
                 # the body and the closing ``<|eot_id|>`` are model-sampled.
                 emit_text("\n\n", msg_idx, is_sampled=False, is_content=False)
@@ -299,9 +331,13 @@ class Llama3Renderer:
             else:
                 # user / non-leading system: caller content, never sampled.
                 content = self._content_str(msg.get("content")).strip()
-                emit_special(self._start_header, msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._start_header, msg_idx, is_sampled=False, is_content=False
+                )
                 emit_text(role or "", msg_idx, is_sampled=False, is_content=False)
-                emit_special(self._end_header, msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._end_header, msg_idx, is_sampled=False, is_content=False
+                )
                 segments = TextSegmentBuilder()
                 segments.append("\n\n", is_content=False)
                 if content:
@@ -323,12 +359,24 @@ class Llama3Renderer:
         )
 
     def render_ids(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> np.ndarray:
-        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
+        return self.render(
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
+        ).token_ids
 
-    def parse_response(self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None) -> ParsedResponse:
-        return parse_llama_3(self._tokenizer, token_ids, stop_ids={self._eot, self._end_of_text, self._eom})
+    def parse_response(
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
+    ) -> ParsedResponse:
+        return parse_llama_3(
+            self._tokenizer,
+            token_ids,
+            stop_ids={self._eot, self._end_of_text, self._eom},
+        )
 
     def get_stop_token_ids(self) -> list[int]:
         return [self._eot, self._end_of_text, self._eom]
@@ -345,9 +393,15 @@ class Llama3Renderer:
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
-        if len(previous_prompt_ids) == 0 or not new_messages or reject_assistant_in_extension(new_messages):
+        if (
+            len(previous_prompt_ids) == 0
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
             return None
-        if should_rerender_for_thinking_retention(self.effective_thinking_retention, new_messages):
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention, new_messages
+        ):
             return None
 
         previous_ids = trim_to_turn_close(
@@ -359,7 +413,9 @@ class Llama3Renderer:
         if previous_ids is None:
             return None
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         builder.prepend_prior(previous_ids)
         emit_special = builder.emit_special
         emit_text = builder.emit_text

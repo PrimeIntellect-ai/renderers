@@ -228,6 +228,7 @@ __all__ = [
     "Renderer",
     "RendererConfig",
     "TextPart",
+    "TextSegmentBuilder",
     "ThinkingPart",
     "Tokenizer",
     "ToolCall",

@@ -55,7 +55,9 @@ TOOLS = [
 def make_renderer(model: str, enable_thinking: bool | None):
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=False)
     if model.startswith("Qwen/Qwen3.5-"):
-        return Qwen35Renderer(tokenizer, Qwen35RendererConfig(enable_thinking=enable_thinking))
+        return Qwen35Renderer(
+            tokenizer, Qwen35RendererConfig(enable_thinking=enable_thinking)
+        )
     raise ValueError(f"unsupported demo model: {model}")
 
 
@@ -87,7 +89,11 @@ def main() -> None:
             targets.append((model, None))
 
     for model, enable_thinking in targets:
-        label = model if enable_thinking is None else f"{model} enable_thinking={enable_thinking}"
+        label = (
+            model
+            if enable_thinking is None
+            else f"{model} enable_thinking={enable_thinking}"
+        )
         print(f"\n=== {label} ===")
 
         renderer = make_renderer(model, enable_thinking)
@@ -108,14 +114,23 @@ def main() -> None:
 
         messages = [
             {"role": "system", "content": "You are a concise tool-using assistant."},
-            {"role": "user", "content": "Use the multiply tool for 17 * 23, then summarize."},
+            {
+                "role": "user",
+                "content": "Use the multiply tool for 17 * 23, then summarize.",
+            },
         ]
 
         # Turn 1: render locally and pass token IDs to vLLM. vLLM never sees
         # messages and never applies a chat template.
-        prompt_ids = renderer.render_ids(messages, tools=TOOLS, add_generation_prompt=True)
-        output1 = llm.generate([{"prompt_token_ids": prompt_ids}], sampling_params=sampling, use_tqdm=False)[0]
-        completion1 = owned_token_ids_from_array("vLLM completion token IDs", output1.outputs[0].token_ids)
+        prompt_ids = renderer.render_ids(
+            messages, tools=TOOLS, add_generation_prompt=True
+        )
+        output1 = llm.generate(
+            [{"prompt_token_ids": prompt_ids}], sampling_params=sampling, use_tqdm=False
+        )[0]
+        completion1 = owned_token_ids_from_array(
+            "vLLM completion token IDs", output1.outputs[0].token_ids
+        )
         parsed1 = renderer.parse_response(completion1)
         print_parsed(label, "turn 1", parsed1)
 
@@ -130,7 +145,9 @@ def main() -> None:
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        "arguments": tc.arguments if isinstance(tc.arguments, str) else json.dumps(tc.arguments),
+                        "arguments": tc.arguments
+                        if isinstance(tc.arguments, str)
+                        else json.dumps(tc.arguments),
                     },
                 }
                 for idx, tc in enumerate(parsed1.tool_calls)
@@ -148,24 +165,36 @@ def main() -> None:
                         "role": "tool",
                         "tool_call_id": tool_call.id or f"call_{idx}",
                         "name": tool_call.name or "multiply",
-                        "content": json.dumps({"result": int(tool_args["a"]) * int(tool_args["b"])}),
+                        "content": json.dumps(
+                            {"result": int(tool_args["a"]) * int(tool_args["b"])}
+                        ),
                     }
                 )
         else:
-            new_messages = [{"role": "user", "content": "Give the final answer in one sentence."}]
+            new_messages = [
+                {"role": "user", "content": "Give the final answer in one sentence."}
+            ]
 
         # Turn 2: bridge extends prompt_ids + completion1 exactly.
         # ``bridge_to_next_turn`` returns a ``RenderedTokens`` (or None); the
         # extended id stream is on ``.token_ids``.
-        bridged = renderer.bridge_to_next_turn(prompt_ids, completion1, new_messages, tools=TOOLS)
+        bridged = renderer.bridge_to_next_turn(
+            prompt_ids, completion1, new_messages, tools=TOOLS
+        )
         if bridged is None:
             raise RuntimeError("bridge_to_next_turn returned None")
         bridged_ids = bridged.token_ids
         expected_prefix = np.concatenate((prompt_ids, completion1))
         assert np.array_equal(bridged_ids[: expected_prefix.size], expected_prefix)
 
-        output2 = llm.generate([{"prompt_token_ids": bridged_ids}], sampling_params=sampling, use_tqdm=False)[0]
-        completion2 = owned_token_ids_from_array("vLLM completion token IDs", output2.outputs[0].token_ids)
+        output2 = llm.generate(
+            [{"prompt_token_ids": bridged_ids}],
+            sampling_params=sampling,
+            use_tqdm=False,
+        )[0]
+        completion2 = owned_token_ids_from_array(
+            "vLLM completion token IDs", output2.outputs[0].token_ids
+        )
         print_parsed(label, "turn 2", renderer.parse_response(completion2))
 
         del llm

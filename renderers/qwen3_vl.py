@@ -199,7 +199,9 @@ class _Emitter:
     """
 
     def __init__(self, tokenizer, *, offset_tokenizer, msg_idx: int = -1):
-        self._builder = RenderedTokenBuilder(tokenizer, offset_tokenizer=offset_tokenizer)
+        self._builder = RenderedTokenBuilder(
+            tokenizer, offset_tokenizer=offset_tokenizer
+        )
         self._segments = TextSegmentBuilder()
         self._buf_idx: int = msg_idx
         self._buf_sampled: bool = False
@@ -224,7 +226,9 @@ class _Emitter:
         # NOT force a flush: they're carried through the joined BPE pass
         # via :func:`attribute_text_segments`, preserving merges across
         # the wrap/body boundary.
-        if self._segments and (self._buf_idx != self.msg_idx or self._buf_sampled != is_sampled):
+        if self._segments and (
+            self._buf_idx != self.msg_idx or self._buf_sampled != is_sampled
+        ):
             self._flush()
         if not self._segments:
             self._buf_idx = self.msg_idx
@@ -234,7 +238,9 @@ class _Emitter:
     def special(self, token_id: int, *, is_sampled: bool, is_content: bool) -> None:
         if self._segments:
             self._flush()
-        self._builder.emit_special(token_id, self.msg_idx, is_sampled=is_sampled, is_content=is_content)
+        self._builder.emit_special(
+            token_id, self.msg_idx, is_sampled=is_sampled, is_content=is_content
+        )
 
     def cursor(self) -> int:
         """Current token offset after flushing — used to anchor placeholder ranges."""
@@ -264,10 +270,15 @@ class _Emitter:
         first_content = bool(segments.is_content[0])
         if np.all(segments.is_content == first_content):
             self._builder.emit_text(
-                "".join(segments.texts), self._buf_idx, is_sampled=self._buf_sampled, is_content=first_content
+                "".join(segments.texts),
+                self._buf_idx,
+                is_sampled=self._buf_sampled,
+                is_content=first_content,
             )
             return
-        self._builder.emit_text_segments(segments, self._buf_idx, is_sampled=self._buf_sampled)
+        self._builder.emit_text_segments(
+            segments, self._buf_idx, is_sampled=self._buf_sampled
+        )
 
 
 class Qwen3VLRenderer:
@@ -291,12 +302,20 @@ class Qwen3VLRenderer:
 
     supports_process_multimodal = True
 
-    def __init__(self, tokenizer: Tokenizer, config: Qwen3VLRendererConfig | None = None, *, processor: Any = None):
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        config: Qwen3VLRendererConfig | None = None,
+        *,
+        processor: Any = None,
+    ):
         self._tokenizer = tokenizer
         self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self._processor = processor
         self.config = config or Qwen3VLRendererConfig()
-        self.effective_thinking_retention = resolve_thinking_retention(self.config, "all")
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config, "all"
+        )
 
         self._im_start = self._token_id("<|im_start|>")
         self._im_end = self._token_id("<|im_end|>")
@@ -389,7 +408,10 @@ class Qwen3VLRenderer:
         if msg.get("role") != "user":
             return False
         content = Qwen3VLRenderer._render_text_content(msg.get("content")).strip()
-        return not (content.startswith("<tool_response>") and content.endswith("</tool_response>"))
+        return not (
+            content.startswith("<tool_response>")
+            and content.endswith("</tool_response>")
+        )
 
     def _process_image(self, part: dict[str, Any]):
         """Resolve, process, and characterize a single image part.
@@ -453,7 +475,11 @@ class Qwen3VLRenderer:
                 n = 1
             vision_counts["image"] += 1
             if self.config.add_vision_id:
-                em.text(f"Picture {vision_counts['image']}: ", is_sampled=False, is_content=False)
+                em.text(
+                    f"Picture {vision_counts['image']}: ",
+                    is_sampled=False,
+                    is_content=False,
+                )
             em.special(self._vision_start, is_sampled=False, is_content=False)
             offset = em.cursor()
             for _ in range(n):
@@ -462,9 +488,14 @@ class Qwen3VLRenderer:
             if process_multimodal:
                 assert out is not None and h is not None
                 mm_hashes.setdefault("image", []).append(h)
-                mm_placeholder_builders.setdefault("image", FixedWidthRangeBuilder()).append(offset, n)
+                mm_placeholder_builders.setdefault(
+                    "image", FixedWidthRangeBuilder()
+                ).append(offset, n)
                 mm_items.setdefault("image", []).append(
-                    {"pixel_values": out["pixel_values"], "image_grid_thw": out["image_grid_thw"]}
+                    {
+                        "pixel_values": out["pixel_values"],
+                        "image_grid_thw": out["image_grid_thw"],
+                    }
                 )
 
         def render_media_content(content: Any) -> None:
@@ -481,7 +512,11 @@ class Qwen3VLRenderer:
                 em.text(content, is_sampled=False, is_content=True)
                 return
             if not isinstance(content, list):
-                em.text(self._render_text_content(content), is_sampled=False, is_content=True)
+                em.text(
+                    self._render_text_content(content),
+                    is_sampled=False,
+                    is_content=True,
+                )
                 return
             for item in content:
                 if isinstance(item, str):
@@ -490,7 +525,9 @@ class Qwen3VLRenderer:
                     if _is_image_part(item):
                         emit_image(item)
                     elif _is_video_part(item):
-                        raise NotImplementedError("Video parts are not yet supported by Qwen3VLRenderer.")
+                        raise NotImplementedError(
+                            "Video parts are not yet supported by Qwen3VLRenderer."
+                        )
                     elif "text" in item:
                         em.text(item["text"], is_sampled=False, is_content=True)
 
@@ -514,7 +551,11 @@ class Qwen3VLRenderer:
                 em.text("\n\n", is_sampled=False, is_content=False)
             em.text(_TOOLS_HEADER, is_sampled=False, is_content=False)
             for tool in tools:
-                em.text("\n" + json.dumps(tool, ensure_ascii=False), is_sampled=False, is_content=False)
+                em.text(
+                    "\n" + json.dumps(tool, ensure_ascii=False),
+                    is_sampled=False,
+                    is_content=False,
+                )
             em.text(_TOOLS_FOOTER, is_sampled=False, is_content=False)
             em.special(self._im_end, is_sampled=False, is_content=False)
             em.text("\n", is_sampled=False, is_content=False)
@@ -562,7 +603,9 @@ class Qwen3VLRenderer:
         mm_placeholders = finish_range_builders(mm_placeholder_builders)
         mm_data: MultiModalData | None = None
         if mm_hashes or mm_placeholders or mm_items:
-            mm_data = MultiModalData(mm_hashes=mm_hashes, mm_placeholders=mm_placeholders, mm_items=mm_items)
+            mm_data = MultiModalData(
+                mm_hashes=mm_hashes, mm_placeholders=mm_placeholders, mm_items=mm_items
+            )
 
         return em.finish(
             message_roles=[m.get("role") or "" for m in messages],
@@ -572,9 +615,15 @@ class Qwen3VLRenderer:
         )
 
     def render_ids(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> np.ndarray:
-        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
+        return self.render(
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
+        ).token_ids
 
     def parse_response(
         self,
@@ -613,15 +662,24 @@ class Qwen3VLRenderer:
         unchanged in the new prompt (they sit at lower positions than
         the synthesized close token), so we just concatenate.
         """
-        if len(previous_prompt_ids) == 0 or not new_messages or reject_assistant_in_extension(new_messages):
+        if (
+            len(previous_prompt_ids) == 0
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
             return None
         if should_rerender_for_thinking_retention(
-            self.effective_thinking_retention, new_messages, is_user_query=self._is_user_query_message
+            self.effective_thinking_retention,
+            new_messages,
+            is_user_query=self._is_user_query_message,
         ):
             return None
 
         previous_ids = trim_to_turn_close(
-            previous_prompt_ids, previous_completion_ids, {self._im_end, self._endoftext}, synthesize_close=self._im_end
+            previous_prompt_ids,
+            previous_completion_ids,
+            {self._im_end, self._endoftext},
+            synthesize_close=self._im_end,
         )
         if previous_ids is None:
             return None
@@ -688,7 +746,11 @@ class Qwen3VLRenderer:
                 n = 1
             vision_counts["image"] += 1
             if self.config.add_vision_id:
-                em.text(f"Picture {vision_counts['image']}: ", is_sampled=False, is_content=False)
+                em.text(
+                    f"Picture {vision_counts['image']}: ",
+                    is_sampled=False,
+                    is_content=False,
+                )
             em.special(self._vision_start, is_sampled=False, is_content=False)
             offset = em.cursor()
             for _ in range(n):
@@ -697,9 +759,14 @@ class Qwen3VLRenderer:
             if process_multimodal:
                 assert out is not None and h is not None
                 new_hashes.setdefault("image", []).append(h)
-                new_placeholder_builders.setdefault("image", FixedWidthRangeBuilder()).append(offset, n)
+                new_placeholder_builders.setdefault(
+                    "image", FixedWidthRangeBuilder()
+                ).append(offset, n)
                 new_items.setdefault("image", []).append(
-                    {"pixel_values": out["pixel_values"], "image_grid_thw": out["image_grid_thw"]}
+                    {
+                        "pixel_values": out["pixel_values"],
+                        "image_grid_thw": out["image_grid_thw"],
+                    }
                 )
 
         def render_media_content(content: Any) -> None:
@@ -707,7 +774,11 @@ class Qwen3VLRenderer:
                 em.text(content, is_sampled=False, is_content=True)
                 return
             if not isinstance(content, list):
-                em.text(self._render_text_content(content), is_sampled=False, is_content=True)
+                em.text(
+                    self._render_text_content(content),
+                    is_sampled=False,
+                    is_content=True,
+                )
                 return
             for item in content:
                 if isinstance(item, str):
@@ -716,7 +787,9 @@ class Qwen3VLRenderer:
                     if _is_image_part(item):
                         emit_image(item)
                     elif _is_video_part(item):
-                        raise NotImplementedError("Video parts are not yet supported by Qwen3VLRenderer.")
+                        raise NotImplementedError(
+                            "Video parts are not yet supported by Qwen3VLRenderer."
+                        )
                     elif "text" in item:
                         em.text(item["text"], is_sampled=False, is_content=True)
 
@@ -755,7 +828,9 @@ class Qwen3VLRenderer:
             else {}
         )
         previous_placeholders = (
-            previous_multi_modal_data.mm_placeholders if process_multimodal and previous_multi_modal_data else {}
+            previous_multi_modal_data.mm_placeholders
+            if process_multimodal and previous_multi_modal_data
+            else {}
         )
         new_placeholders = finish_range_builders(new_placeholder_builders)
         merged_placeholders = merge_range_maps(previous_placeholders, new_placeholders)
@@ -772,7 +847,9 @@ class Qwen3VLRenderer:
         mm_data: MultiModalData | None = None
         if merged_hashes or merged_placeholders or merged_items:
             mm_data = MultiModalData(
-                mm_hashes=merged_hashes, mm_placeholders=merged_placeholders, mm_items=merged_items
+                mm_hashes=merged_hashes,
+                mm_placeholders=merged_placeholders,
+                mm_items=merged_items,
             )
 
         return em.finish(
@@ -811,10 +888,18 @@ class Qwen3VLRenderer:
                 func = tc.get("function") or tc
                 name = func.get("name", "")
                 arguments = func.get("arguments", {})
-                args_str = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+                args_str = (
+                    arguments
+                    if isinstance(arguments, str)
+                    else json.dumps(arguments, ensure_ascii=False)
+                )
 
                 em.special(self._tool_call, is_sampled=True, is_content=True)
-                em.text('\n{"name": "' + name + '", "arguments": ' + args_str + "}\n", is_sampled=True, is_content=True)
+                em.text(
+                    '\n{"name": "' + name + '", "arguments": ' + args_str + "}\n",
+                    is_sampled=True,
+                    is_content=True,
+                )
                 em.special(self._tool_call_end, is_sampled=True, is_content=True)
 
         # ``<|im_end|>`` is the model's stop signal — it samples this to
@@ -823,7 +908,9 @@ class Qwen3VLRenderer:
         em.special(self._im_end, is_sampled=True, is_content=True)
         em.text("\n", is_sampled=False, is_content=False)
 
-    def _render_tool(self, messages: list[Message], msg_idx: int, em: _Emitter, render_media_content) -> None:
+    def _render_tool(
+        self, messages: list[Message], msg_idx: int, em: _Emitter, render_media_content
+    ) -> None:
         # Tool messages are conversation history injected by the runtime
         # between assistant turns — the model never samples any of these
         # tokens, so every emission is is_sampled=False. The
@@ -832,7 +919,9 @@ class Qwen3VLRenderer:
         # ``<|im_start|>user`` wrap, inter-section ``\n``s, and the
         # ``<|tool_response>`` specials — is scaffold.
         prev_is_tool = msg_idx > 0 and messages[msg_idx - 1]["role"] == "tool"
-        next_is_tool = msg_idx + 1 < len(messages) and messages[msg_idx + 1]["role"] == "tool"
+        next_is_tool = (
+            msg_idx + 1 < len(messages) and messages[msg_idx + 1]["role"] == "tool"
+        )
 
         if not prev_is_tool:
             em.special(self._im_start, is_sampled=False, is_content=False)

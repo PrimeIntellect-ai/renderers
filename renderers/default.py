@@ -98,7 +98,11 @@ class DefaultRenderer:
     :class:`renderers.DefaultRendererConfig`).
     """
 
-    def __init__(self, tokenizer: ChatTemplateTokenizer, config: DefaultRendererConfig | None = None):
+    def __init__(
+        self,
+        tokenizer: ChatTemplateTokenizer,
+        config: DefaultRendererConfig | None = None,
+    ):
         cfg = config or DefaultRendererConfig()
         if cfg.thinking_retention is not None:
             raise ValueError(
@@ -110,14 +114,20 @@ class DefaultRenderer:
         self._tokenizer = tokenizer
         self.config = cfg
         self._tool_parser = _resolve_parser(cfg.tool_parser, tokenizer, get_tool_parser)
-        self._reasoning_parser = _resolve_parser(cfg.reasoning_parser, tokenizer, get_reasoning_parser)
+        self._reasoning_parser = _resolve_parser(
+            cfg.reasoning_parser, tokenizer, get_reasoning_parser
+        )
 
     @property
     def supports_tools(self) -> bool:
         return self._tool_parser is not None
 
     def render(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> RenderedTokens:
         # Incremental rendering to get per-token message attribution
         token_ids = empty_array(TOKEN_IDS_DTYPE)
@@ -145,7 +155,9 @@ class DefaultRenderer:
             message_tool_names=extract_message_tool_names(messages),
         )
 
-    def _apply(self, messages, *, tools=None, add_generation_prompt=False) -> np.ndarray:
+    def _apply(
+        self, messages, *, tools=None, add_generation_prompt=False
+    ) -> np.ndarray:
         kwargs = dict(self.config.model_extra or {})
         kwargs["add_generation_prompt"] = add_generation_prompt
         kwargs["tokenize"] = True
@@ -158,9 +170,15 @@ class DefaultRenderer:
         return owned_token_ids_from_array(type(self._tokenizer).__name__, result)
 
     def render_ids(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> np.ndarray:
-        return self._apply(messages, tools=tools, add_generation_prompt=add_generation_prompt)
+        return self._apply(
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
+        )
 
     def parse_response(
         self,

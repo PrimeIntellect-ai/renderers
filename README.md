@@ -91,11 +91,11 @@ their populated storage, so sealing a render does not add an O(n) final copy.
 Dependency boundaries remain explicit and open. The installed Transformers
 tokenizer implementation may internally build Python lists before honoring
 `return_tensors="np"`, and its public `decode` may call `.tolist()` internally.
-The current `/inference/v1/generate` contract transports token IDs as JSON
-lists, while released vLLM, SGLang, and Tinker generation results expose list
-token surfaces. Each producer/consumer pair must be replaced atomically; this
-package rejects those values at its strict array boundary and provides no
-permanent list-compatible fallback.
+The `/inference/v1/generate` client transports token IDs, sampled logprobs, and
+multimodal ranges in versioned fixed-width base64 envelopes; numeric JSON
+arrays are rejected. Released SGLang and Tinker generation results still expose
+list token surfaces, so those examples fail closed until each producer/consumer
+pair is replaced atomically.
 
 ### `bridge_to_next_turn` (the core contract)
 

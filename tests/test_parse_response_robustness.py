@@ -7,7 +7,11 @@ even with adversarial or truncated model output.
 import numpy as np
 
 from renderers.base import ParsedResponse, ParsedToolCall
-from renderers.token_arrays import FixedWidthArrayBuilder, TOKEN_IDS_DTYPE, encode_token_ids
+from renderers.token_arrays import (
+    FixedWidthArrayBuilder,
+    TOKEN_IDS_DTYPE,
+    encode_token_ids,
+)
 
 
 def _ids(tokenizer, text: str) -> np.ndarray:
@@ -147,7 +151,9 @@ def test_reasoning_is_string_or_none(model_name, tokenizer, renderer):
     assert parsed.reasoning_content is None or isinstance(parsed.reasoning_content, str)
 
 
-def test_tool_calls_is_immutable_tuple_of_parsed_tool_call(model_name, tokenizer, renderer):
+def test_tool_calls_is_immutable_tuple_of_parsed_tool_call(
+    model_name, tokenizer, renderer
+):
     """tool_calls is always a (possibly empty) tuple of ParsedToolCall — never None.
 
     Empty tuple = "model did not emit any tool calls". A tuple with non-OK

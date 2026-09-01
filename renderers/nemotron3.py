@@ -32,7 +32,11 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
-from renderers.configs import Nemotron3RendererConfig, Nemotron3UltraRendererConfig, Nemotron35RendererConfig
+from renderers.configs import (
+    Nemotron3RendererConfig,
+    Nemotron3UltraRendererConfig,
+    Nemotron35RendererConfig,
+)
 from renderers.parsing import parse_qwen35
 from renderers.token_arrays import RenderedTokenBuilder, TextSegmentBuilder
 
@@ -115,7 +119,9 @@ class Nemotron3Renderer:
     _ultra: bool = False
 
     def __init__(
-        self, tokenizer: Tokenizer, config: Nemotron3RendererConfig | Nemotron3UltraRendererConfig | None = None
+        self,
+        tokenizer: Tokenizer,
+        config: Nemotron3RendererConfig | Nemotron3UltraRendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
         self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
@@ -127,7 +133,9 @@ class Nemotron3Renderer:
             implied_thinking_retention = "all"
         else:
             implied_thinking_retention = "tool_cycle"
-        self.effective_thinking_retention = resolve_thinking_retention(cfg, implied_thinking_retention)
+        self.effective_thinking_retention = resolve_thinking_retention(
+            cfg, implied_thinking_retention
+        )
 
         # Resolve the per-variant reasoning-effort hint appended to the last
         # user message. Ultra honours ``medium_effort``; Super honours
@@ -135,7 +143,11 @@ class Nemotron3Renderer:
         # silently ignored (empty hint), exactly as ``apply_chat_template``
         # ignores a template variable the variant's Jinja never defines.
         if self._ultra:
-            self._effort_hint = "\n\n{reasoning effort: efficient}" if getattr(cfg, "medium_effort", False) else ""
+            self._effort_hint = (
+                "\n\n{reasoning effort: efficient}"
+                if getattr(cfg, "medium_effort", False)
+                else ""
+            )
         elif getattr(cfg, "low_effort", False) and _is_super(tokenizer):
             self._effort_hint = "\n\n{reasoning effort: low}"
         else:
@@ -160,7 +172,9 @@ class Nemotron3Renderer:
         if not isinstance(tid, int) or tid == self._tokenizer.unk_token_id:
             if optional:
                 return None
-            raise AssertionError(f"Special token {token!r} not found in tokenizer vocabulary")
+            raise AssertionError(
+                f"Special token {token!r} not found in tokenizer vocabulary"
+            )
         return tid
 
     # ------------------------------------------------------------------
@@ -211,17 +225,25 @@ class Nemotron3Renderer:
                 if "type" in param_fields:
                     lines.append(f"<type>{param_fields['type']!s}</type>")
                 if "description" in param_fields:
-                    lines.append(f"<description>{param_fields['description'].strip()}</description>")
+                    lines.append(
+                        f"<description>{param_fields['description'].strip()}</description>"
+                    )
                 if "enum" in param_fields:
                     lines.append(f"<enum>{json.dumps(param_fields['enum'])}</enum>")
-                lines.extend(_render_extra_keys(param_fields, {"name", "type", "description", "enum"}))
+                lines.extend(
+                    _render_extra_keys(
+                        param_fields, {"name", "type", "description", "enum"}
+                    )
+                )
                 lines.append("</parameter>")
         if isinstance(params, dict):
             lines.extend(_render_extra_keys(params, {"type", "properties", "required"}))
         if isinstance(params, dict) and "required" in params:
             lines.append(f"<required>{json.dumps(params['required'])}</required>")
         lines.append("</parameters>")
-        lines.extend(_render_extra_keys(tool, {"type", "name", "description", "parameters"}))
+        lines.extend(
+            _render_extra_keys(tool, {"type", "name", "description", "parameters"})
+        )
         lines.append("</function>")
         return "\n".join(lines)
 
@@ -229,7 +251,9 @@ class Nemotron3Renderer:
     # Message normalization
     # ------------------------------------------------------------------
 
-    def _normalize_messages(self, messages: list[Message]) -> tuple[list[Message], bool]:
+    def _normalize_messages(
+        self, messages: list[Message]
+    ) -> tuple[list[Message], bool]:
         """Prepend empty system message if none exists.
 
         Nemotron 3's HF template always outputs a system message block even
@@ -247,7 +271,11 @@ class Nemotron3Renderer:
     # ------------------------------------------------------------------
 
     def render(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
@@ -265,7 +293,9 @@ class Nemotron3Renderer:
                 return -1
             return i + idx_offset
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         emit_special = builder.emit_special
         emit_text = builder.emit_text
         emit_text_segments = builder.emit_text_segments
@@ -288,8 +318,16 @@ class Nemotron3Renderer:
             else:
                 sys_content = ""
 
-            tool_declarations = "\n".join(self._format_tool_declaration(t) for t in tools)
-            tools_block = _TOOLS_HEADER + "\n" + tool_declarations + _TOOLS_FOOTER + _TOOLS_INSTRUCTIONS
+            tool_declarations = "\n".join(
+                self._format_tool_declaration(t) for t in tools
+            )
+            tools_block = (
+                _TOOLS_HEADER
+                + "\n"
+                + tool_declarations
+                + _TOOLS_FOOTER
+                + _TOOLS_INSTRUCTIONS
+            )
 
             # Body = caller's system text only; tools block (header, per-
             # tool XML, footer, instructions) is scaffold.
@@ -343,7 +381,9 @@ class Nemotron3Renderer:
                 continue  # Already handled above
 
             elif role == "user":
-                emit_special(self._im_start, msg_orig_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._im_start, msg_orig_idx, is_sampled=False, is_content=False
+                )
                 user_segments = TextSegmentBuilder()
                 user_segments.append("user\n", is_content=False)
                 if content:
@@ -354,14 +394,20 @@ class Nemotron3Renderer:
                 # is template scaffold, not caller content → is_content=False.
                 if self._effort_hint and i == last_user_idx_norm:
                     user_segments.append(self._effort_hint, is_content=False)
-                emit_text_segments(user_segments.finish(), msg_orig_idx, is_sampled=False)
-                emit_special(self._im_end, msg_orig_idx, is_sampled=False, is_content=False)
+                emit_text_segments(
+                    user_segments.finish(), msg_orig_idx, is_sampled=False
+                )
+                emit_special(
+                    self._im_end, msg_orig_idx, is_sampled=False, is_content=False
+                )
                 emit_text("\n", msg_orig_idx, is_sampled=False, is_content=False)
 
             elif role == "assistant":
                 # Template: ``include_content = not (truncate_history_thinking
                 # and loop.index0 < last_user_idx)``.
-                include_content = not self.config.truncate_history_thinking or i >= last_user_idx_norm
+                include_content = (
+                    not self.config.truncate_history_thinking or i >= last_user_idx_norm
+                )
                 self._render_assistant(
                     msg,
                     msg_orig_idx,
@@ -405,11 +451,19 @@ class Nemotron3Renderer:
         )
 
     def render_ids(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> np.ndarray:
-        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
+        return self.render(
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
+        ).token_ids
 
-    def parse_response(self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None) -> ParsedResponse:
+    def parse_response(
+        self, token_ids: np.ndarray, *, tools: list[ToolSpec] | None = None
+    ) -> ParsedResponse:
         stop_ids = {self._im_end}
         if self._endoftext is not None:
             stop_ids.add(self._endoftext)
@@ -450,19 +504,26 @@ class Nemotron3Renderer:
         ):
             return None
 
-        if should_rerender_for_thinking_retention(self.effective_thinking_retention, new_messages):
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention, new_messages
+        ):
             return None
 
         close_ids: set[int] = {self._im_end}
         if self._endoftext is not None:
             close_ids.add(self._endoftext)
         previous_ids = trim_to_turn_close(
-            previous_prompt_ids, previous_completion_ids, close_ids, synthesize_close=self._im_end
+            previous_prompt_ids,
+            previous_completion_ids,
+            close_ids,
+            synthesize_close=self._im_end,
         )
         if previous_ids is None:
             return None
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
@@ -535,7 +596,14 @@ class Nemotron3Renderer:
     # ------------------------------------------------------------------
 
     def _render_assistant(
-        self, msg: Message, msg_idx: int, content: str, *, include_content: bool, emit_special, emit_text
+        self,
+        msg: Message,
+        msg_idx: int,
+        content: str,
+        *,
+        include_content: bool,
+        emit_special,
+        emit_text,
     ) -> None:
         # ``<|im_start|>assistant\n`` is template-injected scaffolding —
         # at inference the chat template emits these as the generation
@@ -560,7 +628,9 @@ class Nemotron3Renderer:
         emit_special(self._im_end, msg_idx, is_sampled=True, is_content=True)
         emit_text("\n", msg_idx, is_sampled=False, is_content=False)
 
-    def _assistant_body(self, msg: Message, raw_content: str, *, include_content: bool) -> str:
+    def _assistant_body(
+        self, msg: Message, raw_content: str, *, include_content: bool
+    ) -> str:
         """Assemble the assistant body string exactly as the chat template.
 
         ``include_content`` is the template's ``not (truncate_history_thinking
@@ -642,7 +712,9 @@ class Nemotron3Renderer:
                     value_str = json.dumps(arg_value, ensure_ascii=False)
                 else:
                     value_str = str(arg_value)
-                parts.append("<parameter=" + arg_name + ">\n" + value_str + "\n</parameter>\n")
+                parts.append(
+                    "<parameter=" + arg_name + ">\n" + value_str + "\n</parameter>\n"
+                )
         parts.append("</function>\n</tool_call>\n")
         return "".join(parts)
 
@@ -668,7 +740,9 @@ class Nemotron3Renderer:
         # body bytes get ``is_content=True``; the surrounding wrap is
         # scaffold.
         prev_is_tool = msg_idx > 0 and messages[msg_idx - 1]["role"] == "tool"
-        next_is_tool = msg_idx + 1 < len(messages) and messages[msg_idx + 1]["role"] == "tool"
+        next_is_tool = (
+            msg_idx + 1 < len(messages) and messages[msg_idx + 1]["role"] == "tool"
+        )
         oi = msg_orig_idx
 
         if not prev_is_tool:

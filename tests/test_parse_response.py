@@ -11,7 +11,12 @@ import pytest
 
 from renderers import create_renderer
 from renderers.base import ToolCallParseStatus, load_tokenizer
-from renderers.token_arrays import TOKEN_IDS_DTYPE, FixedWidthArrayBuilder, empty_array, encode_token_ids
+from renderers.token_arrays import (
+    TOKEN_IDS_DTYPE,
+    FixedWidthArrayBuilder,
+    empty_array,
+    encode_token_ids,
+)
 
 
 def _encode(tokenizer, text: str) -> np.ndarray:
@@ -19,7 +24,9 @@ def _encode(tokenizer, text: str) -> np.ndarray:
 
 
 def _with_stop(token_ids: np.ndarray, stop: int) -> np.ndarray:
-    builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=token_ids.size + 1)
+    builder = FixedWidthArrayBuilder(
+        TOKEN_IDS_DTYPE, initial_capacity=token_ids.size + 1
+    )
     builder.extend(token_ids)
     builder.append(stop)
     return builder.finish()
@@ -46,7 +53,11 @@ def test_parse_thinking_and_content(model_name, tokenizer, renderer):
     ids = _encode(tokenizer, text)
     parsed = renderer.parse_response(ids)
     # Should extract reasoning or at least not crash
-    assert "42" in parsed.content or "think" in (parsed.reasoning_content or "").lower() or parsed.content
+    assert (
+        "42" in parsed.content
+        or "think" in (parsed.reasoning_content or "").lower()
+        or parsed.content
+    )
 
 
 def test_parse_empty_completion(model_name, tokenizer, renderer):
@@ -116,7 +127,9 @@ def _prime_qwen3(model: str):
     return tokenizer, create_renderer(tokenizer)
 
 
-@pytest.mark.parametrize("model", ["PrimeIntellect/Qwen3-0.6B", "PrimeIntellect/Qwen3-1.7B"])
+@pytest.mark.parametrize(
+    "model", ["PrimeIntellect/Qwen3-0.6B", "PrimeIntellect/Qwen3-1.7B"]
+)
 def test_prime_qwen3_empty_think_roundtrips_through_bridge(model):
     """Present-but-empty reasoning must survive parse → bridge → rerender.
 
@@ -137,16 +150,23 @@ def test_prime_qwen3_empty_think_roundtrips_through_bridge(model):
     assert parsed.reasoning_content == ""
     assert parsed.content == "cba"
 
-    assistant = {"role": "assistant", "content": parsed.content, "reasoning_content": parsed.reasoning_content}
+    assistant = {
+        "role": "assistant",
+        "content": parsed.content,
+        "reasoning_content": parsed.reasoning_content,
+    }
     reminder = {"role": "user", "content": "Now reverse def"}
     bridged = renderer.bridge_to_next_turn(prompt_ids, completion_ids, [reminder])
     assert bridged is not None
     assert np.array_equal(
-        bridged.token_ids, renderer.render_ids([*prompt, assistant, reminder], add_generation_prompt=True)
+        bridged.token_ids,
+        renderer.render_ids([*prompt, assistant, reminder], add_generation_prompt=True),
     )
 
 
-@pytest.mark.parametrize("model", ["PrimeIntellect/Qwen3-0.6B", "PrimeIntellect/Qwen3-1.7B"])
+@pytest.mark.parametrize(
+    "model", ["PrimeIntellect/Qwen3-0.6B", "PrimeIntellect/Qwen3-1.7B"]
+)
 def test_prime_qwen3_absent_think_stays_none(model):
     """A completion without a think block must not invent empty reasoning."""
     tokenizer, renderer = _prime_qwen3(model)
@@ -208,7 +228,10 @@ def test_qwen3_distinct_parallel_calls_after_think_are_preserved():
     parsed = renderer.parse_response(_encode(tokenizer, text))
 
     assert len(parsed.tool_calls) == 2
-    assert [tc.arguments for tc in parsed.tool_calls] == [{"code": "print(1)"}, {"code": "print(2)"}]
+    assert [tc.arguments for tc in parsed.tool_calls] == [
+        {"code": "print(1)"},
+        {"code": "print(2)"},
+    ]
     assert parsed.reasoning_content == "plan"
 
 
@@ -228,9 +251,7 @@ def test_kimi_k25_tool_call_carries_packed_token_span():
     """
     tokenizer, renderer = _kimi_k25()
     # K2.5 tool-call wire shape: section + per-call special tokens.
-    call_text = (
-        '<|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"city": "Tokyo"}<|tool_call_end|>'
-    )
+    call_text = '<|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"city": "Tokyo"}<|tool_call_end|>'
     text = "<|tool_calls_section_begin|>" + call_text + "<|tool_calls_section_end|>"
     token_ids = _encode(tokenizer, text)
     parsed = renderer.parse_response(token_ids)
@@ -242,7 +263,9 @@ def test_kimi_k25_tool_call_carries_packed_token_span():
     assert tc.arguments == {"city": "Tokyo"}
     start = int(parsed.tool_call_token_spans[0, 0])
     end = int(parsed.tool_call_token_spans[0, 1])
-    assert 0 <= start < end <= len(token_ids), f"packed span out of range for {len(token_ids)} input tokens"
+    assert 0 <= start < end <= len(token_ids), (
+        f"packed span out of range for {len(token_ids)} input tokens"
+    )
     assert np.array_equal(token_ids[start:end], _encode(tokenizer, call_text))
 
 

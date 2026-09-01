@@ -23,7 +23,12 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 
 from renderers.base import ParsedToolCall, ParsedToolCallBuilder, ToolCallParseStatus
-from renderers.token_arrays import TOKEN_IDS_DTYPE, require_1d_array, require_readonly, require_span_array
+from renderers.token_arrays import (
+    TOKEN_IDS_DTYPE,
+    require_1d_array,
+    require_readonly,
+    require_span_array,
+)
 
 
 # ── Shared helpers ───────────────────────────────────────────────────
@@ -73,17 +78,23 @@ class ParsedToolCallResult:
     tool_call_token_spans: np.ndarray
 
     def __post_init__(self) -> None:
-        require_1d_array("content_ids", self.content_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
+        require_1d_array(
+            "content_ids", self.content_ids, dtype=TOKEN_IDS_DTYPE, minimum=0
+        )
         require_readonly("content_ids", self.content_ids)
         require_span_array("tool_call_token_spans", self.tool_call_token_spans)
         require_readonly("tool_call_token_spans", self.tool_call_token_spans)
         if type(self.tool_calls) is not tuple:
             raise TypeError("tool_calls must be an immutable tuple")
         if self.tool_call_token_spans.shape[0] != len(self.tool_calls):
-            raise ValueError("tool_call_token_spans must align one-to-one with tool_calls")
+            raise ValueError(
+                "tool_call_token_spans must align one-to-one with tool_calls"
+            )
 
 
-def _result(content_ids: np.ndarray, builder: ParsedToolCallBuilder) -> ParsedToolCallResult:
+def _result(
+    content_ids: np.ndarray, builder: ParsedToolCallBuilder
+) -> ParsedToolCallResult:
     calls, spans = builder.finish()
     return ParsedToolCallResult(content_ids, calls, spans)
 
@@ -125,28 +136,48 @@ class Qwen3ToolParser:
             i = _find(ids, self._tc_id, i)
             if i == -1:
                 break
-            end = _find(ids, self._tc_end_id, i + 1) if self._tc_end_id is not None else -1
+            end = (
+                _find(ids, self._tc_end_id, i + 1)
+                if self._tc_end_id is not None
+                else -1
+            )
             unclosed = end == -1
             if unclosed:
                 end = len(ids)
             tc_text = _decode(self._tokenizer, ids[i + 1 : end]).strip()
             span_end = end + (0 if unclosed else 1)
             if unclosed:
-                tool_calls.append(ParsedToolCall(raw=tc_text, status=ToolCallParseStatus.UNCLOSED_BLOCK), i, span_end)
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=tc_text, status=ToolCallParseStatus.UNCLOSED_BLOCK
+                    ),
+                    i,
+                    span_end,
+                )
                 break
             try:
                 parsed = json.loads(tc_text)
             except json.JSONDecodeError:
-                tool_calls.append(ParsedToolCall(raw=tc_text, status=ToolCallParseStatus.INVALID_JSON), i, span_end)
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=tc_text, status=ToolCallParseStatus.INVALID_JSON
+                    ),
+                    i,
+                    span_end,
+                )
             else:
                 name = parsed.get("name", "") if isinstance(parsed, dict) else ""
-                arguments = parsed.get("arguments", {}) if isinstance(parsed, dict) else {}
+                arguments = (
+                    parsed.get("arguments", {}) if isinstance(parsed, dict) else {}
+                )
                 tool_calls.append(
                     ParsedToolCall(
                         raw=tc_text,
                         name=name or None,
                         arguments=arguments,
-                        status=ToolCallParseStatus.MISSING_NAME if not name else ToolCallParseStatus.OK,
+                        status=ToolCallParseStatus.MISSING_NAME
+                        if not name
+                        else ToolCallParseStatus.OK,
                     ),
                     i,
                     span_end,
@@ -177,23 +208,37 @@ class Qwen35ToolParser:
             i = _find(ids, self._tc_id, i)
             if i == -1:
                 break
-            end = _find(ids, self._tc_end_id, i + 1) if self._tc_end_id is not None else -1
+            end = (
+                _find(ids, self._tc_end_id, i + 1)
+                if self._tc_end_id is not None
+                else -1
+            )
             if end == -1:
                 raw = _decode(self._tokenizer, ids[i + 1 :])
-                tool_calls.append(ParsedToolCall(raw=raw, status=ToolCallParseStatus.UNCLOSED_BLOCK), i, len(ids))
+                tool_calls.append(
+                    ParsedToolCall(raw=raw, status=ToolCallParseStatus.UNCLOSED_BLOCK),
+                    i,
+                    len(ids),
+                )
                 break
             block_text = _decode(self._tokenizer, ids[i + 1 : end])
             name_match = re.search(r"<function=([^>]+)>", block_text)
             if not name_match:
                 tool_calls.append(
-                    ParsedToolCall(raw=block_text, status=ToolCallParseStatus.MALFORMED_STRUCTURE), i, end + 1
+                    ParsedToolCall(
+                        raw=block_text, status=ToolCallParseStatus.MALFORMED_STRUCTURE
+                    ),
+                    i,
+                    end + 1,
                 )
                 i = end + 1
                 continue
             name = name_match.group(1)
             arguments: dict = {}
             any_json_fallback = False
-            for pm in re.finditer(r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>", block_text, re.DOTALL):
+            for pm in re.finditer(
+                r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>", block_text, re.DOTALL
+            ):
                 arg_name = pm.group(1)
                 arg_value = pm.group(2).strip()
                 try:
@@ -206,7 +251,9 @@ class Qwen35ToolParser:
                     raw=block_text,
                     name=name,
                     arguments=arguments,
-                    status=ToolCallParseStatus.INVALID_JSON if any_json_fallback else ToolCallParseStatus.OK,
+                    status=ToolCallParseStatus.INVALID_JSON
+                    if any_json_fallback
+                    else ToolCallParseStatus.OK,
                 ),
                 i,
                 end + 1,
@@ -241,10 +288,18 @@ class GlmToolParser:
             i = _find(ids, self._tc_id, i)
             if i == -1:
                 break
-            end = _find(ids, self._tc_end_id, i + 1) if self._tc_end_id is not None else -1
+            end = (
+                _find(ids, self._tc_end_id, i + 1)
+                if self._tc_end_id is not None
+                else -1
+            )
             if end == -1:
                 raw = _decode(self._tokenizer, ids[i + 1 :])
-                tool_calls.append(ParsedToolCall(raw=raw, status=ToolCallParseStatus.UNCLOSED_BLOCK), i, len(ids))
+                tool_calls.append(
+                    ParsedToolCall(raw=raw, status=ToolCallParseStatus.UNCLOSED_BLOCK),
+                    i,
+                    len(ids),
+                )
                 break
             block = ids[i + 1 : end]
             block_text = _decode(self._tokenizer, block)
@@ -262,16 +317,28 @@ class GlmToolParser:
                     j = _find(block, self._ak_id, j)
                     if j == -1:
                         break
-                    ake = _find(block, self._ake_id, j + 1) if self._ake_id is not None else -1
+                    ake = (
+                        _find(block, self._ake_id, j + 1)
+                        if self._ake_id is not None
+                        else -1
+                    )
                     if ake == -1:
                         structure_broke = True
                         break
                     key = _decode(self._tokenizer, block[j + 1 : ake]).strip()
-                    av = _find(block, self._av_id, ake + 1) if self._av_id is not None else -1
+                    av = (
+                        _find(block, self._av_id, ake + 1)
+                        if self._av_id is not None
+                        else -1
+                    )
                     if av == -1:
                         structure_broke = True
                         break
-                    ave = _find(block, self._ave_id, av + 1) if self._ave_id is not None else -1
+                    ave = (
+                        _find(block, self._ave_id, av + 1)
+                        if self._ave_id is not None
+                        else -1
+                    )
                     if ave == -1:
                         structure_broke = True
                         break
@@ -291,7 +358,14 @@ class GlmToolParser:
             else:
                 status = ToolCallParseStatus.OK
             tool_calls.append(
-                ParsedToolCall(raw=block_text, name=name or None, arguments=arguments, status=status), i, end + 1
+                ParsedToolCall(
+                    raw=block_text,
+                    name=name or None,
+                    arguments=arguments,
+                    status=status,
+                ),
+                i,
+                end + 1,
             )
             i = end + 1
         return _result(ids[:tc_start], tool_calls)
@@ -318,7 +392,11 @@ class DeepSeekV3ToolParser:
         if section_start == -1:
             return _result(ids, tool_calls)
         content_ids = ids[:section_start]
-        section_end = _find(ids, self._tcs_end, section_start + 1) if self._tcs_end is not None else -1
+        section_end = (
+            _find(ids, self._tcs_end, section_start + 1)
+            if self._tcs_end is not None
+            else -1
+        )
         if section_end == -1:
             section_end = len(ids)
         inner_offset = section_start + 1
@@ -331,7 +409,11 @@ class DeepSeekV3ToolParser:
             i = _find(section_ids, self._tc_begin, i)
             if i == -1:
                 break
-            end = _find(section_ids, self._tc_end, i + 1) if self._tc_end is not None else -1
+            end = (
+                _find(section_ids, self._tc_end, i + 1)
+                if self._tc_end is not None
+                else -1
+            )
             unclosed = end == -1
             if end == -1:
                 end = len(section_ids)
@@ -358,7 +440,9 @@ class DeepSeekV3ToolParser:
             else:
                 status = ToolCallParseStatus.OK
             tool_calls.append(
-                ParsedToolCall(raw=block_text, name=name or None, arguments=args, status=status),
+                ParsedToolCall(
+                    raw=block_text, name=name or None, arguments=args, status=status
+                ),
                 inner_offset + i,
                 span_end,
             )

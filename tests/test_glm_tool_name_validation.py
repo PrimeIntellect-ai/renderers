@@ -40,7 +40,10 @@ _TOOLS = [
         "description": "Run a shell command.",
         "parameters": {
             "type": "object",
-            "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}},
+            "properties": {
+                "command": {"type": "string"},
+                "timeout": {"type": "integer"},
+            },
             "required": ["command"],
         },
     },
@@ -61,7 +64,9 @@ def _load(model: str, renderer_name: str):
 
 def pytest_generate_tests(metafunc):
     if "model" in metafunc.fixturenames:
-        metafunc.parametrize("model,renderer_name", _MODELS, ids=[m for m, _ in _MODELS])
+        metafunc.parametrize(
+            "model,renderer_name", _MODELS, ids=[m for m, _ in _MODELS]
+        )
 
 
 def _parse(model: str, renderer_name: str, text: str, tools):
@@ -115,7 +120,12 @@ def test_missing_arg_key_block_is_flagged(model, renderer_name):
     # No <arg_key> token ⇒ the whole block resolves as the name — both
     # here and in vLLM's engine (unmatched terminals in TOOL_NAME state
     # accumulate into the name) — and then fails validation.
-    parsed = _parse(model, renderer_name, "<tool_call>bash\n<arg_value>pwd</arg_value>\n</tool_call>", _TOOLS)
+    parsed = _parse(
+        model,
+        renderer_name,
+        "<tool_call>bash\n<arg_value>pwd</arg_value>\n</tool_call>",
+        _TOOLS,
+    )
     assert _statuses(parsed) == [ToolCallParseStatus.UNKNOWN_TOOL]
     assert "bash" in (parsed.tool_calls[0].name or "")
 
@@ -132,7 +142,10 @@ def test_mixed_calls_flag_only_unknown(model, renderer_name):
         "</tool_call>",
         _TOOLS,
     )
-    assert _statuses(parsed) == [ToolCallParseStatus.OK, ToolCallParseStatus.UNKNOWN_TOOL]
+    assert _statuses(parsed) == [
+        ToolCallParseStatus.OK,
+        ToolCallParseStatus.UNKNOWN_TOOL,
+    ]
 
 
 def test_no_tools_means_no_validation(model, renderer_name):
@@ -140,7 +153,10 @@ def test_no_tools_means_no_validation(model, renderer_name):
     # do we — this also keeps tools-less parse_response calls (the
     # common test / SFT path) byte-for-byte backward compatible.
     parsed = _parse(
-        model, renderer_name, "<tool_call>read\n<arg_key>lines</arg_key>\n<arg_value>10</arg_value>\n</tool_call>", None
+        model,
+        renderer_name,
+        "<tool_call>read\n<arg_key>lines</arg_key>\n<arg_value>10</arg_value>\n</tool_call>",
+        None,
     )
     assert _statuses(parsed) == [ToolCallParseStatus.OK]
 

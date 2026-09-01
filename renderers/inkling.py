@@ -58,7 +58,12 @@ from renderers.base import (
 from renderers.configs import INKLING_EFFORT_MAP, InklingRendererConfig
 from renderers.parsing import parse_inkling
 from renderers.qwen3_vl import _image_hash, _load_pil_image
-from renderers.token_arrays import FixedWidthRangeBuilder, RenderedTokenBuilder, finish_range_builders, merge_range_maps
+from renderers.token_arrays import (
+    FixedWidthRangeBuilder,
+    RenderedTokenBuilder,
+    finish_range_builders,
+    merge_range_maps,
+)
 
 # Content-part ``type`` values the template maps to each modality. Untyped
 # parts (``type`` absent) are treated as text — matching the Jinja template's
@@ -151,7 +156,9 @@ def _load_audio(part: Any) -> tuple[np.ndarray, int]:
             "supported here."
         )
     if not isinstance(data, np.ndarray):
-        raise TypeError(f"audio waveform must be a NumPy array, got {type(data).__name__}")
+        raise TypeError(
+            f"audio waveform must be a NumPy array, got {type(data).__name__}"
+        )
     if data.ndim != 1:
         raise ValueError(f"audio waveform must be rank 1, got shape {data.shape}")
     if data.dtype != np.dtype("<f4"):
@@ -179,17 +186,27 @@ class InklingRenderer:
     the :class:`~renderers.base.MultimodalRenderer` protocol.
     """
 
-    def __init__(self, tokenizer: Tokenizer, config: InklingRendererConfig | None = None, *, processor: Any = None):
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        config: InklingRendererConfig | None = None,
+        *,
+        processor: Any = None,
+    ):
         self._tokenizer = tokenizer
         self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self._processor = processor
         self.config = config or InklingRendererConfig()
         # Inkling always renders historical reasoning (the template has no
         # history-dropping knob), so the effective bridge policy is "all".
-        self.effective_thinking_retention = resolve_thinking_retention(self.config, "all")
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config, "all"
+        )
 
         eff = self.config.reasoning_effort
-        self._effort_num: float = INKLING_EFFORT_MAP[eff.strip()] if isinstance(eff, str) else float(eff)
+        self._effort_num: float = (
+            INKLING_EFFORT_MAP[eff.strip()] if isinstance(eff, str) else float(eff)
+        )
 
         # Role markers.
         self._message_user = self._token_id("<|message_user|>")
@@ -204,7 +221,9 @@ class InklingRenderer:
         self._content_xml = self._token_id("<|content_xml|>")
         self._content_invoke_tool_json = self._token_id("<|content_invoke_tool_json|>")
         self._content_invoke_tool_text = self._token_id("<|content_invoke_tool_text|>")
-        self._content_model_end_sampling = self._token_id("<|content_model_end_sampling|>")
+        self._content_model_end_sampling = self._token_id(
+            "<|content_model_end_sampling|>"
+        )
         self._end_message = self._token_id("<|end_message|>")
         self._audio_end = self._token_id("<|audio_end|>")
         # Media soft-token placeholders (expanded per patch / mel frame).
@@ -277,7 +296,9 @@ class InklingRenderer:
         cached = self._image_cache.get(image_hash)
         if cached is not None:
             return cached
-        out = self._get_processor().image_processor.preprocess([pil], return_tensors="pt")
+        out = self._get_processor().image_processor.preprocess(
+            [pil], return_tensors="pt"
+        )
         num_patches = int(out["num_patches"][0])
         if len(self._image_cache) >= self.config.image_cache_max:
             self._image_cache.pop(next(iter(self._image_cache)))
@@ -292,7 +313,9 @@ class InklingRenderer:
         cached = self._audio_cache.get(key)
         if cached is not None:
             return cached
-        processed = self._get_processor()(audio=[wav], sampling_rate=sampling_rate, return_tensors="pt")
+        processed = self._get_processor()(
+            audio=[wav], sampling_rate=sampling_rate, return_tensors="pt"
+        )
         if len(self._audio_cache) >= self.config.audio_cache_max:
             self._audio_cache.pop(next(iter(self._audio_cache)))
         self._audio_cache[key] = processed
@@ -303,12 +326,18 @@ class InklingRenderer:
     # ------------------------------------------------------------------
 
     def render(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         mm_hashes: dict[str, list[str]] = {}
         mm_placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
         mm_items: dict[str, list[dict[str, Any]]] = {}
@@ -316,33 +345,82 @@ class InklingRenderer:
         emit_special = builder.emit_special
         emit_text = builder.emit_text
 
-        def emit_image(part: Any, msg_idx: int, role_open, *, is_sampled: bool, marker_is_content: bool) -> None:
+        def emit_image(
+            part: Any,
+            msg_idx: int,
+            role_open,
+            *,
+            is_sampled: bool,
+            marker_is_content: bool,
+        ) -> None:
             pil = _load_inkling_image(part)
             h = _image_hash(pil)
             out, num_patches = self._process_image(pil, h)
             role_open()
-            emit_special(self._content_image, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+            emit_special(
+                self._content_image,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
             offset = len(builder)
             for _ in range(num_patches):
-                emit_special(self._image_pad, msg_idx, is_sampled=is_sampled, is_content=True)
-            emit_special(self._end_message, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+                emit_special(
+                    self._image_pad, msg_idx, is_sampled=is_sampled, is_content=True
+                )
+            emit_special(
+                self._end_message,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
             mm_hashes.setdefault("image", []).append(h)
-            mm_placeholder_builders.setdefault("image", FixedWidthRangeBuilder()).append(offset, num_patches)
-            mm_items.setdefault("image", []).append({"pixel_values": out["pixel_values"]})
+            mm_placeholder_builders.setdefault(
+                "image", FixedWidthRangeBuilder()
+            ).append(offset, num_patches)
+            mm_items.setdefault("image", []).append(
+                {"pixel_values": out["pixel_values"]}
+            )
 
-        def emit_audio(part: Any, msg_idx: int, role_open, *, is_sampled: bool, marker_is_content: bool) -> None:
+        def emit_audio(
+            part: Any,
+            msg_idx: int,
+            role_open,
+            *,
+            is_sampled: bool,
+            marker_is_content: bool,
+        ) -> None:
             wav, sr = _load_audio(part)
             processed = self._process_audio(wav, sr)
             n_frames = int(processed["audio_input_ids_mask"][0].sum())
             role_open()
-            emit_special(self._content_audio_input, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+            emit_special(
+                self._content_audio_input,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
             offset = len(builder)
             for _ in range(n_frames):
-                emit_special(self._audio_pad, msg_idx, is_sampled=is_sampled, is_content=True)
-            emit_special(self._audio_end, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
-            emit_special(self._end_message, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+                emit_special(
+                    self._audio_pad, msg_idx, is_sampled=is_sampled, is_content=True
+                )
+            emit_special(
+                self._audio_end,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
+            emit_special(
+                self._end_message,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
             mm_hashes.setdefault("audio", []).append(_audio_hash(wav, sr))
-            mm_placeholder_builders.setdefault("audio", FixedWidthRangeBuilder()).append(offset, n_frames)
+            mm_placeholder_builders.setdefault(
+                "audio", FixedWidthRangeBuilder()
+            ).append(offset, n_frames)
             mm_items.setdefault("audio", []).append(
                 {
                     "audio_input_ids": processed["audio_input_ids"],
@@ -365,11 +443,15 @@ class InklingRenderer:
                 effort_emitted = True
 
             if role == "assistant":
-                self._render_assistant(msg, i, emit_special, emit_text, emit_image, emit_audio)
+                self._render_assistant(
+                    msg, i, emit_special, emit_text, emit_image, emit_audio
+                )
             elif role == "tool":
                 self._render_tool(msg, i, tool_names[i], emit_special, emit_text)
             elif role in ("system", "user"):
-                role_id = self._message_system if role == "system" else self._message_user
+                role_id = (
+                    self._message_system if role == "system" else self._message_user
+                )
 
                 def role_open(_role_id=role_id, _i=i):
                     emit_special(_role_id, _i, is_sampled=False, is_content=False)
@@ -398,7 +480,9 @@ class InklingRenderer:
         mm_data: MultiModalData | None = None
         mm_placeholders = finish_range_builders(mm_placeholder_builders)
         if mm_hashes or mm_placeholders or mm_items:
-            mm_data = MultiModalData(mm_hashes=mm_hashes, mm_placeholders=mm_placeholders, mm_items=mm_items)
+            mm_data = MultiModalData(
+                mm_hashes=mm_hashes, mm_placeholders=mm_placeholders, mm_items=mm_items
+            )
 
         return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
@@ -408,9 +492,15 @@ class InklingRenderer:
         )
 
     def render_ids(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> np.ndarray:
-        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
+        return self.render(
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
+        ).token_ids
 
     def parse_response(
         self,
@@ -444,7 +534,10 @@ class InklingRenderer:
         emit_special(self._message_system, -1, is_sampled=False, is_content=False)
         emit_special(self._content_text, -1, is_sampled=False, is_content=False)
         emit_text(
-            "Thinking effort level: " + _format_effort_number(self._effort_num), -1, is_sampled=False, is_content=False
+            "Thinking effort level: " + _format_effort_number(self._effort_num),
+            -1,
+            is_sampled=False,
+            is_content=False,
         )
         emit_special(self._end_message, -1, is_sampled=False, is_content=False)
 
@@ -459,10 +552,13 @@ class InklingRenderer:
                     "description": fn.get("description") or "",
                     "name": fn.get("name"),
                     "parameters": fn.get("parameters") or {},
-                    "type": (tool.get("type") if isinstance(tool, dict) else None) or "function",
+                    "type": (tool.get("type") if isinstance(tool, dict) else None)
+                    or "function",
                 }
             )
-        tools_json = json.dumps(specs, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        tools_json = json.dumps(
+            specs, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
         emit_special(self._message_system, -1, is_sampled=False, is_content=False)
         emit_text("tool_declare", -1, is_sampled=False, is_content=False)
         emit_special(self._content_xml, -1, is_sampled=False, is_content=False)
@@ -492,10 +588,20 @@ class InklingRenderer:
         False for user/system, where markers are scaffold)."""
         if isinstance(content, str):
             role_open()
-            emit_special(self._content_text, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+            emit_special(
+                self._content_text,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
             if content:
                 emit_text(content, msg_idx, is_sampled=is_sampled, is_content=True)
-            emit_special(self._end_message, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+            emit_special(
+                self._end_message,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
             return
         if not content:
             return
@@ -503,16 +609,40 @@ class InklingRenderer:
             kind, data = _classify_part(part)
             if kind == "text":
                 role_open()
-                emit_special(self._content_text, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+                emit_special(
+                    self._content_text,
+                    msg_idx,
+                    is_sampled=is_sampled,
+                    is_content=marker_is_content,
+                )
                 if data:
                     emit_text(data, msg_idx, is_sampled=is_sampled, is_content=True)
-                emit_special(self._end_message, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+                emit_special(
+                    self._end_message,
+                    msg_idx,
+                    is_sampled=is_sampled,
+                    is_content=marker_is_content,
+                )
             elif kind == "image":
-                emit_image(data, msg_idx, role_open, is_sampled=is_sampled, marker_is_content=marker_is_content)
+                emit_image(
+                    data,
+                    msg_idx,
+                    role_open,
+                    is_sampled=is_sampled,
+                    marker_is_content=marker_is_content,
+                )
             elif kind == "audio":
-                emit_audio(data, msg_idx, role_open, is_sampled=is_sampled, marker_is_content=marker_is_content)
+                emit_audio(
+                    data,
+                    msg_idx,
+                    role_open,
+                    is_sampled=is_sampled,
+                    marker_is_content=marker_is_content,
+                )
             elif kind == "video":
-                raise NotImplementedError("Video parts are not supported by InklingRenderer.")
+                raise NotImplementedError(
+                    "Video parts are not supported by InklingRenderer."
+                )
 
     def _render_tool(self, msg, msg_idx, inline_name, emit_special, emit_text) -> None:
         """Tool response: ``<|message_tool|>{name?}<|content_text|>{content}<|end_message|>``.
@@ -530,7 +660,9 @@ class InklingRenderer:
             emit_text(content, msg_idx, is_sampled=False, is_content=True)
         emit_special(self._end_message, msg_idx, is_sampled=False, is_content=False)
 
-    def _render_assistant(self, msg, msg_idx, emit_special, emit_text, emit_image, emit_audio) -> None:
+    def _render_assistant(
+        self, msg, msg_idx, emit_special, emit_text, emit_image, emit_audio
+    ) -> None:
         """Assistant turn: optional reasoning block, content block(s), tool-call
         blocks, then the ``<|content_model_end_sampling|>`` close.
 
@@ -548,14 +680,20 @@ class InklingRenderer:
         def model_tag():
             nonlocal first
             if first:
-                emit_special(self._message_model, msg_idx, is_sampled=False, is_content=False)
+                emit_special(
+                    self._message_model, msg_idx, is_sampled=False, is_content=False
+                )
                 first = False
             else:
-                emit_special(self._message_model, msg_idx, is_sampled=True, is_content=True)
+                emit_special(
+                    self._message_model, msg_idx, is_sampled=True, is_content=True
+                )
 
         if reasoning:
             model_tag()
-            emit_special(self._content_thinking, msg_idx, is_sampled=True, is_content=True)
+            emit_special(
+                self._content_thinking, msg_idx, is_sampled=True, is_content=True
+            )
             emit_text(reasoning, msg_idx, is_sampled=True, is_content=True)
             emit_special(self._end_message, msg_idx, is_sampled=True, is_content=True)
 
@@ -576,11 +714,20 @@ class InklingRenderer:
             model_tag()
             if name:
                 emit_text(name, msg_idx, is_sampled=True, is_content=True)
-            emit_special(self._content_invoke_tool_json, msg_idx, is_sampled=True, is_content=True)
-            emit_text(self._invoke_json(name, args), msg_idx, is_sampled=True, is_content=True)
+            emit_special(
+                self._content_invoke_tool_json,
+                msg_idx,
+                is_sampled=True,
+                is_content=True,
+            )
+            emit_text(
+                self._invoke_json(name, args), msg_idx, is_sampled=True, is_content=True
+            )
             emit_special(self._end_message, msg_idx, is_sampled=True, is_content=True)
 
-        emit_special(self._content_model_end_sampling, msg_idx, is_sampled=True, is_content=True)
+        emit_special(
+            self._content_model_end_sampling, msg_idx, is_sampled=True, is_content=True
+        )
 
     @staticmethod
     def _tool_call_name_args(tc: Any) -> tuple[str, Any]:
@@ -593,9 +740,13 @@ class InklingRenderer:
             try:
                 args = json.loads(args)
             except (json.JSONDecodeError, ValueError) as exc:
-                raise TypeError("Inkling tool_calls[].function.arguments must be a JSON object.") from exc
+                raise TypeError(
+                    "Inkling tool_calls[].function.arguments must be a JSON object."
+                ) from exc
         if not isinstance(args, dict):
-            raise TypeError("Inkling tool_calls[].function.arguments must be a JSON object.")
+            raise TypeError(
+                "Inkling tool_calls[].function.arguments must be a JSON object."
+            )
         return name, args
 
     @staticmethod
@@ -604,9 +755,13 @@ class InklingRenderer:
         key-sorted encoding."""
         return (
             '{"name":'
-            + json.dumps(name, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            + json.dumps(
+                name, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
             + ',"args":'
-            + json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            + json.dumps(
+                args, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
             + "}"
         )
 
@@ -623,9 +778,15 @@ class InklingRenderer:
         tools: list[ToolSpec] | None = None,
         previous_multi_modal_data: MultiModalData | None = None,
     ) -> "RenderedTokens | None":
-        if len(previous_prompt_ids) == 0 or not new_messages or reject_assistant_in_extension(new_messages):
+        if (
+            len(previous_prompt_ids) == 0
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
             return None
-        if should_rerender_for_thinking_retention(self.effective_thinking_retention, new_messages):
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention, new_messages
+        ):
             return None
 
         # A tool message whose name would be recovered from a prior-turn
@@ -633,7 +794,11 @@ class InklingRenderer:
         # (assistants are excluded), so a bridge would diverge from a full
         # re-render — refuse and let the caller re-render.
         for msg in new_messages:
-            if msg.get("role") == "tool" and not msg.get("name") and msg.get("tool_call_id"):
+            if (
+                msg.get("role") == "tool"
+                and not msg.get("name")
+                and msg.get("tool_call_id")
+            ):
                 return None
 
         # Prior assistant turn closes with <|content_model_end_sampling|>;
@@ -642,12 +807,17 @@ class InklingRenderer:
         if self._endoftext is not None:
             close_ids.add(self._endoftext)
         previous_ids = trim_to_turn_close(
-            previous_prompt_ids, previous_completion_ids, close_ids, synthesize_close=self._content_model_end_sampling
+            previous_prompt_ids,
+            previous_completion_ids,
+            close_ids,
+            synthesize_close=self._content_model_end_sampling,
         )
         if previous_ids is None:
             return None
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         builder.prepend_prior(previous_ids)
         new_hashes: dict[str, list[str]] = {}
         new_placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
@@ -656,33 +826,72 @@ class InklingRenderer:
         emit_special = builder.emit_special
         emit_text = builder.emit_text
 
-        def emit_image(part, msg_idx, role_open, *, is_sampled, marker_is_content) -> None:
+        def emit_image(
+            part, msg_idx, role_open, *, is_sampled, marker_is_content
+        ) -> None:
             pil = _load_inkling_image(part)
             h = _image_hash(pil)
             out, num_patches = self._process_image(pil, h)
             role_open()
-            emit_special(self._content_image, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+            emit_special(
+                self._content_image,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
             offset = len(builder)
             for _ in range(num_patches):
-                emit_special(self._image_pad, msg_idx, is_sampled=is_sampled, is_content=True)
-            emit_special(self._end_message, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+                emit_special(
+                    self._image_pad, msg_idx, is_sampled=is_sampled, is_content=True
+                )
+            emit_special(
+                self._end_message,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
             new_hashes.setdefault("image", []).append(h)
-            new_placeholder_builders.setdefault("image", FixedWidthRangeBuilder()).append(offset, num_patches)
-            new_items.setdefault("image", []).append({"pixel_values": out["pixel_values"]})
+            new_placeholder_builders.setdefault(
+                "image", FixedWidthRangeBuilder()
+            ).append(offset, num_patches)
+            new_items.setdefault("image", []).append(
+                {"pixel_values": out["pixel_values"]}
+            )
 
-        def emit_audio(part, msg_idx, role_open, *, is_sampled, marker_is_content) -> None:
+        def emit_audio(
+            part, msg_idx, role_open, *, is_sampled, marker_is_content
+        ) -> None:
             wav, sr = _load_audio(part)
             processed = self._process_audio(wav, sr)
             n_frames = int(processed["audio_input_ids_mask"][0].sum())
             role_open()
-            emit_special(self._content_audio_input, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+            emit_special(
+                self._content_audio_input,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
             offset = len(builder)
             for _ in range(n_frames):
-                emit_special(self._audio_pad, msg_idx, is_sampled=is_sampled, is_content=True)
-            emit_special(self._audio_end, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
-            emit_special(self._end_message, msg_idx, is_sampled=is_sampled, is_content=marker_is_content)
+                emit_special(
+                    self._audio_pad, msg_idx, is_sampled=is_sampled, is_content=True
+                )
+            emit_special(
+                self._audio_end,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
+            emit_special(
+                self._end_message,
+                msg_idx,
+                is_sampled=is_sampled,
+                is_content=marker_is_content,
+            )
             new_hashes.setdefault("audio", []).append(_audio_hash(wav, sr))
-            new_placeholder_builders.setdefault("audio", FixedWidthRangeBuilder()).append(offset, n_frames)
+            new_placeholder_builders.setdefault(
+                "audio", FixedWidthRangeBuilder()
+            ).append(offset, n_frames)
             new_items.setdefault("audio", []).append(
                 {
                     "audio_input_ids": processed["audio_input_ids"],
@@ -696,7 +905,9 @@ class InklingRenderer:
             if role == "tool":
                 self._render_tool(msg, i, tool_names[i], emit_special, emit_text)
             elif role in ("system", "user"):
-                role_id = self._message_system if role == "system" else self._message_user
+                role_id = (
+                    self._message_system if role == "system" else self._message_user
+                )
 
                 def role_open(_role_id=role_id, _i=i):
                     emit_special(_role_id, _i, is_sampled=False, is_content=False)
@@ -721,14 +932,21 @@ class InklingRenderer:
         # Copy the per-modality lists (not just the outer dict) so appending
         # this turn's items never mutates the caller's previous_multi_modal_data.
         merged_hashes = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()} if previous_multi_modal_data else {}
+            {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
+            if previous_multi_modal_data
+            else {}
         )
         new_placeholders = finish_range_builders(new_placeholder_builders)
         merged_placeholders = merge_range_maps(
-            previous_multi_modal_data.mm_placeholders if previous_multi_modal_data else {}, new_placeholders
+            previous_multi_modal_data.mm_placeholders
+            if previous_multi_modal_data
+            else {},
+            new_placeholders,
         )
         merged_items = (
-            {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()} if previous_multi_modal_data else {}
+            {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
+            if previous_multi_modal_data
+            else {}
         )
         for modality, vals in new_hashes.items():
             merged_hashes.setdefault(modality, []).extend(vals)
@@ -738,7 +956,9 @@ class InklingRenderer:
         mm_data: MultiModalData | None = None
         if merged_hashes or merged_placeholders or merged_items:
             mm_data = MultiModalData(
-                mm_hashes=merged_hashes, mm_placeholders=merged_placeholders, mm_items=merged_items
+                mm_hashes=merged_hashes,
+                mm_placeholders=merged_placeholders,
+                mm_items=merged_items,
             )
 
         return builder.finish(

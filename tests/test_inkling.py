@@ -25,7 +25,11 @@ from renderers import create_renderer
 from renderers.base import ToolCallParseStatus, load_tokenizer
 from renderers.configs import InklingRendererConfig
 from renderers.inkling import InklingRenderer
-from renderers.token_arrays import FixedWidthArrayBuilder, TOKEN_IDS_DTYPE, owned_token_ids_from_array
+from renderers.token_arrays import (
+    FixedWidthArrayBuilder,
+    TOKEN_IDS_DTYPE,
+    owned_token_ids_from_array,
+)
 
 _MODEL = "thinkingmachines/Inkling"
 _SMALL_MODEL = "thinkingmachines/Inkling-Small"
@@ -115,7 +119,9 @@ def test_effort_line_format_and_parity(effort, shown):
     msgs = [{"role": "user", "content": "Hi"}]
     r = _renderer(reasoning_effort=effort)
     ours = r.render_ids(msgs, add_generation_prompt=True)
-    assert np.array_equal(ours, _expected(msgs, add_generation_prompt=True, reasoning_effort=effort))
+    assert np.array_equal(
+        ours, _expected(msgs, add_generation_prompt=True, reasoning_effort=effort)
+    )
     assert f"Thinking effort level: {shown}<|end_message|>" in _decode(ours)
 
 
@@ -133,7 +139,11 @@ def test_effort_emitted_once_before_first_non_system():
     assert np.array_equal(ours, _expected(msgs, add_generation_prompt=True))
     text = _decode(ours)
     # System body precedes the effort line, which precedes the user turn.
-    assert text.index("SYS") < text.index("Thinking effort level") < text.index("<|message_user|>")
+    assert (
+        text.index("SYS")
+        < text.index("Thinking effort level")
+        < text.index("<|message_user|>")
+    )
     assert text.count("Thinking effort level") == 1
 
 
@@ -149,20 +159,32 @@ def test_effort_emitted_at_end_when_all_system():
 
 
 def test_tool_declaration_comes_first():
-    msgs = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "Weather?"}]
+    msgs = [
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": "Weather?"},
+    ]
     ours = _renderer().render_ids(msgs, tools=TOOLS, add_generation_prompt=True)
-    assert np.array_equal(ours, _expected(msgs, tools=TOOLS, add_generation_prompt=True))
+    assert np.array_equal(
+        ours, _expected(msgs, tools=TOOLS, add_generation_prompt=True)
+    )
     text = _decode(ours)
     assert text.startswith("<|message_system|>tool_declare<|content_xml|>")
     # The tools block precedes the system body and the effort line.
-    assert text.index("tool_declare") < text.index("SYS") < text.index("Thinking effort level")
+    assert (
+        text.index("tool_declare")
+        < text.index("SYS")
+        < text.index("Thinking effort level")
+    )
 
 
 # ── Assistant structure + masks ───────────────────────────────────────
 
 
 def test_assistant_structure_and_masks():
-    msgs = [{"role": "user", "content": "2+2?"}, {"role": "assistant", "reasoning_content": "add them", "content": "4"}]
+    msgs = [
+        {"role": "user", "content": "2+2?"},
+        {"role": "assistant", "reasoning_content": "add them", "content": "4"},
+    ]
     r = _renderer()
     rendered = r.render(msgs)
     assert np.array_equal(rendered.token_ids, _expected(msgs))
@@ -185,7 +207,14 @@ def test_tool_call_invoke_json_shape():
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Paris", "days": 3}}}],
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": {"city": "Paris", "days": 3},
+                    }
+                }
+            ],
         },
     ]
     ours = _renderer().render_ids(msgs, tools=TOOLS)
@@ -203,7 +232,9 @@ def test_tool_call_rejects_non_object_arguments(arguments):
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"function": {"name": "get_weather", "arguments": arguments}}],
+            "tool_calls": [
+                {"function": {"name": "get_weather", "arguments": arguments}}
+            ],
         },
     ]
     with pytest.raises(TypeError, match="arguments must be a JSON object"):
@@ -212,7 +243,9 @@ def test_tool_call_rejects_non_object_arguments(arguments):
 
 def test_unknown_content_part_type_raises():
     with pytest.raises(ValueError, match="Unsupported Inkling content part type"):
-        _renderer().render_ids([{"role": "user", "content": [{"type": "file", "file": "notes.txt"}]}])
+        _renderer().render_ids(
+            [{"role": "user", "content": [{"type": "file", "file": "notes.txt"}]}]
+        )
 
 
 def test_input_image_field_loads_during_render_and_bridge(monkeypatch):
@@ -255,13 +288,20 @@ def test_tool_name_resolved_via_tool_call_id():
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"id": "c1", "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}],
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "function": {"name": "get_weather", "arguments": {"city": "Paris"}},
+                }
+            ],
         },
         {"role": "tool", "tool_call_id": "c1", "content": "sunny"},
     ]
     ours = _renderer().render_ids(msgs, tools=TOOLS)
     assert np.array_equal(ours, _expected(msgs, tools=TOOLS))
-    assert "<|message_tool|>get_weather<|content_text|>sunny<|end_message|>" in _decode(ours)
+    assert "<|message_tool|>get_weather<|content_text|>sunny<|end_message|>" in _decode(
+        ours
+    )
 
 
 # ── Parse ─────────────────────────────────────────────────────────────
@@ -277,7 +317,11 @@ def _completion(prompt, asst, *, tools=None):
 def test_parse_reasoning_and_content():
     r, comp = _completion(
         [{"role": "user", "content": "2+2?"}],
-        {"role": "assistant", "reasoning_content": "Let me think.", "content": "The answer is 4."},
+        {
+            "role": "assistant",
+            "reasoning_content": "Let me think.",
+            "content": "The answer is 4.",
+        },
     )
     parsed = r.parse_response(comp)
     assert parsed.reasoning_content == "Let me think."
@@ -291,7 +335,14 @@ def test_parse_tool_call_preserves_types():
         {
             "role": "assistant",
             "content": "checking",
-            "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Paris", "days": 3}}}],
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": {"city": "Paris", "days": 3},
+                    }
+                }
+            ],
         },
         tools=TOOLS,
     )
@@ -356,11 +407,16 @@ def test_bridge_tool_extension_matches_fresh_render():
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Tokyo"}}}],
+            "tool_calls": [
+                {"function": {"name": "get_weather", "arguments": {"city": "Tokyo"}}}
+            ],
         },
         # Tool message carries an explicit name (bridge can't resolve a
         # prior-turn tool_call_id since the assistant is outside new_messages).
-        [{"role": "tool", "name": "get_weather", "content": "Sunny"}, {"role": "user", "content": "And Paris?"}],
+        [
+            {"role": "tool", "name": "get_weather", "content": "Sunny"},
+            {"role": "user", "content": "And Paris?"},
+        ],
         tools=TOOLS,
     )
     assert bridged is not None
@@ -387,7 +443,11 @@ def test_bridge_rejects_assistant_extension():
     r = _renderer()
     pp = r.render_ids([{"role": "user", "content": "Hi"}], add_generation_prompt=True)
     assert (
-        r.bridge_to_next_turn(pp, _one_token(r._content_model_end_sampling), [{"role": "assistant", "content": "x"}])
+        r.bridge_to_next_turn(
+            pp,
+            _one_token(r._content_model_end_sampling),
+            [{"role": "assistant", "content": "x"}],
+        )
         is None
     )
 
@@ -399,7 +459,9 @@ def test_bridge_refuses_tool_needing_prior_name_resolution():
     r = _renderer()
     pp = r.render_ids([{"role": "user", "content": "Hi"}], add_generation_prompt=True)
     bridged = r.bridge_to_next_turn(
-        pp, _one_token(r._content_model_end_sampling), [{"role": "tool", "tool_call_id": "c1", "content": "sunny"}]
+        pp,
+        _one_token(r._content_model_end_sampling),
+        [{"role": "tool", "tool_call_id": "c1", "content": "sunny"}],
     )
     assert bridged is None
 
@@ -425,7 +487,11 @@ def test_audio_cache_has_an_independent_bound_and_uses_public_processor_api():
             }
 
     processor = FakeProcessor()
-    renderer = InklingRenderer(_tok(), InklingRendererConfig(image_cache_max=1, audio_cache_max=2), processor=processor)
+    renderer = InklingRenderer(
+        _tok(),
+        InklingRendererConfig(image_cache_max=1, audio_cache_max=2),
+        processor=processor,
+    )
     renderer._process_audio(np.zeros(8, dtype=np.float32), 16_000)
     renderer._process_audio(np.ones(8, dtype=np.float32), 16_000)
 

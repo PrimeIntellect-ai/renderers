@@ -48,11 +48,15 @@ class KimiK2Renderer:
     but have no effect on the byte-level output.
     """
 
-    def __init__(self, tokenizer: Tokenizer, config: KimiK2RendererConfig | None = None):
+    def __init__(
+        self, tokenizer: Tokenizer, config: KimiK2RendererConfig | None = None
+    ):
         self._tokenizer = tokenizer
         self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self.config = config or KimiK2RendererConfig()
-        self.effective_thinking_retention = resolve_thinking_retention(self.config, "all")
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config, "all"
+        )
 
         self._im_user = self._token_id("<|im_user|>")
         self._im_assistant = self._token_id("<|im_assistant|>")
@@ -72,7 +76,9 @@ class KimiK2Renderer:
         )
         return tid
 
-    def _ensure_system_message(self, messages: list[Message]) -> tuple[list[Message], int]:
+    def _ensure_system_message(
+        self, messages: list[Message]
+    ) -> tuple[list[Message], int]:
         """Prepend default system message if none present.
 
         Returns ``(messages, auto_injected_idx)``. ``auto_injected_idx`` is
@@ -104,7 +110,11 @@ class KimiK2Renderer:
         return messages, -1
 
     def render(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
@@ -120,7 +130,9 @@ class KimiK2Renderer:
         # ``tojson(separators=(',', ':'))``, which produces compact JSON
         # with sorted keys — match both to stay byte-identical.
         if tools:
-            tools_json = json.dumps(list(tools), separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+            tools_json = json.dumps(
+                list(tools), separators=(",", ":"), sort_keys=True, ensure_ascii=False
+            )
             tool_declare_msg: Message = {"role": "tool_declare", "content": tools_json}
             # Prepend tool_declare if not already present
             if messages[0].get("role") != "tool_declare":
@@ -149,7 +161,9 @@ class KimiK2Renderer:
                 return -1
             return i - sum(position < i for position in injected_positions)
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         emit_special = builder.emit_special
         emit_text = builder.emit_text
 
@@ -171,7 +185,9 @@ class KimiK2Renderer:
                         if part.get("type") == "text":
                             parts.append(part.get("text", ""))
                         elif part.get("type") == "thinking":
-                            parts.append("<think>" + part.get("thinking", "") + "</think>")
+                            parts.append(
+                                "<think>" + part.get("thinking", "") + "</think>"
+                            )
                     elif isinstance(part, str):
                         parts.append(part)
                 content = "".join(parts)
@@ -216,13 +232,22 @@ class KimiK2Renderer:
                 # Kimi strips reasoning from historical assistant turns and
                 # only keeps it for the most-recent plain assistant. Off-by-one
                 # here would drop reasoning from the last turn too.
-                is_last_turn = last_plain_assistant_idx == -1 or i >= last_plain_assistant_idx
+                is_last_turn = (
+                    last_plain_assistant_idx == -1 or i >= last_plain_assistant_idx
+                )
                 self._render_assistant(
-                    msg, oi, content, is_last_turn=is_last_turn, emit_special=emit_special, emit_text=emit_text
+                    msg,
+                    oi,
+                    content,
+                    is_last_turn=is_last_turn,
+                    emit_special=emit_special,
+                    emit_text=emit_text,
                 )
 
             elif role == "tool":
-                self._render_tool(msg, oi, content, emit_special=emit_special, emit_text=emit_text)
+                self._render_tool(
+                    msg, oi, content, emit_special=emit_special, emit_text=emit_text
+                )
 
             else:
                 # Unknown role: use system-style formatting. Not a sampled
@@ -247,9 +272,15 @@ class KimiK2Renderer:
         )
 
     def render_ids(
-        self, messages: list[Message], *, tools: list[ToolSpec] | None = None, add_generation_prompt: bool = False
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
     ) -> np.ndarray:
-        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
+        return self.render(
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
+        ).token_ids
 
     def parse_response(
         self,
@@ -279,18 +310,29 @@ class KimiK2Renderer:
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
-        if len(previous_prompt_ids) == 0 or not new_messages or reject_assistant_in_extension(new_messages):
+        if (
+            len(previous_prompt_ids) == 0
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
             return None
-        if should_rerender_for_thinking_retention(self.effective_thinking_retention, new_messages):
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention, new_messages
+        ):
             return None
 
         previous_ids = trim_to_turn_close(
-            previous_prompt_ids, previous_completion_ids, {self._im_end}, synthesize_close=self._im_end
+            previous_prompt_ids,
+            previous_completion_ids,
+            {self._im_end},
+            synthesize_close=self._im_end,
         )
         if previous_ids is None:
             return None
 
-        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer
+        )
         builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
@@ -314,7 +356,9 @@ class KimiK2Renderer:
                         if part.get("type") == "text":
                             parts.append(part.get("text", ""))
                         elif part.get("type") == "thinking":
-                            parts.append("<think>" + part.get("thinking", "") + "</think>")
+                            parts.append(
+                                "<think>" + part.get("thinking", "") + "</think>"
+                            )
                     elif isinstance(part, str):
                         parts.append(part)
                 content = "".join(parts)
@@ -332,7 +376,9 @@ class KimiK2Renderer:
                 emit_text(content, i, is_content=True)
                 emit_special(self._im_end, i)
             elif role == "tool":
-                self._render_tool(msg, i, content, emit_special=emit_special, emit_text=emit_text)
+                self._render_tool(
+                    msg, i, content, emit_special=emit_special, emit_text=emit_text
+                )
             else:
                 return None
 
@@ -348,7 +394,14 @@ class KimiK2Renderer:
         )
 
     def _render_assistant(
-        self, msg: Message, msg_idx: int, content: str, *, is_last_turn: bool, emit_special, emit_text
+        self,
+        msg: Message,
+        msg_idx: int,
+        content: str,
+        *,
+        is_last_turn: bool,
+        emit_special,
+        emit_text,
     ) -> None:
         # ``<|im_assistant|>assistant<|im_middle|>`` is template-injected
         # scaffolding — at inference the chat template emits these as the
@@ -374,29 +427,51 @@ class KimiK2Renderer:
         # Tool calls — model-sampled markup carrying caller / model body.
         tool_calls = msg.get("tool_calls") or []
         if tool_calls:
-            emit_special(self._tool_calls_section_begin, msg_idx, is_sampled=True, is_content=True)
+            emit_special(
+                self._tool_calls_section_begin,
+                msg_idx,
+                is_sampled=True,
+                is_content=True,
+            )
             for tc in tool_calls:
                 func = tc.get("function") or tc
                 arguments = func.get("arguments", {})
-                args_str = json.dumps(arguments, ensure_ascii=False) if not isinstance(arguments, str) else arguments
+                args_str = (
+                    json.dumps(arguments, ensure_ascii=False)
+                    if not isinstance(arguments, str)
+                    else arguments
+                )
                 # The Jinja template emits ``tool_call['id']`` verbatim —
                 # empty when missing. Round-trip parseability requires the
                 # caller to provide an id in ``functions.{name}:{idx}`` form
                 # (that's where the Kimi parser recovers the function name).
                 tc_id = tc.get("id") or ""
-                emit_special(self._tool_call_begin, msg_idx, is_sampled=True, is_content=True)
+                emit_special(
+                    self._tool_call_begin, msg_idx, is_sampled=True, is_content=True
+                )
                 emit_text(tc_id, msg_idx, is_sampled=True, is_content=True)
-                emit_special(self._tool_call_argument_begin, msg_idx, is_sampled=True, is_content=True)
+                emit_special(
+                    self._tool_call_argument_begin,
+                    msg_idx,
+                    is_sampled=True,
+                    is_content=True,
+                )
                 emit_text(args_str, msg_idx, is_sampled=True, is_content=True)
-                emit_special(self._tool_call_end, msg_idx, is_sampled=True, is_content=True)
-            emit_special(self._tool_calls_section_end, msg_idx, is_sampled=True, is_content=True)
+                emit_special(
+                    self._tool_call_end, msg_idx, is_sampled=True, is_content=True
+                )
+            emit_special(
+                self._tool_calls_section_end, msg_idx, is_sampled=True, is_content=True
+            )
 
         # ``<|im_end|>`` is the model's stop signal — it samples this to
         # end its turn, so it is part of the sampled stream (and the
         # assistant's body).
         emit_special(self._im_end, msg_idx, is_sampled=True, is_content=True)
 
-    def _render_tool(self, msg: Message, msg_idx: int, content: str, *, emit_special, emit_text) -> None:
+    def _render_tool(
+        self, msg: Message, msg_idx: int, content: str, *, emit_special, emit_text
+    ) -> None:
         # Tool messages are conversation history injected by the runtime
         # between assistant turns — the model never samples any of these
         # tokens, so every emission is is_sampled=False. The ``content``
@@ -416,6 +491,11 @@ class KimiK2Renderer:
         emit_special(self._im_system, msg_idx, is_sampled=False, is_content=False)
         emit_text(name, msg_idx, is_sampled=False, is_content=False)
         emit_special(self._im_middle, msg_idx, is_sampled=False, is_content=False)
-        emit_text(f"## Return of {tool_call_id}\n", msg_idx, is_sampled=False, is_content=False)
+        emit_text(
+            f"## Return of {tool_call_id}\n",
+            msg_idx,
+            is_sampled=False,
+            is_content=False,
+        )
         emit_text(content, msg_idx, is_sampled=False, is_content=True)
         emit_special(self._im_end, msg_idx, is_sampled=False, is_content=False)

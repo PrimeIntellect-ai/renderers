@@ -39,9 +39,7 @@ def _concat_tokens(*arrays: np.ndarray) -> np.ndarray:
 
 def _completion_with_close(tokenizer, text: str, close_id: int) -> np.ndarray:
     content = encode_token_ids(tokenizer, text)
-    builder = FixedWidthArrayBuilder(
-        TOKEN_IDS_DTYPE, initial_capacity=content.size + 1
-    )
+    builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=content.size + 1)
     builder.extend(content)
     builder.append(close_id)
     return builder.finish()
@@ -178,7 +176,9 @@ def test_bridge_rejects_empty_prev_or_new(br_renderer):
 def test_bridge_synthesises_close_on_truncation(br_renderer_all, br_model):
     prev_prompt, prev_completion = _simulate_prior_turn(br_renderer_all)
     # Drop the final close token to simulate a max_tokens truncation.
-    prev_completion_trunc = prev_completion[:-1] if prev_completion else prev_completion
+    prev_completion_trunc = (
+        prev_completion[:-1] if prev_completion.size else prev_completion
+    )
     if len(prev_completion_trunc) == 0:
         pytest.skip(
             f"{br_model}: simulated prior had no completion tokens — can't truncate"
@@ -288,7 +288,6 @@ _GUARDED_THINKING_MODELS = {
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "MiniMaxAI/MiniMax-M2.5",
     "moonshotai/Kimi-K2.5",
-    "openai/gpt-oss-20b",
     "tencent/Hy3",
 }
 

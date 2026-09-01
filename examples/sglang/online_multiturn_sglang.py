@@ -76,7 +76,9 @@ TOOLS = [
 def make_renderer(model: str, enable_thinking: bool | None) -> Renderer:
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=False)
     if model.startswith("Qwen/Qwen3.5-"):
-        return Qwen35Renderer(tokenizer, Qwen35RendererConfig(enable_thinking=enable_thinking))
+        return Qwen35Renderer(
+            tokenizer, Qwen35RendererConfig(enable_thinking=enable_thinking)
+        )
     raise ValueError(f"unsupported demo model: {model}")
 
 
@@ -88,7 +90,11 @@ def completion_ids(output: dict, prompt_ids: np.ndarray) -> np.ndarray:
     if ids.size == 0:
         raise RuntimeError("SGLang did not return completion token IDs")
     # Match offline recipe: strip prefix only if SGLang echoed the prompt back.
-    return ids[prompt_ids.size :] if np.array_equal(ids[: prompt_ids.size], prompt_ids) else ids
+    return (
+        ids[prompt_ids.size :]
+        if np.array_equal(ids[: prompt_ids.size], prompt_ids)
+        else ids
+    )
 
 
 async def generate_sglang(
@@ -130,22 +136,38 @@ def print_parsed(label: str, turn: str, parsed) -> None:
 
 
 async def run_one(
-    *, client: httpx.AsyncClient, base_url: str, model: str, enable_thinking: bool | None, max_new_tokens: int
+    *,
+    client: httpx.AsyncClient,
+    base_url: str,
+    model: str,
+    enable_thinking: bool | None,
+    max_new_tokens: int,
 ) -> None:
-    label = model if enable_thinking is None else f"{model} enable_thinking={enable_thinking}"
+    label = (
+        model
+        if enable_thinking is None
+        else f"{model} enable_thinking={enable_thinking}"
+    )
     print(f"\n=== {label} ===")
 
     renderer = make_renderer(model, enable_thinking)
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": "You are a concise tool-using assistant."},
-        {"role": "user", "content": "Use the multiply tool for 17 * 23, then summarize."},
+        {
+            "role": "user",
+            "content": "Use the multiply tool for 17 * 23, then summarize.",
+        },
     ]
 
     # Turn 1: render locally, send token IDs. SGLang never sees messages.
     prompt_ids = renderer.render_ids(messages, tools=TOOLS, add_generation_prompt=True)
     output1 = await generate_sglang(
-        client=client, base_url=base_url, renderer=renderer, prompt_ids=prompt_ids, max_new_tokens=max_new_tokens
+        client=client,
+        base_url=base_url,
+        renderer=renderer,
+        prompt_ids=prompt_ids,
+        max_new_tokens=max_new_tokens,
     )
     completion1 = completion_ids(output1, prompt_ids)
     parsed1 = renderer.parse_response(completion1)
@@ -162,7 +184,9 @@ async def run_one(
                 "type": "function",
                 "function": {
                     "name": tc.name,
-                    "arguments": tc.arguments if isinstance(tc.arguments, str) else json.dumps(tc.arguments),
+                    "arguments": tc.arguments
+                    if isinstance(tc.arguments, str)
+                    else json.dumps(tc.arguments),
                 },
             }
             for idx, tc in enumerate(parsed1.tool_calls)
@@ -180,16 +204,22 @@ async def run_one(
                     "role": "tool",
                     "tool_call_id": tool_call.id or f"call_{idx}",
                     "name": tool_call.name or "multiply",
-                    "content": json.dumps({"result": int(tool_args["a"]) * int(tool_args["b"])}),
+                    "content": json.dumps(
+                        {"result": int(tool_args["a"]) * int(tool_args["b"])}
+                    ),
                 }
             )
     else:
-        new_messages = [{"role": "user", "content": "Give the final answer in one sentence."}]
+        new_messages = [
+            {"role": "user", "content": "Give the final answer in one sentence."}
+        ]
 
     # Turn 2: bridge extends prompt_ids + completion1 exactly.
     # ``bridge_to_next_turn`` returns a ``RenderedTokens`` (or None); the
     # extended id stream is on ``.token_ids``.
-    bridged = renderer.bridge_to_next_turn(prompt_ids, completion1, new_messages, tools=TOOLS)
+    bridged = renderer.bridge_to_next_turn(
+        prompt_ids, completion1, new_messages, tools=TOOLS
+    )
     if bridged is None:
         raise RuntimeError("bridge_to_next_turn returned None")
     bridged_ids = bridged.token_ids
@@ -197,7 +227,11 @@ async def run_one(
     assert np.array_equal(bridged_ids[: expected_prefix.size], expected_prefix)
 
     output2 = await generate_sglang(
-        client=client, base_url=base_url, renderer=renderer, prompt_ids=bridged_ids, max_new_tokens=max_new_tokens
+        client=client,
+        base_url=base_url,
+        renderer=renderer,
+        prompt_ids=bridged_ids,
+        max_new_tokens=max_new_tokens,
     )
     completion2 = completion_ids(output2, bridged_ids)
     print_parsed(label, "turn 2", renderer.parse_response(completion2))
@@ -205,10 +239,21 @@ async def run_one(
 
 async def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", default="http://localhost:30000", help="SGLang HTTP server base URL.")
-    parser.add_argument("--model", default="Qwen/Qwen3.5-4B", help="Must match the model the SGLang server is serving.")
     parser.add_argument(
-        "--enable-thinking", choices=["true", "false", "both"], default="both", help="Qwen3.5 thinking mode."
+        "--base-url",
+        default="http://localhost:30000",
+        help="SGLang HTTP server base URL.",
+    )
+    parser.add_argument(
+        "--model",
+        default="Qwen/Qwen3.5-4B",
+        help="Must match the model the SGLang server is serving.",
+    )
+    parser.add_argument(
+        "--enable-thinking",
+        choices=["true", "false", "both"],
+        default="both",
+        help="Qwen3.5 thinking mode.",
     )
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--timeout", type=float, default=600.0)

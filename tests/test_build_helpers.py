@@ -20,7 +20,9 @@ def test_build_mm_token_type_ids_marks_ranges():
     video_ranges.append(7, 2)
     placeholders = {"image": image_ranges.finish(), "video": video_ranges.finish()}
     ids = _build_mm_token_type_ids(placeholders, length=10)
-    assert np.array_equal(ids, np.fromiter((0, 0, 1, 1, 1, 0, 0, 2, 2, 0), dtype=ids.dtype, count=10))
+    assert np.array_equal(
+        ids, np.fromiter((0, 0, 1, 1, 1, 0, 0, 2, 2, 0), dtype=ids.dtype, count=10)
+    )
 
 
 def _expected(tokenizer, messages, **kwargs):
@@ -29,7 +31,10 @@ def _expected(tokenizer, messages, **kwargs):
 
 def test_build_training_sample_ids_match(model_name, tokenizer, renderer):
     """Token IDs must match the model-aware reference renderer."""
-    if model_name in {"google/gemma-4-26B-A4B-it", "google/gemma-4-31B-it"} and not renderer.config.enable_thinking:
+    if (
+        model_name in {"google/gemma-4-26B-A4B-it", "google/gemma-4-31B-it"}
+        and not renderer.config.enable_thinking
+    ):
         pytest.skip(
             "Gemma 4 26B/31B deliberately keeps the disabled-thinking prefill "
             "on assistant history; stability is covered separately"
@@ -39,7 +44,9 @@ def test_build_training_sample_ids_match(model_name, tokenizer, renderer):
         {"role": "user", "content": "Hi"},
         {"role": "assistant", "content": "Hello!"},
     ]
-    sample = build_training_sample(renderer, msgs, role_to_mask=lambda m: m["role"] == "assistant")
+    sample = build_training_sample(
+        renderer, msgs, role_to_mask=lambda m: m["role"] == "assistant"
+    )
     ids = sample.token_ids
     assert np.array_equal(ids, _expected(tokenizer, msgs))
     # text-only sample carries no multimodal payload
@@ -49,8 +56,13 @@ def test_build_training_sample_ids_match(model_name, tokenizer, renderer):
 
 def test_build_training_sample_has_trainable_tokens(model_name, tokenizer, renderer):
     """At least some tokens should be marked for training."""
-    msgs = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]
-    sample = build_training_sample(renderer, msgs, role_to_mask=lambda m: m["role"] == "assistant")
+    msgs = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
+    sample = build_training_sample(
+        renderer, msgs, role_to_mask=lambda m: m["role"] == "assistant"
+    )
     ids, mask = sample.token_ids, sample.loss_mask
     assert np.count_nonzero(mask) > 0
     assert len(mask) == len(ids)
@@ -66,7 +78,10 @@ def test_build_training_sample_ensures_final_stop(model_name, tokenizer, rendere
     """
     if renderer.render([{"role": "user", "content": "x"}]).sampled_mask.size == 0:
         return  # DefaultRenderer: no sampled_mask, role-only masking
-    msgs = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]
+    msgs = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
     sample = build_training_sample(renderer, msgs, ensure_final_stop=True)
     stop_ids = set(renderer.get_stop_token_ids())
     trainable_positions = np.flatnonzero(sample.loss_mask)
@@ -82,11 +97,16 @@ def test_build_training_sample_ensures_final_stop(model_name, tokenizer, rendere
 
 def test_build_trajectory_step_reconstructs_full(model_name, tokenizer, renderer):
     """prompt_ids + completion_ids must equal the full rendered sequence."""
-    prompt = [{"role": "system", "content": "You are helpful."}, {"role": "user", "content": "Hi"}]
+    prompt = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "Hi"},
+    ]
     completion = [{"role": "assistant", "content": "Hello!"}]
     step = build_trajectory_step(renderer, prompt, completion)
     full_ids = renderer.render_ids(prompt + completion)
-    assert np.array_equal(np.concatenate((step["prompt_ids"], step["completion_ids"])), full_ids)
+    assert np.array_equal(
+        np.concatenate((step["prompt_ids"], step["completion_ids"])), full_ids
+    )
 
 
 def test_build_trajectory_step_masks(model_name, tokenizer, renderer):

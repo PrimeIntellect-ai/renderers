@@ -68,7 +68,9 @@ def test_qwen3_tool_parser_records_invalid_json():
     """Malformed JSON in a <tool_call> block surfaces as INVALID_JSON, not silently dropped."""
     tok = load_tokenizer("Qwen/Qwen3-0.6B")
     parser = get_tool_parser("qwen3", tok)
-    completion = 'hi\n<tool_call>\n{"name": "f", "arguments": {broken json\n</tool_call>'
+    completion = (
+        'hi\n<tool_call>\n{"name": "f", "arguments": {broken json\n</tool_call>'
+    )
     ids = encode_token_ids(tok, completion)
     tool_calls = parser.extract(ids).tool_calls
     assert len(tool_calls) == 1
@@ -118,7 +120,9 @@ def test_default_renderer_uses_parsers():
     from renderers import DefaultRendererConfig, create_renderer
 
     tok = load_tokenizer("Qwen/Qwen3-0.6B")
-    renderer = create_renderer(tok, DefaultRendererConfig(tool_parser="qwen3", reasoning_parser="think"))
+    renderer = create_renderer(
+        tok, DefaultRendererConfig(tool_parser="qwen3", reasoning_parser="think")
+    )
     assert renderer.supports_tools is True
 
     completion = '<think>think</think>ok\n<tool_call>\n{"name": "f", "arguments": {}}\n</tool_call>'

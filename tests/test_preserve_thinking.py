@@ -8,6 +8,7 @@ generic values do not change render output.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from renderers import create_renderer
@@ -61,7 +62,7 @@ def test_generic_thinking_retention_does_not_change_full_render(
             renderer_name,
             thinking_retention=retention,
         ).render_ids(CONVERSATION)
-        assert explicit == default, (
+        assert np.array_equal(explicit, default), (
             f"{model_name}: thinking_retention={retention!r} changed full render"
         )
 

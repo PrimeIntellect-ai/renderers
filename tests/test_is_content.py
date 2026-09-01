@@ -33,13 +33,19 @@ import numpy as np
 
 
 def _is_populated(rendered) -> bool:
-    return rendered.is_content.size == rendered.token_ids.size and rendered.is_content.size > 0
+    return (
+        rendered.is_content.size == rendered.token_ids.size
+        and rendered.is_content.size > 0
+    )
 
 
 def test_is_content_length_or_empty(model_name, renderer):
     """``is_content`` is either empty (opt-out) or matches token_ids
     length exactly. No partial fills."""
-    msgs = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]
+    msgs = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
     rendered = renderer.render(msgs)
     n_tokens = len(rendered.token_ids)
     n_mask = len(rendered.is_content)
@@ -71,7 +77,9 @@ def test_is_content_equals_sampled_on_assistant(model_name, renderer):
     valid = rendered.message_indices >= 0
     assistant_tokens = np.zeros(rendered.token_ids.size, dtype=np.bool_)
     assistant_tokens[valid] = assistant_messages[rendered.message_indices[valid]]
-    mismatches = np.flatnonzero(assistant_tokens & (rendered.is_content != rendered.sampled_mask))
+    mismatches = np.flatnonzero(
+        assistant_tokens & (rendered.is_content != rendered.sampled_mask)
+    )
     assert mismatches.size == 0, (
         f"{model_name}: is_content != sampled_mask on assistant tokens at positions {mismatches[:8]}"
     )
@@ -87,7 +95,9 @@ def test_is_content_excludes_generation_prompt(model_name, renderer):
         return
 
     bad = np.flatnonzero((rendered.message_indices == -1) & rendered.is_content)
-    assert bad.size == 0, f"{model_name}: generation-prompt tokens marked is_content=True at positions {bad[:8]}"
+    assert bad.size == 0, (
+        f"{model_name}: generation-prompt tokens marked is_content=True at positions {bad[:8]}"
+    )
 
 
 def test_is_content_recovers_user_body(model_name, tokenizer, renderer):
@@ -97,13 +107,20 @@ def test_is_content_recovers_user_body(model_name, tokenizer, renderer):
     the input substring must still be recoverable from the decoded
     body run."""
     user_text = "Hello, my name is Sebastian."
-    msgs = [{"role": "user", "content": user_text}, {"role": "assistant", "content": "Hi!"}]
+    msgs = [
+        {"role": "user", "content": user_text},
+        {"role": "assistant", "content": "Hi!"},
+    ]
     rendered = renderer.render(msgs)
     if not _is_populated(rendered):
         return
 
-    user_body_ids = rendered.token_ids[(rendered.message_indices == 0) & rendered.is_content]
-    assert user_body_ids.size > 0, f"{model_name}: no is_content=True tokens attributed to user message"
+    user_body_ids = rendered.token_ids[
+        (rendered.message_indices == 0) & rendered.is_content
+    ]
+    assert user_body_ids.size > 0, (
+        f"{model_name}: no is_content=True tokens attributed to user message"
+    )
     decoded = tokenizer.decode(user_body_ids).strip()
     assert user_text in decoded or decoded in user_text, (
         f"{model_name}: user body run decodes to {decoded!r}, expected to contain {user_text!r}"
@@ -126,7 +143,10 @@ def test_is_content_recovers_tool_body(model_name, tokenizer, renderer):
                 {
                     "type": "function",
                     "id": "call_1",
-                    "function": {"name": "lookup", "arguments": {"q": "capital of France"}},
+                    "function": {
+                        "name": "lookup",
+                        "arguments": {"q": "capital of France"},
+                    },
                 }
             ],
         },
@@ -137,8 +157,12 @@ def test_is_content_recovers_tool_body(model_name, tokenizer, renderer):
     if not _is_populated(rendered):
         return
 
-    tool_body_ids = rendered.token_ids[(rendered.message_indices == 2) & rendered.is_content]
-    assert tool_body_ids.size > 0, f"{model_name}: no is_content=True tokens attributed to tool message"
+    tool_body_ids = rendered.token_ids[
+        (rendered.message_indices == 2) & rendered.is_content
+    ]
+    assert tool_body_ids.size > 0, (
+        f"{model_name}: no is_content=True tokens attributed to tool message"
+    )
     decoded = tokenizer.decode(tool_body_ids).strip()
     assert tool_text in decoded, (
         f"{model_name}: tool body run decodes to {decoded!r}, expected to contain {tool_text!r}"
@@ -159,8 +183,12 @@ def test_is_content_recovers_system_body(model_name, tokenizer, renderer):
     if not _is_populated(rendered):
         return
 
-    sys_body_ids = rendered.token_ids[(rendered.message_indices == 0) & rendered.is_content]
-    assert sys_body_ids.size > 0, f"{model_name}: no is_content=True tokens attributed to system message"
+    sys_body_ids = rendered.token_ids[
+        (rendered.message_indices == 0) & rendered.is_content
+    ]
+    assert sys_body_ids.size > 0, (
+        f"{model_name}: no is_content=True tokens attributed to system message"
+    )
     decoded = tokenizer.decode(sys_body_ids).strip()
     assert sys_text in decoded, (
         f"{model_name}: system body run decodes to {decoded!r}, expected to contain {sys_text!r}"
@@ -172,13 +200,18 @@ def test_is_content_no_body_on_role_tag(model_name, renderer):
     have ``is_content=False`` — that's the leading role-tag run
     (``<|im_start|>`` / equivalent), which is template scaffold, never
     body."""
-    msgs = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]
+    msgs = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
     rendered = renderer.render(msgs)
     if not _is_populated(rendered):
         return
 
     user_positions = np.flatnonzero(rendered.message_indices == 0)
-    assert user_positions.size > 0, f"{model_name}: no tokens attributed to user message"
+    assert user_positions.size > 0, (
+        f"{model_name}: no tokens attributed to user message"
+    )
     first_k = int(user_positions[0])
     assert not rendered.is_content[first_k], (
         f"{model_name}: first user-attributed token at k={first_k} should "
@@ -186,7 +219,9 @@ def test_is_content_no_body_on_role_tag(model_name, renderer):
     )
 
 
-def test_content_token_spans_by_role_isolates_tool_body(model_name, tokenizer, renderer):
+def test_content_token_spans_by_role_isolates_tool_body(
+    model_name, tokenizer, renderer
+):
     """``content_token_spans_by_role()["tool"]`` returns spans over
     which every token is the tool message body. Joining the decoded
     spans recovers the tool response. Adjacent scaffold tokens
@@ -199,7 +234,11 @@ def test_content_token_spans_by_role_isolates_tool_body(model_name, tokenizer, r
             "role": "assistant",
             "content": "",
             "tool_calls": [
-                {"type": "function", "id": "call_x", "function": {"name": "calc", "arguments": {"e": "6*7"}}}
+                {
+                    "type": "function",
+                    "id": "call_x",
+                    "function": {"name": "calc", "arguments": {"e": "6*7"}},
+                }
             ],
         },
         {"role": "tool", "content": tool_text, "tool_call_id": "call_x"},
@@ -211,7 +250,9 @@ def test_content_token_spans_by_role_isolates_tool_body(model_name, tokenizer, r
 
     spans = rendered.content_token_spans_by_role()
     tool_spans = spans.get("tool")
-    assert tool_spans is not None and tool_spans.shape[0] > 0, f"{model_name}: no tool content spans returned"
+    assert tool_spans is not None and tool_spans.shape[0] > 0, (
+        f"{model_name}: no tool content spans returned"
+    )
 
     pieces: list[str] = []
     for row_index in range(tool_spans.shape[0]):
@@ -219,7 +260,9 @@ def test_content_token_spans_by_role_isolates_tool_body(model_name, tokenizer, r
         e = int(tool_spans[row_index, 1])
         run_ids = rendered.token_ids[s:e]
         # All tokens in the span must be is_content=True by definition.
-        assert np.all(rendered.is_content[s:e]), f"{model_name}: span [{s}, {e}) contains is_content=False"
+        assert np.all(rendered.is_content[s:e]), (
+            f"{model_name}: span [{s}, {e}) contains is_content=False"
+        )
         pieces.append(tokenizer.decode(run_ids))
     joined = "".join(pieces).strip()
     assert tool_text in joined, (
@@ -237,7 +280,13 @@ def test_content_mask_for_roles_excludes_assistant_when_unset(model_name, render
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"type": "function", "id": "call_a", "function": {"name": "ping", "arguments": {}}}],
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "id": "call_a",
+                    "function": {"name": "ping", "arguments": {}},
+                }
+            ],
         },
         {"role": "tool", "content": "pong", "tool_call_id": "call_a"},
         {"role": "assistant", "content": "OK."},
@@ -250,10 +299,14 @@ def test_content_mask_for_roles_excludes_assistant_when_unset(model_name, render
     assert len(tool_mask) == len(rendered.token_ids)
 
     expected = (rendered.message_indices == 2) & rendered.is_content
-    assert np.array_equal(tool_mask, expected), f"{model_name}: tool-role mask included scaffold or another role"
+    assert np.array_equal(tool_mask, expected), (
+        f"{model_name}: tool-role mask included scaffold or another role"
+    )
 
 
-def test_build_training_sample_content_sft_roles_picks_up_tool_body(model_name, renderer):
+def test_build_training_sample_content_sft_roles_picks_up_tool_body(
+    model_name, renderer
+):
     """``build_training_sample(..., content_sft_roles={"tool"})``
     produces a loss mask that's True on tool body tokens AND assistant
     sampled tokens, but False on the tool-message scaffold (role tag,
@@ -266,13 +319,22 @@ def test_build_training_sample_content_sft_roles_picks_up_tool_body(model_name, 
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"type": "function", "id": "call_z", "function": {"name": "noop", "arguments": {}}}],
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "id": "call_z",
+                    "function": {"name": "noop", "arguments": {}},
+                }
+            ],
         },
         {"role": "tool", "content": "done", "tool_call_id": "call_z"},
         {"role": "assistant", "content": "OK."},
     ]
     sample = build_training_sample(
-        renderer, msgs, role_to_mask=lambda m: m["role"] == "assistant", content_sft_roles={"tool"}
+        renderer,
+        msgs,
+        role_to_mask=lambda m: m["role"] == "assistant",
+        content_sft_roles={"tool"},
     )
     ids, mask = sample.token_ids, sample.loss_mask
     assert len(mask) == len(ids)
@@ -289,5 +351,9 @@ def test_build_training_sample_content_sft_roles_picks_up_tool_body(model_name, 
         f"{model_name}: build_training_sample with content_sft_roles={{'tool'}} trained on zero tool tokens"
     )
     assistant = (rendered.message_indices == 1) | (rendered.message_indices == 3)
-    assert np.any(mask & assistant), f"{model_name}: assistant tokens dropped from training mask"
-    assert not np.any(mask & (rendered.message_indices == 0)), f"{model_name}: user tokens leaked into training mask"
+    assert np.any(mask & assistant), (
+        f"{model_name}: assistant tokens dropped from training mask"
+    )
+    assert not np.any(mask & (rendered.message_indices == 0)), (
+        f"{model_name}: user tokens leaked into training mask"
+    )

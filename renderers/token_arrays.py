@@ -17,7 +17,9 @@ TRAINING_TOKEN_IDS_DTYPE = np.dtype("<i8")
 MM_TOKEN_TYPE_IDS_DTYPE = np.dtype("<i8")
 
 
-def require_1d_array(name: str, value: object, *, dtype: np.dtype, minimum: int | None = None) -> np.ndarray:
+def require_1d_array(
+    name: str, value: object, *, dtype: np.dtype, minimum: int | None = None
+) -> np.ndarray:
     """Validate an ndarray without accepting or materializing list payloads."""
     if not isinstance(value, np.ndarray):
         raise TypeError(f"{name} must be a NumPy array, got {type(value).__name__}")
@@ -61,7 +63,9 @@ def require_range_array(name: str, value: object) -> np.ndarray:
     if value.ndim != 2 or value.shape[1:] != (2,):
         raise ValueError(f"{name} must have shape [items, 2], got {value.shape}")
     if value.dtype != OFFSETS_DTYPE:
-        raise TypeError(f"{name} must have dtype {OFFSETS_DTYPE.str}, got {value.dtype.str}")
+        raise TypeError(
+            f"{name} must have dtype {OFFSETS_DTYPE.str}, got {value.dtype.str}"
+        )
     if value.size and np.any(value < 0):
         raise ValueError(f"{name} offsets and lengths must be non-negative")
     return value
@@ -86,16 +90,22 @@ def require_span_array(name: str, value: object) -> np.ndarray:
     if value.ndim != 2 or value.shape[1:] != (2,):
         raise ValueError(f"{name} must have shape [items, 2], got {value.shape}")
     if value.dtype != OFFSETS_DTYPE:
-        raise TypeError(f"{name} must have dtype {OFFSETS_DTYPE.str}, got {value.dtype.str}")
+        raise TypeError(
+            f"{name} must have dtype {OFFSETS_DTYPE.str}, got {value.dtype.str}"
+        )
     if value.size:
         unknown = np.all(value == -1, axis=1)
         known = np.all(value >= 0, axis=1) & (value[:, 0] <= value[:, 1])
         if not np.all(unknown | known):
-            raise ValueError(f"{name} rows must be [-1, -1] or non-negative half-open spans")
+            raise ValueError(
+                f"{name} rows must be [-1, -1] or non-negative half-open spans"
+            )
     return value
 
 
-def owned_readonly_copy(name: str, value: object, *, dtype: np.dtype, minimum: int | None = None) -> np.ndarray:
+def owned_readonly_copy(
+    name: str, value: object, *, dtype: np.dtype, minimum: int | None = None
+) -> np.ndarray:
     """Validate then take explicit immutable ownership at a public boundary."""
     source = require_1d_array(name, value, dtype=dtype, minimum=minimum)
     owned = np.array(source, dtype=dtype, copy=True, order="C")
@@ -156,7 +166,9 @@ class FixedWidthArrayBuilder:
     def _validate_scalar(self, value: int | bool) -> None:
         if self._dtype == MASK_DTYPE:
             if type(value) is not bool:
-                raise TypeError(f"builder value must be bool, got {type(value).__name__}")
+                raise TypeError(
+                    f"builder value must be bool, got {type(value).__name__}"
+                )
             return
         if type(value) is not int:
             raise TypeError(f"builder value must be int, got {type(value).__name__}")
@@ -191,7 +203,9 @@ class TextSegmentBuilder:
 
     def __init__(self, *, initial_capacity: int = 4) -> None:
         self._texts: list[str] = []
-        self._content = FixedWidthArrayBuilder(MASK_DTYPE, initial_capacity=initial_capacity)
+        self._content = FixedWidthArrayBuilder(
+            MASK_DTYPE, initial_capacity=initial_capacity
+        )
         self._sealed = False
 
     def __len__(self) -> int:
@@ -203,7 +217,9 @@ class TextSegmentBuilder:
         if type(text) is not str:
             raise TypeError(f"segment text must be str, got {type(text).__name__}")
         if type(is_content) is not bool:
-            raise TypeError(f"segment is_content must be bool, got {type(is_content).__name__}")
+            raise TypeError(
+                f"segment is_content must be bool, got {type(is_content).__name__}"
+            )
         self._texts.append(text)
         self._content.append(is_content)
 
@@ -292,7 +308,9 @@ class FixedWidthSpanBuilder:
             raise TypeError("span boundaries must be integers")
         unknown = start == -1 and end == -1
         if not unknown and not (0 <= start <= end <= upper_bound):
-            raise ValueError("span must be [-1, -1] or a non-negative half-open interval")
+            raise ValueError(
+                "span must be [-1, -1] or a non-negative half-open interval"
+            )
         self._reserve()
         self._buffer[self._size, 0] = start
         self._buffer[self._size, 1] = end
@@ -317,7 +335,9 @@ class FixedWidthSpanBuilder:
         return readonly_view(self._buffer[: self._size])
 
 
-def finish_range_builders(builders: Mapping[str, FixedWidthRangeBuilder]) -> dict[str, np.ndarray]:
+def finish_range_builders(
+    builders: Mapping[str, FixedWidthRangeBuilder],
+) -> dict[str, np.ndarray]:
     """Seal a structural modality map without numeric list intermediates."""
     return {modality: builder.finish() for modality, builder in builders.items()}
 
@@ -338,7 +358,14 @@ _OFFSET_CAPABILITY_UNRESOLVED = object()
 class RenderedTokenBuilder:
     """Aligned grow-as-you-go storage for every per-token renderer signal."""
 
-    __slots__ = ("_is_content", "_message_indices", "_offset_tokenizer", "_sampled_mask", "_token_ids", "_tokenizer")
+    __slots__ = (
+        "_is_content",
+        "_message_indices",
+        "_offset_tokenizer",
+        "_sampled_mask",
+        "_token_ids",
+        "_tokenizer",
+    )
 
     def __init__(
         self,
@@ -349,21 +376,36 @@ class RenderedTokenBuilder:
     ) -> None:
         self._tokenizer = tokenizer
         self._offset_tokenizer = offset_tokenizer
-        self._token_ids = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=initial_capacity)
-        self._message_indices = FixedWidthArrayBuilder(MESSAGE_INDICES_DTYPE, initial_capacity=initial_capacity)
-        self._sampled_mask = FixedWidthArrayBuilder(MASK_DTYPE, initial_capacity=initial_capacity)
-        self._is_content = FixedWidthArrayBuilder(MASK_DTYPE, initial_capacity=initial_capacity)
+        self._token_ids = FixedWidthArrayBuilder(
+            TOKEN_IDS_DTYPE, initial_capacity=initial_capacity
+        )
+        self._message_indices = FixedWidthArrayBuilder(
+            MESSAGE_INDICES_DTYPE, initial_capacity=initial_capacity
+        )
+        self._sampled_mask = FixedWidthArrayBuilder(
+            MASK_DTYPE, initial_capacity=initial_capacity
+        )
+        self._is_content = FixedWidthArrayBuilder(
+            MASK_DTYPE, initial_capacity=initial_capacity
+        )
 
     def __len__(self) -> int:
         return len(self._token_ids)
 
     def emit_special(
-        self, token_id: int, message_index: int = -1, *, is_sampled: bool = False, is_content: bool = False
+        self,
+        token_id: int,
+        message_index: int = -1,
+        *,
+        is_sampled: bool = False,
+        is_content: bool = False,
     ) -> None:
         if type(token_id) is not int:
             raise TypeError(f"token_id must be int, got {type(token_id).__name__}")
         if type(message_index) is not int:
-            raise TypeError(f"message_index must be int, got {type(message_index).__name__}")
+            raise TypeError(
+                f"message_index must be int, got {type(message_index).__name__}"
+            )
         if type(is_sampled) is not bool:
             raise TypeError(f"is_sampled must be bool, got {type(is_sampled).__name__}")
         if type(is_content) is not bool:
@@ -371,20 +413,31 @@ class RenderedTokenBuilder:
         if token_id < 0 or token_id > np.iinfo(TOKEN_IDS_DTYPE).max:
             raise ValueError(f"token_id is outside the int32 token range: {token_id}")
         if message_index < -1 or message_index > np.iinfo(MESSAGE_INDICES_DTYPE).max:
-            raise ValueError(f"message_index is outside the int32 attribution range: {message_index}")
+            raise ValueError(
+                f"message_index is outside the int32 attribution range: {message_index}"
+            )
         self._token_ids.append(token_id)
         self._message_indices.append(message_index)
         self._sampled_mask.append(is_sampled)
         self._is_content.append(is_content)
 
     def emit_tokens(
-        self, token_ids: np.ndarray, message_index: int, *, is_sampled: bool | np.ndarray, is_content: bool | np.ndarray
+        self,
+        token_ids: np.ndarray,
+        message_index: int,
+        *,
+        is_sampled: bool | np.ndarray,
+        is_content: bool | np.ndarray,
     ) -> None:
         require_1d_array("token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
         if type(message_index) is not int:
-            raise TypeError(f"message_index must be int, got {type(message_index).__name__}")
+            raise TypeError(
+                f"message_index must be int, got {type(message_index).__name__}"
+            )
         if message_index < -1 or message_index > np.iinfo(MESSAGE_INDICES_DTYPE).max:
-            raise ValueError(f"message_index is outside the int32 attribution range: {message_index}")
+            raise ValueError(
+                f"message_index is outside the int32 attribution range: {message_index}"
+            )
         if isinstance(is_sampled, np.ndarray):
             require_1d_array("is_sampled", is_sampled, dtype=MASK_DTYPE)
             if is_sampled.size != token_ids.size:
@@ -392,7 +445,9 @@ class RenderedTokenBuilder:
                     f"is_sampled length {is_sampled.size} does not match token_ids length {token_ids.size}"
                 )
         elif type(is_sampled) is not bool:
-            raise TypeError(f"is_sampled must be bool or a NumPy bool array, got {type(is_sampled).__name__}")
+            raise TypeError(
+                f"is_sampled must be bool or a NumPy bool array, got {type(is_sampled).__name__}"
+            )
         if isinstance(is_content, np.ndarray):
             require_1d_array("is_content", is_content, dtype=MASK_DTYPE)
             if is_content.size != token_ids.size:
@@ -400,7 +455,9 @@ class RenderedTokenBuilder:
                     f"is_content length {is_content.size} does not match token_ids length {token_ids.size}"
                 )
         elif type(is_content) is not bool:
-            raise TypeError(f"is_content must be bool or a NumPy bool array, got {type(is_content).__name__}")
+            raise TypeError(
+                f"is_content must be bool or a NumPy bool array, got {type(is_content).__name__}"
+            )
 
         self._token_ids.extend(token_ids)
         self._message_indices.extend_constant(message_index, token_ids.size)
@@ -414,14 +471,25 @@ class RenderedTokenBuilder:
             self._is_content.extend_constant(is_content, token_ids.size)
 
     def emit_aligned(
-        self, token_ids: np.ndarray, message_indices: np.ndarray, sampled_mask: np.ndarray, is_content: np.ndarray
+        self,
+        token_ids: np.ndarray,
+        message_indices: np.ndarray,
+        sampled_mask: np.ndarray,
+        is_content: np.ndarray,
     ) -> None:
         """Append already-aligned fixed-width signals without scalar iteration."""
         require_1d_array("token_ids", token_ids, dtype=TOKEN_IDS_DTYPE, minimum=0)
-        require_1d_array("message_indices", message_indices, dtype=MESSAGE_INDICES_DTYPE, minimum=-1)
+        require_1d_array(
+            "message_indices", message_indices, dtype=MESSAGE_INDICES_DTYPE, minimum=-1
+        )
         require_1d_array("sampled_mask", sampled_mask, dtype=MASK_DTYPE)
         require_1d_array("is_content", is_content, dtype=MASK_DTYPE)
-        sizes = {token_ids.size, message_indices.size, sampled_mask.size, is_content.size}
+        sizes = {
+            token_ids.size,
+            message_indices.size,
+            sampled_mask.size,
+            is_content.size,
+        }
         if len(sizes) != 1:
             raise ValueError("aligned token signals must have equal lengths")
         self._token_ids.extend(token_ids)
@@ -433,13 +501,23 @@ class RenderedTokenBuilder:
         self.emit_tokens(token_ids, -1, is_sampled=False, is_content=False)
 
     def emit_text(
-        self, text: str, message_index: int = -1, *, is_sampled: bool = False, is_content: bool = False
+        self,
+        text: str,
+        message_index: int = -1,
+        *,
+        is_sampled: bool = False,
+        is_content: bool = False,
     ) -> None:
         if text:
             if self._tokenizer is None:
-                raise RuntimeError("emit_text requires a tokenizer-bound RenderedTokenBuilder")
+                raise RuntimeError(
+                    "emit_text requires a tokenizer-bound RenderedTokenBuilder"
+                )
             self.emit_tokens(
-                encode_token_ids(self._tokenizer, text), message_index, is_sampled=is_sampled, is_content=is_content
+                encode_token_ids(self._tokenizer, text),
+                message_index,
+                is_sampled=is_sampled,
+                is_content=is_content,
             )
 
     def emit_text_segments(
@@ -453,24 +531,9 @@ class RenderedTokenBuilder:
         from renderers.base import attribute_text_segments
 
         if self._tokenizer is None:
-            raise RuntimeError("emit_text_segments requires a tokenizer-bound RenderedTokenBuilder")
-        attributed = attribute_text_segments(
-            self._tokenizer,
-            segments,
-            overlap_is_content=overlap_is_content,
-            _offset_tokenizer=self._resolved_offset_tokenizer(),
-        )
-        self.emit_tokens(attributed.token_ids, message_index, is_sampled=is_sampled, is_content=attributed.is_content)
-        return attributed.has_content_attribution
-
-    def emit_assistant_segments(
-        self, segments: TextSegments, message_index: int = -1, *, overlap_is_content: bool = False
-    ) -> bool:
-        """Emit assistant text, sampling exactly the attributable content tokens."""
-        from renderers.base import attribute_text_segments
-
-        if self._tokenizer is None:
-            raise RuntimeError("emit_assistant_segments requires a tokenizer-bound builder")
+            raise RuntimeError(
+                "emit_text_segments requires a tokenizer-bound RenderedTokenBuilder"
+            )
         attributed = attribute_text_segments(
             self._tokenizer,
             segments,
@@ -478,7 +541,38 @@ class RenderedTokenBuilder:
             _offset_tokenizer=self._resolved_offset_tokenizer(),
         )
         self.emit_tokens(
-            attributed.token_ids, message_index, is_sampled=attributed.is_content, is_content=attributed.is_content
+            attributed.token_ids,
+            message_index,
+            is_sampled=is_sampled,
+            is_content=attributed.is_content,
+        )
+        return attributed.has_content_attribution
+
+    def emit_assistant_segments(
+        self,
+        segments: TextSegments,
+        message_index: int = -1,
+        *,
+        overlap_is_content: bool = False,
+    ) -> bool:
+        """Emit assistant text, sampling exactly the attributable content tokens."""
+        from renderers.base import attribute_text_segments
+
+        if self._tokenizer is None:
+            raise RuntimeError(
+                "emit_assistant_segments requires a tokenizer-bound builder"
+            )
+        attributed = attribute_text_segments(
+            self._tokenizer,
+            segments,
+            overlap_is_content=overlap_is_content,
+            _offset_tokenizer=self._resolved_offset_tokenizer(),
+        )
+        self.emit_tokens(
+            attributed.token_ids,
+            message_index,
+            is_sampled=attributed.is_content,
+            is_content=attributed.is_content,
         )
         return attributed.has_content_attribution
 
@@ -501,13 +595,24 @@ class RenderedTokenBuilder:
         """Seal aligned arrays and construct the public RenderedTokens value."""
         from renderers.base import RenderedTokens
 
-        sizes = {len(self._token_ids), len(self._message_indices), len(self._sampled_mask), len(self._is_content)}
+        sizes = {
+            len(self._token_ids),
+            len(self._message_indices),
+            len(self._sampled_mask),
+            len(self._is_content),
+        }
         if len(sizes) != 1:
             raise RuntimeError("rendered token builder signals are misaligned")
         token_ids = self._token_ids.finish()
         message_indices = self._message_indices.finish()
-        sampled_mask = self._sampled_mask.finish() if sampled_available else empty_array(MASK_DTYPE)
-        is_content = self._is_content.finish() if content_available else empty_array(MASK_DTYPE)
+        sampled_mask = (
+            self._sampled_mask.finish()
+            if sampled_available
+            else empty_array(MASK_DTYPE)
+        )
+        is_content = (
+            self._is_content.finish() if content_available else empty_array(MASK_DTYPE)
+        )
         return RenderedTokens(
             token_ids=token_ids,
             message_indices=message_indices,
@@ -528,27 +633,41 @@ def owned_token_ids_from_array(name: str, value: object) -> np.ndarray:
     if value.ndim == 2 and value.shape[0] == 1:
         value = value[0]
     if value.ndim != 1:
-        raise ValueError(f"{name} input_ids must have shape [tokens] or [1, tokens], got {value.shape}")
+        raise ValueError(
+            f"{name} input_ids must have shape [tokens] or [1, tokens], got {value.shape}"
+        )
     if value.dtype.kind not in "iu" or value.dtype.itemsize > 8:
-        raise TypeError(f"{name} input_ids must use a fixed-width integer dtype, got {value.dtype}")
-    if value.size and (np.any(value < 0) or np.any(value > np.iinfo(TOKEN_IDS_DTYPE).max)):
+        raise TypeError(
+            f"{name} input_ids must use a fixed-width integer dtype, got {value.dtype}"
+        )
+    if value.size and (
+        np.any(value < 0) or np.any(value > np.iinfo(TOKEN_IDS_DTYPE).max)
+    ):
         raise ValueError(f"{name} input_ids are outside the int32 token range")
     owned = np.array(value, dtype=TOKEN_IDS_DTYPE, copy=True, order="C")
     owned.flags.writeable = False
     return owned
 
 
-def owned_offsets_from_array(name: str, value: object, *, token_count: int) -> np.ndarray:
+def owned_offsets_from_array(
+    name: str, value: object, *, token_count: int
+) -> np.ndarray:
     """Validate tokenizer offsets and take readonly little-endian int64 ownership."""
     if not isinstance(value, np.ndarray):
         raise TypeError(f"{name} must return NumPy offsets, got {type(value).__name__}")
     if value.ndim == 3 and value.shape[0] == 1:
         value = value[0]
     if value.shape != (token_count, 2):
-        raise ValueError(f"{name} offsets must have shape [{token_count}, 2], got {value.shape}")
+        raise ValueError(
+            f"{name} offsets must have shape [{token_count}, 2], got {value.shape}"
+        )
     if value.dtype.kind not in "iu" or value.dtype.itemsize > 8:
-        raise TypeError(f"{name} offsets must use a fixed-width integer dtype, got {value.dtype}")
-    if value.size and (np.any(value < 0) or np.any(value > np.iinfo(OFFSETS_DTYPE).max)):
+        raise TypeError(
+            f"{name} offsets must use a fixed-width integer dtype, got {value.dtype}"
+        )
+    if value.size and (
+        np.any(value < 0) or np.any(value > np.iinfo(OFFSETS_DTYPE).max)
+    ):
         raise ValueError(f"{name} offsets are outside the non-negative int64 range")
     owned = np.array(value, dtype=OFFSETS_DTYPE, copy=True, order="C")
     owned.flags.writeable = False
@@ -558,11 +677,17 @@ def owned_offsets_from_array(name: str, value: object, *, token_count: int) -> n
 def encode_token_ids(tokenizer: Any, text: str) -> np.ndarray:
     """Encode only through the NumPy tokenizer ABI; never invoke list APIs."""
     if not callable(tokenizer):
-        raise TypeError(f"{type(tokenizer).__name__} must support callable NumPy tokenization")
+        raise TypeError(
+            f"{type(tokenizer).__name__} must support callable NumPy tokenization"
+        )
     try:
         encoded = tokenizer(text, add_special_tokens=False, return_tensors="np")
     except TypeError as exc:
-        raise TypeError(f"{type(tokenizer).__name__} must support callable NumPy tokenization") from exc
+        raise TypeError(
+            f"{type(tokenizer).__name__} must support callable NumPy tokenization"
+        ) from exc
     if not isinstance(encoded, Mapping) or "input_ids" not in encoded:
-        raise TypeError(f"{type(tokenizer).__name__} must return a mapping with NumPy input_ids")
+        raise TypeError(
+            f"{type(tokenizer).__name__} must return a mapping with NumPy input_ids"
+        )
     return owned_token_ids_from_array(type(tokenizer).__name__, encoded["input_ids"])

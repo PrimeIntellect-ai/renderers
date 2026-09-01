@@ -15,7 +15,9 @@ _TYPED_ARRAY_ERROR = (
 class GptOssRenderer:
     """Fail closed until Harmony can preserve typed token custody."""
 
-    def __init__(self, tokenizer: Tokenizer, config: GptOssRendererConfig | None = None) -> None:
+    def __init__(
+        self, tokenizer: Tokenizer, config: GptOssRendererConfig | None = None
+    ) -> None:
         del tokenizer, config
         raise RuntimeError(_TYPED_ARRAY_ERROR)
 

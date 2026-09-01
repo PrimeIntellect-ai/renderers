@@ -17,7 +17,12 @@ import pytest
 
 from renderers import Hy3RendererConfig, create_renderer
 from renderers.base import ToolCallParseStatus, load_tokenizer
-from renderers.token_arrays import FixedWidthArrayBuilder, TOKEN_IDS_DTYPE, encode_token_ids, owned_token_ids_from_array
+from renderers.token_arrays import (
+    FixedWidthArrayBuilder,
+    TOKEN_IDS_DTYPE,
+    encode_token_ids,
+    owned_token_ids_from_array,
+)
 
 _MODEL = "tencent/Hy3"
 
@@ -33,7 +38,11 @@ TOOLS = [
         "function": {
             "name": "get_weather",
             "description": "Get the current weather for a city",
-            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
         },
     }
 ]
@@ -53,7 +62,9 @@ def _decode(ids):
 
 
 def _append_token(token_ids: np.ndarray, token_id: int) -> np.ndarray:
-    builder = FixedWidthArrayBuilder(TOKEN_IDS_DTYPE, initial_capacity=len(token_ids) + 1)
+    builder = FixedWidthArrayBuilder(
+        TOKEN_IDS_DTYPE, initial_capacity=len(token_ids) + 1
+    )
     builder.extend(token_ids)
     builder.append(token_id)
     return builder.finish()
@@ -70,12 +81,18 @@ def _empty_token_ids() -> np.ndarray:
 
 @pytest.mark.parametrize(
     "effort,expected_tail",
-    [("no_think", _ASSISTANT + _THINK + _THINK_END), ("low", _ASSISTANT + _THINK), ("high", _ASSISTANT + _THINK)],
+    [
+        ("no_think", _ASSISTANT + _THINK + _THINK_END),
+        ("low", _ASSISTANT + _THINK),
+        ("high", _ASSISTANT + _THINK),
+    ],
 )
 def test_generation_prompt_polarity(effort, expected_tail):
     r = _renderer(reasoning_effort=effort)
     ids = r.render_ids([{"role": "user", "content": "Hi"}], add_generation_prompt=True)
-    assert _decode(ids).endswith(expected_tail), f"effort={effort}: gen prompt tail was {_decode(ids)[-60:]!r}"
+    assert _decode(ids).endswith(expected_tail), (
+        f"effort={effort}: gen prompt tail was {_decode(ids)[-60:]!r}"
+    )
 
 
 def test_reasoning_mode_marker_in_system_without_tools():
@@ -111,7 +128,9 @@ def test_parse_low_mode_inference_stream():
     it with ``</think>`` the model emits itself (the ``<think>`` opener was in
     the prompt)."""
     r = _renderer(reasoning_effort="low")
-    comp = encode_token_ids(_tok(), "Let me work it out." + _THINK_END + "It is 4." + _EOS)
+    comp = encode_token_ids(
+        _tok(), "Let me work it out." + _THINK_END + "It is 4." + _EOS
+    )
     parsed = r.parse_response(comp)
     assert parsed.reasoning_content == "Let me work it out."
     assert parsed.content == "It is 4."
@@ -189,7 +208,9 @@ def test_tool_group_not_reopened_after_plain_assistant():
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}],
+            "tool_calls": [
+                {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}
+            ],
         },
         {"role": "tool", "content": "sunny"},
         {"role": "assistant", "content": "Checking again."},
@@ -198,9 +219,16 @@ def test_tool_group_not_reopened_after_plain_assistant():
     ]
     ours = _renderer().render_ids(convo, tools=TOOLS, add_generation_prompt=True)
     theirs = _tok().apply_chat_template(
-        convo, tools=TOOLS, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="np"
+        convo,
+        tools=TOOLS,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="np",
     )
-    assert np.array_equal(ours, owned_token_ids_from_array("template input_ids", theirs["input_ids"][0]))
+    assert np.array_equal(
+        ours, owned_token_ids_from_array("template input_ids", theirs["input_ids"][0])
+    )
 
 
 # ── preserved_thinking history retention ─────────────────────────────────
@@ -257,9 +285,14 @@ def test_preserved_thinking_conflict_raises():
 _BRIDGE_ASST = {
     "role": "assistant",
     "content": "",
-    "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}],
+    "tool_calls": [
+        {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}
+    ],
 }
-_BRIDGE_EXT = [{"role": "tool", "content": "sunny"}, {"role": "user", "content": "And tomorrow?"}]
+_BRIDGE_EXT = [
+    {"role": "tool", "content": "sunny"},
+    {"role": "user", "content": "And tomorrow?"},
+]
 
 
 def test_bridge_default_config_with_tools_extends_across_user_turn():
@@ -274,7 +307,9 @@ def test_bridge_default_config_with_tools_extends_across_user_turn():
     pc = r.render_ids([*prev, _BRIDGE_ASST], tools=TOOLS)[len(pp) :]
 
     bridged = r.bridge_to_next_turn(pp, pc, _BRIDGE_EXT, tools=TOOLS)
-    fresh = r.render_ids([*prev, _BRIDGE_ASST, *_BRIDGE_EXT], tools=TOOLS, add_generation_prompt=True)
+    fresh = r.render_ids(
+        [*prev, _BRIDGE_ASST, *_BRIDGE_EXT], tools=TOOLS, add_generation_prompt=True
+    )
     assert bridged is not None and np.array_equal(bridged.token_ids, fresh)
 
 
@@ -319,7 +354,10 @@ def test_is_training_keeps_all_thinking_and_closes_final_assistant():
 
 def test_raw_last_assistant_drops_wrap_and_eos():
     """A trailing non-tool assistant renders as bare visible content."""
-    convo = [{"role": "user", "content": "Q"}, {"role": "assistant", "reasoning_content": "R", "content": "the answer"}]
+    convo = [
+        {"role": "user", "content": "Q"},
+        {"role": "assistant", "reasoning_content": "R", "content": "the answer"},
+    ]
     raw = _decode(_renderer(raw_last_assistant=True).render_ids(convo))
     assert raw.endswith(_ASSISTANT + "the answer")  # no think wrap, no eos
     assert _THINK not in raw.split(_ASSISTANT)[-1]
@@ -339,7 +377,9 @@ def test_fallback_strategy_forces_high_and_no_gen_prompt():
 def test_fallback_strategy_bridge_matches_full_render():
     """The bridge must also suppress the generation prompt under the fallback
     retry strategy, so it stays consistent with a fresh full render."""
-    r = _renderer(fallback_strategy="reasoning_toolcall_retry", thinking_retention="all")
+    r = _renderer(
+        fallback_strategy="reasoning_toolcall_retry", thinking_retention="all"
+    )
     eos = _tok().convert_tokens_to_ids(_EOS)
     prior = [{"role": "user", "content": "Hi."}]
     pp = r.render_ids(prior, add_generation_prompt=True)
@@ -400,7 +440,9 @@ def test_bridge_tool_cycle_matches_full_render():
     asst = {
         "role": "assistant",
         "content": "",
-        "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}],
+        "tool_calls": [
+            {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}
+        ],
     }
     prev = [{"role": "user", "content": "Weather?"}]
     pp = r.render_ids(prev, add_generation_prompt=True)
@@ -408,7 +450,10 @@ def test_bridge_tool_cycle_matches_full_render():
     assert pc[-1] == eos  # tool-call turn closes with eos
 
     bridged = r.bridge_to_next_turn(pp, pc, [{"role": "tool", "content": '{"t": 20}'}])
-    fresh = r.render_ids([*prev, asst, {"role": "tool", "content": '{"t": 20}'}], add_generation_prompt=True)
+    fresh = r.render_ids(
+        [*prev, asst, {"role": "tool", "content": '{"t": 20}'}],
+        add_generation_prompt=True,
+    )
     assert bridged is not None and np.array_equal(bridged.token_ids, fresh)
 
 
@@ -421,7 +466,9 @@ def test_bridge_tool_groups_across_user_turn_match_full_render():
     asst = {
         "role": "assistant",
         "content": "",
-        "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}],
+        "tool_calls": [
+            {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}
+        ],
     }
     prev = [{"role": "user", "content": "Weather?"}]
     pp = r.render_ids(prev, tools=TOOLS, add_generation_prompt=True)
@@ -441,13 +488,26 @@ def test_bridge_declines_on_empty_completion():
     """With no sampled completion there is no assistant turn to extend — the
     bridge declines (so a stream ending at a </tool_responses> tool-section
     boundary never gets a spurious <｜hy_eos｜> wedged before the extension)."""
-    rf = _renderer(fallback_strategy="reasoning_toolcall_retry", thinking_retention="all")
+    rf = _renderer(
+        fallback_strategy="reasoning_toolcall_retry", thinking_retention="all"
+    )
     asst = {
         "role": "assistant",
         "content": "",
-        "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}],
+        "tool_calls": [
+            {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}
+        ],
     }
-    base = [{"role": "user", "content": "Weather?"}, asst, {"role": "tool", "content": '{"t": 20}'}]
+    base = [
+        {"role": "user", "content": "Weather?"},
+        asst,
+        {"role": "tool", "content": '{"t": 20}'},
+    ]
     prompt = rf.render_ids(base, add_generation_prompt=True)  # fallback → no gen prompt
     assert prompt[-1] == _tok().convert_tokens_to_ids("</tool_responses:opensource>")
-    assert rf.bridge_to_next_turn(prompt, _empty_token_ids(), [{"role": "tool", "content": "more"}]) is None
+    assert (
+        rf.bridge_to_next_turn(
+            prompt, _empty_token_ids(), [{"role": "tool", "content": "more"}]
+        )
+        is None
+    )

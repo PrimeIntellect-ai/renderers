@@ -29,7 +29,7 @@ from renderers.base import (
 )
 from renderers.configs import GLM45RendererConfig
 from renderers.parsing import parse_glm
-from renderers.token_arrays import RenderedTokenBuilder, TOKEN_IDS_DTYPE
+from renderers.token_arrays import RenderedTokenBuilder, TextSegmentBuilder, TOKEN_IDS_DTYPE
 
 _TOOLS_HEADER = (
     "\n# Tools\n\n"
@@ -57,6 +57,7 @@ class GLM45Renderer:
 
     def __init__(self, tokenizer: Tokenizer, config: GLM45RendererConfig | None = None):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self.config = config or GLM45RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config, "all" if not self.config.enable_thinking else "tool_cycle"
@@ -114,7 +115,7 @@ class GLM45Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         emit_special = builder.emit_special
         emit_text = builder.emit_text
         emit_text_segments = builder.emit_text_segments
@@ -163,17 +164,22 @@ class GLM45Renderer:
                 emit_special(self._system, i, is_sampled=False, is_content=False)
                 # ``\n`` is the scaffold separator after the role tag;
                 # the body proper is the caller-provided content.
-                emit_text_segments([("\n", False), (content, True)], i, is_sampled=False)
+                system_segments = TextSegmentBuilder()
+                system_segments.append("\n", is_content=False)
+                system_segments.append(content, is_content=True)
+                emit_text_segments(system_segments.finish(), i, is_sampled=False)
 
             elif role == "user":
                 emit_special(self._user, i, is_sampled=closes_assistant_turn, is_content=False)
                 # ``\n`` is scaffold; ``content`` is body; the optional
                 # ``/nothink`` suffix is scaffold the renderer injects
                 # when ``enable_thinking=False``.
-                user_segments: list[tuple[str, bool]] = [("\n", False), (content, True)]
+                user_segments = TextSegmentBuilder()
+                user_segments.append("\n", is_content=False)
+                user_segments.append(content, is_content=True)
                 if not self.config.enable_thinking and not content.endswith("/nothink"):
-                    user_segments.append(("/nothink", False))
-                emit_text_segments(user_segments, i, is_sampled=False)
+                    user_segments.append("/nothink", is_content=False)
+                emit_text_segments(user_segments.finish(), i, is_sampled=False)
 
             elif role == "assistant":
                 self._render_assistant(
@@ -207,7 +213,7 @@ class GLM45Renderer:
         return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -259,7 +265,7 @@ class GLM45Renderer:
             previous_ids = closed
 
         last_prev = int(previous_ids[-1])
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
@@ -295,20 +301,29 @@ class GLM45Renderer:
             if role == "user":
                 if not (i == 0 and last_prev == self._user):
                     emit_special(self._user, i)
-                user_segments: list[tuple[str, bool]] = [("\n", False), (content, True)]
+                user_segments = TextSegmentBuilder()
+                user_segments.append("\n", is_content=False)
+                user_segments.append(content, is_content=True)
                 if not self.config.enable_thinking and not content.endswith("/nothink"):
-                    user_segments.append(("/nothink", False))
-                emit_text_segments(user_segments, i)
+                    user_segments.append("/nothink", is_content=False)
+                emit_text_segments(user_segments.finish(), i)
             elif role == "system":
                 emit_special(self._system, i)
-                emit_text_segments([("\n", False), (content, True)], i)
+                system_segments = TextSegmentBuilder()
+                system_segments.append("\n", is_content=False)
+                system_segments.append(content, is_content=True)
+                emit_text_segments(system_segments.finish(), i)
             elif role == "tool":
                 prev_is_tool = i > 0 and new_messages[i - 1].get("role") == "tool"
                 if i == 0 and last_prev == self._observation:
                     pass
                 elif not prev_is_tool:
                     emit_special(self._observation, i)
-                emit_text_segments([("\n<tool_response>\n", False), (content, True), ("\n</tool_response>", False)], i)
+                tool_segments = TextSegmentBuilder()
+                tool_segments.append("\n<tool_response>\n", is_content=False)
+                tool_segments.append(content, is_content=True)
+                tool_segments.append("\n</tool_response>", is_content=False)
+                emit_text_segments(tool_segments.finish(), i)
             else:
                 return None
 
@@ -322,7 +337,7 @@ class GLM45Renderer:
         return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def _render_assistant(self, msg, msg_idx, content, last_user_index, *, emit_special, emit_text, emit_text_segments):
@@ -422,6 +437,8 @@ class GLM45Renderer:
         if prev_role != "tool":
             emit_special(self._observation, msg_idx, is_sampled=closes_assistant_turn, is_content=False)
 
-        emit_text_segments(
-            [("\n<tool_response>\n", False), (content, True), ("\n</tool_response>", False)], msg_idx, is_sampled=False
-        )
+        tool_segments = TextSegmentBuilder()
+        tool_segments.append("\n<tool_response>\n", is_content=False)
+        tool_segments.append(content, is_content=True)
+        tool_segments.append("\n</tool_response>", is_content=False)
+        emit_text_segments(tool_segments.finish(), msg_idx, is_sampled=False)

@@ -52,7 +52,13 @@ from renderers.base import (
 )
 from renderers.configs import Qwen3VLRendererConfig
 from renderers.parsing import parse_qwen3
-from renderers.token_arrays import FixedWidthRangeBuilder, RenderedTokenBuilder, finish_range_builders, merge_range_maps
+from renderers.token_arrays import (
+    FixedWidthRangeBuilder,
+    RenderedTokenBuilder,
+    TextSegmentBuilder,
+    finish_range_builders,
+    merge_range_maps,
+)
 
 _TOOLS_HEADER = (
     "# Tools\n\n"
@@ -188,23 +194,13 @@ class _Emitter:
     ``is_content`` is the per-token body/scaffold attribution. Within a
     single flush adjacent text fragments may carry different
     ``is_content`` values (e.g. ``"user\\n"`` scaffold + caller content
-    body): the buffer stores fragments as a list of
-    ``(text, is_content)`` segments and flushes via
-    :func:`attribute_text_segments`, which performs one BPE pass over
-    the joined text and assigns per-token is_content from each token's
-    source segment. When every segment in a flush shares the same
-    is_content (the common case for sampled assistant body / pure
-    scaffold) the fast path of a single ``encode()`` call is used and
-    no offset-tokenizer lookup is required.
+    body); :class:`TextSegmentBuilder` keeps those flags fixed-width
+    while the joined text is encoded in one BPE pass.
     """
 
-    def __init__(self, tokenizer, msg_idx: int = -1):
-        self._tokenizer = tokenizer
-        self._builder = RenderedTokenBuilder(tokenizer)
-        # Buffered text fragments as ``(text, is_content)`` tuples. All
-        # fragments share a single ``_buf_sampled`` / ``_buf_idx``;
-        # changing either of those triggers a flush.
-        self._segments: list[tuple[str, bool]] = []
+    def __init__(self, tokenizer, *, offset_tokenizer, msg_idx: int = -1):
+        self._builder = RenderedTokenBuilder(tokenizer, offset_tokenizer=offset_tokenizer)
+        self._segments = TextSegmentBuilder()
         self._buf_idx: int = msg_idx
         self._buf_sampled: bool = False
         self.msg_idx = msg_idx
@@ -233,7 +229,7 @@ class _Emitter:
         if not self._segments:
             self._buf_idx = self.msg_idx
             self._buf_sampled = is_sampled
-        self._segments.append((text, is_content))
+        self._segments.append(text, is_content=is_content)
 
     def special(self, token_id: int, *, is_sampled: bool, is_content: bool) -> None:
         if self._segments:
@@ -260,26 +256,17 @@ class _Emitter:
         return self._builder.finish(**kwargs)
 
     def _flush(self) -> None:
-        segments = self._segments
-        self._segments = []
-        if not segments:
+        segment_builder = self._segments
+        self._segments = TextSegmentBuilder()
+        if not segment_builder:
             return
-        # Fast path: every segment shares the same is_content — use the
-        # plain ``encode()`` call so we don't pay for the offset
-        # tokenizer. This is the common case (pure scaffold flushes, or
-        # pure body flushes).
-        first_ic = segments[0][1]
-        all_same = all(ic == first_ic for _, ic in segments)
-        if all_same:
-            joined = "".join(text for text, _ in segments)
-            self._builder.emit_text(joined, self._buf_idx, is_sampled=self._buf_sampled, is_content=first_ic)
+        segments = segment_builder.finish()
+        first_content = bool(segments.is_content[0])
+        if np.all(segments.is_content == first_content):
+            self._builder.emit_text(
+                "".join(segments.texts), self._buf_idx, is_sampled=self._buf_sampled, is_content=first_content
+            )
             return
-        # Mixed body/scaffold flush — encode once and attribute back to
-        # each segment via offset_mapping when available. A basic tokenizer
-        # still preserves the joined token IDs but leaves attribution empty.
-        assert self._tokenizer is not None, (
-            "_Emitter mixed-is_content flush requires a tokenizer; pass one to the constructor."
-        )
         self._builder.emit_text_segments(segments, self._buf_idx, is_sampled=self._buf_sampled)
 
 
@@ -306,6 +293,7 @@ class Qwen3VLRenderer:
 
     def __init__(self, tokenizer: Tokenizer, config: Qwen3VLRendererConfig | None = None, *, processor: Any = None):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self._processor = processor
         self.config = config or Qwen3VLRendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(self.config, "all")
@@ -439,7 +427,7 @@ class Qwen3VLRenderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        em = _Emitter(self._tokenizer)
+        em = _Emitter(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         mm_hashes: dict[str, list[str]] = {}
         mm_placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
         mm_items: dict[str, list[dict[str, Any]]] = {}
@@ -580,7 +568,7 @@ class Qwen3VLRenderer:
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=mm_data,
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -664,7 +652,7 @@ class Qwen3VLRenderer:
         # and read each step's own body mask. Downstream consumers can
         # run :meth:`RenderedTokens.tokens_per_message` on the bridge
         # output to get per-new-message token counts without re-rendering.
-        em = _Emitter(self._tokenizer)
+        em = _Emitter(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         # Seed the emitter with the prior turn's tokens so cursor() reports
         # absolute offsets in the combined sequence. Per-token attribution
         # for the prior portion is unknown to the bridge (it only has
@@ -791,7 +779,7 @@ class Qwen3VLRenderer:
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
             multi_modal_data=mm_data,
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def _render_assistant(self, msg: Message, em: _Emitter) -> None:

@@ -37,7 +37,7 @@ from renderers.base import (
 )
 from renderers.configs import Qwen3RendererConfig
 from renderers.parsing import parse_qwen3
-from renderers.token_arrays import RenderedTokenBuilder
+from renderers.token_arrays import RenderedTokenBuilder, TextSegmentBuilder
 
 _TOOLS_HEADER = (
     "# Tools\n\n"
@@ -61,6 +61,7 @@ class Qwen3Renderer:
 
     def __init__(self, tokenizer: Tokenizer, config: Qwen3RendererConfig | None = None):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self.config = config or Qwen3RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(
             self.config, "all" if not self.config.enable_thinking else "tool_cycle"
@@ -116,7 +117,7 @@ class Qwen3Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         emit_special = builder.emit_special
         emit_text = builder.emit_text
         emit_text_segments = builder.emit_text_segments
@@ -132,26 +133,28 @@ class Qwen3Renderer:
             # specs — is scaffold. The tools dict is recoverable from
             # the ``tools`` argument; don't re-attribute its embedded
             # JSON as message body.
-            segments: list[tuple[str, bool]] = [("system\n", False)]
+            segments = TextSegmentBuilder()
+            segments.append("system\n", is_content=False)
             if first_is_system:
                 sys_content = messages[0].get("content") or ""
                 if sys_content:
-                    segments.append((sys_content, True))
-                segments.append(("\n\n", False))
-            segments.append((_TOOLS_HEADER, False))
+                    segments.append(sys_content, is_content=True)
+                segments.append("\n\n", is_content=False)
+            segments.append(_TOOLS_HEADER, is_content=False)
             for tool in tools:
-                segments.append(("\n" + json.dumps(tool, ensure_ascii=False), False))
-            segments.append((_TOOLS_FOOTER, False))
-            emit_text_segments(segments, sys_idx, is_sampled=False)
+                segments.append("\n" + json.dumps(tool, ensure_ascii=False), is_content=False)
+            segments.append(_TOOLS_FOOTER, is_content=False)
+            emit_text_segments(segments.finish(), sys_idx, is_sampled=False)
             emit_special(self._im_end, sys_idx, is_sampled=False, is_content=False)
             emit_text("\n", sys_idx, is_sampled=False, is_content=False)
         elif first_is_system:
             emit_special(self._im_start, 0, is_sampled=False, is_content=False)
             sys_content = messages[0].get("content") or ""
-            sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+            sys_segments = TextSegmentBuilder()
+            sys_segments.append("system\n", is_content=False)
             if sys_content:
-                sys_segments.append((sys_content, True))
-            emit_text_segments(sys_segments, 0, is_sampled=False)
+                sys_segments.append(sys_content, is_content=True)
+            emit_text_segments(sys_segments.finish(), 0, is_sampled=False)
             emit_special(self._im_end, 0, is_sampled=False, is_content=False)
             emit_text("\n", 0, is_sampled=False, is_content=False)
 
@@ -168,19 +171,21 @@ class Qwen3Renderer:
                 if i == 0:
                     continue
                 emit_special(self._im_start, i, is_sampled=False, is_content=False)
-                msg_segments: list[tuple[str, bool]] = [(role + "\n", False)]
+                msg_segments = TextSegmentBuilder()
+                msg_segments.append(role + "\n", is_content=False)
                 if content:
-                    msg_segments.append((content, True))
-                emit_text_segments(msg_segments, i, is_sampled=False)
+                    msg_segments.append(content, is_content=True)
+                emit_text_segments(msg_segments.finish(), i, is_sampled=False)
                 emit_special(self._im_end, i, is_sampled=False, is_content=False)
                 emit_text("\n", i, is_sampled=False, is_content=False)
 
             elif role == "user":
                 emit_special(self._im_start, i, is_sampled=False, is_content=False)
-                user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                user_segments = TextSegmentBuilder()
+                user_segments.append("user\n", is_content=False)
                 if content:
-                    user_segments.append((content, True))
-                emit_text_segments(user_segments, i, is_sampled=False)
+                    user_segments.append(content, is_content=True)
+                emit_text_segments(user_segments.finish(), i, is_sampled=False)
                 emit_special(self._im_end, i, is_sampled=False, is_content=False)
                 emit_text("\n", i, is_sampled=False, is_content=False)
 
@@ -216,7 +221,7 @@ class Qwen3Renderer:
         return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -264,7 +269,9 @@ class Qwen3Renderer:
         if previous_ids is None:
             return None
 
-        builder = RenderedTokenBuilder(self._tokenizer, initial_capacity=len(previous_ids) + 64)
+        builder = RenderedTokenBuilder(
+            self._tokenizer, offset_tokenizer=self._offset_tokenizer, initial_capacity=len(previous_ids) + 64
+        )
         builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
@@ -289,18 +296,20 @@ class Qwen3Renderer:
             content = msg.get("content") if isinstance(msg.get("content"), str) else ""
             if role == "user":
                 emit_special(self._im_start, i)
-                user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                user_segments = TextSegmentBuilder()
+                user_segments.append("user\n", is_content=False)
                 if content:
-                    user_segments.append((content, True))
-                emit_text_segments(user_segments, i)
+                    user_segments.append(content, is_content=True)
+                emit_text_segments(user_segments.finish(), i)
                 emit_special(self._im_end, i)
                 emit_text("\n", i)
             elif role == "system":
                 emit_special(self._im_start, i)
-                sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+                sys_segments = TextSegmentBuilder()
+                sys_segments.append("system\n", is_content=False)
                 if content:
-                    sys_segments.append((content, True))
-                emit_text_segments(sys_segments, i)
+                    sys_segments.append(content, is_content=True)
+                emit_text_segments(sys_segments.finish(), i)
                 emit_special(self._im_end, i)
                 emit_text("\n", i)
             elif role == "tool":
@@ -323,7 +332,7 @@ class Qwen3Renderer:
         return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def _render_assistant(
@@ -431,7 +440,11 @@ class Qwen3Renderer:
         # merges (Qwen3 keeps ``\n`` as its own token, so this is
         # mostly a no-op, but we route through segments anyway so the
         # attribution doesn't depend on tokenizer-specific behaviour).
-        emit_text_segments([("\n", False), (content, True), ("\n", False)], msg_idx, is_sampled=False)
+        tool_segments = TextSegmentBuilder()
+        tool_segments.append("\n", is_content=False)
+        tool_segments.append(content, is_content=True)
+        tool_segments.append("\n", is_content=False)
+        emit_text_segments(tool_segments.finish(), msg_idx, is_sampled=False)
         emit_special(self._tool_response_end, msg_idx, is_sampled=False, is_content=False)
 
         if not next_is_tool:

@@ -23,7 +23,7 @@ from renderers.base import (
 )
 from renderers.configs import PrimeQwen3RendererConfig
 from renderers.parsing import parse_qwen35
-from renderers.token_arrays import RenderedTokenBuilder
+from renderers.token_arrays import RenderedTokenBuilder, TextSegmentBuilder
 
 _DEFAULT_TOOL_SYSTEM = "You are Qwen, a helpful AI assistant that can interact with a computer to solve tasks."
 _TOOLS_HEADER = "\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>"
@@ -105,6 +105,7 @@ class PrimeQwen3Renderer:
 
     def __init__(self, tokenizer: Tokenizer, config: PrimeQwen3RendererConfig | None = None):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self.config = config or PrimeQwen3RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(self.config, "all")
 
@@ -140,27 +141,28 @@ class PrimeQwen3Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         first_is_system = messages[0].get("role") == "system"
         loop_start = 1 if first_is_system else 0
 
         if first_is_system or tools:
             system_index = 0 if first_is_system else -1
             builder.emit_special(self._im_start, system_index, is_sampled=False, is_content=False)
-            system_segments: list[tuple[str, bool]] = [("system\n", False)]
+            system_segments = TextSegmentBuilder()
+            system_segments.append("system\n", is_content=False)
             if first_is_system:
-                system_segments.append((self._content(messages[0]), True))
+                system_segments.append(self._content(messages[0]), is_content=True)
             else:
-                system_segments.append((_DEFAULT_TOOL_SYSTEM, False))
+                system_segments.append(_DEFAULT_TOOL_SYSTEM, is_content=False)
 
             if tools:
                 tools_text = _TOOLS_HEADER
                 for tool in tools:
                     tools_text += _tool_definition(tool)
                 tools_text += _TOOLS_FOOTER
-                system_segments.append((tools_text, False))
+                system_segments.append(tools_text, is_content=False)
 
-            builder.emit_text_segments(system_segments, system_index, is_sampled=False)
+            builder.emit_text_segments(system_segments.finish(), system_index, is_sampled=False)
             builder.emit_special(self._im_end, system_index, is_sampled=False, is_content=False)
             builder.emit_text("\n", system_index, is_sampled=False, is_content=False)
 
@@ -186,7 +188,7 @@ class PrimeQwen3Renderer:
         if add_generation_prompt:
             self._render_generation_prompt(builder)
 
-        attribution_available = _get_offset_tokenizer(self._tokenizer) is not None
+        attribution_available = self._offset_tokenizer is not None
         return builder.finish(
             message_roles=[message.get("role") or "" for message in messages],
             message_tool_names=extract_message_tool_names(messages),
@@ -197,9 +199,10 @@ class PrimeQwen3Renderer:
     def _render_history_message(self, message: Message, message_index: int, builder: RenderedTokenBuilder) -> None:
         role = message.get("role", "")
         builder.emit_special(self._im_start, message_index, is_sampled=False, is_content=False)
-        builder.emit_text_segments(
-            [(role + "\n", False), (self._content(message), True)], message_index, is_sampled=False
-        )
+        segments = TextSegmentBuilder()
+        segments.append(role + "\n", is_content=False)
+        segments.append(self._content(message), is_content=True)
+        builder.emit_text_segments(segments.finish(), message_index, is_sampled=False)
         builder.emit_special(self._im_end, message_index, is_sampled=False, is_content=False)
         builder.emit_text("\n", message_index, is_sampled=False, is_content=False)
 
@@ -217,7 +220,10 @@ class PrimeQwen3Renderer:
             if content.strip():
                 builder.emit_text("\n" + content.strip(), message_index, is_sampled=True, is_content=True)
         else:
-            builder.emit_assistant_segments([("assistant\n", False), (content, True)], message_index)
+            segments = TextSegmentBuilder()
+            segments.append("assistant\n", is_content=False)
+            segments.append(content, is_content=True)
+            builder.emit_assistant_segments(segments.finish(), message_index)
 
         builder.emit_special(self._im_end, message_index, is_sampled=True, is_content=True)
         builder.emit_text("\n", message_index, is_sampled=False, is_content=False)
@@ -226,10 +232,11 @@ class PrimeQwen3Renderer:
         builder.emit_special(self._im_start, message_index, is_sampled=False, is_content=False)
         content = message.get("content")
         trimmed_content = content.strip() if isinstance(content, str) else ""
-        opener_segments = [("assistant\n", False)]
+        opener_segments = TextSegmentBuilder()
+        opener_segments.append("assistant\n", is_content=False)
         if trimmed_content:
-            opener_segments.append((trimmed_content + "\n\n", True))
-        builder.emit_assistant_segments(opener_segments, message_index)
+            opener_segments.append(trimmed_content + "\n\n", is_content=True)
+        builder.emit_assistant_segments(opener_segments.finish(), message_index)
 
         tool_calls = message.get("tool_calls") or []
         for tool_call_index, tool_call in enumerate(tool_calls):
@@ -286,9 +293,11 @@ class PrimeQwen3Renderer:
             builder.emit_text("user\n", message_index, is_sampled=False, is_content=False)
 
         builder.emit_special(self._tool_response, message_index, is_sampled=False, is_content=False)
-        builder.emit_text_segments(
-            [("\n", False), (self._content(message), True), ("\n", False)], message_index, is_sampled=False
-        )
+        segments = TextSegmentBuilder()
+        segments.append("\n", is_content=False)
+        segments.append(self._content(message), is_content=True)
+        segments.append("\n", is_content=False)
+        builder.emit_text_segments(segments.finish(), message_index, is_sampled=False)
         builder.emit_special(self._tool_response_end, message_index, is_sampled=False, is_content=False)
         builder.emit_text("\n", message_index, is_sampled=False, is_content=False)
 
@@ -339,7 +348,7 @@ class PrimeQwen3Renderer:
         if previous_ids is None:
             return None
 
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         builder.prepend_prior(previous_ids)
         builder.emit_text("\n", -1, is_sampled=False, is_content=False)
 
@@ -355,7 +364,7 @@ class PrimeQwen3Renderer:
                 self._render_history_message(message, message_index, builder)
 
         self._render_generation_prompt(builder)
-        attribution_available = _get_offset_tokenizer(self._tokenizer) is not None
+        attribution_available = self._offset_tokenizer is not None
         return builder.finish(
             message_roles=[message.get("role") or "" for message in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),

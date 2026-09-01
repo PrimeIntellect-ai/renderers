@@ -31,7 +31,7 @@ from renderers.base import (
 )
 from renderers.configs import MiniMaxM2RendererConfig
 from renderers.parsing import parse_minimax
-from renderers.token_arrays import RenderedTokenBuilder
+from renderers.token_arrays import RenderedTokenBuilder, TextSegmentBuilder
 
 _TOOLS_HEADER = (
     "\n\n# Tools\n"
@@ -59,6 +59,7 @@ class MiniMaxM2Renderer:
 
     def __init__(self, tokenizer: Tokenizer, config: MiniMaxM2RendererConfig | None = None):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self.config = config or MiniMaxM2RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(self.config, "tool_cycle")
 
@@ -99,7 +100,7 @@ class MiniMaxM2Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         emit_special = builder.emit_special
         emit_text = builder.emit_text
         emit_text_segments = builder.emit_text_segments
@@ -118,16 +119,11 @@ class MiniMaxM2Renderer:
             BPE merges it with the wrap's trailing byte (``>The`` →
             single token).
             """
-            builder.emit_text_segments(
-                [
-                    (full_text[:body_start], False),
-                    (full_text[body_start:body_end], True),
-                    (full_text[body_end:], False),
-                ],
-                msg_idx,
-                is_sampled=is_sampled,
-                overlap_is_content=True,
-            )
+            segments = TextSegmentBuilder()
+            segments.append(full_text[:body_start], is_content=False)
+            segments.append(full_text[body_start:body_end], is_content=True)
+            segments.append(full_text[body_end:], is_content=False)
+            builder.emit_text_segments(segments.finish(), msg_idx, is_sampled=is_sampled, overlap_is_content=True)
 
         # ── Extract system message ──────────────────────────────────
         first_is_system = messages[0].get("role") == "system"
@@ -143,21 +139,22 @@ class MiniMaxM2Renderer:
         # is template-injected scaffold; tools header / per-tool JSON /
         # footer / instructions are scaffold too (the tools dict is
         # recoverable from the ``tools`` arg).
-        sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+        sys_segments = TextSegmentBuilder()
+        sys_segments.append("system\n", is_content=False)
         if sys_content:
-            sys_segments.append((sys_content, True))
+            sys_segments.append(sys_content, is_content=True)
         else:
-            sys_segments.append((self.config.model_identity, False))
+            sys_segments.append(self.config.model_identity, is_content=False)
 
         if tools:
-            sys_segments.append((_TOOLS_HEADER, False))
+            sys_segments.append(_TOOLS_HEADER, is_content=False)
             for tool in tools:
                 func = tool.get("function", tool)
-                sys_segments.append(("<tool>" + json.dumps(func, ensure_ascii=False) + "</tool>\n", False))
-            sys_segments.append((_TOOLS_FOOTER_PREFIX, False))
-            sys_segments.append((_TOOLS_INSTRUCTIONS, False))
+                sys_segments.append("<tool>" + json.dumps(func, ensure_ascii=False) + "</tool>\n", is_content=False)
+            sys_segments.append(_TOOLS_FOOTER_PREFIX, is_content=False)
+            sys_segments.append(_TOOLS_INSTRUCTIONS, is_content=False)
 
-        emit_text_segments(sys_segments, sys_idx, is_sampled=False)
+        emit_text_segments(sys_segments.finish(), sys_idx, is_sampled=False)
         emit_special(self._eos, sys_idx, is_sampled=False, is_content=False)
         emit_text("\n", sys_idx, is_sampled=False, is_content=False)
 
@@ -176,10 +173,11 @@ class MiniMaxM2Renderer:
             if role == "user":
                 emit_special(self._role, orig_idx, is_sampled=False, is_content=False)
                 user_content = self._visible_text(msg.get("content"))
-                user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                user_segments = TextSegmentBuilder()
+                user_segments.append("user\n", is_content=False)
                 if user_content:
-                    user_segments.append((user_content, True))
-                emit_text_segments(user_segments, orig_idx, is_sampled=False)
+                    user_segments.append(user_content, is_content=True)
+                emit_text_segments(user_segments.finish(), orig_idx, is_sampled=False)
                 emit_special(self._eos, orig_idx, is_sampled=False, is_content=False)
                 emit_text("\n", orig_idx, is_sampled=False, is_content=False)
 
@@ -216,7 +214,7 @@ class MiniMaxM2Renderer:
         return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -259,7 +257,7 @@ class MiniMaxM2Renderer:
         if previous_ids is None:
             return None
 
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         builder.prepend_prior(previous_ids)
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
@@ -275,16 +273,11 @@ class MiniMaxM2Renderer:
         def emit_token_overlap_body(
             full_text: str, body_start: int, body_end: int, msg_idx: int, *, is_sampled: bool
         ) -> None:
-            builder.emit_text_segments(
-                [
-                    (full_text[:body_start], False),
-                    (full_text[body_start:body_end], True),
-                    (full_text[body_end:], False),
-                ],
-                msg_idx,
-                is_sampled=is_sampled,
-                overlap_is_content=True,
-            )
+            segments = TextSegmentBuilder()
+            segments.append(full_text[:body_start], is_content=False)
+            segments.append(full_text[body_start:body_end], is_content=True)
+            segments.append(full_text[body_end:], is_content=False)
+            builder.emit_text_segments(segments.finish(), msg_idx, is_sampled=is_sampled, overlap_is_content=True)
 
         # Trailing ``\n`` after the ``[e~[`` turn close — see ``render()``.
         emit_text("\n", -1)
@@ -294,18 +287,20 @@ class MiniMaxM2Renderer:
             content = self._visible_text(msg.get("content"))
             if role == "user":
                 emit_special(self._role, i)
-                user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                user_segments = TextSegmentBuilder()
+                user_segments.append("user\n", is_content=False)
                 if content:
-                    user_segments.append((content, True))
-                emit_text_segments(user_segments, i)
+                    user_segments.append(content, is_content=True)
+                emit_text_segments(user_segments.finish(), i)
                 emit_special(self._eos, i)
                 emit_text("\n", i)
             elif role == "system":
                 emit_special(self._role, i)
-                sys_segments: list[tuple[str, bool]] = [("system\n", False)]
+                sys_segments = TextSegmentBuilder()
+                sys_segments.append("system\n", is_content=False)
                 if content:
-                    sys_segments.append((content, True))
-                emit_text_segments(sys_segments, i)
+                    sys_segments.append(content, is_content=True)
+                emit_text_segments(sys_segments.finish(), i)
                 emit_special(self._eos, i)
                 emit_text("\n", i)
             elif role == "tool":
@@ -331,7 +326,7 @@ class MiniMaxM2Renderer:
         return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def _render_assistant(
@@ -481,16 +476,16 @@ class MiniMaxM2Renderer:
         else:
             # Empty body or no overlap-aware emitter available — fall back
             # to the standard segments path.
-            tool_segments: list[tuple[str, bool]] = []
+            tool_segments = TextSegmentBuilder()
             if prefix:
-                tool_segments.append((prefix, False))
-            tool_segments.append(("<response>", False))
+                tool_segments.append(prefix, is_content=False)
+            tool_segments.append("<response>", is_content=False)
             if content:
-                tool_segments.append((content, True))
-            tool_segments.append(("</response>", False))
+                tool_segments.append(content, is_content=True)
+            tool_segments.append("</response>", is_content=False)
             if suffix:
-                tool_segments.append((suffix, False))
-            emit_text_segments(tool_segments, orig_idx, is_sampled=False)
+                tool_segments.append(suffix, is_content=False)
+            emit_text_segments(tool_segments.finish(), orig_idx, is_sampled=False)
 
         if not next_is_tool:
             emit_special(self._eos, orig_idx, is_sampled=False, is_content=False)

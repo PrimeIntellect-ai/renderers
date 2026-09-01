@@ -47,6 +47,7 @@ from renderers.configs import Gemma4RendererConfig
 from renderers.token_arrays import (
     FixedWidthRangeBuilder,
     RenderedTokenBuilder,
+    TextSegmentBuilder,
     encode_token_ids,
     finish_range_builders,
     merge_range_maps,
@@ -60,10 +61,9 @@ _EMPTY_THOUGHT_PREFILL_MODELS = {"google/gemma-4-26B-A4B-it", "google/gemma-4-31
 class _Emitter:
     """BPE-safe token emitter with per-token attribution side channels."""
 
-    def __init__(self, tokenizer, msg_idx: int = -1):
-        self._tokenizer = tokenizer
-        self._builder = RenderedTokenBuilder(tokenizer)
-        self._segments: list[tuple[str, bool]] = []
+    def __init__(self, tokenizer, *, offset_tokenizer, msg_idx: int = -1):
+        self._builder = RenderedTokenBuilder(tokenizer, offset_tokenizer=offset_tokenizer)
+        self._segments = TextSegmentBuilder()
         self._buf_idx = msg_idx
         self._buf_sampled = False
         self.msg_idx = msg_idx
@@ -82,7 +82,7 @@ class _Emitter:
         if not self._segments:
             self._buf_idx = self.msg_idx
             self._buf_sampled = is_sampled
-        self._segments.append((text, is_content))
+        self._segments.append(text, is_content=is_content)
 
     def special(self, token_id: int, *, is_sampled: bool, is_content: bool) -> None:
         if self._segments:
@@ -108,20 +108,17 @@ class _Emitter:
         return self._builder.finish(**kwargs)
 
     def _flush(self) -> None:
-        segments = self._segments
-        self._segments = []
-        if not segments:
+        segment_builder = self._segments
+        self._segments = TextSegmentBuilder()
+        if not segment_builder:
             return
-        first_content = segments[0][1]
-        if all(is_content == first_content for _, is_content in segments):
+        segments = segment_builder.finish()
+        first_content = bool(segments.is_content[0])
+        if np.all(segments.is_content == first_content):
             self._builder.emit_text(
-                "".join(text for text, _ in segments),
-                self._buf_idx,
-                is_sampled=self._buf_sampled,
-                is_content=first_content,
+                "".join(segments.texts), self._buf_idx, is_sampled=self._buf_sampled, is_content=first_content
             )
             return
-        assert self._tokenizer is not None, "Gemma4 _Emitter needs a tokenizer for mixed body/scaffold text."
         self._builder.emit_text_segments(segments, self._buf_idx, is_sampled=self._buf_sampled)
 
 
@@ -391,6 +388,7 @@ class Gemma4Renderer:
 
     def __init__(self, tokenizer: Tokenizer, config: Gemma4RendererConfig | None = None, *, processor: Any = None):
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self._processor = processor
         self.config = config or Gemma4RendererConfig()
         model_name = getattr(tokenizer, "name_or_path", "")
@@ -602,7 +600,7 @@ class Gemma4Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        em = _Emitter(self._tokenizer)
+        em = _Emitter(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         mm_hashes: dict[str, list[str]] = {}
         mm_placeholders: dict[str, FixedWidthRangeBuilder] = {}
         mm_items: dict[str, list[dict[str, Any]]] = {}
@@ -805,7 +803,7 @@ class Gemma4Renderer:
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=multi_modal_data,
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -962,7 +960,7 @@ class Gemma4Renderer:
         if previous_ids is None or previous_ids[-1] == self._eos:
             return None
 
-        em = _Emitter(self._tokenizer)
+        em = _Emitter(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         em.prepend_prior(previous_ids)
         hashes: dict[str, list[str]] = {}
         placeholder_builders: dict[str, FixedWidthRangeBuilder] = {}
@@ -1018,7 +1016,7 @@ class Gemma4Renderer:
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
             multi_modal_data=self._merge_multi_modal_data(previous_multi_modal_data, hashes, placeholders, items),
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
 

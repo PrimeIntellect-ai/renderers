@@ -58,7 +58,7 @@ from renderers.base import (
 )
 from renderers.configs import Llama3RendererConfig
 from renderers.parsing import parse_llama_3
-from renderers.token_arrays import RenderedTokenBuilder
+from renderers.token_arrays import RenderedTokenBuilder, TextSegmentBuilder
 
 # ---------------------------------------------------------------------------
 # Constants — must match the Jinja chat template's literal strings exactly.
@@ -101,6 +101,7 @@ class Llama3Renderer:
         # the same contract as Kimi-K2 / Qwen3-VL (see the never-preserves
         # renderers in tests/test_preserve_thinking.py).
         self._tokenizer = tokenizer
+        self._offset_tokenizer = _get_offset_tokenizer(tokenizer)
         self.config = config or Llama3RendererConfig()
         self.effective_thinking_retention = resolve_thinking_retention(self.config, "all")
 
@@ -170,7 +171,7 @@ class Llama3Renderer:
         if not messages:
             raise ValueError("No messages provided.")
 
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         emit_special = builder.emit_special
         emit_text = builder.emit_text
         emit_text_segments = builder.emit_text_segments
@@ -199,10 +200,11 @@ class Llama3Renderer:
             preamble += _TOOLS_IN_SYSTEM_INTRO
             for t in tools:
                 preamble += json.dumps(t, indent=4, ensure_ascii=False) + "\n\n"
-        sys_segments: list[tuple[str, bool]] = [(preamble, False)]
+        sys_segments = TextSegmentBuilder()
+        sys_segments.append(preamble, is_content=False)
         if sys_text:
-            sys_segments.append((sys_text, True))
-        emit_text_segments(sys_segments, sys_idx, is_sampled=False)
+            sys_segments.append(sys_text, is_content=True)
+        emit_text_segments(sys_segments.finish(), sys_idx, is_sampled=False)
         emit_special(self._eot, sys_idx, is_sampled=False, is_content=False)
 
         # ── 2. Body messages ────────────────────────────────────────
@@ -229,10 +231,11 @@ class Llama3Renderer:
             for t in tools:
                 user_preamble += json.dumps(t, indent=4, ensure_ascii=False) + "\n\n"
             user_content = self._content_str(first_user.get("content")).strip()
-            user_segments: list[tuple[str, bool]] = [(user_preamble, False)]
+            user_segments = TextSegmentBuilder()
+            user_segments.append(user_preamble, is_content=False)
             if user_content:
-                user_segments.append((user_content, True))
-            emit_text_segments(user_segments, user_idx, is_sampled=False)
+                user_segments.append(user_content, is_content=True)
+            emit_text_segments(user_segments.finish(), user_idx, is_sampled=False)
             emit_special(self._eot, user_idx, is_sampled=False, is_content=False)
             i += 1
 
@@ -251,10 +254,11 @@ class Llama3Renderer:
                 emit_text("ipython", msg_idx, is_sampled=False, is_content=False)
                 emit_special(self._end_header, msg_idx, is_sampled=False, is_content=False)
                 tool_body = self._tool_response_str(msg.get("content"))
-                tool_segments: list[tuple[str, bool]] = [("\n\n", False)]
+                tool_segments = TextSegmentBuilder()
+                tool_segments.append("\n\n", is_content=False)
                 if tool_body:
-                    tool_segments.append((tool_body, True))
-                emit_text_segments(tool_segments, msg_idx, is_sampled=False)
+                    tool_segments.append(tool_body, is_content=True)
+                emit_text_segments(tool_segments.finish(), msg_idx, is_sampled=False)
                 emit_special(self._eot, msg_idx, is_sampled=False, is_content=False)
             elif tool_calls:
                 if len(tool_calls) != 1:
@@ -298,10 +302,11 @@ class Llama3Renderer:
                 emit_special(self._start_header, msg_idx, is_sampled=False, is_content=False)
                 emit_text(role or "", msg_idx, is_sampled=False, is_content=False)
                 emit_special(self._end_header, msg_idx, is_sampled=False, is_content=False)
-                segments: list[tuple[str, bool]] = [("\n\n", False)]
+                segments = TextSegmentBuilder()
+                segments.append("\n\n", is_content=False)
                 if content:
-                    segments.append((content, True))
-                emit_text_segments(segments, msg_idx, is_sampled=False)
+                    segments.append(content, is_content=True)
+                emit_text_segments(segments.finish(), msg_idx, is_sampled=False)
                 emit_special(self._eot, msg_idx, is_sampled=False, is_content=False)
 
         # ── 3. Generation prompt ────────────────────────────────────
@@ -314,7 +319,7 @@ class Llama3Renderer:
         return builder.finish(
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )
 
     def render_ids(
@@ -354,7 +359,7 @@ class Llama3Renderer:
         if previous_ids is None:
             return None
 
-        builder = RenderedTokenBuilder(self._tokenizer)
+        builder = RenderedTokenBuilder(self._tokenizer, offset_tokenizer=self._offset_tokenizer)
         builder.prepend_prior(previous_ids)
         emit_special = builder.emit_special
         emit_text = builder.emit_text
@@ -367,20 +372,22 @@ class Llama3Renderer:
                 emit_special(self._start_header, i)
                 emit_text(role, i)
                 emit_special(self._end_header, i)
-                segs: list[tuple[str, bool]] = [("\n\n", False)]
+                segs = TextSegmentBuilder()
+                segs.append("\n\n", is_content=False)
                 if content:
-                    segs.append((content, True))
-                emit_text_segments(segs, i)
+                    segs.append(content, is_content=True)
+                emit_text_segments(segs.finish(), i)
                 emit_special(self._eot, i)
             elif role in ("tool", "ipython"):
                 tool_body = self._tool_response_str(msg.get("content"))
                 emit_special(self._start_header, i)
                 emit_text("ipython", i)
                 emit_special(self._end_header, i)
-                tool_segs: list[tuple[str, bool]] = [("\n\n", False)]
+                tool_segs = TextSegmentBuilder()
+                tool_segs.append("\n\n", is_content=False)
                 if tool_body:
-                    tool_segs.append((tool_body, True))
-                emit_text_segments(tool_segs, i)
+                    tool_segs.append(tool_body, is_content=True)
+                emit_text_segments(tool_segs.finish(), i)
                 emit_special(self._eot, i)
             else:
                 return None
@@ -394,5 +401,5 @@ class Llama3Renderer:
         return builder.finish(
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
-            content_available=_get_offset_tokenizer(self._tokenizer) is not None,
+            content_available=self._offset_tokenizer is not None,
         )

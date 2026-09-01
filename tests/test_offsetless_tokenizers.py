@@ -9,6 +9,7 @@ import pytest
 
 from renderers import create_renderer
 from renderers.base import load_tokenizer
+from renderers.token_arrays import TOKEN_IDS_DTYPE, empty_array
 
 
 class OffsetlessTokenizer:
@@ -171,12 +172,12 @@ def test_offsetless_contract_across_renderer_bridges(
 
     expected = renderer.bridge_to_next_turn(
         prior.token_ids,
-        [],
+        empty_array(TOKEN_IDS_DTYPE),
         new_messages,
     )
     actual = offsetless.bridge_to_next_turn(
         prior.token_ids,
-        [],
+        empty_array(TOKEN_IDS_DTYPE),
         new_messages,
     )
 

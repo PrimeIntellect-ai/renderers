@@ -3,7 +3,8 @@
 The oracle is selected from the resolved renderer, not assumed to be Hugging
 Face ``apply_chat_template``. Most checkpoints currently route to that adapter,
 DeepSeek V4 routes to its shipped Python-encoder contract, and GPT-OSS routes to
-Harmony. ``render_reference`` is the single invocation path for all three.
+an explicit fail-closed Harmony adapter until Harmony publishes a fixed-width
+ABI. ``render_reference`` is the single invocation path for all three.
 
 The compact DSV4 implementation below is deliberately test-side and independent
 of ``renderers.deepseek_v4``.  It mirrors the public chat/tool branches of the

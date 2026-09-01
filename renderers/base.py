@@ -510,7 +510,7 @@ class RenderedTokens:
     def content_token_spans_by_role(self) -> dict[str, np.ndarray]:
         """Per-role spans of contiguous body-only tokens (``is_content=True``).
 
-        Maps each role appearing in :attr:`message_roles` to a list of
+        Maps each role appearing in :attr:`message_roles` to an array of
         half-open ``[start, end)`` slices into :attr:`token_ids` over
         which every token satisfies ``is_content=True`` AND belongs to
         a message of that role. Spans never cross message boundaries:
@@ -526,11 +526,7 @@ class RenderedTokens:
         bodies while RL acts only on assistant turns is the canonical
         case::
 
-            spans = rendered.content_token_spans_by_role()
-            tool_sft_mask = np.zeros(len(rendered.token_ids), dtype=np.bool_)
-            for s, e in spans.get("tool", np.empty((0, 2), dtype=np.int64)):
-                for k in range(s, e):
-                    tool_sft_mask[k] = True
+            tool_sft_mask = rendered.content_mask_for_roles({"tool"})
 
         See also :meth:`content_mask_for_roles` for the same
         computation returned as a per-token bool array.

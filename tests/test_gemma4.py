@@ -366,6 +366,5 @@ def test_legacy_assistant_tool_responses_preserve_mask_contract():
     ]
     rendered = renderer.render(messages)
 
-    for index, message_index in enumerate(rendered.message_indices):
-        if message_index == 1:
-            assert rendered.is_content[index] == rendered.sampled_mask[index]
+    assistant_tokens = rendered.message_indices == 1
+    assert np.array_equal(rendered.is_content[assistant_tokens], rendered.sampled_mask[assistant_tokens])

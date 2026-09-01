@@ -776,6 +776,33 @@ class Llama3RendererConfig(BaseRendererConfig):
     kwarg."""
 
 
+class MuseGlimmerRendererConfig(BaseRendererConfig):
+    """Muse Glimmer ATEM-channel renderer config.
+
+    The template always re-emits historical ``reasoning_content``, so
+    ``thinking_retention`` only controls bridge eligibility and does not alter full
+    renders.
+    """
+
+    name: Literal["muse-glimmer"] = "muse-glimmer"
+    _template_fields = frozenset(
+        {"reasoning_strength", "knowledge_cutoff", "current_date"}
+    )
+
+    reasoning_strength: Literal["low", "medium", "high"] = "high"
+    """Reasoning-strength directive in the system block. Mirrors the chat
+    template's ``reasoning_strength`` kwarg."""
+
+    knowledge_cutoff: str = "2026-01-04"
+    """Knowledge-cutoff value in the synthesized system block. Mirrors the chat
+    template's ``knowledge_cutoff`` kwarg."""
+
+    current_date: str | None = None
+    """Current-date value in the synthesized system block. ``None`` resolves once
+    when the renderer is constructed, matching the template's ``strftime_now``
+    fallback while keeping each renderer instance deterministic."""
+
+
 class MiniMaxM2RendererConfig(BaseRendererConfig):
     """MiniMax M2 / M2.5 renderer config."""
 
@@ -996,6 +1023,7 @@ RendererConfig = Annotated[
         LagunaS21RendererConfig,
         Llama3RendererConfig,
         MiniMaxM2RendererConfig,
+        MuseGlimmerRendererConfig,
         Nemotron3RendererConfig,
         Nemotron3UltraRendererConfig,
         Nemotron35RendererConfig,
@@ -1043,6 +1071,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "laguna-s-2.1": LagunaS21RendererConfig,
     "llama-3": Llama3RendererConfig,
     "minimax-m2": MiniMaxM2RendererConfig,
+    "muse-glimmer": MuseGlimmerRendererConfig,
     "nemotron-3": Nemotron3RendererConfig,
     "nemotron-3-ultra": Nemotron3UltraRendererConfig,
     "nemotron-3.5": Nemotron35RendererConfig,
@@ -1056,8 +1085,7 @@ def _config_class_for(name: str) -> type[BaseRendererConfig]:
     cls = _CONFIG_BY_NAME.get(name)
     if cls is None:
         raise ValueError(
-            f"No renderer config registered for name={name!r}. "
-            f"Known: {sorted(_CONFIG_BY_NAME)}"
+            f"No renderer config registered for name={name!r}. Known: {sorted(_CONFIG_BY_NAME)}"
         )
     return cls
 
@@ -1099,6 +1127,7 @@ __all__ = [
     "LagunaXS21RendererConfig",
     "Llama3RendererConfig",
     "MiniMaxM2RendererConfig",
+    "MuseGlimmerRendererConfig",
     "Nemotron35RendererConfig",
     "Nemotron3RendererConfig",
     "Nemotron3UltraRendererConfig",

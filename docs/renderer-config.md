@@ -45,6 +45,7 @@ product in `tests/test_parity.py`.
 | Laguna XS-2.1 | `LagunaXS21RendererConfig` | `enable_thinking` | - |
 | Laguna S-2.1 | `LagunaS21RendererConfig` | `enable_thinking`, `preserve_thinking` | - |
 | Llama 3 | `Llama3RendererConfig` | `date_string`, `tools_in_user_message` | - |
+| Muse Glimmer | `MuseGlimmerRendererConfig` | `reasoning_strength`, `knowledge_cutoff`, `current_date` | - |
 | MiniMax M2 | `MiniMaxM2RendererConfig` | `model_identity` | - |
 | Nemotron-3 Nano / Super | `Nemotron3RendererConfig` | `enable_thinking`, `truncate_history_thinking`, `low_effort` | - |
 | Nemotron-3 Ultra | `Nemotron3UltraRendererConfig` | `enable_thinking`, `truncate_history_thinking`, `medium_effort` | - |
@@ -52,6 +53,9 @@ product in `tests/test_parity.py`.
 | DeepSeek V3 | `DeepSeekV3RendererConfig` | - | - |
 | DeepSeek R1 | `DeepSeekR1RendererConfig` | - | - |
 | DeepSeek V4 Flash 0731 | `DeepSeekV4RendererConfig` | `enable_thinking`, `drop_thinking`, `reasoning_effort` | - |
+
+The Muse Glimmer renderer currently supports text content only. Image and video
+parts raise an error instead of silently emitting incomplete multimodal inputs.
 
 Configs are frozen value objects. To override a field, construct a new instance
 or call `config.model_copy(update={...})`.

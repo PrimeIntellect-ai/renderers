@@ -17,10 +17,10 @@ failure) — see ``ToolCallParseStatus`` docstring for the rationale.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from renderers.base import ParsedResponse, ParsedToolCall, ToolCallParseStatus, ToolSpec
-
 
 # ── Schema-aware argument coercion ──────────────────────────────────
 #
@@ -1857,6 +1857,265 @@ def parse_llama_3(
     # "malformed attempt" against, so it falls through to content rather
     # than producing a non-OK ParsedToolCall.
     return ParsedResponse(content=text, reasoning_content=None)
+
+
+# ── Muse Glimmer: ATEM channel protocol ─────────────────────────────────────────────────────
+
+_ATEM_INVOKE_OPEN_RE = re.compile(r"<atem:invoke\b")
+_ATEM_INVOKE_END = "</atem:invoke>"
+_ATEM_INVOKE_NAME_RE = re.compile(r'\bname="(?P<name>[^"]*)"')
+_ATEM_PARAM_RE = re.compile(
+    r'<atem:parameter\s+name="(?P<key>[^"]*)"\s*>(?P<value>.*?)</atem:parameter>',
+    re.S,
+)
+_ATEM_PARAM_OPEN_RE = re.compile(r"<atem:parameter\b")
+_ATEM_RECIPIENT_RE = re.compile(r"to=(?P<recipient>\S+)")
+
+
+def _atem_text_span_to_token_span(
+    tokenizer,
+    ids: list[int],
+    char_start: int,
+    char_end: int,
+    *,
+    section_offset: int,
+) -> tuple[int, int]:
+    """Map a decoded ATEM substring back to its enclosing token range."""
+    text = _decode(tokenizer, ids)
+    encoding = tokenizer(
+        text,
+        add_special_tokens=False,
+        return_offsets_mapping=True,
+    )
+    offsets = list(encoding["offset_mapping"])
+    if list(encoding["input_ids"]) == ids:
+        start = next(
+            (i for i, (_, end) in enumerate(offsets) if end > char_start),
+            len(ids),
+        )
+        end = next(
+            (i for i, (begin, _) in enumerate(offsets) if begin >= char_end),
+            len(ids),
+        )
+        return section_offset + start, section_offset + max(start, end)
+
+    # Decoding and re-encoding can differ for unusual byte-level fragments.
+    # Prefix decodes still locate the enclosing original tokens without
+    # changing the parser's robustness contract.
+    start = 0
+    for i in range(len(ids)):
+        if len(_decode(tokenizer, ids[: i + 1])) > char_start:
+            start = i
+            break
+    end = len(ids)
+    for i in range(start + 1, len(ids) + 1):
+        if len(_decode(tokenizer, ids[:i])) >= char_end:
+            end = i
+            break
+    return section_offset + start, section_offset + end
+
+
+def _parse_atem_invokes(
+    tokenizer,
+    ids: list[int],
+    *,
+    section_offset: int,
+    param_index: dict[str, dict[str, dict[str, Any]]],
+    known_names: set[str] | None,
+    recipient: str,
+) -> list[ParsedToolCall]:
+    """Parse ``<atem:invoke>`` attempts from one tool-channel body."""
+    text = _decode(tokenizer, ids)
+    calls: list[ParsedToolCall] = []
+    cursor = 0
+    while invoke_match := _ATEM_INVOKE_OPEN_RE.search(text, cursor):
+        start = invoke_match.start()
+        next_match = _ATEM_INVOKE_OPEN_RE.search(text, invoke_match.end())
+        next_start = next_match.start() if next_match else -1
+        open_end = text.find(">", invoke_match.end())
+        if open_end == -1 or (next_start != -1 and next_start < open_end):
+            end = next_start if next_start != -1 else len(text)
+            raw = text[start:end]
+            name_match = _ATEM_INVOKE_NAME_RE.search(raw)
+            calls.append(
+                ParsedToolCall(
+                    raw=raw,
+                    name=name_match.group("name") if name_match else None,
+                    token_span=_atem_text_span_to_token_span(
+                        tokenizer,
+                        ids,
+                        start,
+                        end,
+                        section_offset=section_offset,
+                    ),
+                    status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                )
+            )
+            cursor = end
+            continue
+
+        opening_tag = text[start : open_end + 1]
+        name_match = _ATEM_INVOKE_NAME_RE.search(opening_tag)
+        name = name_match.group("name") if name_match else ""
+        close = text.find(_ATEM_INVOKE_END, open_end + 1)
+        if close == -1 or (next_start != -1 and next_start < close):
+            end = next_start if next_start != -1 else len(text)
+            calls.append(
+                ParsedToolCall(
+                    raw=text[start:end],
+                    name=name or None,
+                    token_span=_atem_text_span_to_token_span(
+                        tokenizer,
+                        ids,
+                        start,
+                        end,
+                        section_offset=section_offset,
+                    ),
+                    status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                )
+            )
+            cursor = end
+            continue
+
+        end = close + len(_ATEM_INVOKE_END)
+        body = text[open_end + 1 : close]
+        arguments: dict[str, Any] = {}
+        used_json_fallback = False
+        param_matches = list(_ATEM_PARAM_RE.finditer(body))
+        for param in param_matches:
+            value, used_fallback = _coerce_arg_value(
+                param.group("value"),
+                param_index.get(name, {}).get(param.group("key")),
+            )
+            arguments[param.group("key")] = value
+            used_json_fallback = used_json_fallback or used_fallback
+        has_unclosed_parameter = len(_ATEM_PARAM_OPEN_RE.findall(body)) != len(
+            param_matches
+        ) or body.count("</atem:parameter>") != len(param_matches)
+        if not name:
+            status = ToolCallParseStatus.MISSING_NAME
+        elif has_unclosed_parameter:
+            status = ToolCallParseStatus.UNCLOSED_BLOCK
+        elif name != recipient:
+            status = ToolCallParseStatus.MALFORMED_STRUCTURE
+        elif known_names is not None and name not in known_names:
+            status = ToolCallParseStatus.UNKNOWN_TOOL
+        elif used_json_fallback:
+            status = ToolCallParseStatus.INVALID_JSON
+        else:
+            status = ToolCallParseStatus.OK
+        calls.append(
+            ParsedToolCall(
+                raw=text[start:end],
+                name=name or None,
+                arguments=arguments,
+                token_span=_atem_text_span_to_token_span(
+                    tokenizer,
+                    ids,
+                    start,
+                    end,
+                    section_offset=section_offset,
+                ),
+                status=status,
+            )
+        )
+        cursor = end
+
+    if not calls and "<atem:function_calls>" in text:
+        calls.append(
+            ParsedToolCall(
+                raw=text,
+                token_span=(section_offset, section_offset + len(ids)),
+                status=ToolCallParseStatus.UNCLOSED_BLOCK,
+            )
+        )
+    return calls
+
+
+def parse_muse_glimmer(
+    tokenizer,
+    token_ids: list[int],
+    *,
+    stop_ids: set[int],
+    tools: list[ToolSpec] | None = None,
+) -> ParsedResponse:
+    """Parse Muse Glimmer reasoning, user-facing content, and ATEM calls.
+
+    A sampled completion starts midway through the first assistant header because
+    the generation prompt already supplied ``<|start|>assistant``. Later channels
+    include their own ``<|start|>`` token and are split directly on that ID.
+    """
+    start_id = tokenizer.convert_tokens_to_ids("<|start|>")
+    message_id = tokenizer.convert_tokens_to_ids("<|message|>")
+    eom_id = tokenizer.convert_tokens_to_ids("<|eom|>")
+
+    ids = _strip_stop_tokens(token_ids, stop_ids)
+    param_index = _build_param_type_index(tools)
+    known_names = _extract_tool_names(tools)
+
+    channels: list[tuple[int, list[int]]] = [(0, [])]
+    for i, token_id in enumerate(ids):
+        if token_id == start_id:
+            channels.append((i + 1, []))
+        else:
+            channels[-1][1].append(token_id)
+
+    content: list[str] = []
+    reasoning: list[str] = []
+    tool_calls: list[ParsedToolCall] = []
+
+    for section_offset, raw_channel in channels:
+        channel = list(raw_channel)
+        while channel and channel[-1] == eom_id:
+            channel.pop()
+        if not channel:
+            continue
+
+        split = _find(channel, message_id)
+        if split == -1:
+            content.append(_decode(tokenizer, channel))
+            continue
+
+        header = _decode(tokenizer, channel[:split])
+        body_ids = channel[split + 1 :]
+        body = _decode(tokenizer, body_ids)
+        recipient_match = _ATEM_RECIPIENT_RE.search(header)
+        recipient = recipient_match.group("recipient") if recipient_match else None
+        if recipient == "self":
+            reasoning.append(body)
+        elif recipient is None or recipient == "user":
+            content.append(body)
+        else:
+            body_offset = section_offset + split + 1
+            parsed_calls = _parse_atem_invokes(
+                tokenizer,
+                body_ids,
+                section_offset=body_offset,
+                param_index=param_index,
+                known_names=known_names,
+                recipient=recipient,
+            )
+            if not parsed_calls:
+                token_span = (
+                    (body_offset, body_offset + len(body_ids))
+                    if body_ids
+                    else (section_offset, section_offset + len(channel))
+                )
+                parsed_calls.append(
+                    ParsedToolCall(
+                        raw=body,
+                        name=recipient,
+                        token_span=token_span,
+                        status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+                    )
+                )
+            tool_calls.extend(parsed_calls)
+
+    return ParsedResponse(
+        content="".join(content),
+        reasoning_content="".join(reasoning) or None,
+        tool_calls=tool_calls,
+    )
 
 
 def parse_inkling(

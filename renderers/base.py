@@ -562,13 +562,13 @@ class ToolCallParseStatus(str, enum.Enum):
     The renderer parser's job is JSON-syntax → ``dict`` (the parser-level
     contract). Schema validation — required fields, argument types — is
     the *tool*'s job and is intentionally not done here. Tool-*name*
-    lookup is the one exception, and only where the reference inference
-    parser does it: vLLM ≥ 0.24 aliases ``glm45``/``glm47`` to a parser
-    with ``validate_tool_names=True`` that silently drops any call whose
-    name isn't in the request's tool list. ``parse_glm`` mirrors that as
-    ``UNKNOWN_TOOL`` (when ``tools`` is passed) so train-side parsing
-    agrees with what an eval client sees from the engine — but keeps the
-    attempt visible instead of swallowing it.
+    lookup is the one exception. vLLM ≥ 0.24 aliases ``glm45``/``glm47``
+    to a parser with ``validate_tool_names=True`` that silently drops any
+    call whose name isn't in the request's tool list. ``parse_glm`` mirrors
+    that as ``UNKNOWN_TOOL`` (when ``tools`` is passed), and the Muse ATEM
+    parser applies the same rule while also requiring its recipient header
+    to match the invoke name. Train-side parsing therefore agrees with what
+    an eval client sees from the engine while keeping the attempt visible.
     See ``ParsedToolCall.status`` for what each value means.
 
     Diverges from vLLM/SGLang on purpose. Both engines collapse parse
@@ -914,6 +914,8 @@ RENDERER_REGISTRY: dict[str, type] = {}
 # ``DefaultRenderer`` (which uses ``apply_chat_template`` verbatim) and
 # logs a loud INFO line with the chosen fallback.
 MODEL_RENDERER_MAP: dict[str, str] = {
+    # Meta Muse Glimmer uses the ATEM channel and tool-call protocol.
+    "meta-models/Muse-Glimmer-30B": "muse-glimmer",
     # Qwen3 — base and Instruct variants share the same chat template.
     "Qwen/Qwen3-0.6B": "qwen3",
     "Qwen/Qwen3-1.7B": "qwen3",
@@ -1304,10 +1306,10 @@ def _populate_registry():
     from renderers.deepseek_v3 import DeepSeekV3Renderer
     from renderers.deepseek_v4 import DeepSeekV4Renderer
     from renderers.default import DefaultRenderer
+    from renderers.gemma4 import Gemma4Renderer
     from renderers.glm5 import GLM5Renderer, GLM51Renderer
     from renderers.glm45 import GLM45Renderer
     from renderers.gpt_oss import GptOssRenderer
-    from renderers.gemma4 import Gemma4Renderer
     from renderers.hy3 import Hy3Renderer
     from renderers.inkling import InklingRenderer
     from renderers.kimi_k2 import KimiK2Renderer
@@ -1320,6 +1322,7 @@ def _populate_registry():
     )
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
+    from renderers.muse_glimmer import MuseGlimmerRenderer
     from renderers.nemotron3 import (
         Nemotron3Renderer,
         Nemotron3UltraRenderer,
@@ -1346,6 +1349,7 @@ def _populate_registry():
             "glm-5.1": GLM51Renderer,
             "glm-4.5": GLM45Renderer,
             "minimax-m2": MiniMaxM2Renderer,
+            "muse-glimmer": MuseGlimmerRenderer,
             "deepseek-v3": DeepSeekV3Renderer,
             "deepseek-r1": DeepSeekR1Renderer,
             "deepseek-v4": DeepSeekV4Renderer,

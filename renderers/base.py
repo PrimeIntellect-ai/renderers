@@ -1666,7 +1666,7 @@ def build_training_sample(
     restrict training to a specific role (e.g. assistant-only) even on
     a renderer whose ``sampled_mask`` already covers other roles.
 
-    Renderers that don't populate ``sampled_mask`` (empty list) fall
+    Renderers that don't populate ``sampled_mask`` (an empty read-only boolean array) fall
     back to attribution-only masking — every token attributed to a
     trainable role is trained on, including template-injected
     ``<|im_start|>role\\n`` openers. In this fallback mode
@@ -1688,7 +1688,7 @@ def build_training_sample(
     (``content_sft_roles={"tool"}``).
 
     Requires the renderer to populate ``is_content`` for the body-only
-    path to fire. Renderers that leave it empty (``DefaultRenderer``,
+    path to fire. Renderers that leave it as an empty read-only boolean array (``DefaultRenderer``,
     or hand-coded renderers that haven't been wired up yet) ignore
     ``content_sft_roles`` silently — falling back to the original
     ``role_to_mask`` + ``sampled_mask`` behaviour.

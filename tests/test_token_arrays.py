@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 
@@ -18,7 +21,6 @@ from renderers.base import (
 )
 from renderers.configs import DefaultRendererConfig, Hy3RendererConfig, InklingRendererConfig, LagunaXS21RendererConfig
 from renderers.default import DefaultRenderer
-from renderers.gpt_oss import GptOssRenderer
 from renderers.hy3 import Hy3Renderer
 from renderers.inkling import InklingRenderer
 from renderers.laguna_xs2 import LagunaXS21Renderer
@@ -533,8 +535,19 @@ def test_default_renderer_requests_numpy_and_builds_attribution_without_lists():
 
 
 def test_gpt_oss_fails_before_the_list_backed_harmony_abi():
-    with pytest.raises(RuntimeError, match="openai-harmony fixed-width NumPy token ABI"):
-        GptOssRenderer(object())  # type: ignore[arg-type]
+    script = """
+import sys
+from renderers.gpt_oss import GptOssRenderer
+assert "openai_harmony" not in sys.modules
+try:
+    GptOssRenderer(object())
+except RuntimeError as exc:
+    assert "openai-harmony fixed-width NumPy token ABI" in str(exc)
+else:
+    raise AssertionError("GptOssRenderer did not fail closed")
+assert "openai_harmony" not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def test_training_sample_rejects_mutable_aliases_without_mutating_caller():

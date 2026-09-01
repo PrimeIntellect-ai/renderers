@@ -27,6 +27,7 @@ from renderers.base import (
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
+    validate_canonical_messages,
 )
 from renderers.configs import GLM5RendererConfig, GLM51RendererConfig
 from renderers.parsing import parse_glm
@@ -51,6 +52,8 @@ _TOOLS_FOOTER = (
 
 class GLM5Renderer:
     """Deterministic message → token renderer for GLM-5 models."""
+
+    supports_reasoning_content = True
 
     # GLM-5.1 flips this on: even when the most-recent assistant has no
     # reasoning content, the template wraps it with ``<think></think>``
@@ -150,6 +153,11 @@ class GLM5Renderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 

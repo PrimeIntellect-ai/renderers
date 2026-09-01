@@ -34,6 +34,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
+    validate_canonical_messages,
 )
 from renderers.configs import Qwen3RendererConfig
 from renderers.parsing import parse_qwen3
@@ -57,6 +58,8 @@ _TOOLS_FOOTER = (
 
 class Qwen3Renderer:
     """Deterministic message → token renderer for Qwen3 models."""
+
+    supports_reasoning_content = True
 
     def __init__(
         self,
@@ -129,6 +132,11 @@ class Qwen3Renderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 

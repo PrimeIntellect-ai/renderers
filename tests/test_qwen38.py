@@ -157,8 +157,8 @@ def test_qwen38_text_and_tool_parity(config_kwargs, qwen38_model):
 
 
 @pytest.mark.parametrize("qwen38_model", QWEN38_MODELS)
-def test_qwen38_keeps_inline_think_markup_in_visible_content(qwen38_model):
-    tokenizer, renderer = _qwen38(qwen38_model)
+def test_qwen38_rejects_inline_think_markup(qwen38_model):
+    _, renderer = _qwen38(qwen38_model)
     messages = [
         {"role": "user", "content": "Echo this."},
         {
@@ -167,7 +167,8 @@ def test_qwen38_keeps_inline_think_markup_in_visible_content(qwen38_model):
         },
     ]
 
-    assert renderer.render_ids(messages) == _expected(tokenizer, messages)
+    with pytest.raises(ValueError, match="normalize legacy.*reasoning_content"):
+        renderer.render_ids(messages)
 
 
 @pytest.mark.parametrize("qwen38_model", QWEN38_MODELS)

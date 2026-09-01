@@ -7,7 +7,11 @@ from functools import lru_cache
 import pytest
 
 from renderers import create_renderer
-from renderers.base import get_structured_reasoning, load_tokenizer
+from renderers.base import (
+    get_structured_reasoning,
+    load_tokenizer,
+    validate_canonical_messages,
+)
 
 
 _INLINE_CONTENT = "<think>INLINE_REASONING_SENTINEL</think>VISIBLE_ANSWER_SENTINEL"
@@ -16,7 +20,7 @@ _INLINE_CONTENT = "<think>INLINE_REASONING_SENTINEL</think>VISIBLE_ANSWER_SENTIN
 # implementation that previously promoted inline string content into its
 # structured reasoning channel. Inherited variants (Qwen3.6, GLM-5.1, Kimi
 # K2.6) use the same implementation.
-_MODELS = (
+_REASONING_MODELS = (
     "Qwen/Qwen3-8B",
     "Qwen/Qwen3.5-9B",
     "THUDM/GLM-4.5-Air",
@@ -25,6 +29,13 @@ _MODELS = (
     "moonshotai/Kimi-K2.5",
     "poolside/Laguna-M.1",
     "deepseek-ai/DeepSeek-V4-Flash-0731",
+)
+
+_UNSUPPORTED_MODELS = (
+    "deepseek-ai/DeepSeek-V3",
+    "Qwen/Qwen3-VL-4B-Instruct",
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "Qwen/Qwen2.5-0.5B-Instruct",
 )
 
 
@@ -46,41 +57,60 @@ def test_structured_reasoning_helper_never_reads_content():
         == "structured reasoning"
     )
 
-    # Model-specific field precedence includes an explicit empty string.
-    assert (
-        get_structured_reasoning(
+
+@pytest.mark.parametrize("model", _REASONING_MODELS)
+def test_inline_think_markup_is_rejected(model: str):
+    _, renderer = _load(model)
+    assert renderer.supports_reasoning_content is True
+    with pytest.raises(ValueError, match="normalize legacy.*reasoning_content"):
+        renderer.render(
+            [
+                {"role": "user", "content": "First question."},
+                {"role": "assistant", "content": _INLINE_CONTENT},
+            ]
+        )
+
+
+@pytest.mark.parametrize("model", _UNSUPPORTED_MODELS)
+def test_non_reasoning_renderers_reject_structured_reasoning(model: str):
+    _, renderer = _load(model)
+    assert renderer.supports_reasoning_content is False
+    with pytest.raises(ValueError, match="does not support structured reasoning"):
+        renderer.render(
+            [
+                {"role": "user", "content": "Question."},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "private",
+                    "content": "Answer.",
+                },
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "message,match",
+    [
+        (
+            {"role": "assistant", "reasoning": "legacy", "content": "answer"},
+            "non-canonical 'reasoning' field",
+        ),
+        (
             {
-                "reasoning": "",
-                "reasoning_content": "lower-priority reasoning",
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "legacy"},
+                    {"type": "text", "text": "answer"},
+                ],
             },
-            "reasoning",
-            "reasoning_content",
+            "non-canonical 'thinking' content part",
+        ),
+    ],
+)
+def test_non_canonical_structured_shapes_are_rejected(message, match):
+    with pytest.raises(ValueError, match=match):
+        validate_canonical_messages(
+            [message],
+            supports_reasoning_content=True,
+            renderer_name="TestRenderer",
         )
-        == ""
-    )
-
-
-@pytest.mark.parametrize("model", _MODELS)
-def test_inline_think_markup_stays_in_assistant_content(model: str):
-    tokenizer, renderer = _load(model)
-    rendered = renderer.render(
-        [
-            {"role": "user", "content": "First question."},
-            {"role": "assistant", "content": _INLINE_CONTENT},
-            {"role": "user", "content": "Second question."},
-        ]
-    )
-
-    assistant_ids = [
-        token_id
-        for token_id, message_index in zip(
-            rendered.token_ids, rendered.message_indices, strict=True
-        )
-        if message_index == 1
-    ]
-    assistant_text = tokenizer.decode(assistant_ids, skip_special_tokens=False)
-
-    assert _INLINE_CONTENT in assistant_text, (
-        f"{model} promoted or removed inline think markup instead of keeping "
-        f"content opaque: {assistant_text!r}"
-    )

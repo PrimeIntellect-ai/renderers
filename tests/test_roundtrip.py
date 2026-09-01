@@ -121,6 +121,10 @@ def test_roundtrip_reasoning_and_content(rt_model, rt_tokenizer, rt_renderer):
         "content": "The answer is four.",
         "reasoning_content": "Two plus two equals four.",
     }
+    if not rt_renderer.supports_reasoning_content:
+        with pytest.raises(ValueError, match="does not support structured reasoning"):
+            _extract_assistant_tokens(rt_renderer, PROMPT, msg)
+        return
     completion_ids = _extract_assistant_tokens(rt_renderer, PROMPT, msg)
     parsed = rt_renderer.parse_response(completion_ids)
 

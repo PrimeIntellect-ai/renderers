@@ -42,6 +42,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
+    validate_canonical_messages,
 )
 from renderers.configs import Qwen35RendererConfig
 from renderers.parsing import parse_qwen35
@@ -124,6 +125,7 @@ def _default_enable_thinking(tokenizer) -> bool:
 class Qwen35Renderer:
     """Deterministic message → token renderer for Qwen3.5 models."""
 
+    supports_reasoning_content = True
     supports_process_multimodal = True
     _config_cls: type = Qwen35RendererConfig
 
@@ -343,6 +345,11 @@ class Qwen35Renderer:
         add_generation_prompt: bool = False,
         process_multimodal: bool = True,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 

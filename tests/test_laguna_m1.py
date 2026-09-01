@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import pytest
 from pydantic import TypeAdapter
 
 from renderers import (
@@ -71,34 +72,17 @@ def test_auto_selection_and_typed_config():
     assert parsed.enable_thinking is True
 
 
-def test_reasoning_field_precedence():
-    precedence = [
+def test_legacy_reasoning_field_is_rejected():
+    messages = [
         {"role": "user", "content": "Compute."},
         {
             "role": "assistant",
-            "reasoning": "preferred",
-            "reasoning_content": "ignored",
+            "reasoning": "legacy",
             "content": "answer",
         },
     ]
-    got = _renderer(enable_thinking=True).render_ids(precedence)
-    assert got == _expected(precedence, enable_thinking=True)
-    text = _tok().decode(got)
-    assert "preferred" in text
-    assert "ignored" not in text
-
-    empty_reasoning_wins = [
-        {"role": "user", "content": "Compute."},
-        {
-            "role": "assistant",
-            "reasoning": "",
-            "reasoning_content": "also ignored",
-            "content": "answer",
-        },
-    ]
-    got = _renderer(enable_thinking=True).render_ids(empty_reasoning_wins)
-    assert got == _expected(empty_reasoning_wins, enable_thinking=True)
-    assert "also ignored" not in _tok().decode(got)
+    with pytest.raises(ValueError, match="non-canonical 'reasoning' field"):
+        _renderer(enable_thinking=True).render_ids(messages)
 
 
 def test_reasoning_content_and_tool_call_round_trip():
@@ -106,7 +90,7 @@ def test_reasoning_content_and_tool_call_round_trip():
     prompt = [{"role": "user", "content": "Inspect the machine."}]
     assistant = {
         "role": "assistant",
-        "reasoning": "Need a command.",
+        "reasoning_content": "Need a command.",
         "content": "Running it.",
         "tool_calls": [
             {

@@ -37,13 +37,6 @@ class TextPart(TypedDict):
     text: str
 
 
-class ThinkingPart(TypedDict):
-    """Model's internal reasoning (chain-of-thought) as a content part."""
-
-    type: Literal["thinking"]
-    thinking: str
-
-
 class ImagePart(TypedDict, total=False):
     """An image attached to a message.
 
@@ -74,7 +67,7 @@ class VideoPart(TypedDict, total=False):
     video_url: dict[str, Any]
 
 
-ContentPart = TextPart | ThinkingPart | ImagePart | VideoPart
+ContentPart = TextPart | ImagePart | VideoPart
 
 # Content is either a plain string or a list of structured parts.
 Content = str | list[ContentPart]
@@ -119,26 +112,93 @@ class Message(TypedDict, total=False):
     tool_calls: list[ToolCall]
     tool_call_id: str
     name: str
-    reasoning: str
     reasoning_content: str
+
+
+def validate_canonical_messages(
+    messages: list[Message],
+    *,
+    supports_reasoning_content: bool,
+    renderer_name: str,
+    allow_inline_reasoning_markup: bool = False,
+) -> None:
+    """Validate the canonical message boundary before rendering.
+
+    Dataset adapters own conversion from legacy/model-native shapes into the
+    canonical schema. Renderers therefore consume assistant reasoning only from
+    ``reasoning_content`` and never infer it from ``content``. A renderer that
+    cannot represent structured reasoning must reject it instead of silently
+    discarding it.
+
+    ``allow_inline_reasoning_markup`` is reserved for explicit raw native-wire
+    passthrough modes. It must not be used to accept legacy dataset records.
+    """
+    for message_index, message in enumerate(messages):
+        if message.get("role") != "assistant":
+            continue
+
+        if "reasoning" in message:
+            raise ValueError(
+                f"{renderer_name}: assistant message {message_index} uses the "
+                "non-canonical 'reasoning' field; normalize it to "
+                "'reasoning_content' before rendering"
+            )
+
+        reasoning = message.get("reasoning_content")
+        if reasoning is not None and not isinstance(reasoning, str):
+            raise TypeError(
+                f"{renderer_name}: assistant message {message_index} has a "
+                "non-string 'reasoning_content'"
+            )
+        if reasoning and not supports_reasoning_content:
+            raise ValueError(
+                f"{renderer_name} does not support structured reasoning; "
+                f"assistant message {message_index} has non-empty "
+                "'reasoning_content'"
+            )
+
+        content = message.get("content")
+        text_fragments: list[str] = []
+        if isinstance(content, str):
+            text_fragments.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if not isinstance(part, Mapping):
+                    continue
+                if part.get("type") == "thinking":
+                    raise ValueError(
+                        f"{renderer_name}: assistant message {message_index} "
+                        "uses a non-canonical 'thinking' content part; normalize "
+                        "it to 'reasoning_content' before rendering"
+                    )
+                text = part.get("text")
+                if part.get("type") == "text" and isinstance(text, str):
+                    text_fragments.append(text)
+
+        if not allow_inline_reasoning_markup and any(
+            "<think>" in fragment or "</think>" in fragment
+            for fragment in text_fragments
+        ):
+            raise ValueError(
+                f"{renderer_name}: assistant message {message_index} contains "
+                "reserved reasoning markup in 'content'; normalize legacy "
+                "'<think>...</think>' data to 'reasoning_content' plus visible "
+                "'content' before rendering"
+            )
 
 
 def get_structured_reasoning(
     message: Mapping[str, Any],
-    *fields: str,
 ) -> str:
-    """Return reasoning from the first explicit string field.
+    """Return canonical assistant reasoning when it is a string.
 
     ``content`` is intentionally never inspected. This helper is for renderers
     whose canonical message schema separates visible content from reasoning;
     model-output parsers remain responsible for decoding wire-format reasoning
     delimiters into ``reasoning_content``.
     """
-    for field_name in fields or ("reasoning_content",):
-        value = message.get(field_name)
-        if isinstance(value, str):
-            return value
-    return ""
+    value = message.get("reasoning_content")
+    return value if isinstance(value, str) else ""
 
 
 def extract_message_tool_names(messages: list[Message]) -> list[str | None]:
@@ -731,6 +791,8 @@ class ChatTemplateTokenizer(Tokenizer, Protocol):
 @runtime_checkable
 class Renderer(Protocol):
     """Owns message ↔ token conversion for a specific model family."""
+
+    supports_reasoning_content: bool
 
     def render(
         self,

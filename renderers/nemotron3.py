@@ -30,6 +30,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
+    validate_canonical_messages,
 )
 from renderers.configs import (
     Nemotron3RendererConfig,
@@ -109,6 +110,8 @@ class Nemotron3Renderer:
     :class:`Nemotron3UltraRenderer` subclass below; both are registered under
     their own discriminator and differ only by the class-level hooks here.
     """
+
+    supports_reasoning_content = True
 
     # Variant hooks (overridden by ``Nemotron3UltraRenderer``): the default
     # config to build when none is passed, and whether to use Ultra's
@@ -283,6 +286,11 @@ class Nemotron3Renderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 
@@ -727,9 +735,8 @@ class Nemotron3Renderer:
 
         # 1. Assemble ``content`` — wrap a ``reasoning_content`` field in
         #    <think> tags (raw, not stripped: interior whitespace is part of
-        #    the reasoning), else prepend an empty <think></think> only when
-        #    the content carries no inline think tags of its own (which are
-        #    passed through verbatim, like the template).
+        #    the reasoning), else prepend an empty <think></think>. Canonical
+        #    validation guarantees raw content cannot contain think tags.
         reasoning = msg.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning.strip():
             if ultra:
@@ -750,9 +757,8 @@ class Nemotron3Renderer:
                     parts.append(content.strip() + "\n")
                 else:
                     # Drop historical thinking: keep only what follows the last
-                    # </think> (or precedes a dangling <think>), then re-stamp
-                    # an empty block. Nano/Super trim the remainder; Ultra glues
-                    # it raw (its template omits the trailing ``| trim``).
+                    # </think>, then re-stamp an empty block. The split operates
+                    # on renderer-generated native markup, never caller content.
                     c = content
                     if "</think>" in c:
                         c = c.split("</think>")[-1]

@@ -36,6 +36,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
+    validate_canonical_messages,
 )
 from renderers.configs import DeepSeekV4RendererConfig
 from renderers.parsing import parse_deepseek_v4
@@ -178,18 +179,7 @@ def _tool_result_content(value: Any) -> str:
 
 def _reasoning_content(message: Mapping[str, Any]) -> str:
     reasoning = message.get("reasoning_content")
-    if reasoning is None:
-        reasoning = message.get("reasoning")
-    if reasoning is not None:
-        return str(reasoning)
-    content = message.get("content")
-    if isinstance(content, list):
-        return "".join(
-            str(part.get("thinking", ""))
-            for part in content
-            if isinstance(part, Mapping) and part.get("type") == "thinking"
-        )
-    return ""
+    return reasoning if isinstance(reasoning, str) else ""
 
 
 def _tool_function(tool: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -292,6 +282,7 @@ def _prepare_messages(messages: list[Message]) -> list[_LogicalMessage]:
 class DeepSeekV4Renderer:
     """Renderer for ``deepseek-ai/DeepSeek-V4-Flash-0731``."""
 
+    supports_reasoning_content = True
     _implied_thinking_retention = "tool_cycle"
 
     def __init__(
@@ -373,6 +364,11 @@ class DeepSeekV4Renderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         return self._render(
             messages,
             tools=tools,

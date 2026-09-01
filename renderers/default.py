@@ -19,6 +19,7 @@ from renderers.base import (
     ToolSpec,
     extract_message_tool_names,
     resolve_thinking_retention,
+    validate_canonical_messages,
 )
 from renderers.configs import DefaultRendererConfig
 from renderers.parsers import (
@@ -89,6 +90,10 @@ class DefaultRenderer:
     :class:`renderers.DefaultRendererConfig`).
     """
 
+    # An opaque Jinja template cannot promise that it consumes structured
+    # reasoning. Use a typed renderer when ``reasoning_content`` is present.
+    supports_reasoning_content = False
+
     def __init__(
         self,
         tokenizer: ChatTemplateTokenizer,
@@ -150,6 +155,11 @@ class DefaultRenderer:
         )
 
     def _apply(self, messages, *, tools=None, add_generation_prompt=False) -> list[int]:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         kwargs = dict(self.config.model_extra or {})
         kwargs["add_generation_prompt"] = add_generation_prompt
         kwargs["tokenize"] = True

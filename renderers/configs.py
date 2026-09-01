@@ -621,10 +621,11 @@ class GptOssRendererConfig(BaseRendererConfig):
 class KimiK2RendererConfig(BaseRendererConfig):
     """Kimi K2 renderer config.
 
-    ``enable_thinking`` is renderer-internal here — Kimi K2's chat
-    template doesn't reference any thinking variable, so it's a no-op
-    against ``apply_chat_template`` parity. The field is kept for
-    protocol uniformity with the rest of the renderer family.
+    Kimi K2's chat template reads assistant content verbatim. The typed
+    renderer projects canonical ``reasoning_content`` into native
+    ``<think>...</think>`` content before applying that wire format.
+    ``enable_thinking`` remains a generation-control no-op because the
+    upstream template has no corresponding variable.
     """
 
     name: Literal["kimi-k2"] = "kimi-k2"
@@ -678,9 +679,9 @@ class LagunaM1RendererConfig(BaseRendererConfig):
     """Laguna M.1 renderer config.
 
     Laguna M.1 shares Laguna XS.2's role and tool-call format, but its
-    official checkpoint has a distinct chat template: it does not inject
-    XS.2's fallback system message and it gives ``message.reasoning``
-    precedence over ``message.reasoning_content``. Served by
+    official checkpoint has a distinct chat template and does not inject
+    XS.2's fallback system message. Canonical inputs always use
+    ``message.reasoning_content``. Served by
     :class:`renderers.laguna_xs2.LagunaM1Renderer`.
     """
 

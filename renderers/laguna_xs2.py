@@ -39,8 +39,8 @@ XS-2.1's template (upstream rev ``575f0f28``) is served by the
 
 Laguna M.1's official template (revision ``2bf8a4ab``) is served by
 :class:`LagunaM1Renderer`. It shares XS.2's byte layout, tool syntax, and
-generation prompt, but has no fallback system prompt and reads assistant
-reasoning from ``reasoning`` before falling back to ``reasoning_content``.
+generation prompt, but has no fallback system prompt. Canonical assistant
+reasoning always comes from ``reasoning_content``.
 
 S-2.1 subclasses :class:`LagunaXS21Renderer` from :mod:`renderers.laguna_s21`,
 overriding only the ``_render_history_reasoning`` seam.
@@ -65,6 +65,7 @@ from renderers.base import (
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
+    validate_canonical_messages,
 )
 from renderers.configs import (
     LagunaM1RendererConfig,
@@ -119,6 +120,8 @@ _TOOLS_HEADER_XS21 = (
 
 
 class LagunaXS2Renderer:
+    supports_reasoning_content = True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -173,22 +176,6 @@ class LagunaXS2Renderer:
             return "".join(parts)
         return ""
 
-    @staticmethod
-    def _thinking_text(content: Content | None) -> str:
-        """Concatenate ``ThinkingPart`` entries from list-form content.
-
-        Used as a reasoning source in ``_render_assistant`` when neither
-        ``reasoning`` nor ``reasoning_content`` is present on the message.
-        Returns ``""`` for any non-list input.
-        """
-        if not isinstance(content, list):
-            return ""
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "thinking":
-                parts.append(item.get("thinking", ""))
-        return "".join(parts)
-
     def render(
         self,
         messages: list[Message],
@@ -196,6 +183,15 @@ class LagunaXS2Renderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        raw_passthrough = getattr(self.config, "render_assistant_messages_raw", False)
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=(
+                self.supports_reasoning_content and not raw_passthrough
+            ),
+            renderer_name=type(self).__name__,
+            allow_inline_reasoning_markup=raw_passthrough,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 
@@ -582,17 +578,7 @@ class LagunaXS2Renderer:
         self, msg: Message, content: str
     ) -> tuple[str, str]:
         """Return the reasoning/body pair used by the XS.2 template."""
-        reasoning_content = ""
-        if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-        else:
-            # When the caller stores reasoning as a ``ThinkingPart`` inside
-            # a list-form ``content`` (e.g. after parse_response →
-            # reserialize), pull it out here so it survives the re-render.
-            part_thinking = self._thinking_text(msg.get("content"))
-            if part_thinking:
-                reasoning_content = part_thinking
-        return reasoning_content, content
+        return get_structured_reasoning(msg), content
 
     def _render_assistant_raw(
         self,
@@ -665,10 +651,7 @@ class LagunaM1Renderer(LagunaXS2Renderer):
     def _assistant_reasoning_and_content(
         self, msg: Message, content: str
     ) -> tuple[str, str]:
-        # ``reasoning`` wins whenever it is a string (including the empty
-        # string), then ``reasoning_content`` is considered. String content is
-        # opaque; callers must normalize legacy inline think blocks first.
-        return get_structured_reasoning(msg, "reasoning", "reasoning_content"), content
+        return get_structured_reasoning(msg), content
 
 
 class LagunaXS21Renderer(LagunaXS2Renderer):
@@ -702,6 +685,11 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 
@@ -1007,13 +995,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         emit_text,
         emit_text_segments,
     ) -> None:
-        reasoning_content = ""
-        if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-        else:
-            part_thinking = self._thinking_text(msg.get("content"))
-            if part_thinking:
-                reasoning_content = part_thinking
+        reasoning_content = get_structured_reasoning(msg)
 
         # ``<assistant>`` plus the think tag that follows are exactly the
         # generation prompt for the active mode — template-injected

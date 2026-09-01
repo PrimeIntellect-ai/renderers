@@ -28,6 +28,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
+    validate_canonical_messages,
 )
 from renderers.configs import KimiK2RendererConfig
 from renderers.parsing import parse_kimi_k2
@@ -38,12 +39,12 @@ _DEFAULT_SYSTEM = "You are Kimi, an AI assistant created by Moonshot AI."
 class KimiK2Renderer:
     """Deterministic message → token renderer for Kimi K2 models.
 
-    Kimi K2's chat template doesn't read any thinking-related variable —
-    ``content`` renders verbatim with no reasoning branch. The
-    ``enable_thinking`` / ``thinking_retention`` fields on the config are
-    stored for protocol uniformity with the rest of the renderer family
-    but have no effect on the byte-level output.
+    Canonical ``reasoning_content`` is projected into Kimi's native
+    ``<think>...</think>`` assistant body before rendering. Dataset records
+    must not carry those tags in ``content`` themselves.
     """
+
+    supports_reasoning_content = True
 
     def __init__(
         self,
@@ -120,6 +121,11 @@ class KimiK2Renderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 
@@ -221,10 +227,6 @@ class KimiK2Renderer:
                     if isinstance(part, dict):
                         if part.get("type") == "text":
                             parts.append(part.get("text", ""))
-                        elif part.get("type") == "thinking":
-                            parts.append(
-                                "<think>" + part.get("thinking", "") + "</think>"
-                            )
                     elif isinstance(part, str):
                         parts.append(part)
                 content = "".join(parts)
@@ -424,10 +426,6 @@ class KimiK2Renderer:
                     if isinstance(part, dict):
                         if part.get("type") == "text":
                             parts.append(part.get("text", ""))
-                        elif part.get("type") == "thinking":
-                            parts.append(
-                                "<think>" + part.get("thinking", "") + "</think>"
-                            )
                     elif isinstance(part, str):
                         parts.append(part)
                 content = "".join(parts)
@@ -493,15 +491,17 @@ class KimiK2Renderer:
         emit_text("assistant", msg_idx, is_sampled=False, is_content=False)
         emit_special(self._im_middle, msg_idx, is_sampled=False, is_content=False)
 
-        # Kimi K2's Jinja template has no reasoning-content support: the
-        # assistant turn renders its ``content`` verbatim, including any
-        # inline ``<think>...</think>`` tags. The separate
-        # ``reasoning_content`` field is dropped (the template never reads
-        # it). ``is_last_turn`` is unused here for the same reason.
+        # Kimi K2's native template reads only ``content``. Project the
+        # canonical reasoning field into the model's native wire format here;
+        # callers must never pre-encode these delimiters in ``content``.
         # On assistant tokens, ``is_content == sampled_mask`` by construction
         # — every sampled token is body, every scaffold token isn't.
         _ = is_last_turn
-        emit_text(content, msg_idx, is_sampled=True, is_content=True)
+        reasoning = msg.get("reasoning_content")
+        body = content
+        if isinstance(reasoning, str):
+            body = f"<think>{reasoning}</think>{content}"
+        emit_text(body, msg_idx, is_sampled=True, is_content=True)
 
         # Tool calls — model-sampled markup carrying caller / model body.
         tool_calls = msg.get("tool_calls") or []

@@ -41,6 +41,7 @@ from renderers.base import (
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
+    validate_canonical_messages,
 )
 from renderers.configs import Hy3RendererConfig, ResolvedThinkingRetention
 from renderers.parsing import parse_hy3
@@ -73,6 +74,8 @@ _TOOL_RESPONSE_END = f"</tool_response{_HYTK}>"
 
 class Hy3Renderer:
     """Deterministic message → token renderer for Tencent Hy3 models."""
+
+    supports_reasoning_content = True
 
     def __init__(
         self,
@@ -181,12 +184,7 @@ class Hy3Renderer:
 
     def _reasoning_content(self, msg: Message) -> str | None:
         rc = msg.get("reasoning_content")
-        if isinstance(rc, str):
-            return rc
-        rc = msg.get("reasoning")
-        if isinstance(rc, str):
-            return rc
-        return None
+        return rc if isinstance(rc, str) else None
 
     def _tools_instruction_block(self, tools: list[ToolSpec], has_system: bool) -> str:
         """Build the ``# Tools`` instruction blob (all scaffold).
@@ -304,6 +302,23 @@ class Hy3Renderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
+        if (
+            self._raw_last_assistant
+            and messages
+            and messages[-1].get("role") == "assistant"
+            and not messages[-1].get("tool_calls")
+            and messages[-1].get("reasoning_content")
+        ):
+            raise ValueError(
+                "Hy3Renderer raw_last_assistant cannot represent "
+                "'reasoning_content'; pass raw visible content only or disable "
+                "raw_last_assistant"
+            )
         if not messages:
             raise ValueError("No messages provided.")
 

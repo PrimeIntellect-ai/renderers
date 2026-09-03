@@ -6,7 +6,7 @@ Runs against every (model, renderer) pair.
 
 from functools import lru_cache
 
-from renderers import create_renderer
+from renderers import Qwen35Renderer, Qwen35RendererConfig, create_renderer
 from renderers.base import ToolCallParseStatus, load_tokenizer
 
 
@@ -17,12 +17,67 @@ def _qwen3_vl():
     return tokenizer, renderer
 
 
+@lru_cache
+def _qwen35_thinking():
+    tokenizer = load_tokenizer("Qwen/Qwen3.5-2B")
+    renderer = create_renderer(
+        tokenizer, Qwen35RendererConfig(enable_thinking=True)
+    )
+    return tokenizer, renderer
+
+
+def test_qwen35_unclosed_implicit_thinking_matches_chat_parser():
+    """The generation prompt owns the opening ``<think>`` token.
+
+    Without a sampled ``</think>``, deployment-style chat parsing keeps the
+    entire completion in reasoning_content. Renderer training must therefore
+    not reward apparent final content or execute apparent tool syntax from
+    that still-open reasoning block.
+    """
+    tokenizer, renderer = _qwen35_thinking()
+    text = (
+        "Still reasoning about the next action.\n"
+        "<tool_call><function=terminal><parameter=command>head -n 1"
+        "</parameter></function></tool_call>"
+    )
+
+    parsed = renderer.parse_response(
+        tokenizer.encode(text, add_special_tokens=False)
+    )
+
+    assert parsed.content == ""
+    assert "Still reasoning" in (parsed.reasoning_content or "")
+    assert "<tool_call>" in (parsed.reasoning_content or "")
+    assert parsed.tool_calls == []
+
+
+def test_qwen35_closed_implicit_thinking_exposes_tool_call():
+    tokenizer, renderer = _qwen35_thinking()
+    text = (
+        "Plan complete.</think>\n"
+        "<tool_call><function=terminal><parameter=command>head -n 1"
+        "</parameter></function></tool_call>"
+    )
+
+    parsed = renderer.parse_response(
+        tokenizer.encode(text, add_special_tokens=False)
+    )
+
+    assert parsed.reasoning_content == "Plan complete."
+    assert len(parsed.tool_calls) == 1
+    assert parsed.tool_calls[0].name == "terminal"
+
+
 def test_parse_simple_content(model_name, tokenizer, renderer):
-    """Plain content, no thinking."""
+    """Plain tokens are content unless the generation prompt opened thinking."""
     text = "Hello there!"
     ids = tokenizer.encode(text, add_special_tokens=False)
     parsed = renderer.parse_response(ids)
-    assert "Hello" in parsed.content
+    if isinstance(renderer, Qwen35Renderer) and renderer.config.enable_thinking:
+        assert parsed.content == ""
+        assert "Hello" in (parsed.reasoning_content or "")
+    else:
+        assert "Hello" in parsed.content
 
 
 def test_parse_thinking_and_content(model_name, tokenizer, renderer):

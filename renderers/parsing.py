@@ -305,6 +305,7 @@ def parse_qwen35(
     tool_call_id: int,
     tool_call_end_id: int,
     tools: list[ToolSpec] | None = None,
+    implicit_thinking: bool = False,
 ) -> ParsedResponse:
     """Parse Qwen3.5 completion tokens. XML-style tool calls, token-level thinking.
 
@@ -327,6 +328,16 @@ def parse_qwen35(
         reasoning = _decode(tokenizer, reasoning_ids).strip()
         ids = ids[think_end + 1 :]
         parse_offset = think_end + 1
+    elif implicit_thinking:
+        # Qwen3.5's thinking-enabled generation prompt opens ``<think>``
+        # before sampling, so the opening token is part of the prompt rather
+        # than ``token_ids``. If the model never emits ``</think>``, the whole
+        # completion is still reasoning. This matches vLLM's Qwen3 chat
+        # reasoning parser: apparent content or tool-call syntax inside an
+        # unclosed thinking block must not be exposed as a final answer/call.
+        reasoning_ids = [t for t in ids if t != think_id]
+        reasoning = _decode(tokenizer, reasoning_ids).strip()
+        return ParsedResponse(content="", reasoning_content=reasoning, tool_calls=[])
     elif think_id in set(ids):
         # <think> present but no </think> — truncated reasoning. Block
         # present ⇒ string (see docstring), even when nothing follows the

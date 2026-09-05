@@ -74,6 +74,11 @@ class Renderer(Protocol):
 - `ParsedResponse` is `(content, reasoning_content, tool_calls)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
 - Round-trip: rendering `[user, assistant(content, reasoning, tool_calls)]`, slicing the assistant completion, and feeding it through `parse_response` returns an equivalent structured message. Tested per-renderer in `tests/test_roundtrip.py`.
 
+Laguna parsing follows the configured generation prompt. With `enable_thinking=True`,
+output before `</think>` remains reasoning even when generation truncates without that closing
+marker; it is not final content or a tool call. Parse plain content without a thinking marker
+using the no-thinking configuration that generated it.
+
 ### `bridge_to_next_turn` (the core contract)
 
 Given `(prev_prompt_ids, prev_completion_ids)` and new environment messages, return ids for the next turn's prompt such that the result starts with `prev_prompt_ids + prev_completion_ids` byte-for-byte and continues with the new messages plus the next assistant opener. If that cannot be proven safe, return `None` and the caller falls back to a full render.

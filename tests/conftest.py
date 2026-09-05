@@ -54,6 +54,18 @@ def tokenizer(model_name, renderer_name):
 
 
 @pytest.fixture
-def renderer(model_name, renderer_name):
-    _, r = _load(model_name, renderer_name)
+def renderer(model_name, renderer_name, request):
+    tokenizer, r = _load(model_name, renderer_name)
+    if model_name == "poolside/Laguna-S-2.1" and Path(request.node.path).name in {
+        "test_parse_response.py",
+        "test_parse_response_robustness.py",
+    }:
+        # These shared fixtures feed plain content without a closing </think>.
+        # S-2.1 otherwise defaults to a generation prompt with thinking open.
+        return create_renderer(
+            tokenizer,
+            config_from_name("laguna-s-2.1").model_copy(
+                update={"enable_thinking": False}
+            ),
+        )
     return r

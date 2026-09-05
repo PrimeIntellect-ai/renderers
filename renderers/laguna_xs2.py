@@ -362,6 +362,7 @@ class LagunaXS2Renderer:
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
             tools=tools,
+            prefilled_thinking=self.config.enable_thinking,
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -907,6 +908,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             tool_call_end_id=self._tool_call_end,
             tools=tools,
             strip_newlines=False,
+            prefilled_thinking=self.config.enable_thinking,
         )
 
     def bridge_to_next_turn(

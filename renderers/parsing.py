@@ -828,6 +828,7 @@ def parse_laguna_xs2(
     tool_call_end_id: int,
     tools: list[ToolSpec] | None = None,
     strip_newlines: bool = True,
+    prefilled_thinking: bool = False,
 ) -> ParsedResponse:
     """Parse Laguna-XS.2 / XS-2.1 completion tokens.
 
@@ -843,6 +844,10 @@ def parse_laguna_xs2(
     never a bare ``.strip()``, which would also eat whitespace the model
     emitted intentionally. XS-2.1 renders both segments verbatim, so it
     parses with ``strip_newlines=False``.
+
+    ``prefilled_thinking`` means the generation prompt already opened
+    ``<think>``. Without a sampled ``</think>``, all output is still
+    reasoning, including any tool-call-looking text drafted inside it.
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
@@ -859,8 +864,9 @@ def parse_laguna_xs2(
         reasoning = _segment(reasoning_ids)
         ids = ids[think_end + 1 :]
         parse_offset = think_end + 1
-    elif (think_start := _find(ids, think_id)) != -1:
-        reasoning = _segment(ids[think_start + 1 :])
+    elif (think_start := _find(ids, think_id)) != -1 or prefilled_thinking:
+        reasoning_ids = ids if prefilled_thinking else ids[think_start + 1 :]
+        reasoning = _segment([t for t in reasoning_ids if t != think_id])
         return ParsedResponse(
             content="", reasoning_content=reasoning or None, tool_calls=[]
         )

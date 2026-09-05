@@ -68,6 +68,7 @@ class _FakeClient:
     def __init__(self):
         self.calls = []
         self.base_url = "http://fake-host:8000/v1"
+        self.usage = None
         routed_experts = np.array([[[1]], [[2]]], dtype=np.uint8)
         self.choice = {
             "index": 0,
@@ -93,6 +94,8 @@ class _FakeClient:
             "request_id": "gen-test",
             "choices": [self.choice],
         }
+        if self.usage is not None:
+            payload["usage"] = self.usage
         if body and body.get("content_parts"):
             payload["prompt_token_ids"] = [1, 2, 2, 3]
             payload["mm_placeholders"] = {"image": [{"offset": 1, "length": 2}]}
@@ -114,8 +117,22 @@ def _run_generate(client, renderer=None):
     )
 
 
-def test_generate_builds_request_body_and_parses_response():
+@pytest.mark.parametrize(
+    "usage",
+    [
+        None,
+        {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 2},
+            "completion_tokens_details": {"reasoning_tokens": 1},
+        },
+    ],
+)
+def test_generate_builds_request_body_and_parses_response(usage):
     client = _FakeClient()
+    client.usage = usage
     renderer = _FakeRenderer()
 
     result = asyncio.run(
@@ -167,6 +184,7 @@ def test_generate_builds_request_body_and_parses_response():
     assert result["routed_experts"]["data"].tobytes() == base64.b64encode(b"\x01\x02")
     assert result["multi_modal_data"] is None
     assert result["request_id"] == "gen-test"
+    assert result["usage"] == usage
     # Per-token attribution from the renderer surfaces on the result so
     # downstream consumers (verifiers RendererClient → prime-rl) can
     # build selective loss masks without a second render pass.

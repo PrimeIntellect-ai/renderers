@@ -19,7 +19,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from renderers.base import ParsedResponse, ParsedToolCall, ToolCallParseStatus, ToolSpec
+from renderers.base import (
+    CompletionStatus,
+    ParsedResponse,
+    ParsedToolCall,
+    ToolCallParseStatus,
+    ToolSpec,
+)
 
 
 # ── Schema-aware argument coercion ──────────────────────────────────
@@ -305,6 +311,7 @@ def parse_qwen35(
     tool_call_id: int,
     tool_call_end_id: int,
     tools: list[ToolSpec] | None = None,
+    prefilled_thinking: bool | None = None,
 ) -> ParsedResponse:
     """Parse Qwen3.5 completion tokens. XML-style tool calls, token-level thinking.
 
@@ -314,6 +321,9 @@ def parse_qwen35(
     semantics (PrimeQwen3Renderer): a sampled ``<think></think>`` must
     round-trip parse → message → render back to the same tokens, so an
     empty-but-present block is ``""``, never ``None``.
+
+    ``prefilled_thinking`` declares whether the generation prompt opened reasoning.
+    None leaves a delimiter-free completion's structural state unknown.
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
 
@@ -327,13 +337,21 @@ def parse_qwen35(
         reasoning = _decode(tokenizer, reasoning_ids).strip()
         ids = ids[think_end + 1 :]
         parse_offset = think_end + 1
-    elif think_id in set(ids):
+    elif think_id in set(ids) or prefilled_thinking:
         # <think> present but no </think> — truncated reasoning. Block
         # present ⇒ string (see docstring), even when nothing follows the
         # opening tag.
         think_start = _find(ids, think_id)
-        reasoning = _decode(tokenizer, ids[think_start + 1 :]).strip()
-        return ParsedResponse(content="", reasoning_content=reasoning, tool_calls=[])
+        reasoning_ids = ids if prefilled_thinking else ids[think_start + 1 :]
+        reasoning = _decode(
+            tokenizer, [t for t in reasoning_ids if t != think_id]
+        ).strip()
+        return ParsedResponse(
+            content="",
+            reasoning_content=reasoning,
+            tool_calls=[],
+            completion_status=CompletionStatus("incomplete", "unfinished_reasoning"),
+        )
 
     tc_start = _find(ids, tool_call_id)
     tool_calls: list[ParsedToolCall] = []
@@ -359,6 +377,9 @@ def parse_qwen35(
         content=content_text,
         reasoning_content=reasoning,
         tool_calls=tool_calls,
+        completion_status=CompletionStatus("complete", None)
+        if think_end != -1 or prefilled_thinking is False
+        else CompletionStatus(),
     )
 
 
@@ -868,7 +889,10 @@ def parse_laguna_xs2(
         reasoning_ids = ids if prefilled_thinking else ids[think_start + 1 :]
         reasoning = _segment([t for t in reasoning_ids if t != think_id])
         return ParsedResponse(
-            content="", reasoning_content=reasoning or None, tool_calls=[]
+            content="",
+            reasoning_content=reasoning or None,
+            tool_calls=[],
+            completion_status=CompletionStatus("incomplete", "unfinished_reasoning"),
         )
 
     tc_start = _find(ids, tool_call_id)
@@ -890,6 +914,7 @@ def parse_laguna_xs2(
         content=content_text,
         reasoning_content=reasoning or None,
         tool_calls=tool_calls,
+        completion_status=CompletionStatus("complete", None),
     )
 
 

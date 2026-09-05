@@ -252,6 +252,7 @@ def test_parse_no_think_completion():
     completion is pure content up to ``</assistant>``."""
     parsed = _renderer().parse_response(_completion_ids("Four.</assistant>"))
     assert parsed.content == "Four."
+    assert parsed.completion_status.status == "complete"
     assert parsed.reasoning_content is None
     assert not parsed.tool_calls
 
@@ -276,12 +277,15 @@ def test_parse_unclosed_prefilled_thinking(renderer_name, explicit_open, stop):
     assert parsed.reasoning_content == text
     assert parsed.content == ""
     assert parsed.tool_calls == []
+    assert parsed.completion_status.status == "incomplete"
+    assert parsed.completion_status.reason == "unfinished_reasoning"
 
     closed = renderer.parse_response(
         _completion_ids("Thought</think>Answer.</assistant>")
     )
     assert closed.reasoning_content == "Thought"
     assert closed.content == "Answer."
+    assert closed.completion_status.status == "complete"
 
 
 def test_parse_preserves_newlines_verbatim():

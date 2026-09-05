@@ -617,6 +617,19 @@ class ParsedToolCall:
     id: str | None = None  # native tool-call id when the format carries one (Kimi K2)
 
 
+@dataclass(frozen=True)
+class CompletionStatus:
+    """Structural output validity, independent of generation termination or task success.
+
+    Parsers report what their grammar proves; unaudited parsers remain unknown.
+    The generate client also checks termination before exposing this on the wire.
+    """
+
+    status: Literal["complete", "incomplete", "invalid", "unknown"] = "unknown"
+    reason: str | None = "parser_unavailable"
+    version: Literal[1] = 1
+
+
 @dataclass
 class ParsedResponse:
     """Result of parsing completion tokens back into a structured message.
@@ -632,6 +645,27 @@ class ParsedResponse:
     content: str
     reasoning_content: str | None = None
     tool_calls: list[ParsedToolCall] = field(default_factory=list)
+    completion_status: CompletionStatus = field(default_factory=CompletionStatus)
+
+
+def classify_completion(
+    parsed: ParsedResponse, finish_reason: str | None
+) -> CompletionStatus:
+    """Combine parser evidence with termination without changing sampled output."""
+    status = parsed.completion_status
+    if status.status in {"incomplete", "invalid"}:
+        return status
+    if any(tc.status != ToolCallParseStatus.OK for tc in parsed.tool_calls):
+        return CompletionStatus("invalid", "malformed_tool_call")
+    if finish_reason == "length":
+        return CompletionStatus("incomplete", "output_truncated")
+    if finish_reason == "content_filter":
+        return CompletionStatus("invalid", "content_filtered")
+    if finish_reason not in {"stop", "tool_calls"}:
+        return CompletionStatus("unknown", "unknown_termination")
+    if not parsed.content.strip() and not parsed.tool_calls:
+        return CompletionStatus("incomplete", "missing_final_output")
+    return status
 
 
 @dataclass

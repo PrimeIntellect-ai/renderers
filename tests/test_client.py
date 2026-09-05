@@ -7,10 +7,12 @@ import numpy as np
 import pytest
 from renderers import MalformedGenerateResponseError
 from renderers.base import (
+    CompletionStatus,
     ParsedResponse,
     ParsedToolCall,
     RenderedTokens,
     ToolCallParseStatus,
+    classify_completion,
 )
 from renderers.client import generate
 
@@ -114,6 +116,111 @@ def _run_generate(client, renderer=None):
             model="test-model",
             tools=[{"type": "function", "function": {"name": "echo"}}],
         )
+    )
+
+
+@pytest.mark.parametrize(
+    "state,finish,content,expected,reason",
+    [
+        (CompletionStatus("complete", None), "stop", "summary", "complete", None),
+        (
+            CompletionStatus("complete", None),
+            "length",
+            "partial",
+            "incomplete",
+            "output_truncated",
+        ),
+        (
+            CompletionStatus("incomplete", "unfinished_reasoning"),
+            "stop",
+            "",
+            "incomplete",
+            "unfinished_reasoning",
+        ),
+        (
+            CompletionStatus("complete", None),
+            "stop",
+            "",
+            "incomplete",
+            "missing_final_output",
+        ),
+        (
+            CompletionStatus("complete", None),
+            None,
+            "summary",
+            "unknown",
+            "unknown_termination",
+        ),
+        (CompletionStatus(), "stop", "summary", "unknown", "parser_unavailable"),
+        (
+            CompletionStatus("complete", None),
+            "content_filter",
+            "partial",
+            "invalid",
+            "content_filtered",
+        ),
+    ],
+)
+def test_generate_completion_status(state, finish, content, expected, reason):
+    class Renderer(_FakeRenderer):
+        def parse_response(self, completion_ids, *, tools=None):
+            return ParsedResponse(content=content, completion_status=state)
+
+    client = _FakeClient()
+    client.choice["finish_reason"] = finish
+    result = _run_generate(client, Renderer())
+    assert result["completion_status"] == {
+        "version": 1,
+        "status": expected,
+        "reason": reason,
+    }
+    assert result["finish_reason"] == finish
+    assert result["completion_ids"] == [7, 8]
+    assert result["completion_logprobs"] == [-0.1, -0.2]
+
+
+@pytest.mark.parametrize(
+    "status", [s for s in ToolCallParseStatus if s != ToolCallParseStatus.OK]
+)
+def test_completion_status_keeps_malformed_tool_attempts(status):
+    parsed = ParsedResponse(
+        content="looks like a summary",
+        tool_calls=[ParsedToolCall(raw="partial", status=status)],
+        completion_status=CompletionStatus("complete", None),
+    )
+    assert classify_completion(parsed, "stop") == CompletionStatus(
+        "invalid", "malformed_tool_call"
+    )
+
+
+@pytest.mark.parametrize("family", ["laguna", "qwen35"])
+@pytest.mark.parametrize("closed", [False, True])
+@pytest.mark.parametrize("prefilled", [False, True])
+def test_reasoning_boundary_status_across_parsers(family, closed, prefilled):
+    from renderers.parsing import parse_laguna_xs2, parse_qwen35
+
+    class Tokenizer:
+        def decode(self, ids, **kwargs):
+            return "".join({3: "reason", 4: "summary"}.get(i, "") for i in ids)
+
+    parser = parse_laguna_xs2 if family == "laguna" else parse_qwen35
+    ids = ([] if prefilled else [1]) + ([3, 2, 4, 9] if closed else [3, 9])
+    parsed = parser(
+        Tokenizer(),
+        ids,
+        stop_ids={9},
+        think_id=1,
+        think_end_id=2,
+        tool_call_id=5,
+        tool_call_end_id=6,
+        prefilled_thinking=prefilled,
+    )
+    assert parsed.reasoning_content == "reason"
+    assert parsed.content == ("summary" if closed else "")
+    assert parsed.completion_status == (
+        CompletionStatus("complete", None)
+        if closed
+        else CompletionStatus("incomplete", "unfinished_reasoning")
     )
 
 

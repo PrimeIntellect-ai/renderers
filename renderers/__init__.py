@@ -8,6 +8,7 @@ except ImportError:
 
 from renderers.base import (
     ChatTemplateTokenizer,
+    CompletionStatus,
     Content,
     ContentPart,
     ImagePart,
@@ -189,6 +190,7 @@ __all__ = [
     "OffsetTokenizer",
     "OverlongPromptError",
     "ParsedResponse",
+    "CompletionStatus",
     "ParsedToolCall",
     "PlaceholderRange",
     "PrimeQwen3Renderer",

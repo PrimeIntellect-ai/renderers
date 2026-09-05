@@ -11,6 +11,7 @@ import json
 import logging
 import math
 from collections.abc import Mapping
+from dataclasses import asdict
 from typing import Any, cast
 
 import httpx
@@ -24,6 +25,7 @@ from renderers.base import (
     ToolCallParseStatus,
     ToolSpec,
     _require_transformers,
+    classify_completion,
 )
 
 _request_logger = logging.getLogger("renderers.client")
@@ -401,6 +403,9 @@ async def generate(
         "reasoning_content": parsed.reasoning_content,
         "tool_calls": parsed.tool_calls,
         "finish_reason": finish_reason,
+        "completion_status": asdict(
+            classify_completion(parsed, choice.get("finish_reason"))
+        ),
         "routed_experts": routed_experts,
         "sampling_mask": sampling_mask,
         # The mm sidecar consumed on the request side, surfaced back so

@@ -47,6 +47,18 @@ parsed = r.parse_response(completion_ids)
 # ParsedResponse(content=..., reasoning_content=..., tool_calls=...)
 ```
 
+`ParsedResponse.completion_status` reports structural validity: `complete`, `incomplete`,
+`invalid`, or `unknown`. The version-1 record includes a machine-readable `reason`.
+Laguna parsers account for reasoning opened by the generation prompt; Qwen3.5 also accepts
+that initial state explicitly. Parsers that cannot prove completion report `unknown`.
+This is not a claim about factual correctness or successful task completion.
+
+`renderers.client.generate()` combines this evidence with the engine's termination reason
+and malformed tool attempts, returning a `completion_status` dictionary. A length-limited
+generation is incomplete even if some final text exists; EOS inside reasoning is incomplete
+even when the engine reports `stop`. Tokens, logprobs, and the original finish reason are
+preserved. Consumers must not interpret `unknown` as verified completion.
+
 For the next turn, extend the previous sampled stream instead of re-rendering history:
 
 ```python

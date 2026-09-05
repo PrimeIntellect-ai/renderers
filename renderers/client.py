@@ -391,6 +391,7 @@ async def generate(
 
     return {
         "request_id": data.get("request_id") or "",
+        "usage": data.get("usage"),
         "prompt_ids": list(effective_prompt_ids or prompt_ids),
         "renderer_prompt_ids": list(prompt_ids) if content_parts else None,
         "mm_placeholders": mm_placeholders,

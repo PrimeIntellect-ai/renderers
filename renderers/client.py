@@ -367,7 +367,11 @@ async def generate(
 
     completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
 
-    parsed = renderer.parse_response(completion_ids, tools=tools)
+    parsed = renderer.parse_response(
+        completion_ids,
+        prompt_ids=list(effective_prompt_ids or prompt_ids),
+        tools=tools,
+    )
 
     routed_experts = choice.get("routed_experts")
     # vLLM's native kept-set sampling masks (``--return-sampling-mask``):
@@ -401,6 +405,7 @@ async def generate(
         "reasoning_content": parsed.reasoning_content,
         "tool_calls": parsed.tool_calls,
         "finish_reason": finish_reason,
+        "reasoning_complete": parsed.reasoning_complete,
         "routed_experts": routed_experts,
         "sampling_mask": sampling_mask,
         # The mm sidecar consumed on the request side, surfaced back so

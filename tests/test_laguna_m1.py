@@ -129,7 +129,7 @@ def test_reasoning_content_and_tool_call_round_trip():
     prompt_ids = renderer.render_ids(prompt, add_generation_prompt=True)
     full_ids = renderer.render_ids([*prompt, assistant])
     completion_ids = full_ids[len(prompt_ids) :]
-    parsed = renderer.parse_response(completion_ids, tools=TOOLS)
+    parsed = renderer.parse_response(completion_ids, tools=TOOLS, prompt_ids=prompt_ids)
 
     assert parsed.reasoning_content == "Need a command."
     assert parsed.content == "Running it."

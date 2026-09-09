@@ -632,6 +632,13 @@ class ParsedResponse:
     content: str
     reasoning_content: str | None = None
     tool_calls: list[ParsedToolCall] = field(default_factory=list)
+    reasoning_complete: bool | None = True
+    """Whether the reasoning channel is closed at the end of the completion.
+
+    False means generation ended inside reasoning; this is unrelated to the
+    engine finish reason, tool-call validity, or whether final text is useful.
+    None means the parser needs prompt context to distinguish the channels.
+    """
 
 
 @dataclass
@@ -743,8 +750,15 @@ class Renderer(Protocol):
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         """Parse completion tokens back into a structured message.
+
+        Pass the exact ``prompt_ids`` used for sampling whenever available.
+        This identifies reasoning prefilled by the prompt, including Gemma's
+        post-tool thought channel and partial assistant prefixes. Omitting it,
+        passing None, and passing [] all parse a self-contained completion;
+        generation settings do not imply an initial reasoning channel.
 
         ``tools`` is the same list passed to ``render`` for this turn.
         XML-style formats (Qwen3.5, GLM, MiniMax, Laguna) render argument

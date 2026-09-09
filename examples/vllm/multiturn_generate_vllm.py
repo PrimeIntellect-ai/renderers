@@ -131,7 +131,7 @@ def main() -> None:
             use_tqdm=False,
         )[0]
         completion1 = list(output1.outputs[0].token_ids)
-        parsed1 = renderer.parse_response(completion1)
+        parsed1 = renderer.parse_response(completion1, prompt_ids=prompt_ids)
         print_parsed(label, "turn 1", parsed1)
 
         assistant = {"role": "assistant", "content": parsed1.content}
@@ -194,7 +194,11 @@ def main() -> None:
             use_tqdm=False,
         )[0]
         completion2 = list(output2.outputs[0].token_ids)
-        print_parsed(label, "turn 2", renderer.parse_response(completion2))
+        print_parsed(
+            label,
+            "turn 2",
+            renderer.parse_response(completion2, prompt_ids=bridged_ids),
+        )
 
         del llm
         gc.collect()

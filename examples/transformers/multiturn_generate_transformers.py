@@ -135,7 +135,7 @@ def main() -> None:
             pad_token_id=pad_token_id,
         )[0]
         completion1 = output1[input_ids.shape[-1] :].tolist()
-        parsed1 = renderer.parse_response(completion1)
+        parsed1 = renderer.parse_response(completion1, prompt_ids=prompt_ids)
         print_parsed(label, "turn 1", parsed1)
 
         assistant = {"role": "assistant", "content": parsed1.content}
@@ -203,7 +203,11 @@ def main() -> None:
             pad_token_id=pad_token_id,
         )[0]
         completion2 = output2[bridged_input_ids.shape[-1] :].tolist()
-        print_parsed(label, "turn 2", renderer.parse_response(completion2))
+        print_parsed(
+            label,
+            "turn 2",
+            renderer.parse_response(completion2, prompt_ids=bridged_ids),
+        )
 
         del hf_model
         gc.collect()

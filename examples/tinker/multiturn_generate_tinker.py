@@ -128,7 +128,7 @@ async def main() -> None:
             sampling_params=sampling_params,
         )
         completion1 = list(output1.sequences[0].tokens)
-        parsed1 = renderer.parse_response(completion1)
+        parsed1 = renderer.parse_response(completion1, prompt_ids=prompt_ids)
         print_parsed(label, "turn 1", parsed1)
 
         assistant = {"role": "assistant", "content": parsed1.content}
@@ -191,7 +191,11 @@ async def main() -> None:
             sampling_params=sampling_params,
         )
         completion2 = list(output2.sequences[0].tokens)
-        print_parsed(label, "turn 2", renderer.parse_response(completion2))
+        print_parsed(
+            label,
+            "turn 2",
+            renderer.parse_response(completion2, prompt_ids=bridged_ids),
+        )
 
 
 if __name__ == "__main__":

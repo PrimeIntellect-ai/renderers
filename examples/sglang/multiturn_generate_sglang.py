@@ -138,7 +138,7 @@ def main() -> None:
         )
         output1 = engine.generate(input_ids=prompt_ids, sampling_params=sampling)
         completion1 = completion_ids(output1, prompt_ids)
-        parsed1 = renderer.parse_response(completion1)
+        parsed1 = renderer.parse_response(completion1, prompt_ids=prompt_ids)
         print_parsed(label, "turn 1", parsed1)
 
         assistant = {"role": "assistant", "content": parsed1.content}
@@ -197,7 +197,11 @@ def main() -> None:
 
         output2 = engine.generate(input_ids=bridged_ids, sampling_params=sampling)
         completion2 = completion_ids(output2, bridged_ids)
-        print_parsed(label, "turn 2", renderer.parse_response(completion2))
+        print_parsed(
+            label,
+            "turn 2",
+            renderer.parse_response(completion2, prompt_ids=bridged_ids),
+        )
 
         engine.shutdown()
 

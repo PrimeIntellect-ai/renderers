@@ -23,7 +23,7 @@ def test_parse_simple_content(model_name, tokenizer, renderer):
     """Plain content, no thinking."""
     text = "Hello there!"
     ids = tokenizer.encode(text, add_special_tokens=False)
-    parsed = renderer.parse_response(ids)
+    parsed = renderer.parse_response(ids, prompt_ids=[])
     assert "Hello" in parsed.content
 
 
@@ -31,7 +31,7 @@ def test_parse_thinking_and_content(model_name, tokenizer, renderer):
     """Content with <think>reasoning</think> block."""
     text = "Let me think about this.\n</think>\n\nThe answer is 42."
     ids = tokenizer.encode(text, add_special_tokens=False)
-    parsed = renderer.parse_response(ids)
+    parsed = renderer.parse_response(ids, prompt_ids=[])
     # Should extract reasoning or at least not crash
     assert (
         "42" in parsed.content
@@ -42,14 +42,14 @@ def test_parse_thinking_and_content(model_name, tokenizer, renderer):
 
 def test_parse_empty_completion(model_name, tokenizer, renderer):
     """Empty completion should not crash."""
-    parsed = renderer.parse_response([])
+    parsed = renderer.parse_response([], prompt_ids=[])
     assert parsed.content is not None
 
 
 def test_parse_response_returns_parsed_response(model_name, tokenizer, renderer):
     """Return type must have content, reasoning_content, tool_calls."""
     ids = tokenizer.encode("Hello!", add_special_tokens=False)
-    parsed = renderer.parse_response(ids)
+    parsed = renderer.parse_response(ids, prompt_ids=[])
     assert hasattr(parsed, "content")
     assert hasattr(parsed, "reasoning_content")
     assert hasattr(parsed, "tool_calls")
@@ -61,7 +61,9 @@ def test_qwen3_vl_parse_json_tool_call():
         'Need a tool.\n<tool_call>\n{"name": "get_weather", '
         '"arguments": {"city": "Paris"}}\n</tool_call>'
     )
-    parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
+    parsed = renderer.parse_response(
+        tokenizer.encode(text, add_special_tokens=False), prompt_ids=[]
+    )
 
     assert parsed.content == "Need a tool."
     assert len(parsed.tool_calls) == 1
@@ -91,7 +93,9 @@ def test_qwen3_vl_malformed_tool_call_surfaces_as_invalid_json():
         '<tool_call>\n{"name": "get_weather", '
         '"arguments": {"city": "Paris",}}\n</tool_call>'
     )
-    parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
+    parsed = renderer.parse_response(
+        tokenizer.encode(text, add_special_tokens=False), prompt_ids=[]
+    )
 
     assert len(parsed.tool_calls) == 1
     tc = parsed.tool_calls[0]
@@ -136,7 +140,7 @@ def test_prime_qwen3_empty_think_roundtrips_through_bridge(model):
     assert full[: len(prompt_ids)] == prompt_ids
     completion_ids = full[len(prompt_ids) :] + [stop]
 
-    parsed = renderer.parse_response(completion_ids)
+    parsed = renderer.parse_response(completion_ids, prompt_ids=[])
     assert parsed.reasoning_content == ""
     assert parsed.content == "cba"
 
@@ -163,7 +167,7 @@ def test_prime_qwen3_absent_think_stays_none(model):
     stop = renderer.get_stop_token_ids()[0]
 
     completion_ids = tokenizer.encode("cba", add_special_tokens=False) + [stop]
-    parsed = renderer.parse_response(completion_ids)
+    parsed = renderer.parse_response(completion_ids, prompt_ids=[])
 
     assert parsed.reasoning_content is None
     assert parsed.content == "cba"
@@ -189,7 +193,9 @@ def test_qwen3_in_think_tool_call_is_not_a_real_call():
         '<tool_call>\n{"name": "execute_code", "arguments": {"code": "print(1)"}}\n'
         "</tool_call>"
     )
-    parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
+    parsed = renderer.parse_response(
+        tokenizer.encode(text, add_special_tokens=False), prompt_ids=[]
+    )
 
     assert len(parsed.tool_calls) == 1
     tc = parsed.tool_calls[0]
@@ -215,7 +221,9 @@ def test_qwen3_distinct_parallel_calls_after_think_are_preserved():
         '<tool_call>\n{"name": "execute_code", "arguments": {"code": "print(2)"}}\n'
         "</tool_call>"
     )
-    parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
+    parsed = renderer.parse_response(
+        tokenizer.encode(text, add_special_tokens=False), prompt_ids=[]
+    )
 
     assert len(parsed.tool_calls) == 2
     assert [tc.arguments for tc in parsed.tool_calls] == [
@@ -250,7 +258,7 @@ def test_kimi_k25_tool_call_carries_token_span():
         "<|tool_calls_section_end|>"
     )
     token_ids = tokenizer.encode(text, add_special_tokens=False)
-    parsed = renderer.parse_response(token_ids)
+    parsed = renderer.parse_response(token_ids, prompt_ids=[])
 
     assert len(parsed.tool_calls) == 1
     tc = parsed.tool_calls[0]
@@ -281,7 +289,9 @@ def test_kimi_k25_in_think_section_is_not_a_real_call():
         "<|tool_call_end|><|tool_calls_section_end|>"
     )
     text = f"<think>\nLet me draft:\n{section}\nlooks right.\n</think>\nGo.\n{section}"
-    parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
+    parsed = renderer.parse_response(
+        tokenizer.encode(text, add_special_tokens=False), prompt_ids=[]
+    )
 
     assert len(parsed.tool_calls) == 1
     tc = parsed.tool_calls[0]
@@ -322,7 +332,9 @@ def test_deepseek_v3_in_think_section_is_not_a_real_call():
         f"<think>\nLet me draft:\n{section('draft_tool')}\nlooks right.\n</think>\n"
         f"Go.\n{section('real_tool')}"
     )
-    parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
+    parsed = renderer.parse_response(
+        tokenizer.encode(text, add_special_tokens=False), prompt_ids=[]
+    )
 
     assert len(parsed.tool_calls) == 1
     tc = parsed.tool_calls[0]

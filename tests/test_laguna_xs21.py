@@ -19,9 +19,11 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import pytest
+
 from renderers import create_renderer
 from renderers.base import load_tokenizer
-from renderers.configs import LagunaXS21RendererConfig
+from renderers.configs import LagunaXS21RendererConfig, config_from_name
 from renderers.laguna_xs2 import LagunaXS21Renderer
 
 _MODEL = "poolside/Laguna-XS-2.1"
@@ -250,15 +252,45 @@ def test_parse_no_think_completion():
     completion is pure content up to ``</assistant>``."""
     parsed = _renderer().parse_response(_completion_ids("Four.</assistant>"))
     assert parsed.content == "Four."
+    assert parsed.reasoning_complete is True
     assert parsed.reasoning_content is None
     assert not parsed.tool_calls
+
+
+@pytest.mark.parametrize(
+    "renderer_name", ["laguna-xs.2", "laguna-m.1", "laguna-xs-2.1", "laguna-s-2.1"]
+)
+@pytest.mark.parametrize("stop", ["", "</assistant>"])
+def test_parse_unclosed_prefilled_thinking(renderer_name, stop):
+    config = config_from_name(renderer_name).model_copy(
+        update={"enable_thinking": True}
+    )
+    renderer = create_renderer(_tok(), config)
+    prompt = renderer.render_ids(
+        [{"role": "user", "content": "Research a fact."}], add_generation_prompt=True
+    )
+    assert _tok().decode(prompt).endswith("<think>")
+    text = "Still investigating.<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>"
+    completion = text + stop
+    parsed = renderer.parse_response(
+        _completion_ids(completion), tools=TOOLS, prompt_ids=prompt
+    )
+    assert parsed.reasoning_content == text
+    assert parsed.content == ""
+    assert parsed.tool_calls == []
+    assert parsed.reasoning_complete is False
 
 
 def test_parse_preserves_newlines_verbatim():
     """The template renders content verbatim, so the parse must not
     strip the newlines the model emitted."""
-    parsed = _renderer(enable_thinking=True).parse_response(
-        _completion_ids("Chain of thought</think>\nThe answer.\n</assistant>")
+    renderer = _renderer(enable_thinking=True)
+    prompt = renderer.render_ids(
+        [{"role": "user", "content": "Answer."}], add_generation_prompt=True
+    )
+    parsed = renderer.parse_response(
+        _completion_ids("Chain of thought</think>\nThe answer.\n</assistant>"),
+        prompt_ids=prompt,
     )
     assert parsed.reasoning_content == "Chain of thought"
     assert parsed.content == "\nThe answer.\n"
@@ -294,7 +326,7 @@ def test_roundtrip_reasoning_with_thinking():
     pp = r.render_ids(prompt, add_generation_prompt=True)
     full = r.render_ids([*prompt, msg])
     completion = full[len(pp) :]
-    parsed = r.parse_response(completion)
+    parsed = r.parse_response(completion, prompt_ids=pp)
     assert parsed.reasoning_content == "Two plus two equals four."
     assert parsed.content == "The answer is four."
 

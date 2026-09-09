@@ -24,6 +24,8 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
+
 from renderers.base import (
     Message,
     MultiModalData,
@@ -43,6 +45,8 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
+from renderers.parsing import unfinished_reasoning
+
 from renderers.configs import Gemma4RendererConfig
 from renderers.qwen3_vl import (
     _image_hash,
@@ -1105,14 +1109,13 @@ class Gemma4Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
-        """Parse a Gemma 4 completion without access to its prompt context.
+        """Parse explicit thought channels and prompt-prefilled continuations.
 
-        After a tool response with thinking enabled, the prompt already emits
-        ``<|channel>thought\n`` and the completion contains only the matching
-        ``<channel|>`` closer. A lone closer is therefore treated as post-tool
-        reasoning. This is necessarily heuristic: without the prompt, a
-        malformed first-turn completion with a stray closer is ambiguous.
+        Pass ``prompt_ids`` to distinguish a truncated post-tool thought from
+        ordinary first-turn content. Without it, parse the completion as
+        self-contained and require an explicit thought channel.
         """
         stop_ids = {self._turn_end, self._tool_response_start, self._eos}
         end = len(token_ids)
@@ -1128,6 +1131,27 @@ class Gemma4Renderer:
             ids = ids[len(prefix) :]
             base_offset = len(prefix)
 
+        prefilled_thinking = prompt_ends_in_reasoning(
+            self._tokenizer,
+            prompt_ids,
+            open_marker="<|channel>thought",
+            close_marker="<channel|>",
+            stop_ids=stop_ids,
+            initial_only=False,
+        )
+        if unfinished := unfinished_reasoning(
+            self._tokenizer,
+            ids,
+            prefilled=prefilled_thinking,
+            initial_only=False,
+            open_id=self._channel_start,
+            close_id=self._channel_end,
+            tool_start_id=self._tool_call_start,
+        ):
+            unfinished.reasoning_content = (
+                (unfinished.reasoning_content or "").removeprefix("thought\n").strip()
+            )
+            return unfinished
         reasoning: str | None = None
         content_ids: list[int] = []
         cursor = 0
@@ -1144,16 +1168,19 @@ class Gemma4Renderer:
             if channel_end == -1:
                 reasoning = self._decode(ids[thought_start:]).strip()
                 return ParsedResponse(
-                    content="", reasoning_content=reasoning, tool_calls=[]
+                    content="",
+                    reasoning_content=reasoning,
+                    tool_calls=[],
+                    reasoning_complete=False,
                 )
             reasoning = self._decode(ids[thought_start:channel_end]).strip()
             cursor = channel_end + 1
-        elif self.config.enable_thinking:
+        elif prefilled_thinking:
             # After a tool response, the canonical generation prompt already
             # ends with ``<|channel>thought\n``. The sampled completion therefore
             # starts with the thought body and contains only the closing
-            # ``<channel|>`` marker. A lone closer distinguishes that continuation
-            # from a normal thinking completion, which samples its own opener.
+            # ``<channel|>`` marker. The supplied prompt identifies this
+            # continuation, including when it truncates before the closer.
             channel_end = next(
                 (i for i, token_id in enumerate(ids) if token_id == self._channel_end),
                 -1,
@@ -1161,6 +1188,12 @@ class Gemma4Renderer:
             if channel_end != -1:
                 reasoning = self._decode(ids[:channel_end]).strip()
                 cursor = channel_end + 1
+            else:
+                return ParsedResponse(
+                    content="",
+                    reasoning_content=self._decode(ids).strip(),
+                    reasoning_complete=False,
+                )
 
         tool_calls: list[ParsedToolCall] = []
         while cursor < len(ids):
@@ -1252,6 +1285,24 @@ class Gemma4Renderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_call_start,
+            initial_only=False,
+            open_id=self._channel_start,
+            close_id=self._channel_end,
+            open_marker="<|channel>thought",
+            close_marker="<channel|>",
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._channel_end]
+
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
             new_messages,
@@ -1283,7 +1334,7 @@ class Gemma4Renderer:
             parsed_calls = [
                 call
                 for call in self.parse_response(
-                    previous_completion_ids, tools=tools
+                    previous_completion_ids, tools=tools, prompt_ids=previous_prompt_ids
                 ).tool_calls
                 if call.name
             ]

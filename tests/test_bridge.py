@@ -94,6 +94,13 @@ def _simulate_prior_turn(renderer, assistant=None):
     full_with_assistant = renderer.render_ids(
         prior + assistant, add_generation_prompt=False
     )
+    # Some templates render a content-only historical turn without the live
+    # prompt's reasoning prefill (Harmony also changes analysis to final).
+    # Slice only at an actual shared boundary; cutting by length alone silently
+    # removes content or a reasoning closer and manufactures a malformed turn.
+    if full_with_assistant[: len(prev_prompt)] != prev_prompt:
+        prev_prompt = renderer.render_ids(prior, add_generation_prompt=False)
+        assert full_with_assistant[: len(prev_prompt)] == prev_prompt
     prev_completion = list(full_with_assistant[len(prev_prompt) :])
 
     # Trim past any trailing scaffolding the template emits AFTER the

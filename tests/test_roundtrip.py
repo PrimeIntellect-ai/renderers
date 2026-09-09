@@ -102,7 +102,7 @@ def test_roundtrip_content_only(rt_model, rt_tokenizer, rt_renderer):
     """Plain response, no thinking, no tool calls."""
     msg = {"role": "assistant", "content": "Four."}
     completion_ids = _extract_assistant_tokens(rt_renderer, PROMPT, msg)
-    parsed = rt_renderer.parse_response(completion_ids)
+    parsed = rt_renderer.parse_response(completion_ids, prompt_ids=[])
 
     assert "Four" in parsed.content, f"{rt_model}: lost content, got {parsed.content!r}"
     assert not parsed.tool_calls, (
@@ -122,7 +122,7 @@ def test_roundtrip_reasoning_and_content(rt_model, rt_tokenizer, rt_renderer):
         "reasoning_content": "Two plus two equals four.",
     }
     completion_ids = _extract_assistant_tokens(rt_renderer, PROMPT, msg)
-    parsed = rt_renderer.parse_response(completion_ids)
+    parsed = rt_renderer.parse_response(completion_ids, prompt_ids=[])
 
     assert "four" in parsed.content.lower(), (
         f"{rt_model}: lost content, got {parsed.content!r}"
@@ -170,7 +170,7 @@ def test_roundtrip_single_tool_call(
         ],
     }
     completion_ids = _extract_assistant_tokens(rt_renderer, PROMPT, msg)
-    parsed = rt_renderer.parse_response(completion_ids)
+    parsed = rt_renderer.parse_response(completion_ids, prompt_ids=[])
 
     assert parsed.tool_calls, f"{rt_model}: tool_calls lost, got {parsed.tool_calls!r}"
     assert len(parsed.tool_calls) == 1
@@ -218,7 +218,7 @@ def test_roundtrip_multiple_tool_calls(
         ],
     }
     completion_ids = _extract_assistant_tokens(rt_renderer, PROMPT, msg)
-    parsed = rt_renderer.parse_response(completion_ids)
+    parsed = rt_renderer.parse_response(completion_ids, prompt_ids=[])
 
     assert len(parsed.tool_calls) == 2, (
         f"{rt_model}: expected 2 tool_calls, got {parsed.tool_calls!r}"
@@ -259,10 +259,10 @@ def test_think_reasoning_parser_preserves_boundary_whitespace():
 
     parser = ThinkTextReasoningParser(tokenizer=None)
 
-    # Model naturally emits `\n<think>...</think>\nCONTENT` — the \n on
-    # each side of `</think>` is load-bearing.
+    # An initial reasoning block followed by a content newline. The newline
+    # after `</think>` belongs to the final content and must survive parsing.
     reasoning, content = parser.extract(
-        "\n<think>Reason text</think>\nThe answer is four."
+        "<think>Reason text</think>\nThe answer is four."
     )
 
     assert reasoning == "Reason text", f"reasoning boundary stripped: {reasoning!r}"

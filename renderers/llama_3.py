@@ -412,6 +412,7 @@ class Llama3Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_llama_3(
             self._tokenizer,

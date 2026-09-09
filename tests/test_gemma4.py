@@ -281,7 +281,7 @@ def test_parser_recovers_prompt_opened_post_tool_reasoning():
         add_special_tokens=False,
     )
 
-    parsed = renderer.parse_response(completion)
+    parsed = renderer.parse_response(completion, prompt_ids=prompt)
 
     assert parsed.reasoning_content == "Need synthesize."
     assert parsed.content == "It is sunny."

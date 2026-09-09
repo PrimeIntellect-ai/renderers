@@ -22,6 +22,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
+
 from renderers.base import (
     Message,
     ParsedResponse,
@@ -783,13 +785,20 @@ class DeepSeekV4Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_deepseek_v4(
             self._tokenizer,
             token_ids,
             stop_ids={self._eos},
-            thinking_enabled=self.config.enable_thinking,
+            thinking_enabled=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=set(self.get_stop_token_ids()),
+                assistant_prefix="<｜Assistant｜>",
+            ),
             think_end_id=self._think_end,
+            think_start_id=self._think_start,
             dsml_id=self._dsml,
         )
 
@@ -810,6 +819,20 @@ class DeepSeekV4Renderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._dsml,
+            assistant_prefix="<｜Assistant｜>",
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._think_end]
+
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
             new_messages,

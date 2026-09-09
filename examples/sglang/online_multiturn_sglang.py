@@ -161,7 +161,7 @@ async def run_one(
         max_new_tokens=max_new_tokens,
     )
     completion1 = completion_ids(output1, prompt_ids)
-    parsed1 = renderer.parse_response(completion1)
+    parsed1 = renderer.parse_response(completion1, prompt_ids=prompt_ids)
     print_parsed(label, "turn 1", parsed1)
 
     assistant: dict[str, Any] = {"role": "assistant", "content": parsed1.content}
@@ -226,7 +226,9 @@ async def run_one(
         max_new_tokens=max_new_tokens,
     )
     completion2 = completion_ids(output2, bridged_ids)
-    print_parsed(label, "turn 2", renderer.parse_response(completion2))
+    print_parsed(
+        label, "turn 2", renderer.parse_response(completion2, prompt_ids=bridged_ids)
+    )
 
 
 async def main() -> None:

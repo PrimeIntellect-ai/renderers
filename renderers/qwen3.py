@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
+
 from renderers.base import (
     Message,
     ParsedResponse,
@@ -292,6 +294,7 @@ class Qwen3Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — hermes wire format quotes strings, schema not needed
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_qwen3(
             self._tokenizer,
@@ -300,6 +303,11 @@ class Qwen3Renderer:
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
             reasoning_end_id=self._think_end,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=set(self.get_stop_token_ids()),
+            ),
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -319,6 +327,18 @@ class Qwen3Renderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_call,
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._think_end]
 
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,

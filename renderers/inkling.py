@@ -39,6 +39,8 @@ from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
+from renderers.reasoning import prompt_ends_in_reasoning
+
 from renderers.base import (
     Content,
     Message,
@@ -515,6 +517,7 @@ class InklingRenderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — args are native JSON, no schema coercion
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_inkling(
             self._tokenizer,
@@ -526,6 +529,18 @@ class InklingRenderer:
             invoke_json_id=self._content_invoke_tool_json,
             invoke_text_id=self._content_invoke_tool_text,
             end_message_id=self._end_message,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                open_marker="<|content_thinking|>",
+                close_marker="<|end_message|>",
+                stop_ids={
+                    *self.get_stop_token_ids(),
+                    self._end_message,
+                    self._content_text,
+                },
+                initial_only=False,
+            ),
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -795,6 +810,32 @@ class InklingRenderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        completion_end = next(
+            (
+                i
+                for i, t in enumerate(previous_completion_ids)
+                if t in self.get_stop_token_ids()
+            ),
+            len(previous_completion_ids),
+        )
+        tail = [*previous_prompt_ids, *previous_completion_ids[:completion_end]]
+        segment_start = next(
+            (
+                i + 1
+                for i in range(len(tail) - 1, -1, -1)
+                if tail[i] == self._end_message
+            ),
+            0,
+        )
+        segment = tail[segment_start:]
+        if segment and segment[0] == self._message_model:
+            segment = segment[1:]
+        if segment and segment[0] == self._content_thinking:
+            if completion_end != len(previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._end_message]
+
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention, new_messages
         ):

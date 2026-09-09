@@ -146,3 +146,17 @@ def test_default_renderer_without_parsers_is_backward_compatible():
     assert parsed.reasoning_content == "r"
     assert parsed.content == "a"
     assert parsed.tool_calls == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Before<think>reason</think>After",
+        "Before<think>unfinished",
+        "\n<think>reason</think>After",
+        "Before</think>After",
+    ],
+)
+def test_think_parser_requires_initial_opener(text):
+    parser = get_reasoning_parser("think", None)
+    assert parser.extract(text) == (None, text)

@@ -41,7 +41,7 @@ class _FakeRenderer:
         return [99]
 
     def parse_response(
-        self, completion_ids: list[int], *, tools=None
+        self, completion_ids: list[int], *, tools=None, prompt_ids=None
     ) -> ParsedResponse:
         assert completion_ids == [7, 8]
         # Stores tools so tests can assert the client plumbed them through.
@@ -339,7 +339,7 @@ class _MalformedToolRenderer(_FakeRenderer):
     """Returns only a malformed tool-call attempt — finish_reason must stay "stop"."""
 
     def parse_response(
-        self, completion_ids: list[int], *, tools=None
+        self, completion_ids: list[int], *, tools=None, prompt_ids=None
     ) -> ParsedResponse:
         return ParsedResponse(
             content="",
@@ -726,3 +726,30 @@ def test_generate_caches_max_prompt_len_lookup_failure():
     assert len(client.calls) == 1
     assert result["prompt_ids"] == list(range(10))
     assert _max_prompt_len_cache[("http://no-models:8000/v1", "test-model")] is None
+
+
+@pytest.mark.parametrize(
+    "finish,reasoning_complete", [("stop", False), ("length", True), ("stop", None)]
+)
+def test_generate_forwards_reasoning_state_without_classifying_acceptance(
+    finish,
+    reasoning_complete,
+):
+    class ContextRenderer(_FakeRenderer):
+        def parse_response(self, completion_ids, *, tools=None, prompt_ids=None):
+            assert prompt_ids == [1, 2, 3]
+            assert completion_ids == [7, 8]
+            return ParsedResponse(
+                content="",
+                reasoning_content="reasoning",
+                reasoning_complete=reasoning_complete,
+            )
+
+    client = _FakeClient()
+    client.choice["finish_reason"] = finish
+    result = _run_generate(client, ContextRenderer())
+    assert result["reasoning_complete"] is reasoning_complete
+    assert result["finish_reason"] == finish
+    assert result["completion_ids"] == [7, 8]
+    assert result["completion_logprobs"] == [-0.1, -0.2]
+    assert result["content"] == ""

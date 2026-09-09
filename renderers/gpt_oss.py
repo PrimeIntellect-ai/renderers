@@ -63,7 +63,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import GptOssRendererConfig
-from renderers.parsing import parse_gpt_oss
+from renderers.parsing import harmony_blocks, parse_gpt_oss
 
 
 def _reasoning_effort(effort: str | None) -> ReasoningEffort:
@@ -480,15 +480,39 @@ class GptOssRenderer:
             add_generation_prompt=add_generation_prompt,
         ).token_ids
 
+    def _response_prefix(
+        self, token_ids: list[int], prompt_ids: list[int] | None
+    ) -> list[int]:
+        """Recover the Harmony header supplied by the generation prompt."""
+        if prompt_ids and (not token_ids or token_ids[0] != self._start):
+            if self._start in prompt_ids:
+                start = len(prompt_ids) - 1 - prompt_ids[::-1].index(self._start)
+                tail = prompt_ids[start:]
+                if self._message in tail:
+                    return tail[: tail.index(self._message) + 1]
+        return []
+
     def parse_response(
         self,
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — harmony args land in a JSON object, schema not needed
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
-        return parse_gpt_oss(
+        prefix = self._response_prefix(token_ids, prompt_ids)
+        if not prefix and (not token_ids or token_ids[0] != self._start):
+            end = next(
+                (i for i, t in enumerate(token_ids) if t in self.get_stop_token_ids()),
+                len(token_ids),
+            )
+            return ParsedResponse(
+                content=self._tokenizer.decode(
+                    token_ids[:end], skip_special_tokens=False
+                )
+            )
+        parsed = parse_gpt_oss(
             self._tokenizer,
-            token_ids,
+            [*prefix, *token_ids],
             return_id=self._return,
             call_id=self._call,
             start_id=self._start,
@@ -497,6 +521,12 @@ class GptOssRenderer:
             message_id=self._message,
             constrain_id=self._constrain,
         )
+
+        for tc in parsed.tool_calls:
+            if tc.token_span is not None:
+                start, end = tc.token_span
+                tc.token_span = (max(0, start - len(prefix)), end - len(prefix))
+        return parsed
 
     def get_stop_token_ids(self) -> list[int]:
         return [self._return, self._call]
@@ -521,6 +551,34 @@ class GptOssRenderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        # Harmony closes analysis with <|end|> or <|call|>, not <|return|>.
+        # Inspect framing only; the bridge never needs tool arguments.
+        if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+            end = (
+                previous_completion_ids.index(self._return)
+                if self._return in previous_completion_ids
+                else len(previous_completion_ids)
+            )
+            ids = [
+                *self._response_prefix(previous_completion_ids, previous_prompt_ids),
+                *previous_completion_ids[:end],
+            ]
+            for start, header_end, _, closed in harmony_blocks(
+                ids,
+                start_id=self._start,
+                message_id=self._message,
+                end_id=self._end,
+                call_id=self._call,
+            ):
+                header = ids[start + 1 : header_end]
+                if not closed and self._channel in header:
+                    channel = self._tokenizer.decode(
+                        header[header.index(self._channel) + 1 :],
+                        skip_special_tokens=False,
+                    ).split()
+                    if channel and channel[0] == "analysis":
+                        return None
 
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,

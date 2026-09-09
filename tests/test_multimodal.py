@@ -749,7 +749,11 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     # AFTER the prompt's assistant opener — response text then the renderer's
     # own turn-close token.
     close_id = renderer.get_stop_token_ids()[0]
-    completion_ids = tokenizer.encode("Saw it.", add_special_tokens=False) + [close_id]
+    # A thinking-prefilled prompt requires a sampled reasoning close before
+    # final content. Otherwise this fixture would be EOS inside reasoning.
+    prefix = tokenizer.decode(initial_rendered.token_ids, skip_special_tokens=False)
+    response = "</think>Saw it." if prefix.rstrip().endswith("<think>") else "Saw it."
+    completion_ids = tokenizer.encode(response, add_special_tokens=False) + [close_id]
 
     bridged_raw = renderer.bridge_to_next_turn(
         previous_prompt_ids=initial_rendered.token_ids,
@@ -1078,7 +1082,9 @@ def test_bridge_refuses_when_add_vision_id_loses_prior_count(
 
     initial_rendered = renderer.render(initial, add_generation_prompt=True)
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    completion_ids = tokenizer.encode("Saw it.", add_special_tokens=False) + [im_end_id]
+    prefix = tokenizer.decode(initial_rendered.token_ids, skip_special_tokens=False)
+    response = "</think>Saw it." if prefix.rstrip().endswith("<think>") else "Saw it."
+    completion_ids = tokenizer.encode(response, add_special_tokens=False) + [im_end_id]
 
     # No previous_multi_modal_data → bridge must refuse so the caller
     # falls back to a full re-render (where the counter restarts from

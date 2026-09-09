@@ -73,7 +73,7 @@ def pytest_generate_tests(metafunc):
 def _parse(model: str, renderer_name: str, text: str, tools):
     tok, renderer = _load(model, renderer_name)
     ids = tok.encode(text, add_special_tokens=False)
-    return renderer.parse_response(ids, tools=tools)
+    return renderer.parse_response(ids, tools=tools, prompt_ids=[])
 
 
 def _statuses(parsed):

@@ -203,6 +203,54 @@ def test_generate_builds_request_body_and_parses_response(usage):
     assert tc.status == ToolCallParseStatus.OK
 
 
+@pytest.mark.parametrize("dtype", ["uint8", "uint16"])
+@pytest.mark.parametrize(
+    "usage",
+    [
+        None,
+        {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 2},
+            "completion_tokens_details": {"reasoning_tokens": 1},
+        },
+    ],
+)
+def test_generate_forwards_paired_routing_and_metadata(dtype, usage):
+    client = _FakeClient()
+    client.usage = usage
+    ids = np.array([[[5, 2]], [[1, 4]]], dtype=dtype)
+    weights = np.array([[[0.75, 0.25]], [[0.625, 0.375]]], dtype="<f4")
+    routed = {
+        "data": base64.b64encode(ids.tobytes()).decode("ascii"),
+        "shape": list(ids.shape),
+        "dtype": dtype,
+        "start": 3,
+        "format_version": 1,
+        "weights": {
+            "data": base64.b64encode(weights.tobytes()).decode("ascii"),
+            "dtype": "float32",
+        },
+    }
+    client.choice["routed_experts"] = routed
+
+    result = _run_generate(client)
+    actual = result["routed_experts"]
+
+    assert result["usage"] == usage
+    assert isinstance(actual["data"], memoryview)
+    assert isinstance(actual["weights"]["data"], memoryview)
+    assert base64.b64decode(actual["data"], validate=True) == ids.tobytes()
+    assert (
+        base64.b64decode(actual["weights"]["data"], validate=True) == weights.tobytes()
+    )
+    assert {
+        key: value for key, value in actual.items() if key not in {"data", "weights"}
+    } == {key: value for key, value in routed.items() if key not in {"data", "weights"}}
+    assert actual["weights"]["dtype"] == "float32"
+
+
 def test_generate_process_multimodal_false_sends_content_parts():
     class DeferredMultimodalRenderer(_FakeRenderer):
         supports_process_multimodal = True

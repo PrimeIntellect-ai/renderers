@@ -45,7 +45,6 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
-from renderers.parsing import unfinished_reasoning
 
 from renderers.configs import Gemma4RendererConfig
 from renderers.qwen3_vl import (
@@ -1139,7 +1138,7 @@ class Gemma4Renderer:
             stop_ids=stop_ids,
             initial_only=False,
         )
-        if unfinished := unfinished_reasoning(
+        boundary = scan_reasoning(
             self._tokenizer,
             ids,
             prefilled=prefilled_thinking,
@@ -1147,11 +1146,14 @@ class Gemma4Renderer:
             open_id=self._channel_start,
             close_id=self._channel_end,
             tool_start_id=self._tool_call_start,
-        ):
-            unfinished.reasoning_content = (
-                (unfinished.reasoning_content or "").removeprefix("thought\n").strip()
+        )
+        if boundary.is_open:
+            reasoning = (boundary.text or "").removeprefix("thought\n").strip()
+            return ParsedResponse(
+                content="",
+                reasoning_content=reasoning,
+                reasoning_complete=False,
             )
-            return unfinished
         reasoning: str | None = None
         content_ids: list[int] = []
         cursor = 0

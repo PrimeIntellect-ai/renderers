@@ -637,7 +637,7 @@ class ParsedResponse:
 
     False means generation ended inside reasoning; this is unrelated to the
     engine finish reason, tool-call validity, or whether final text is useful.
-    None means the parser needs prompt context to distinguish the channels.
+    None means the parser cannot determine the state for its reasoning format.
     """
 
 

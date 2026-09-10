@@ -29,16 +29,6 @@ from renderers.base import (
 )
 
 
-def unfinished_reasoning(tokenizer, ids: list[int], **kwargs) -> ParsedResponse | None:
-    """Convert an open boundary into a reasoning-only parser result."""
-    boundary = scan_reasoning(tokenizer, ids, **kwargs)
-    if boundary.is_open:
-        return ParsedResponse(
-            content="", reasoning_content=boundary.text, reasoning_complete=False
-        )
-    return None
-
-
 # ── Schema-aware argument coercion ──────────────────────────────────
 #
 # XML-style tool-call formats render argument values verbatim inside
@@ -230,17 +220,8 @@ def parse_qwen3(
             content="", reasoning_content=boundary.text, reasoning_complete=False
         )
 
-    # Reasoning is resolved before tool calls. Thinking models (e.g.
-    # Qwen3-*-Thinking) routinely draft ``<tool_call>`` blocks *inside* their
-    # ``<think>...</think>`` trace while planning; those are reasoning, not
-    # real invocations. Anchoring the tool-call scan after the ``</think>``
-    # boundary keeps in-think drafts out of ``tool_calls`` (otherwise they
-    # surface as phantom/duplicate calls) and out of the reasoning/content
-    # split. Mirrors vLLM's DelegatingParser, which runs the reasoning parser
-    # first and tool-parses only the post-``</think>`` content.
-    # ``reasoning_end_id`` is the ``</think>`` token id; when it's absent
-    # (``None``) or the model never closed its reasoning, the scan falls back
-    # to the whole stream (prior behavior).
+    # Tool calls are parsed only after the initial reasoning region. An open
+    # region returned above; a closed region can contain non-executable drafts.
     reasoning_end = (
         _find(ids, reasoning_end_id)
         if reasoning_end_id is not None and boundary.text is not None
@@ -1800,8 +1781,7 @@ def parse_gpt_oss(
 ) -> ParsedResponse:
     """Parse GptOss (Harmony) completion tokens.
 
-    Finds the earliest terminal token (<|return|> or <|call|>), then walks the
-    token stream block-by-block to extract:
+    Stops at the first <|return|>, then walks message blocks to extract:
 
     - analysis channel              → reasoning_content
     - final channel                 → content
@@ -1822,6 +1802,7 @@ def parse_gpt_oss(
     reasoning_parts: list[str] = []
     content_parts: list[str] = []
     tool_calls: list[ParsedToolCall] = []
+    reasoning_complete = True
 
     for block_start, msg_pos, body_end, body_closed in harmony_blocks(
         ids,
@@ -1874,24 +1855,22 @@ def parse_gpt_oss(
                 )
         elif channel == "analysis":
             reasoning_parts.append(body_text)
-            if not body_closed:
-                return ParsedResponse(
-                    content="",
-                    reasoning_content="".join(reasoning_parts).strip(),
-                    reasoning_complete=False,
-                )
+            # A new message ends this channel even without a message closer.
+            # Only analysis that reaches the end of the stream remains open.
+            reasoning_complete = body_closed or body_end < len(ids)
         elif channel == "final":
             content_parts.append(body_text)
         elif channel == "commentary":
             content_parts.append(body_text)
 
-    reasoning = "".join(reasoning_parts).strip() or None
+    reasoning = "".join(reasoning_parts).strip() or (None if reasoning_complete else "")
     content = "".join(content_parts).strip()
 
     return ParsedResponse(
         content=content,
         reasoning_content=reasoning,
         tool_calls=tool_calls,
+        reasoning_complete=reasoning_complete,
     )
 
 

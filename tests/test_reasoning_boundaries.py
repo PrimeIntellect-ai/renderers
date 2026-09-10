@@ -428,3 +428,77 @@ def test_missing_and_empty_prompt_are_self_contained(name):
         with_prompt = renderer.parse_response(incomplete, prompt_ids=prompt)
         assert with_prompt.reasoning_complete is False
         assert with_prompt.content == ""
+
+
+@pytest.mark.parametrize("prefilled", [False, True])
+@pytest.mark.parametrize("channel", ["final", "commentary", "tool"])
+@pytest.mark.parametrize("terminated", [False, True])
+def test_harmony_later_channels_end_unterminated_analysis(
+    prefilled, channel, terminated
+):
+    tok, renderer = _renderer("gpt-oss")
+    prompt, _, _ = _thinking_stream("gpt-oss", tok, renderer)
+    opening = "<|start|>assistant<|channel|>analysis<|message|>"
+    header = "assistant to=functions.weather" if channel == "tool" else "assistant"
+    channel_name = "commentary" if channel == "tool" else channel
+    body = '{"city":"Berlin"}' if channel == "tool" else "Answer"
+    stop = "<|call|>" if channel == "tool" else "<|return|>"
+    text = (
+        ("" if prefilled else opening)
+        + "Reasoning"
+        + f"<|start|>{header}<|channel|>{channel_name}<|message|>{body}"
+        + (stop if terminated else "")
+    )
+    sampled = _encode(tok, text)
+    parsed = renderer.parse_response(sampled, prompt_ids=prompt if prefilled else [])
+    assert parsed.reasoning_content == "Reasoning"
+    assert parsed.reasoning_complete is True
+    assert parsed.content == ("" if channel == "tool" else "Answer")
+    if channel == "tool":
+        from renderers.base import ToolCallParseStatus
+
+        assert len(parsed.tool_calls) == 1
+        call = parsed.tool_calls[0]
+        assert call.name == "weather"
+        assert call.arguments == {"city": "Berlin"}
+        assert call.status == (
+            ToolCallParseStatus.OK if terminated else ToolCallParseStatus.UNCLOSED_BLOCK
+        )
+        assert (
+            _encode(
+                tok,
+                f"<|start|>{header}<|channel|>{channel_name}<|message|>{body}"
+                + (stop if terminated else ""),
+            )
+            == sampled[slice(*call.token_span)]
+        )
+    else:
+        assert not parsed.tool_calls
+    bridge = renderer.bridge_to_next_turn(
+        prompt, sampled, [{"role": "user", "content": "Continue."}]
+    )
+    assert bridge is not None
+    prefix = prompt + sampled
+    assert bridge.token_ids[: len(prefix)] == prefix
+    assert not any(bridge.sampled_mask[len(prefix) :])
+
+
+def test_harmony_later_unfinished_analysis_preserves_earlier_output():
+    tok, renderer = _renderer("gpt-oss")
+    prompt, _, _ = _thinking_stream("gpt-oss", tok, renderer)
+    sampled = _encode(
+        tok,
+        "First reasoning"
+        "<|start|>assistant<|channel|>commentary<|message|>Working."
+        "<|start|>assistant<|channel|>analysis<|message|>More reasoning<|return|>",
+    )
+    parsed = renderer.parse_response(sampled, prompt_ids=prompt)
+    assert parsed.content == "Working."
+    assert parsed.reasoning_content == "First reasoningMore reasoning"
+    assert parsed.reasoning_complete is False
+    assert (
+        renderer.bridge_to_next_turn(
+            prompt, sampled, [{"role": "user", "content": "Continue."}]
+        )
+        is None
+    )

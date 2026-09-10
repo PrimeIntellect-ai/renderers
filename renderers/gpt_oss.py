@@ -564,7 +564,7 @@ class GptOssRenderer:
                 *self._response_prefix(previous_completion_ids, previous_prompt_ids),
                 *previous_completion_ids[:end],
             ]
-            for start, header_end, _, closed in harmony_blocks(
+            for start, header_end, body_end, closed in harmony_blocks(
                 ids,
                 start_id=self._start,
                 message_id=self._message,
@@ -572,7 +572,7 @@ class GptOssRenderer:
                 call_id=self._call,
             ):
                 header = ids[start + 1 : header_end]
-                if not closed and self._channel in header:
+                if not closed and body_end == len(ids) and self._channel in header:
                     channel = self._tokenizer.decode(
                         header[header.index(self._channel) + 1 :],
                         skip_special_tokens=False,

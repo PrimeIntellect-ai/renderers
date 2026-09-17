@@ -177,12 +177,10 @@ MODEL_CATALOG = (
     _model(
         "moonshotai/Kimi-K2.5",
         bridge=True,
-        excluded={"inline-thinking-history"},
     ),
     _model(
         "moonshotai/Kimi-K2.6",
         bridge=False,
-        excluded={"inline-thinking-history"},
     ),
     _model(
         "deepseek-ai/DeepSeek-V3",
@@ -374,26 +372,6 @@ SCENARIOS = (
                 "content": "6",
             },
         ],
-    ),
-    _scenario(
-        "inline-thinking-history",
-        [
-            {"role": "user", "content": "First"},
-            {
-                "role": "assistant",
-                "content": "<think>raw reasoning</think>visible answer",
-            },
-            {"role": "user", "content": "Second"},
-        ],
-        only_renderers={
-            "prime-qwen3",
-            "kimi-k2",
-            "nemotron-3",
-            "nemotron-3-ultra",
-            "nemotron-3.5",
-            "deepseek-v3",
-            "deepseek-r1",
-        },
     ),
     _scenario(
         "whitespace",
@@ -735,6 +713,33 @@ def scenario_is_valid(
     if (
         scenario.only_renderers
         and case.resolved_renderer not in scenario.only_renderers
+    ):
+        return False
+
+    if case.resolved_renderer in {"deepseek-v3", "qwen3-vl", "llama-3", "default"}:
+        if any(
+            message.get("role") == "assistant"
+            and bool(message.get("reasoning_content"))
+            for message in scenario.messages
+        ):
+            return False
+
+    has_reasoning = any(
+        message.get("role") == "assistant" and bool(message.get("reasoning_content"))
+        for message in scenario.messages
+    )
+    if (
+        has_reasoning
+        and case.resolved_renderer in {"laguna-xs.2", "laguna-m.1"}
+        and kwargs.get("render_assistant_messages_raw") is True
+    ):
+        return False
+    if (
+        has_reasoning
+        and case.resolved_renderer == "hy3"
+        and kwargs.get("raw_last_assistant") is True
+        and scenario.messages[-1].get("role") == "assistant"
+        and not scenario.messages[-1].get("tool_calls")
     ):
         return False
 

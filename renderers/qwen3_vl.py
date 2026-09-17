@@ -51,6 +51,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
+    validate_canonical_messages,
 )
 from renderers.configs import Qwen3VLRendererConfig
 from renderers.parsing import parse_qwen3
@@ -312,6 +313,7 @@ class Qwen3VLRenderer:
     ``thinking_retention`` still controls whether the bridge is attempted.
     """
 
+    supports_reasoning_content = False
     supports_process_multimodal = True
 
     def __init__(
@@ -413,8 +415,6 @@ class Qwen3VLRenderer:
                         continue
                     if "text" in item:
                         parts.append(item["text"])
-                    elif item.get("type") == "thinking" and "thinking" in item:
-                        parts.append(item["thinking"])
                 else:
                     raise ValueError(f"Unexpected content item: {item}")
             return "".join(parts)
@@ -463,6 +463,11 @@ class Qwen3VLRenderer:
         add_generation_prompt: bool = False,
         process_multimodal: bool = True,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 

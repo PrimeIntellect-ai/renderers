@@ -1,15 +1,12 @@
 """Qwen3.8 Renderer — mirrors the Qwen3.8 Jinja chat template.
 
 Qwen3.8 retains Qwen3.6's multimodal message grammar and JSON-safe tool
-argument serialization, with three template changes:
+argument serialization, with two template changes:
 
 - ``reasoning_effort`` can be ``xhigh`` (default), ``medium``, or ``low``;
   xhigh/low inject a matching instruction into the system prompt.
 - ``preserve_thinking`` defaults to true, so historical reasoning blocks are
   retained unless explicitly disabled.
-- Legacy inline ``<think>...</think>`` text is no longer split out of
-  assistant ``content``; only ``reasoning_content`` populates the reasoning
-  block.
 """
 
 from __future__ import annotations
@@ -54,13 +51,6 @@ class Qwen38Renderer(Qwen36Renderer):
         if last_query_index == len(messages):
             raise ValueError("No user query found in messages.")
         return last_query_index
-
-    @staticmethod
-    def _extract_assistant_parts(msg: Message, content: str) -> tuple[str, str]:
-        reasoning_content = msg.get("reasoning_content")
-        if not isinstance(reasoning_content, str):
-            reasoning_content = ""
-        return reasoning_content.strip(), content
 
 
 __all__ = ["Qwen38Renderer"]

@@ -45,7 +45,9 @@ def test_discriminated_union_dispatches_on_name():
     matching typed config; the union ``RendererConfig`` is what
     downstream consumers (prime-rl, verifiers) hold as a single field."""
     ta = TypeAdapter(RendererConfig)
-    parsed = ta.validate_python({"name": "glm-5", "enable_thinking": False, "clear_thinking": False})
+    parsed = ta.validate_python(
+        {"name": "glm-5", "enable_thinking": False, "clear_thinking": False}
+    )
     assert isinstance(parsed, GLM5RendererConfig)
     assert parsed.enable_thinking is False
     assert parsed.clear_thinking is False
@@ -70,7 +72,9 @@ def test_default_renderer_config_accepts_arbitrary_extras():
     """``DefaultRenderer`` wraps ``apply_chat_template`` for unknown
     templates, so its config uses ``extra="allow"`` and surfaces extras
     via ``model_extra``."""
-    cfg = DefaultRendererConfig(tool_parser="qwen3", enable_thinking=False, custom_jinja_kwarg=True)
+    cfg = DefaultRendererConfig(
+        tool_parser="qwen3", enable_thinking=False, custom_jinja_kwarg=True
+    )
     assert cfg.tool_parser == "qwen3"
     assert cfg.model_extra == {
         "enable_thinking": False,

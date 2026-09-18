@@ -314,7 +314,9 @@ class RenderedTokens:
     message_tool_names: list[str | None] = field(default_factory=list)
     multi_modal_data: "MultiModalData | None" = None
 
-    def tokens_per_message(self, n_messages: int | None = None, *, sampled_only: bool = False) -> list[int]:
+    def tokens_per_message(
+        self, n_messages: int | None = None, *, sampled_only: bool = False
+    ) -> list[int]:
         """Count rendered tokens attributed to each caller-relative message.
 
         ``out[i]`` is the number of tokens with ``message_indices[k] == i``,
@@ -1105,7 +1107,9 @@ def _require_transformers(feature: str) -> Any:
     try:
         import transformers
     except ImportError as exc:
-        raise ImportError(f"{feature} requires Transformers. {_TRANSFORMERS_INSTALL_HINT}") from exc
+        raise ImportError(
+            f"{feature} requires Transformers. {_TRANSFORMERS_INSTALL_HINT}"
+        ) from exc
     return transformers
 
 
@@ -1136,7 +1140,9 @@ def _model_has_vision_config(model_name: str) -> bool:
             "model."
         ) from exc
     try:
-        cfg = transformers.AutoConfig.from_pretrained(model_name, trust_remote_code=False)
+        cfg = transformers.AutoConfig.from_pretrained(
+            model_name, trust_remote_code=False
+        )
     except Exception:
         return False
     # Most VLM configs nest a vision tower as ``vision_config`` (Qwen-VL,
@@ -1216,7 +1222,9 @@ def _preserve_requested_tokenizer_name(
     return tokenizer
 
 
-def _load_fast_tokenizer_directly(model_name_or_path: str, revision: str | None) -> Any | None:
+def _load_fast_tokenizer_directly(
+    model_name_or_path: str, revision: str | None
+) -> Any | None:
     """Load a self-contained fast tokenizer without building the model config.
 
     ``AutoTokenizer.from_pretrained`` eagerly constructs the *model* config to
@@ -1238,7 +1246,9 @@ def _load_fast_tokenizer_directly(model_name_or_path: str, revision: str | None)
     try:
         if "auto_map" in get_tokenizer_config(model_name_or_path, revision=revision):
             return None
-        return PreTrainedTokenizerFast.from_pretrained(model_name_or_path, revision=revision)
+        return PreTrainedTokenizerFast.from_pretrained(
+            model_name_or_path, revision=revision
+        )
     except Exception:
         return None
 
@@ -1256,7 +1266,9 @@ def _load_tokenizer_via_auto(model_name_or_path: str, **kwargs) -> Any:
     try:
         return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
     except Exception as exc:
-        tok = _load_fast_tokenizer_directly(model_name_or_path, revision=kwargs.get("revision"))
+        tok = _load_fast_tokenizer_directly(
+            model_name_or_path, revision=kwargs.get("revision")
+        )
         if tok is None:
             raise
         logger.debug(
@@ -1412,7 +1424,9 @@ def create_renderer(
     )
     cls = RENDERER_REGISTRY.get(config.name)
     if cls is None:
-        raise ValueError(f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}")
+        raise ValueError(
+            f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
+        )
     return cls(tokenizer, config)
 
 
@@ -1571,7 +1585,9 @@ class RenderedTrainingSample:
     mm_token_type_ids: list[int] | None = None
 
 
-def _build_mm_token_type_ids(mm_placeholders: dict[str, list[PlaceholderRange]], length: int) -> list[int]:
+def _build_mm_token_type_ids(
+    mm_placeholders: dict[str, list[PlaceholderRange]], length: int
+) -> list[int]:
     """Per-token modality flags (0=text, 1=image, 2=video) from placeholder ranges."""
     ids = [0] * length
     for modality, ranges in mm_placeholders.items():
@@ -1709,7 +1725,9 @@ def build_training_sample(
         and (role_to_mask is None or role_to_mask(messages[-1]))
     ):
         stop_ids = set(renderer.get_stop_token_ids())
-        last_trainable = next((k for k in range(len(loss_mask) - 1, -1, -1) if loss_mask[k]), None)
+        last_trainable = next(
+            (k for k in range(len(loss_mask) - 1, -1, -1) if loss_mask[k]), None
+        )
         if last_trainable is None or token_ids[last_trainable] not in stop_ids:
             token_ids.append(renderer.get_stop_token_ids()[0])
             # loss_mask=True marks the token as trainable — the appended
@@ -1723,7 +1741,9 @@ def build_training_sample(
     if mm is not None and mm.is_empty():
         mm = None
     mm_token_type_ids = (
-        _build_mm_token_type_ids(mm.mm_placeholders, len(token_ids)) if mm is not None and mm.mm_placeholders else None
+        _build_mm_token_type_ids(mm.mm_placeholders, len(token_ids))
+        if mm is not None and mm.mm_placeholders
+        else None
     )
     return RenderedTrainingSample(
         token_ids=token_ids,
@@ -1877,7 +1897,9 @@ def _infer_offsets_from_decode(
     return offsets
 
 
-def _content_mask_or_empty(tokenizer: Tokenizer, content_mask: list[bool]) -> list[bool]:
+def _content_mask_or_empty(
+    tokenizer: Tokenizer, content_mask: list[bool]
+) -> list[bool]:
     """Return exact content attribution, or the empty-list unavailable sentinel."""
     if _get_offset_tokenizer(tokenizer) is None:
         return []
@@ -2074,7 +2096,9 @@ def build_trajectory_step(
     the completion).
     """
     has_completion = len(completion_messages) > 0
-    prompt_ids = renderer.render_ids(prompt_messages, tools=tools, add_generation_prompt=has_completion)
+    prompt_ids = renderer.render_ids(
+        prompt_messages, tools=tools, add_generation_prompt=has_completion
+    )
     full_rendered = renderer.render(prompt_messages + completion_messages, tools=tools)
     full_ids = full_rendered.token_ids
 
@@ -2090,6 +2114,9 @@ def build_trajectory_step(
         "routed_experts": None,
         "sampling_mask": None,
     }
-    if full_rendered.multi_modal_data is not None and not full_rendered.multi_modal_data.is_empty():
+    if (
+        full_rendered.multi_modal_data is not None
+        and not full_rendered.multi_modal_data.is_empty()
+    ):
         out["multi_modal_data"] = full_rendered.multi_modal_data
     return out

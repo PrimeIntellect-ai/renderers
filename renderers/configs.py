@@ -38,7 +38,9 @@ def _reject_thinking_retention_conflict(
     fields_set = config.__pydantic_fields_set__
     requested = getattr(config, "thinking_retention", None)
     if kwarg_name in fields_set and requested is not None:
-        implied = false_implies if getattr(config, kwarg_name) is False else true_implies
+        implied = (
+            false_implies if getattr(config, kwarg_name) is False else true_implies
+        )
         if requested == implied:
             return
         raise ValueError(
@@ -238,7 +240,9 @@ class Qwen36RendererConfig(BaseRendererConfig):
     """Qwen3.6 renderer config. Inherits Qwen3.5's template surface."""
 
     name: Literal["qwen3.6"] = "qwen3.6"
-    _template_fields = frozenset({"enable_thinking", "add_vision_id", "preserve_thinking"})
+    _template_fields = frozenset(
+        {"enable_thinking", "add_vision_id", "preserve_thinking"}
+    )
 
     enable_thinking: bool | None = None
     """See :class:`Qwen35RendererConfig.enable_thinking`."""
@@ -817,7 +821,9 @@ class Nemotron3RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["nemotron-3"] = "nemotron-3"
-    _template_fields = frozenset({"enable_thinking", "truncate_history_thinking", "low_effort"})
+    _template_fields = frozenset(
+        {"enable_thinking", "truncate_history_thinking", "low_effort"}
+    )
 
     enable_thinking: bool = True
     """When ``True``, the generation prompt includes ``<think>``. Mirrors
@@ -860,7 +866,9 @@ class Nemotron3UltraRendererConfig(BaseRendererConfig):
     """
 
     name: Literal["nemotron-3-ultra"] = "nemotron-3-ultra"
-    _template_fields = frozenset({"enable_thinking", "truncate_history_thinking", "medium_effort"})
+    _template_fields = frozenset(
+        {"enable_thinking", "truncate_history_thinking", "medium_effort"}
+    )
 
     enable_thinking: bool = True
     """See :class:`Nemotron3RendererConfig.enable_thinking`."""
@@ -954,7 +962,9 @@ class DeepSeekV4RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["deepseek-v4"] = "deepseek-v4"
-    _template_fields = frozenset({"enable_thinking", "drop_thinking", "reasoning_effort"})
+    _template_fields = frozenset(
+        {"enable_thinking", "drop_thinking", "reasoning_effort"}
+    )
 
     enable_thinking: bool = False
     """Select thinking mode.  ``False`` matches the official inference script."""
@@ -1070,7 +1080,9 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
 def _config_class_for(name: str) -> type[BaseRendererConfig]:
     cls = _CONFIG_BY_NAME.get(name)
     if cls is None:
-        raise ValueError(f"No renderer config registered for name={name!r}. Known: {sorted(_CONFIG_BY_NAME)}")
+        raise ValueError(
+            f"No renderer config registered for name={name!r}. Known: {sorted(_CONFIG_BY_NAME)}"
+        )
     return cls
 
 

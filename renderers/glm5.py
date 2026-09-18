@@ -732,7 +732,8 @@ class GLM53Renderer(GLM5Renderer):
         rendered.token_ids[insertion:insertion] = preamble
         rendered.message_indices[insertion:insertion] = [-1] * len(preamble)
         rendered.sampled_mask[insertion:insertion] = [False] * len(preamble)
-        rendered.is_content[insertion:insertion] = [False] * len(preamble)
+        if rendered.is_content:
+            rendered.is_content[insertion:insertion] = [False] * len(preamble)
         return rendered
 
     def _render_assistant(

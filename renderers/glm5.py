@@ -20,8 +20,8 @@ from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
-    ToolSpec,
     Tokenizer,
+    ToolSpec,
     _content_mask_or_empty,
     attribute_text_segments,
     extract_message_tool_names,
@@ -29,7 +29,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
 )
-from renderers.configs import GLM5RendererConfig, GLM51RendererConfig
+from renderers.configs import GLM5RendererConfig, GLM51RendererConfig, GLM53RendererConfig
 from renderers.parsing import parse_glm
 
 _TOOLS_HEADER = (
@@ -73,7 +73,7 @@ class GLM5Renderer:
         self.config = config or type(self)._config_cls()
         if not self.config.clear_thinking:
             implied_thinking_retention = "all"
-        elif not self.config.enable_thinking:
+        elif not getattr(self.config, "enable_thinking", True):
             implied_thinking_retention = "all"
         else:
             implied_thinking_retention = "tool_cycle"
@@ -159,26 +159,20 @@ class GLM5Renderer:
         sampled: list[bool] = []
         content_mask: list[bool] = []
 
-        def emit_special(
-            token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
+        def emit_special(token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool) -> None:
             tokens.append(token_id)
             indices.append(msg_idx)
             sampled.append(is_sampled)
             content_mask.append(is_content)
 
-        def emit_text(
-            text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
-        ) -> None:
+        def emit_text(text: str, msg_idx: int, *, is_sampled: bool, is_content: bool) -> None:
             ids = self._encode(text)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
             content_mask.extend([is_content] * len(ids))
 
-        def emit_text_segments(
-            segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
-        ) -> None:
+        def emit_text_segments(segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool) -> None:
             """Tokenize concatenated segments as one BPE pass; per-token
             ``is_content`` follows each token's source segment.
 
@@ -186,9 +180,7 @@ class GLM5Renderer:
             same way as the chat template, but attributed separately"
             without splitting the encode call (which could shift BPE
             merges at the boundary)."""
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
+            for tok_id, is_content in attribute_text_segments(self._tokenizer, segments):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
                 sampled.append(is_sampled)
@@ -262,14 +254,18 @@ class GLM5Renderer:
                 )
 
             elif role == "tool":
-                self._render_tool(
-                    messages,
-                    i,
-                    content,
-                    emit_special=emit_special,
-                    emit_text=emit_text,
-                    emit_text_segments=emit_text_segments,
-                )
+                if i == 0 or messages[i - 1]["role"] != "tool":
+                    for position, tool_idx in enumerate(self._ordered_tool_indices(messages, i)):
+                        tool_message = messages[tool_idx]
+                        self._render_tool(
+                            messages,
+                            tool_idx,
+                            self._visible_text(tool_message.get("content")),
+                            emit_special=emit_special,
+                            emit_text=emit_text,
+                            emit_text_segments=emit_text_segments,
+                            starts_block=position == 0,
+                        )
 
         # ── Generation prompt ───────────────────────────────────────
         # Gen prompt tokens are what the chat template prepends before
@@ -277,7 +273,7 @@ class GLM5Renderer:
         # them. Always is_sampled=False / is_content=False.
         if add_generation_prompt:
             emit_special(self._assistant, -1, is_sampled=False, is_content=False)
-            if self.config.enable_thinking:
+            if getattr(self.config, "enable_thinking", True):
                 emit_special(self._think, -1, is_sampled=False, is_content=False)
             else:
                 emit_special(self._think_end, -1, is_sampled=False, is_content=False)
@@ -290,6 +286,14 @@ class GLM5Renderer:
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
+
+    @staticmethod
+    def _ordered_tool_indices(messages: list[Message], block_start: int) -> list[int]:
+        """Return one contiguous tool block in its source order."""
+        block_end = block_start
+        while block_end + 1 < len(messages) and messages[block_end + 1].get("role") == "tool":
+            block_end += 1
+        return list(range(block_start, block_end + 1))
 
     def render_ids(
         self,
@@ -343,11 +347,7 @@ class GLM5Renderer:
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
-        if (
-            not previous_prompt_ids
-            or not new_messages
-            or reject_assistant_in_extension(new_messages)
-        ):
+        if not previous_prompt_ids or not new_messages or reject_assistant_in_extension(new_messages):
             return None
 
         boundary = scan_reasoning(
@@ -376,10 +376,7 @@ class GLM5Renderer:
         # previous_completion_ids. Truncation means none is there yet.
         previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
         stop_ids = {self._endoftext, self._user, self._observation}
-        if (
-            not previous_ids[len(previous_prompt_ids) :]
-            or previous_ids[-1] not in stop_ids
-        ):
+        if not previous_ids[len(previous_prompt_ids) :] or previous_ids[-1] not in stop_ids:
             # Truncation: synthesise <|endoftext|> as the canonical turn end.
             previous_ids.append(self._endoftext)
 
@@ -429,9 +426,7 @@ class GLM5Renderer:
             *,
             is_sampled: bool = False,
         ) -> None:
-            for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
-            ):
+            for tok_id, is_content in attribute_text_segments(self._tokenizer, segments):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)
                 ext_sampled.append(is_sampled)
@@ -478,7 +473,7 @@ class GLM5Renderer:
 
         # Generation prompt — match the gen-prompt branch of ``render()``.
         emit_special(self._assistant, -1)
-        if self.config.enable_thinking:
+        if getattr(self.config, "enable_thinking", True):
             emit_special(self._think, -1)
         else:
             emit_special(self._think_end, -1)
@@ -488,9 +483,7 @@ class GLM5Renderer:
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=_content_mask_or_empty(
-                self._tokenizer, [False] * len(previous_ids) + ext_content
-            ),
+            is_content=_content_mask_or_empty(self._tokenizer, [False] * len(previous_ids) + ext_content),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
         )
@@ -535,9 +528,7 @@ class GLM5Renderer:
         # the template's per-call ``clear_thinking is defined and not
         # clear_thinking`` gate: a chat_template_kwarg surface for the
         # same behaviour, gated explicitly by the caller per render.
-        include_thinking = (
-            msg_idx > last_user_index or not self.config.clear_thinking
-        ) and reasoning_content
+        include_thinking = (msg_idx > last_user_index or not self.config.clear_thinking) and reasoning_content
 
         if include_thinking:
             # ``<think>`` matches the gen-prompt's trailing token at
@@ -545,15 +536,9 @@ class GLM5Renderer:
             # template-injected scaffolding. The reasoning text and the
             # closing ``</think>`` are what the model actually samples.
             emit_special(self._think, msg_idx, is_sampled=False, is_content=False)
-            emit_text(
-                reasoning_content.strip(), msg_idx, is_sampled=True, is_content=True
-            )
+            emit_text(reasoning_content.strip(), msg_idx, is_sampled=True, is_content=True)
             emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
-        elif (
-            self.empty_think_on_last_assistant
-            and msg_idx > last_user_index
-            and self.config.enable_thinking
-        ):
+        elif self.empty_think_on_last_assistant and msg_idx > last_user_index and self.config.enable_thinking:
             # GLM-5.1: wrap the last assistant with an empty <think></think>
             # even without reasoning, matching the Jinja template. With
             # ``enable_thinking=True`` the gen prompt already includes
@@ -597,16 +582,10 @@ class GLM5Renderer:
                     arguments = {}
             if isinstance(arguments, dict):
                 for arg_name, arg_value in arguments.items():
-                    emit_special(
-                        self._arg_key, msg_idx, is_sampled=True, is_content=True
-                    )
+                    emit_special(self._arg_key, msg_idx, is_sampled=True, is_content=True)
                     emit_text(arg_name, msg_idx, is_sampled=True, is_content=True)
-                    emit_special(
-                        self._arg_key_end, msg_idx, is_sampled=True, is_content=True
-                    )
-                    emit_special(
-                        self._arg_value, msg_idx, is_sampled=True, is_content=True
-                    )
+                    emit_special(self._arg_key_end, msg_idx, is_sampled=True, is_content=True)
+                    emit_special(self._arg_value, msg_idx, is_sampled=True, is_content=True)
                     if isinstance(arg_value, str):
                         emit_text(arg_value, msg_idx, is_sampled=True, is_content=True)
                     else:
@@ -616,12 +595,8 @@ class GLM5Renderer:
                             is_sampled=True,
                             is_content=True,
                         )
-                    emit_special(
-                        self._arg_value_end, msg_idx, is_sampled=True, is_content=True
-                    )
-            emit_special(
-                self._tool_call_end_tok, msg_idx, is_sampled=True, is_content=True
-            )
+                    emit_special(self._arg_value_end, msg_idx, is_sampled=True, is_content=True)
+            emit_special(self._tool_call_end_tok, msg_idx, is_sampled=True, is_content=True)
 
     def _render_tool(
         self,
@@ -632,6 +607,7 @@ class GLM5Renderer:
         emit_special,
         emit_text,
         emit_text_segments,
+        starts_block: bool = False,
     ) -> None:
         # Tool body bytes get ``is_content=True``; the wraps are
         # scaffold. The ``<|observation|>`` role tag is scaffold too
@@ -644,7 +620,7 @@ class GLM5Renderer:
         prev_role = messages[msg_idx - 1]["role"] if msg_idx > 0 else None
         closes_assistant_turn = prev_role == "assistant"
 
-        if prev_role != "tool":
+        if starts_block or prev_role != "tool":
             emit_special(
                 self._observation,
                 msg_idx,
@@ -652,13 +628,9 @@ class GLM5Renderer:
                 is_content=False,
             )
 
-        emit_special(
-            self._tool_response_tok, msg_idx, is_sampled=False, is_content=False
-        )
+        emit_special(self._tool_response_tok, msg_idx, is_sampled=False, is_content=False)
         emit_text(content, msg_idx, is_sampled=False, is_content=True)
-        emit_special(
-            self._tool_response_end_tok, msg_idx, is_sampled=False, is_content=False
-        )
+        emit_special(self._tool_response_end_tok, msg_idx, is_sampled=False, is_content=False)
 
 
 class GLM51Renderer(GLM5Renderer):
@@ -683,3 +655,137 @@ class GLM51Renderer(GLM5Renderer):
         spec = tool["function"] if "function" in tool else tool
         spec = {k: v for k, v in spec.items() if k not in ("defer_loading", "strict")}
         return json.dumps(spec, ensure_ascii=False)
+
+
+class GLM53Renderer(GLM5Renderer):
+    """Deterministic message → token renderer for GLM-5.3 models.
+
+    GLM-5.3 adds a reasoning-effort system preamble and always starts an
+    assistant generation with ``<think>``.  Its template also orders a tool
+    result block by the preceding assistant's tool-call IDs.
+    """
+
+    _config_cls = GLM53RendererConfig
+
+    @staticmethod
+    def _visible_text(content: Any) -> str:
+        # The GLM-5.3 template omits ``None`` content instead of rendering
+        # Python's string representation (notably tool-call-only assistants).
+        return "" if content is None else GLM5Renderer._visible_text(content)
+
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        config: GLM53RendererConfig | None = None,
+    ):
+        super().__init__(tokenizer, config)
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            "tool_cycle" if self.config.clear_thinking else "all",
+        )
+
+    @staticmethod
+    def _format_tool_spec(tool: ToolSpec) -> str:
+        spec = tool["function"] if "function" in tool else tool
+        spec = {k: v for k, v in spec.items() if k not in ("defer_loading", "strict")}
+        return json.dumps(spec, ensure_ascii=False)
+
+    def _ordered_tool_indices(self, messages: list[Message], block_start: int) -> list[int]:
+        """Match the template's safe tool-result reordering rule."""
+        block_end = block_start
+        while block_end + 1 < len(messages) and messages[block_end + 1].get("role") == "tool":
+            block_end += 1
+
+        previous = messages[block_start - 1] if block_start else {}
+        calls = previous.get("tool_calls") if previous.get("role") == "assistant" else None
+        if not calls:
+            return list(range(block_start, block_end + 1))
+
+        call_ids = [call.get("id") or call.get("tool_call_id") for call in calls]
+        result_ids = [
+            message.get("tool_call_id") or message.get("id") for message in messages[block_start : block_end + 1]
+        ]
+        if (
+            any(identifier is None for identifier in call_ids + result_ids)
+            or len(set(call_ids)) != len(call_ids)
+            or len(set(result_ids)) != len(result_ids)
+            or set(call_ids) != set(result_ids)
+        ):
+            return list(range(block_start, block_end + 1))
+
+        by_id = {identifier: index for identifier, index in zip(result_ids, range(block_start, block_end + 1))}
+        return [by_id[identifier] for identifier in call_ids]
+
+    def render(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
+    ) -> RenderedTokens:
+        rendered = super().render(messages, tools=tools, add_generation_prompt=add_generation_prompt)
+        # GLM-5.3's preamble belongs immediately after ``[gMASK]<sop>``.
+        prefix = [self._gmask, self._sop]
+        preamble = [self._system] + self._encode(f"Reasoning Effort: {self.config.reasoning_effort.capitalize()}")
+        assert rendered.token_ids[:2] == prefix
+        insertion = len(prefix)
+        rendered.token_ids[insertion:insertion] = preamble
+        rendered.message_indices[insertion:insertion] = [-1] * len(preamble)
+        rendered.sampled_mask[insertion:insertion] = [False] * len(preamble)
+        rendered.is_content[insertion:insertion] = [False] * len(preamble)
+        return rendered
+
+    def _render_assistant(
+        self,
+        msg,
+        msg_idx,
+        content,
+        last_user_index,
+        *,
+        emit_special,
+        emit_text,
+        emit_text_segments,
+    ):
+        reasoning_content = ""
+        has_reasoning = False
+        if isinstance(msg.get("reasoning_content"), str):
+            reasoning_content = msg["reasoning_content"]
+            has_reasoning = True
+        elif "</think>" in content:
+            before, after = content.split("</think>", 1)
+            reasoning_content = before.split("<think>")[-1].strip()
+            content = after.strip()
+            has_reasoning = True
+
+        emit_special(self._assistant, msg_idx, is_sampled=False, is_content=False)
+        include_thinking = has_reasoning and (not self.config.clear_thinking or msg_idx > last_user_index)
+        emit_special(self._think, msg_idx, is_sampled=False, is_content=False)
+        if include_thinking:
+            emit_text(reasoning_content, msg_idx, is_sampled=True, is_content=True)
+        emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
+        if content.strip():
+            emit_text(content.strip(), msg_idx, is_sampled=True, is_content=True)
+
+        self._render_tool_calls(msg, msg_idx, emit_special=emit_special, emit_text=emit_text)
+
+    def _render_tool_calls(self, msg, msg_idx, *, emit_special, emit_text) -> None:
+        for tc in msg.get("tool_calls") or []:
+            func = tc.get("function") or tc
+            arguments = func.get("arguments", {})
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            emit_special(self._tool_call_tok, msg_idx, is_sampled=True, is_content=True)
+            emit_text(func.get("name", ""), msg_idx, is_sampled=True, is_content=True)
+            for arg_name, arg_value in arguments.items():
+                emit_special(self._arg_key, msg_idx, is_sampled=True, is_content=True)
+                emit_text(arg_name, msg_idx, is_sampled=True, is_content=True)
+                emit_special(self._arg_key_end, msg_idx, is_sampled=True, is_content=True)
+                emit_special(self._arg_value, msg_idx, is_sampled=True, is_content=True)
+                emit_text(
+                    arg_value if isinstance(arg_value, str) else json.dumps(arg_value, ensure_ascii=False),
+                    msg_idx,
+                    is_sampled=True,
+                    is_content=True,
+                )
+                emit_special(self._arg_value_end, msg_idx, is_sampled=True, is_content=True)
+            emit_special(self._tool_call_end_tok, msg_idx, is_sampled=True, is_content=True)

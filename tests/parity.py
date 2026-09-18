@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from itertools import product
 from typing import Any, Iterable, Mapping
 
 from renderers.base import MODEL_RENDERER_MAP
 from renderers.configs import _config_class_for
 from tests.reference_rendering import reference_oracle_for_renderer
-
 
 TOOLS = [
     {
@@ -66,9 +66,7 @@ def _model(
         suites.add("roundtrip")
     if bridge:
         suites.add("bridge")
-    resolved_renderer = (
-        MODEL_RENDERER_MAP.get(model, "default") if renderer == "auto" else renderer
-    )
+    resolved_renderer = MODEL_RENDERER_MAP.get(model, "default") if renderer == "auto" else renderer
     if reference_oracle_for_renderer(resolved_renderer) == "harmony":
         suites.discard("plain-parser")
         suites.discard("build-helpers")
@@ -158,6 +156,11 @@ MODEL_CATALOG = (
         extra_suites={"tool-arg-types", "glm-tool-names"},
     ),
     _model("zai-org/GLM-5.1", bridge=True),
+    _model(
+        "zai-org/GLM-5.3",
+        bridge=True,
+        extra_suites={"tool-arg-types", "glm-tool-names"},
+    ),
     _model("zai-org/GLM-4.7-Flash"),
     _model(
         "THUDM/GLM-4.5-Air",
@@ -709,10 +712,7 @@ def kwarg_combinations(case: ModelCase) -> tuple[dict[str, Any], ...]:
     fields = sorted(config_cls.template_field_names())
     missing = set(fields) - KWARG_VALUES.keys()
     if missing:
-        raise AssertionError(
-            f"{case.resolved_renderer} declares uncovered template fields: "
-            f"{sorted(missing)}"
-        )
+        raise AssertionError(f"{case.resolved_renderer} declares uncovered template fields: {sorted(missing)}")
     if not fields:
         return ({},)
 
@@ -727,23 +727,17 @@ def kwarg_combinations(case: ModelCase) -> tuple[dict[str, Any], ...]:
     return tuple(combinations)
 
 
-def scenario_is_valid(
-    case: ModelCase, scenario: Scenario, kwargs: Mapping[str, Any]
-) -> bool:
+def scenario_is_valid(case: ModelCase, scenario: Scenario, kwargs: Mapping[str, Any]) -> bool:
     if scenario.id in case.excluded_scenarios:
         return False
-    if (
-        scenario.only_renderers
-        and case.resolved_renderer not in scenario.only_renderers
-    ):
+    if scenario.only_renderers and case.resolved_renderer not in scenario.only_renderers:
         return False
 
     # These renderers intentionally retain a generated empty thinking wrapper
     # on plain historical turns when thinking is disabled. That stability
     # contract is tested separately; it is not upstream-reference parity.
     thinking_disabled = kwargs.get("enable_thinking") is False or (
-        kwargs.get("enable_thinking") is None
-        and case.model in {"Qwen/Qwen3.5-0.8B", "Qwen/Qwen3.5-2B"}
+        kwargs.get("enable_thinking") is None and case.model in {"Qwen/Qwen3.5-0.8B", "Qwen/Qwen3.5-2B"}
     )
     if (
         case.resolved_renderer in {"qwen3", "qwen3.5", "qwen3.6", "qwen3.8"}
@@ -773,8 +767,7 @@ def scenario_is_valid(
         case.model in {"google/gemma-4-26B-A4B-it", "google/gemma-4-31B-it"}
         and kwargs.get("enable_thinking", False) is False
         and any(
-            message.get("role") == "assistant"
-            and not (message.get("reasoning") or message.get("reasoning_content"))
+            message.get("role") == "assistant" and not (message.get("reasoning") or message.get("reasoning_content"))
             for message in scenario.messages
         )
     ):

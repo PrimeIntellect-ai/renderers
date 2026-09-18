@@ -34,6 +34,7 @@ product in `tests/test_parity.py`.
 | Qwen3-VL | `Qwen3VLRendererConfig` | `add_vision_id` | `image_cache_max` |
 | Gemma 4 | `Gemma4RendererConfig` | `enable_thinking`, `preserve_thinking` | `image_cache_max` |
 | GLM-5 / 5.1 | `GLM5RendererConfig` / `GLM51RendererConfig` | `enable_thinking`, `clear_thinking` | - |
+| GLM-5.3 | `GLM53RendererConfig` | `clear_thinking`, `reasoning_effort` | - |
 | GLM-4.5 | `GLM45RendererConfig` | `enable_thinking` | - |
 | gpt-oss | `GptOssRendererConfig` | `reasoning_effort`, `conversation_start_date` | `use_system_prompt`, `knowledge_cutoff`, `model_identity`, `auto_drop_analysis` |
 | Hy3 | `Hy3RendererConfig` | `reasoning_effort`, `preserved_thinking`, `is_training`, `raw_last_assistant`, `fallback_strategy` | - |
@@ -140,6 +141,7 @@ the knobs its template actually exposes:
 | Qwen3.8 | `preserve_thinking=True -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | Gemma 4 | `preserve_thinking=True -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | GLM-5 / 5.1 | `clear_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
+| GLM-5.3 | `clear_thinking=False -> all`, else `tool_cycle` |
 | GLM-4.5 | `enable_thinking=False -> all`, else `tool_cycle` |
 | gpt-oss | `auto_drop_analysis=False -> all`, else `tool_cycle` |
 | Hy3 | `preserved_thinking=True -> all`, else `tool_cycle` |

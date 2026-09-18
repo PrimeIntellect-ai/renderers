@@ -38,9 +38,7 @@ def _reject_thinking_retention_conflict(
     fields_set = config.__pydantic_fields_set__
     requested = getattr(config, "thinking_retention", None)
     if kwarg_name in fields_set and requested is not None:
-        implied = (
-            false_implies if getattr(config, kwarg_name) is False else true_implies
-        )
+        implied = false_implies if getattr(config, kwarg_name) is False else true_implies
         if requested == implied:
             return
         raise ValueError(
@@ -240,9 +238,7 @@ class Qwen36RendererConfig(BaseRendererConfig):
     """Qwen3.6 renderer config. Inherits Qwen3.5's template surface."""
 
     name: Literal["qwen3.6"] = "qwen3.6"
-    _template_fields = frozenset(
-        {"enable_thinking", "add_vision_id", "preserve_thinking"}
-    )
+    _template_fields = frozenset({"enable_thinking", "add_vision_id", "preserve_thinking"})
 
     enable_thinking: bool | None = None
     """See :class:`Qwen35RendererConfig.enable_thinking`."""
@@ -399,6 +395,29 @@ class GLM51RendererConfig(BaseRendererConfig):
 
     clear_thinking: bool = True
     """See :class:`GLM5RendererConfig.clear_thinking`."""
+
+    @model_validator(mode="after")
+    def _check_thinking_retention(self):
+        _reject_thinking_retention_conflict(
+            self,
+            "clear_thinking",
+            true_implies="tool_cycle",
+            false_implies="all",
+        )
+        return self
+
+
+class GLM53RendererConfig(BaseRendererConfig):
+    """GLM-5.3 renderer config."""
+
+    name: Literal["glm-5.3"] = "glm-5.3"
+    _template_fields = frozenset({"clear_thinking", "reasoning_effort"})
+
+    clear_thinking: bool = False
+    """Drop reasoning from historical assistant turns when ``True``."""
+
+    reasoning_effort: Literal["low", "high", "max"] = "max"
+    """Reasoning-effort system preamble emitted by the canonical template."""
 
     @model_validator(mode="after")
     def _check_thinking_retention(self):
@@ -798,9 +817,7 @@ class Nemotron3RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["nemotron-3"] = "nemotron-3"
-    _template_fields = frozenset(
-        {"enable_thinking", "truncate_history_thinking", "low_effort"}
-    )
+    _template_fields = frozenset({"enable_thinking", "truncate_history_thinking", "low_effort"})
 
     enable_thinking: bool = True
     """When ``True``, the generation prompt includes ``<think>``. Mirrors
@@ -843,9 +860,7 @@ class Nemotron3UltraRendererConfig(BaseRendererConfig):
     """
 
     name: Literal["nemotron-3-ultra"] = "nemotron-3-ultra"
-    _template_fields = frozenset(
-        {"enable_thinking", "truncate_history_thinking", "medium_effort"}
-    )
+    _template_fields = frozenset({"enable_thinking", "truncate_history_thinking", "medium_effort"})
 
     enable_thinking: bool = True
     """See :class:`Nemotron3RendererConfig.enable_thinking`."""
@@ -939,9 +954,7 @@ class DeepSeekV4RendererConfig(BaseRendererConfig):
     """
 
     name: Literal["deepseek-v4"] = "deepseek-v4"
-    _template_fields = frozenset(
-        {"enable_thinking", "drop_thinking", "reasoning_effort"}
-    )
+    _template_fields = frozenset({"enable_thinking", "drop_thinking", "reasoning_effort"})
 
     enable_thinking: bool = False
     """Select thinking mode.  ``False`` matches the official inference script."""
@@ -984,6 +997,7 @@ RendererConfig = Annotated[
         Gemma4RendererConfig,
         GLM5RendererConfig,
         GLM51RendererConfig,
+        GLM53RendererConfig,
         GLM45RendererConfig,
         GptOssRendererConfig,
         Hy3RendererConfig,
@@ -1031,6 +1045,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "gemma4": Gemma4RendererConfig,
     "glm-5": GLM5RendererConfig,
     "glm-5.1": GLM51RendererConfig,
+    "glm-5.3": GLM53RendererConfig,
     "glm-4.5": GLM45RendererConfig,
     "gpt-oss": GptOssRendererConfig,
     "hy3": Hy3RendererConfig,
@@ -1055,10 +1070,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
 def _config_class_for(name: str) -> type[BaseRendererConfig]:
     cls = _CONFIG_BY_NAME.get(name)
     if cls is None:
-        raise ValueError(
-            f"No renderer config registered for name={name!r}. "
-            f"Known: {sorted(_CONFIG_BY_NAME)}"
-        )
+        raise ValueError(f"No renderer config registered for name={name!r}. Known: {sorted(_CONFIG_BY_NAME)}")
     return cls
 
 
@@ -1085,6 +1097,7 @@ __all__ = [
     "DeepSeekV4RendererConfig",
     "GLM45RendererConfig",
     "GLM51RendererConfig",
+    "GLM53RendererConfig",
     "GLM5RendererConfig",
     "Gemma4RendererConfig",
     "GptOssRendererConfig",

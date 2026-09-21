@@ -367,7 +367,13 @@ async def generate(
 
     completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
 
-    parsed = renderer.parse_response(completion_ids, tools=tools)
+    parse_with_prompt = getattr(renderer, "parse_response_with_prompt", None)
+    if parse_with_prompt is None:
+        parsed = renderer.parse_response(completion_ids, tools=tools)
+    else:
+        parsed = parse_with_prompt(
+            completion_ids, list(effective_prompt_ids or prompt_ids), tools=tools
+        )
 
     routed_experts = choice.get("routed_experts")
     # vLLM's native kept-set sampling masks (``--return-sampling-mask``):

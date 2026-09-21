@@ -27,6 +27,34 @@ def test_parse_simple_content(model_name, tokenizer, renderer):
     assert "Hello" in parsed.content
 
 
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("complete", [False, True])
+def test_qwen35_prompt_prefilled_reasoning(thinking, complete):
+    from renderers.configs import Qwen35RendererConfig
+    from renderers.qwen35 import Qwen35Renderer
+
+    tokenizer = load_tokenizer("Qwen/Qwen3.5-397B-A17B")
+    renderer = Qwen35Renderer(tokenizer, Qwen35RendererConfig(enable_thinking=thinking))
+    prompt = renderer.render_ids(
+        [{"role": "user", "content": "Solve the problem."}],
+        add_generation_prompt=True,
+    )
+    text = "Considering Answer: B"
+    if complete:
+        text += "</think>\nAnswer: C"
+    tokens = tokenizer.encode(text, add_special_tokens=False)
+    parsed = renderer.parse_response_with_prompt(tokens, prompt)
+    if thinking and not complete:
+        assert parsed.content == ""
+        assert parsed.reasoning_content == text
+        assert parsed.tool_calls == []
+    else:
+        assert parsed == renderer.parse_response(tokens)
+    assert renderer.parse_response_with_prompt(tokens, []) == renderer.parse_response(
+        tokens
+    )
+
+
 def test_parse_thinking_and_content(model_name, tokenizer, renderer):
     """Content with <think>reasoning</think> block."""
     text = "Let me think about this.\n</think>\n\nThe answer is 42."

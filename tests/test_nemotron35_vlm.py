@@ -254,7 +254,7 @@ def test_nemotron35_rejects_unapproved_local_processor(tmp_path, monkeypatch):
         Nemotron35Renderer(_LocalTokenizer())._get_processor()
 
 
-def test_nemotron35_pins_approved_remote_processor(monkeypatch):
+def test_nemotron35_loads_approved_remote_processor_without_revision(monkeypatch):
     calls = []
     expected = object()
     transformers = SimpleNamespace(
@@ -272,10 +272,7 @@ def test_nemotron35_pins_approved_remote_processor(monkeypatch):
     assert calls == [
         (
             MODEL,
-            {
-                "trust_remote_code": True,
-                "revision": "0e636f78faab096c0398e4dab809f4422001a144",
-            },
+            {"trust_remote_code": True},
         )
     ]
 

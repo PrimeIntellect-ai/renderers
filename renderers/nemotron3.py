@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
 
@@ -903,11 +903,7 @@ class Nemotron35Renderer(Nemotron3Renderer):
     supports_process_multimodal = True
     supports_multimodal_bridge = False
 
-    _processor_revisions: ClassVar[dict[str, str]] = {
-        "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026": (
-            "0e636f78faab096c0398e4dab809f4422001a144"
-        )
-    }
+    _processor_model_prefix = "nvidia/NVIDIA-Nemotron-3.5"
 
     def __init__(
         self,
@@ -937,22 +933,20 @@ class Nemotron35Renderer(Nemotron3Renderer):
             raise RuntimeError(
                 "Nemotron35Renderer needs a processor for image content."
             )
-        kwargs: dict[str, Any] = {"trust_remote_code": True}
         if Path(name).expanduser().is_dir():
             raise RuntimeError(
                 "Local Nemotron remote-code processor paths require an explicitly "
                 "injected reviewed processor."
             )
-        else:
-            revision = self._processor_revisions.get(name)
-            if revision is None:
-                raise RuntimeError(
-                    f"Nemotron processor {name!r} is not approved for remote-code "
-                    "loading. Inject a reviewed processor."
-                )
-            kwargs["revision"] = revision
+        if not name.startswith(self._processor_model_prefix):
+            raise RuntimeError(
+                f"Nemotron processor {name!r} is not approved for remote-code "
+                "loading. Inject a reviewed processor."
+            )
         transformers = _require_transformers("Auto-loading a Nemotron 3.5 processor")
-        self._processor = transformers.AutoProcessor.from_pretrained(name, **kwargs)
+        self._processor = transformers.AutoProcessor.from_pretrained(
+            name, trust_remote_code=True
+        )
         return self._processor
 
     @staticmethod

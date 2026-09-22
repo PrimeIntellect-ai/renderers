@@ -105,10 +105,9 @@ _loaded: dict[str, tuple] = {}
 
 
 # Models whose processors need ``trust_remote_code=True`` (custom Python
-# in the repo) AND a pinned revision for security. Mirrors the
-# ``TRUSTED_REVISIONS`` policy in ``renderers.base`` for tokenizers.
+# in the repo) and still use a pinned revision. Nemotron 3.5 is handled
+# separately below so its selected model revision is not overridden.
 _PROCESSOR_TRUSTED_REVISIONS: dict[str, str] = {
-    "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026": "0e636f78faab096c0398e4dab809f4422001a144",
     "moonshotai/Kimi-K2.5": "4d01dfe0332d63057c186e0b262165819efb6611",
     "moonshotai/Kimi-K2.6": "2755962d07cb42aa2d988a35bcb65cd4a9c2de82",
 }
@@ -120,7 +119,12 @@ def _load_processor_and_renderer(model_name: str):
 
         tokenizer = load_tokenizer(model_name)
         revision = _PROCESSOR_TRUSTED_REVISIONS.get(model_name)
-        if revision is not None:
+        if model_name.startswith("nvidia/NVIDIA-Nemotron-3.5"):
+            processor = AutoProcessor.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+            )
+        elif revision is not None:
             processor = AutoProcessor.from_pretrained(
                 model_name,
                 trust_remote_code=True,
@@ -174,7 +178,7 @@ def _detect_family(model_name: str) -> str:
     - ``gemma4``: canonical Gemma turn grammar plus dynamic
       ``<|image>`` + N x ``<|image|>`` + ``<image|>`` expansion.
     """
-    if model_name == "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026":
+    if model_name.startswith("nvidia/NVIDIA-Nemotron-3.5"):
         return "nemotron35"
     if model_name.startswith("moonshotai/Kimi-K2.5") or model_name.startswith(
         "moonshotai/Kimi-K2.6"

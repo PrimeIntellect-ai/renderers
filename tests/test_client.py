@@ -628,13 +628,13 @@ def test_generate_serializes_nemotron_dynamic_image_features():
             "image": [
                 {
                     "pixel_values": np.zeros((1, 3, 32, 48), dtype=np.float32),
-                    "imgs_sizes": [(32, 48)],
+                    "imgs_sizes": np.array([[32, 48]], dtype=np.int64),
                     "num_tokens": [6],
                     "num_patches": [1],
                 },
                 {
                     "pixel_values": np.ones((1, 3, 48, 32), dtype=np.float32),
-                    "imgs_sizes": [(48, 32)],
+                    "imgs_sizes": np.array([[48, 32]], dtype=np.int64),
                     "num_tokens": [6],
                     "num_patches": [1],
                 },

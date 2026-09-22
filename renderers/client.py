@@ -549,7 +549,7 @@ def _build_nemotron35_features(mm_data: MultiModalData) -> dict[str, Any]:
                     "Each Nemotron image item must contain one size and token count."
                 )
             pixel_values_flat.append(pixel_values[0])
-            imgs_sizes.append(sizes[0])
+            imgs_sizes.append(tuple(int(value) for value in sizes[0]))
             num_tokens_per_image.append(int(token_counts[0]))
 
         hf_inputs = BatchFeature(

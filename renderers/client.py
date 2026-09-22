@@ -486,6 +486,7 @@ def _build_mm_features(
     to change. Don't pre-build the abstraction with one engine in tree.
     """
     from renderers.gemma4 import Gemma4Renderer
+    from renderers.nemotron3 import Nemotron35Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
     from renderers.qwen35 import Qwen35Renderer
 
@@ -498,11 +499,86 @@ def _build_mm_features(
         return _build_qwen_vl_features(mm_data, spatial_merge_size=2)
     if issubclass(renderer_cls, Gemma4Renderer):
         return _build_gemma4_features(mm_data)
+    if issubclass(renderer_cls, Nemotron35Renderer):
+        return _build_nemotron35_features(mm_data)
 
     raise NotImplementedError(
         f"Multimodal serialization not implemented for {renderer_cls.__name__}. "
         "Add a dispatch branch in renderers.client._build_mm_features."
     )
+
+
+def _build_nemotron35_features(mm_data: MultiModalData) -> dict[str, Any]:
+    """Encode dynamic-resolution Nemotron image inputs for vLLM."""
+    _require_transformers("Encoding Nemotron 3.5 multimodal features for vLLM")
+    try:
+        import torch
+        from transformers.feature_extraction_utils import BatchFeature
+        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+            encode_mm_kwargs_item,
+        )
+        from vllm.multimodal.inputs import (
+            MultiModalFieldConfig,
+            MultiModalKwargsItems,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "Nemotron 3.5 multimodal generate requires vLLM and torch."
+        ) from exc
+
+    out: dict[str, Any] = {
+        "mm_hashes": {},
+        "mm_placeholders": {},
+        "kwargs_data": {},
+    }
+    image_items = mm_data.mm_items.get("image") or []
+    if image_items:
+        pixel_values_flat = []
+        imgs_sizes = []
+        num_tokens_per_image = []
+        for item in image_items:
+            pixel_values = torch.as_tensor(item["pixel_values"])
+            if pixel_values.ndim != 4 or pixel_values.shape[0] != 1:
+                raise ValueError(
+                    "Each Nemotron pixel_values item must have shape (1, C, H, W)."
+                )
+            sizes = item["imgs_sizes"]
+            token_counts = item["num_tokens"]
+            if not (len(sizes) == len(token_counts) == 1):
+                raise ValueError(
+                    "Each Nemotron image item must contain one size and token count."
+                )
+            pixel_values_flat.append(pixel_values[0])
+            imgs_sizes.append(sizes[0])
+            num_tokens_per_image.append(int(token_counts[0]))
+
+        hf_inputs = BatchFeature(
+            data={
+                "pixel_values_flat": pixel_values_flat,
+                "imgs_sizes": imgs_sizes,
+                "num_tokens_per_image": num_tokens_per_image,
+            }
+        )
+        field_config = {
+            "pixel_values_flat": MultiModalFieldConfig.batched("image"),
+            "num_tokens_per_image": MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
+            "imgs_sizes": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+        }
+        kwargs_items = MultiModalKwargsItems.from_hf_inputs(hf_inputs, field_config)
+        out["kwargs_data"]["image"] = [
+            encode_mm_kwargs_item(item) for item in kwargs_items["image"]
+        ]
+        out["mm_hashes"]["image"] = list(mm_data.mm_hashes.get("image") or [])
+        out["mm_placeholders"]["image"] = [
+            {"offset": placeholder.offset, "length": placeholder.length}
+            for placeholder in mm_data.mm_placeholders.get("image") or []
+        ]
+
+    if not any(out["kwargs_data"].values()):
+        out["kwargs_data"] = None
+    return out
 
 
 def _build_gemma4_features(mm_data: MultiModalData) -> dict[str, Any]:

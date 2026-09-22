@@ -1017,6 +1017,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # Nemotron 3.5 (Lightning). Its template is the Ultra variant's minus the
     # effort kwarg (``nemotron-3.5``).
     "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16": "nemotron-3.5",
+    "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026": "nemotron-3.5",
     # Llama 3.2 (Instruct). Tested against the gated meta-llama repos and
     # the unrestricted unsloth/... mirror, which ships a byte-identical
     # chat template. ``Llama3Renderer`` defaults ``date_string`` to
@@ -1057,6 +1058,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
 # Modality values: ``"image"``, ``"video"``, ``"audio"``. Text is implicit
 # (every model supports it), so it doesn't appear in the set.
 MULTIMODAL_MODELS: dict[str, set[str]] = {
+    "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026": {"image"},
     "Qwen/Qwen3-VL-4B-Instruct": {"image"},
     "Qwen/Qwen3-VL-8B-Instruct": {"image"},
     "Qwen/Qwen3-VL-30B-A3B-Instruct": {"image"},

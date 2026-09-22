@@ -595,6 +595,105 @@ def test_generate_serializes_multimodal_features_for_gemma4():
     )
 
 
+def test_generate_serializes_nemotron_dynamic_image_features():
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm", reason="vllm needed for features serialization")
+
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+        decode_mm_kwargs_item,
+    )
+    from vllm.model_executor.models.nano_nemotron_vl import NemotronH_Nano_VL_V2
+    from vllm.multimodal.inputs import MultiModalKwargsItems
+
+    from renderers.base import MultiModalData, PlaceholderRange
+    from renderers.nemotron3 import Nemotron35Renderer
+
+    class _FakeNemotronRenderer(Nemotron35Renderer):
+        def get_stop_token_ids(self):
+            return [99]
+
+        def parse_response(self, completion_ids, *, tools=None, prompt_ids=None):
+            return ParsedResponse(content="done")
+
+    renderer = object.__new__(_FakeNemotronRenderer)
+    mm_data = MultiModalData(
+        mm_hashes={"image": ["wide", "tall"]},
+        mm_placeholders={
+            "image": [
+                PlaceholderRange(offset=2, length=6),
+                PlaceholderRange(offset=10, length=6),
+            ]
+        },
+        mm_items={
+            "image": [
+                {
+                    "pixel_values": np.zeros((1, 3, 32, 48), dtype=np.float32),
+                    "imgs_sizes": [(32, 48)],
+                    "num_tokens": [6],
+                    "num_patches": [1],
+                },
+                {
+                    "pixel_values": np.ones((1, 3, 48, 32), dtype=np.float32),
+                    "imgs_sizes": [(48, 32)],
+                    "num_tokens": [6],
+                    "num_patches": [1],
+                },
+            ]
+        },
+    )
+    client = _FakeClient()
+
+    asyncio.run(
+        generate(
+            client=client,
+            renderer=renderer,
+            messages=[],
+            model="nemotron35-super",
+            prompt_ids=list(range(20)),
+            multi_modal_data=mm_data,
+            sampling_params={"max_tokens": 4},
+        )
+    )
+
+    features = client.calls[0]["body"]["features"]
+    assert features["mm_hashes"] == {"image": ["wide", "tall"]}
+    assert features["mm_placeholders"] == {
+        "image": [{"offset": 2, "length": 6}, {"offset": 10, "length": 6}]
+    }
+    decoded_items = [
+        decode_mm_kwargs_item(item) for item in features["kwargs_data"]["image"]
+    ]
+    decoded = [item.get_data() for item in decoded_items]
+    assert [tuple(item["pixel_values_flat"].shape) for item in decoded] == [
+        (3, 32, 48),
+        (3, 48, 32),
+    ]
+    assert [tuple(item["imgs_sizes"]) for item in decoded] == [
+        (32, 48),
+        (48, 32),
+    ]
+    assert [int(item["num_tokens_per_image"]) for item in decoded] == [6, 6]
+    assert all("image_num_patches" not in item for item in decoded)
+
+    kwargs = MultiModalKwargsItems({"image": decoded_items}).get_data()
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    model.dynamic_resolution = True
+    model.patch_size = 16
+    image_input = model._parse_and_validate_image_input(**kwargs)
+
+    assert image_input is not None
+    assert tuple(image_input["pixel_values_flat"].shape) == (
+        1,
+        12,
+        3 * 16 * 16,
+    )
+    assert [tuple(size) for size in image_input["imgs_sizes"]] == [
+        (32, 48),
+        (48, 32),
+    ]
+    assert image_input["num_tokens_per_image"] == [6, 6]
+
+
 # ---------------------------------------------------------------------------
 # Prompt overflow handling.
 # ---------------------------------------------------------------------------

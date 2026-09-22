@@ -378,6 +378,7 @@ class KimiK2Renderer:
             prompt_ids=previous_prompt_ids,
             stop_ids=set(self.get_stop_token_ids()),
             tool_start_id=self._tool_calls_section_begin,
+            tool_start_closes_reasoning=True,
             assistant_prefix="<|im_assistant|>assistant<|im_middle|>",
         )
         if boundary.is_open:

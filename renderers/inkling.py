@@ -831,7 +831,12 @@ class InklingRenderer:
         segment = tail[segment_start:]
         if segment and segment[0] == self._message_model:
             segment = segment[1:]
-        if segment and segment[0] == self._content_thinking:
+        # A tool-call opener ends an unclosed thinking segment (parse_inkling).
+        if (
+            segment
+            and segment[0] == self._content_thinking
+            and self._content_invoke_tool_json not in segment
+        ):
             if completion_end != len(previous_completion_ids):
                 return None
             previous_completion_ids = [*previous_completion_ids, self._end_message]

@@ -57,6 +57,14 @@ as self-contained: reasoning needs its own initial opener or channel header.
 Generation settings never supply missing parsing context. If the prompt supplied
 the opener, pass that prompt; `generate` does this automatically.
 
+Where vLLM 0.26's parser does the same, the format's atomic tool-call opener
+also ends reasoning that has no closing marker: Qwen3 / Qwen3-VL / Qwen3.5+,
+Prime-Qwen3, Nemotron-3, GLM, MiniMax-M2, DeepSeek-V4, Kimi-K2 / K2.5, Gemma 4,
+and Inkling. The call parses normally, and `bridge_to_next_turn` extends it
+without inserting a close. A closing marker later in the completion still wins:
+tool markup before it stays reasoning. Inkling ends thinking and tool segments
+with the same `<|end_message|>`, so there the first opener decides.
+
 For reasoning-first formats, only an initial `<think>` (after any assistant
 header) or reasoning already opened in the prompt starts reasoning. After its
 first closing marker, the rest is content. Later think markers remain literal

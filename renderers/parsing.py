@@ -214,6 +214,7 @@ def parse_qwen3(
         prefilled=prefilled_thinking,
         close_id=reasoning_end_id,
         tool_start_id=tool_call_id,
+        tool_start_closes_reasoning=True,
     )
     if boundary.is_open:
         return ParsedResponse(
@@ -222,12 +223,15 @@ def parse_qwen3(
 
     # Tool calls are parsed only after the initial reasoning region. An open
     # region returned above; a closed region can contain non-executable drafts.
-    reasoning_end = (
-        _find(ids, reasoning_end_id)
-        if reasoning_end_id is not None and boundary.text is not None
-        else -1
-    )
-    scan_start = reasoning_end + 1 if reasoning_end != -1 else 0
+    if boundary.closed_by_tool:
+        scan_start = _find(ids, tool_call_id)
+    else:
+        reasoning_end = (
+            _find(ids, reasoning_end_id)
+            if reasoning_end_id is not None and boundary.text is not None
+            else -1
+        )
+        scan_start = reasoning_end + 1 if reasoning_end != -1 else 0
 
     tc_start = _find(ids, tool_call_id, scan_start)
     tool_calls: list[ParsedToolCall] = []
@@ -294,7 +298,10 @@ def parse_qwen3(
     text = _decode(tokenizer, content_ids)
     # Extract reasoning from text (Qwen3 doesn't have <think> as special token)
     reasoning = None
-    if boundary.text is not None and "</think>" in text:
+    if boundary.closed_by_tool:
+        reasoning = boundary.text.strip("\n").strip()
+        text = _decode(tokenizer, content_ids[scan_start:])
+    elif boundary.text is not None and "</think>" in text:
         before, _, after = text.partition("</think>")
         reasoning = boundary.text.strip("\n").strip()
         text = after.strip("\n")
@@ -320,7 +327,6 @@ def parse_qwen35(
     tool_call_end_id: int,
     tools: list[ToolSpec] | None = None,
     prefilled_thinking: bool = False,
-    tool_start_closes_reasoning: bool = False,
 ) -> ParsedResponse:
     """Parse Qwen3.5 completion tokens. XML-style tool calls, token-level thinking.
 
@@ -342,7 +348,7 @@ def parse_qwen35(
         open_id=think_id,
         close_id=think_end_id,
         tool_start_id=tool_call_id,
-        tool_start_closes_reasoning=tool_start_closes_reasoning,
+        tool_start_closes_reasoning=True,
     )
     if boundary.is_open:
         return ParsedResponse(
@@ -353,18 +359,13 @@ def parse_qwen35(
     reasoning = None
     parse_offset = 0  # shift to map local indices back to stop-stripped ids
     think_end = _find(ids, think_end_id)
-    if boundary.text is not None:
+    if boundary.closed_by_tool:
         reasoning = boundary.text.strip()
-        tool_start = _find(ids, tool_call_id)
-        if (
-            tool_start_closes_reasoning
-            and tool_start != -1
-            and (think_end == -1 or tool_start < think_end)
-        ):
-            parse_offset = tool_start
-        else:
-            parse_offset = think_end + 1
-        ids = ids[parse_offset:]
+        parse_offset = _find(ids, tool_call_id)
+    elif boundary.text is not None and think_end != -1:
+        reasoning = boundary.text.strip()
+        parse_offset = think_end + 1
+    ids = ids[parse_offset:]
 
     tc_start = _find(ids, tool_call_id)
     tool_calls: list[ParsedToolCall] = []
@@ -511,6 +512,7 @@ def parse_glm(
         open_id=think_id,
         close_id=think_end_id,
         tool_start_id=tool_call_id,
+        tool_start_closes_reasoning=True,
         assistant_prefix="<|assistant|>",
     )
     if boundary.is_open:
@@ -521,10 +523,13 @@ def parse_glm(
     reasoning = None
     parse_offset = 0
     think_end = _find(ids, think_end_id)
-    if boundary.text is not None and think_end != -1:
+    if boundary.closed_by_tool:
         reasoning = boundary.text.strip()
-        ids = ids[think_end + 1 :]
+        parse_offset = _find(ids, tool_call_id)
+    elif boundary.text is not None and think_end != -1:
+        reasoning = boundary.text.strip()
         parse_offset = think_end + 1
+    ids = ids[parse_offset:]
 
     tc_start = _find(ids, tool_call_id)
     tool_calls: list[ParsedToolCall] = []
@@ -1246,6 +1251,7 @@ def parse_deepseek_v4(
         open_id=think_start_id,
         close_id=think_end_id,
         tool_start_id=dsml_id,
+        tool_start_closes_reasoning=True,
         assistant_prefix="<｜Assistant｜>",
     )
     if boundary.is_open:
@@ -1256,14 +1262,25 @@ def parse_deepseek_v4(
     reasoning: str | None = None
     content_offset = 0
     think_end = _find(ids, think_end_id)
-    if boundary.text is not None and think_end != -1:
+    if boundary.closed_by_tool:
+        content_offset = int(bool(ids) and ids[0] == think_start_id)
+    elif boundary.text is not None and think_end != -1:
         reasoning = boundary.text
         content_offset = think_end + 1
 
     content_ids = ids[content_offset:]
     decoded = _decode(tokenizer, content_ids)
-    section_marker = "\n\n<｜DSML｜tool_calls>"
-    section_pos = decoded.find(section_marker)
+    if boundary.closed_by_tool:
+        # Reasoning ran into DSML markup without </think>. The section opener
+        # is text around the atomic ｜DSML｜ token, so split before its tag
+        # and the canonical blank line.
+        prefix = _decode(tokenizer, content_ids[: _find(content_ids, dsml_id)])
+        section_pos = len(prefix.removesuffix("<"))
+        if decoded[:section_pos].endswith("\n\n"):
+            section_pos -= 2
+        reasoning = decoded[:section_pos]
+    else:
+        section_pos = decoded.find("\n\n<｜DSML｜tool_calls>")
     if section_pos == -1 or dsml_id not in content_ids:
         return ParsedResponse(
             content=decoded,
@@ -1271,7 +1288,7 @@ def parse_deepseek_v4(
             tool_calls=[],
         )
 
-    content = decoded[:section_pos]
+    content = "" if boundary.closed_by_tool else decoded[:section_pos]
     section_text = decoded[section_pos:]
     section_token_offset = content_offset + _decoded_char_to_token_index(
         tokenizer,
@@ -1441,6 +1458,7 @@ def parse_minimax(
         open_id=think_id,
         close_id=think_end_id,
         tool_start_id=tool_call_id,
+        tool_start_closes_reasoning=True,
         assistant_prefix="]~b]ai\n",
     )
     if boundary.is_open:
@@ -1452,10 +1470,13 @@ def parse_minimax(
     reasoning = None
     parse_offset = 0
     think_end = _find(ids, think_end_id)
-    if boundary.text is not None and think_end != -1:
+    if boundary.closed_by_tool:
         reasoning = boundary.text.strip()
-        ids = ids[think_end + 1 :]
+        parse_offset = _find(ids, tool_call_id)
+    elif boundary.text is not None and think_end != -1:
+        reasoning = boundary.text.strip()
         parse_offset = think_end + 1
+    ids = ids[parse_offset:]
 
     tc_start = _find(ids, tool_call_id)
     tool_calls: list[ParsedToolCall] = []
@@ -1619,6 +1640,7 @@ def parse_kimi_k2(
         ids,
         prefilled=prefilled_thinking,
         tool_start_id=tool_calls_section_begin_id,
+        tool_start_closes_reasoning=True,
         assistant_prefix="<|im_assistant|>assistant<|im_middle|>",
     )
     if boundary.is_open:
@@ -1626,6 +1648,12 @@ def parse_kimi_k2(
             content="", reasoning_content=boundary.text, reasoning_complete=False
         )
 
+    if boundary.closed_by_tool:
+        scan_start = _find(ids, tool_calls_section_begin_id)
+    elif boundary.text is not None:
+        scan_start = _reasoning_end_token_index(tokenizer, ids)
+    else:
+        scan_start = 0
     content_ids, tool_calls = parse_kimi_k2_section(
         tokenizer,
         ids,
@@ -1634,14 +1662,15 @@ def parse_kimi_k2(
         tool_call_begin_id=tool_call_begin_id,
         tool_call_argument_begin_id=tool_call_argument_begin_id,
         tool_call_end_id=tool_call_end_id,
-        scan_start=_reasoning_end_token_index(tokenizer, ids)
-        if boundary.text is not None
-        else 0,
+        scan_start=scan_start,
     )
 
     text = _decode(tokenizer, content_ids)
     reasoning: str | None = None
-    if boundary.text is not None and "</think>" in text:
+    if boundary.closed_by_tool:
+        reasoning = boundary.text.strip("\n").strip() or None
+        text = _decode(tokenizer, content_ids[scan_start:])
+    elif boundary.text is not None and "</think>" in text:
         before, _, after = text.partition("</think>")
         raw_think = boundary.text
         reasoning = raw_think.strip("\n").strip() or None
@@ -2025,6 +2054,27 @@ def parse_inkling(
             pass
         elif body[0] == content_thinking_id or (pos == 0 and prefilled_thinking):
             reasoning_ids = body[1:] if body[0] == content_thinking_id else body
+            # A tool-call opener ends the thinking segment (as in vLLM); the
+            # rest of the segment is the call's payload. Thinking and tool
+            # segments share <|end_message|>, so it cannot arbitrate here.
+            invoke = _find(reasoning_ids, invoke_json_id)
+            if invoke != -1:
+                reasoning_parts.append(_decode(tokenizer, reasoning_ids[:invoke]))
+                tool_calls.append(
+                    _build_inkling_tool_call(
+                        name="",
+                        payload=_decode(tokenizer, reasoning_ids[invoke + 1 :]),
+                        token_span=(
+                            seg_end - len(reasoning_ids) + invoke,
+                            seg_end + 1 if terminated else n,
+                        ),
+                        terminated=terminated,
+                    )
+                )
+                if not terminated:
+                    break
+                pos = em + 1
+                continue
             reasoning_parts.append(_decode(tokenizer, reasoning_ids))
             if not terminated:
                 return ParsedResponse(

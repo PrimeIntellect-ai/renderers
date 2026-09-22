@@ -47,6 +47,7 @@ from renderers.base import (
 )
 from renderers.configs import KimiK25RendererConfig
 from renderers.parsing import (
+    _find,
     _reasoning_end_token_index,
     parse_kimi_k2_section,
 )
@@ -461,6 +462,7 @@ def _parse_kimi_k2_response(
         tokenizer,
         ids,
         tool_start_id=tool_calls_section_begin_id,
+        tool_start_closes_reasoning=True,
         prefilled=prefilled_thinking,
         assistant_prefix="<|im_assistant|>assistant<|im_middle|>",
     )
@@ -474,9 +476,13 @@ def _parse_kimi_k2_response(
     # parse_qwen3). K2.5 renders </think> as text, so locate the boundary by
     # decoding; the section scan then starts past it. content_ids still begins
     # at 0, so the </think> text-split below recovers reasoning unchanged.
-    reasoning_end = (
-        _reasoning_end_token_index(tokenizer, ids) if boundary.text is not None else 0
-    )
+    # Without </think>, the section opener itself ends reasoning.
+    if boundary.closed_by_tool:
+        reasoning_end = _find(ids, tool_calls_section_begin_id)
+    elif boundary.text is not None:
+        reasoning_end = _reasoning_end_token_index(tokenizer, ids)
+    else:
+        reasoning_end = 0
 
     # Token-ID path — produces spans. Only run if every relevant special
     # token resolved at init (i.e. is in the tokenizer's vocab).
@@ -499,6 +505,8 @@ def _parse_kimi_k2_response(
             tool_call_end_id=tool_call_end_id,
             scan_start=reasoning_end,
         )
+        if boundary.closed_by_tool:
+            content_ids = content_ids[reasoning_end:]
         text = (
             tokenizer.decode(content_ids, skip_special_tokens=False)
             if content_ids
@@ -1030,6 +1038,7 @@ class KimiK25Renderer:
             prompt_ids=previous_prompt_ids,
             stop_ids=set(self.get_stop_token_ids()),
             tool_start_id=self._tool_calls_section_begin,
+            tool_start_closes_reasoning=True,
             assistant_prefix="<|im_assistant|>assistant<|im_middle|>",
         )
         if boundary.is_open:

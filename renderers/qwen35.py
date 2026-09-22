@@ -682,7 +682,6 @@ class Qwen35Renderer:
             think_end_id=self._think_end,
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
-            tool_start_closes_reasoning=True,
             tools=tools,
             prefilled_thinking=prompt_ends_in_reasoning(
                 self._tokenizer,

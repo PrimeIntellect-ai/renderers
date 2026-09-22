@@ -334,6 +334,7 @@ class GLM45Renderer:
             prompt_ids=previous_prompt_ids,
             stop_ids=set(self.get_stop_token_ids()),
             tool_start_id=self._tool_call_tok,
+            tool_start_closes_reasoning=True,
             assistant_prefix="<|assistant|>",
         )
         if boundary.is_open:

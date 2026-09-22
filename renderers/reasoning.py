@@ -5,10 +5,15 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ReasoningBoundary:
-    """Reasoning state and text; None means no reasoning region was opened."""
+    """Reasoning state and text; None means no reasoning region was opened.
+
+    ``closed_by_tool`` marks a region ended by a tool-call opener rather than
+    the format's close marker; the tool call then starts the content.
+    """
 
     is_open: bool
     text: str | None
+    closed_by_tool: bool = False
 
 
 def _decode(tokenizer, ids: list[int]) -> str:
@@ -98,8 +103,11 @@ def scan_reasoning(
     Tagged formats recognize an opener only at the beginning of the assistant
     body, or continue reasoning opened in the prompt. A first close permanently
     switches to content. Atomic delimiters match token IDs, not lookalike text.
-    Qwen3.5 can also end reasoning at an atomic tool-start marker.
     Explicit channel formats can opt into channel transitions instead.
+
+    ``tool_start_closes_reasoning`` lets an atomic tool-call opener end a
+    region that has no close marker, as vLLM's parsers do for these formats.
+    An explicit close still wins: tool markup before it stays reasoning.
     """
     if prompt_ids is not None:
         prefilled = prompt_ends_in_reasoning(
@@ -129,15 +137,17 @@ def scan_reasoning(
             if not prefilled and not explicit:
                 return ReasoningBoundary(False, None)
             start = int(explicit)
-            closing_ids = {close_id}
-            if tool_start_closes_reasoning and tool_start_id is not None:
-                closing_ids.add(tool_start_id)
-            close = next(
-                (i for i in range(start, len(ids)) if ids[i] in closing_ids), -1
-            )
+            close = next((i for i in range(start, len(ids)) if ids[i] == close_id), -1)
+            by_tool = False
+            if close == -1 and tool_start_closes_reasoning:
+                close = next(
+                    (i for i in range(start, len(ids)) if ids[i] == tool_start_id), -1
+                )
+                by_tool = close != -1
             return ReasoningBoundary(
                 close == -1,
                 _decode(tokenizer, ids[start : close if close != -1 else len(ids)]),
+                by_tool,
             )
         text = _decode(tokenizer, ids)
         explicit = text.startswith(open_marker)
@@ -145,8 +155,14 @@ def scan_reasoning(
             return ReasoningBoundary(False, None)
         start = len(open_marker) if explicit else 0
         close = text.find(close_marker, start)
+        by_tool = False
+        if close == -1 and tool_start_closes_reasoning:
+            tool = next((i for i, t in enumerate(ids) if t == tool_start_id), -1)
+            tool_pos = len(_decode(tokenizer, ids[:tool])) if tool != -1 else -1
+            if tool_pos >= start:
+                close, by_tool = tool_pos, True
         return ReasoningBoundary(
-            close == -1, text[start : close if close != -1 else len(text)]
+            close == -1, text[start : close if close != -1 else len(text)], by_tool
         )
 
     events: list[tuple[int, int, bool | None]]
@@ -183,11 +199,21 @@ def scan_reasoning(
 
     active = prefilled
     start = 0
+    by_tool = False
     closed_regions: list[tuple[int, int]] = []
-    for pos, after, opening in sorted(events):
+    events.sort()
+    for n, (pos, after, opening) in enumerate(events):
         if opening is None:
             if not active:
                 break
+            # While a region is active, its next close ends it; without one,
+            # the tool opener does.
+            if tool_start_closes_reasoning and all(
+                o is not False for _, _, o in events[n + 1 :]
+            ):
+                closed_regions.append((start, pos))
+                active = False
+                by_tool = True
             continue
         if opening:
             if not active:
@@ -203,4 +229,5 @@ def scan_reasoning(
     return ReasoningBoundary(
         is_open=active,
         text="".join(decode_region(a, b) for a, b in closed_regions),
+        closed_by_tool=by_tool,
     )

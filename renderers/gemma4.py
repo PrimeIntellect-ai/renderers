@@ -1146,6 +1146,7 @@ class Gemma4Renderer:
             open_id=self._channel_start,
             close_id=self._channel_end,
             tool_start_id=self._tool_call_start,
+            tool_start_closes_reasoning=True,
         )
         if boundary.is_open:
             reasoning = (boundary.text or "").removeprefix("thought\n").strip()
@@ -1154,14 +1155,19 @@ class Gemma4Renderer:
                 reasoning_content=reasoning,
                 reasoning_complete=False,
             )
+
+        def thought_end(start: int) -> int:
+            """Index of the closer, else of a tool call that ended the thought."""
+            closer = self._channel_end
+            if self._channel_end not in ids[start:] and boundary.closed_by_tool:
+                closer = self._tool_call_start
+            return next((i for i in range(start, len(ids)) if ids[i] == closer), -1)
+
         reasoning: str | None = None
         content_ids: list[int] = []
         cursor = 0
         if ids and ids[0] == self._channel_start:
-            channel_end = next(
-                (i for i in range(1, len(ids)) if ids[i] == self._channel_end),
-                -1,
-            )
+            channel_end = thought_end(1)
             thought_start = 1
             if ids[thought_start : thought_start + len(self._thought_prefix)] == (
                 self._thought_prefix
@@ -1176,20 +1182,17 @@ class Gemma4Renderer:
                     reasoning_complete=False,
                 )
             reasoning = self._decode(ids[thought_start:channel_end]).strip()
-            cursor = channel_end + 1
+            cursor = channel_end + int(ids[channel_end] == self._channel_end)
         elif prefilled_thinking:
             # After a tool response, the canonical generation prompt already
             # ends with ``<|channel>thought\n``. The sampled completion therefore
             # starts with the thought body and contains only the closing
             # ``<channel|>`` marker. The supplied prompt identifies this
             # continuation, including when it truncates before the closer.
-            channel_end = next(
-                (i for i, token_id in enumerate(ids) if token_id == self._channel_end),
-                -1,
-            )
+            channel_end = thought_end(0)
             if channel_end != -1:
                 reasoning = self._decode(ids[:channel_end]).strip()
-                cursor = channel_end + 1
+                cursor = channel_end + int(ids[channel_end] == self._channel_end)
             else:
                 return ParsedResponse(
                     content="",
@@ -1294,6 +1297,7 @@ class Gemma4Renderer:
             prompt_ids=previous_prompt_ids,
             stop_ids=set(self.get_stop_token_ids()),
             tool_start_id=self._tool_call_start,
+            tool_start_closes_reasoning=True,
             initial_only=False,
             open_id=self._channel_start,
             close_id=self._channel_end,

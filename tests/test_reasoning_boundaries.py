@@ -6,7 +6,7 @@ import pytest
 from parity import MODEL_CATALOG
 
 from renderers import create_renderer
-from renderers.base import load_tokenizer
+from renderers.base import ToolCallParseStatus, load_tokenizer
 from renderers.configs import config_from_name
 
 
@@ -157,15 +157,55 @@ def test_gemma_post_tool_prompt_supplies_reasoning_state():
     assert result.reasoning_complete is False
 
 
-@pytest.mark.parametrize(
-    "name", ["qwen3", "qwen3.5", "deepseek-r1", "kimi-k2", "kimi-k2.5", "laguna-xs-2.1"]
-)
+# Formats whose vLLM 0.26 parser ends unclosed reasoning at a tool-call opener,
+# with a well-formed call to ``danger``. The rest keep reasoning open.
+_QWEN_XML_CALL = "<tool_call>\n<function=danger>\n</function>\n</tool_call>"
+_GLM_CALL = "<tool_call>danger</tool_call>"
+_KIMI_CALL = "<|tool_calls_section_begin|><|tool_call_begin|>functions.danger:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"
+_TOOL_CALLS = {
+    "qwen3": '<tool_call>\n{"name": "danger", "arguments": {}}\n</tool_call>',
+    "qwen3-vl": '<tool_call>\n{"name": "danger", "arguments": {}}\n</tool_call>',
+    "qwen3.5": _QWEN_XML_CALL,
+    "qwen3.6": _QWEN_XML_CALL,
+    "qwen3.8": _QWEN_XML_CALL,
+    "prime-qwen3": _QWEN_XML_CALL,
+    "nemotron-3": _QWEN_XML_CALL,
+    "nemotron-3-ultra": _QWEN_XML_CALL,
+    "nemotron-3.5": _QWEN_XML_CALL,
+    "glm-4.5": _GLM_CALL,
+    "glm-5": _GLM_CALL,
+    "glm-5.1": _GLM_CALL,
+    "glm-5.3": _GLM_CALL,
+    "minimax-m2": '<minimax:tool_call>\n<invoke name="danger">\n</invoke>\n</minimax:tool_call>',
+    "deepseek-v4": '\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name="danger">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+    "kimi-k2": _KIMI_CALL,
+    "kimi-k2.5": _KIMI_CALL,
+    "gemma4": "<|tool_call>call:danger{}<tool_call|>",
+    "inkling": '<|content_invoke_tool_json|>{"name": "danger", "args": {}}<|end_message|>',
+}
+_STRICT_TOOL_OPENERS = {
+    "deepseek-r1",
+    "deepseek-v3",
+    "gpt-oss",
+    "hy3",
+    "laguna-m.1",
+    "laguna-s-2.1",
+    "laguna-xs-2.1",
+    "laguna-xs.2",
+}
+
+
+def test_every_reasoning_renderer_classifies_tool_openers():
+    reasoning_renderers = set(_CASES) - {"llama-3", "default"}
+    assert reasoning_renderers == set(_TOOL_CALLS) | _STRICT_TOOL_OPENERS
+    assert not set(_TOOL_CALLS) & _STRICT_TOOL_OPENERS
+
+
+@pytest.mark.parametrize("name", ["deepseek-r1", "laguna-xs-2.1"])
 def test_tool_drafts_in_unfinished_reasoning_are_not_executable(name):
     tok, renderer = _renderer(name)
     prompt, incomplete, _ = _thinking_stream(name, tok, renderer)
     draft = '<tool_call>{"name":"danger","arguments":{}}</tool_call>'
-    if name.startswith("kimi"):
-        draft = "<|tool_calls_section_begin|><|tool_call_begin|>functions.danger:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"
     if name == "deepseek-r1":
         draft = "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>danger\n```json\n{}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"
     result = renderer.parse_response(
@@ -175,6 +215,74 @@ def test_tool_drafts_in_unfinished_reasoning_are_not_executable(name):
     assert "danger" in result.reasoning_content
     assert result.tool_calls == []
     assert result.reasoning_complete is False
+
+
+@pytest.mark.parametrize("name", sorted(_TOOL_CALLS))
+@pytest.mark.parametrize("stop", [False, True])
+def test_tool_opener_ends_unclosed_reasoning(name, stop):
+    tok, renderer = _renderer(name)
+    prompt, incomplete, _ = _thinking_stream(name, tok, renderer)
+    call = _encode(tok, _TOOL_CALLS[name])
+    sampled = incomplete + call + (renderer.get_stop_token_ids()[:1] if stop else [])
+    result = renderer.parse_response(sampled, prompt_ids=prompt)
+    assert result.content == ""
+    assert result.reasoning_content == "unfinished reasoning"
+    assert result.reasoning_complete is True
+    assert [(c.name, c.arguments, c.status) for c in result.tool_calls] == [
+        ("danger", {}, ToolCallParseStatus.OK)
+    ]
+    start, end = result.tool_calls[0].token_span
+    assert len(incomplete) <= start < end <= len(incomplete) + len(call)
+    assert "danger" in tok.decode(sampled[start:end], skip_special_tokens=False)
+
+
+@pytest.mark.parametrize("name", sorted(set(_TOOL_CALLS) - {"inkling"}))
+def test_explicit_reasoning_close_outranks_earlier_tool_opener(name):
+    # Inkling closes thinking and tool segments with the same <|end_message|>.
+    tok, renderer = _renderer(name)
+    prompt, incomplete, closed = _thinking_stream(name, tok, renderer)
+    draft = _encode(tok, _TOOL_CALLS[name])
+    result = renderer.parse_response(incomplete + draft + closed, prompt_ids=prompt)
+    assert result.content == "Answer"
+    assert "danger" in result.reasoning_content
+    assert result.tool_calls == []
+    assert result.reasoning_complete is True
+
+
+def test_inkling_prose_after_tool_opener_is_not_executable():
+    tok, renderer = _renderer("inkling")
+    prompt, incomplete, _ = _thinking_stream("inkling", tok, renderer)
+    draft = _encode(
+        tok, '<|content_invoke_tool_json|>{"name": "danger"} maybe not<|end_message|>'
+    )
+    result = renderer.parse_response(incomplete + draft, prompt_ids=prompt)
+    assert result.reasoning_content == "unfinished reasoning"
+    assert [c.status for c in result.tool_calls] == [ToolCallParseStatus.INVALID_JSON]
+
+
+@pytest.mark.parametrize("name", sorted(_TOOL_CALLS))
+@pytest.mark.parametrize("truncated", [False, True])
+def test_bridge_extends_tool_call_that_ended_reasoning(name, truncated):
+    tok, renderer = _renderer(name)
+    prompt, incomplete, _ = _thinking_stream(name, tok, renderer)
+    call = _encode(tok, _TOOL_CALLS[name])
+    sampled = incomplete + (
+        call[: len(call) // 2]
+        if truncated
+        else call + renderer.get_stop_token_ids()[:1]
+    )
+    bridge = renderer.bridge_to_next_turn(
+        prompt, sampled, [{"role": "user", "content": "Next question."}]
+    )
+    assert bridge is not None
+    prefix_len = len(prompt) + len(sampled)
+    assert bridge.token_ids[:prefix_len] == prompt + sampled
+    assert not any(bridge.sampled_mask[prefix_len:])
+    close_ids = {
+        "gemma4": lambda: [renderer._channel_end],
+        "inkling": lambda: [renderer._end_message],
+    }.get(name, lambda: _encode(tok, "</think>"))()
+    assert bridge.token_ids[prefix_len : prefix_len + len(close_ids)] != close_ids
 
 
 @pytest.mark.parametrize(

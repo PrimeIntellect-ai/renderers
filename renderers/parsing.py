@@ -320,6 +320,7 @@ def parse_qwen35(
     tool_call_end_id: int,
     tools: list[ToolSpec] | None = None,
     prefilled_thinking: bool = False,
+    tool_start_closes_reasoning: bool = False,
 ) -> ParsedResponse:
     """Parse Qwen3.5 completion tokens. XML-style tool calls, token-level thinking.
 
@@ -341,6 +342,7 @@ def parse_qwen35(
         open_id=think_id,
         close_id=think_end_id,
         tool_start_id=tool_call_id,
+        tool_start_closes_reasoning=tool_start_closes_reasoning,
     )
     if boundary.is_open:
         return ParsedResponse(
@@ -351,10 +353,18 @@ def parse_qwen35(
     reasoning = None
     parse_offset = 0  # shift to map local indices back to stop-stripped ids
     think_end = _find(ids, think_end_id)
-    if boundary.text is not None and think_end != -1:
+    if boundary.text is not None:
         reasoning = boundary.text.strip()
-        ids = ids[think_end + 1 :]
-        parse_offset = think_end + 1
+        tool_start = _find(ids, tool_call_id)
+        if (
+            tool_start_closes_reasoning
+            and tool_start != -1
+            and (think_end == -1 or tool_start < think_end)
+        ):
+            parse_offset = tool_start
+        else:
+            parse_offset = think_end + 1
+        ids = ids[parse_offset:]
 
     tc_start = _find(ids, tool_call_id)
     tool_calls: list[ParsedToolCall] = []

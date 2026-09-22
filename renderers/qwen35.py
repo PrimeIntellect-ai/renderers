@@ -682,6 +682,7 @@ class Qwen35Renderer:
             think_end_id=self._think_end,
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
+            tool_start_closes_reasoning=True,
             tools=tools,
             prefilled_thinking=prompt_ends_in_reasoning(
                 self._tokenizer,
@@ -716,6 +717,7 @@ class Qwen35Renderer:
             prompt_ids=previous_prompt_ids,
             stop_ids=set(self.get_stop_token_ids()),
             tool_start_id=self._tool_call,
+            tool_start_closes_reasoning=True,
         )
         if boundary.is_open:
             if any(t in self.get_stop_token_ids() for t in previous_completion_ids):

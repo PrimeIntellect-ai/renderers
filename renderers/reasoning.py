@@ -87,6 +87,7 @@ def scan_reasoning(
     open_id: int | None = None,
     close_id: int | None = None,
     tool_start_id: int | None = None,
+    tool_start_closes_reasoning: bool = False,
     prompt_ids: list[int] | None = None,
     stop_ids: set[int] | frozenset[int] = frozenset(),
     open_marker: str = "<think>",
@@ -97,6 +98,7 @@ def scan_reasoning(
     Tagged formats recognize an opener only at the beginning of the assistant
     body, or continue reasoning opened in the prompt. A first close permanently
     switches to content. Atomic delimiters match token IDs, not lookalike text.
+    Qwen3.5 can also end reasoning at an atomic tool-start marker.
     Explicit channel formats can opt into channel transitions instead.
     """
     if prompt_ids is not None:
@@ -127,7 +129,12 @@ def scan_reasoning(
             if not prefilled and not explicit:
                 return ReasoningBoundary(False, None)
             start = int(explicit)
-            close = next((i for i in range(start, len(ids)) if ids[i] == close_id), -1)
+            closing_ids = {close_id}
+            if tool_start_closes_reasoning and tool_start_id is not None:
+                closing_ids.add(tool_start_id)
+            close = next(
+                (i for i in range(start, len(ids)) if ids[i] in closing_ids), -1
+            )
             return ReasoningBoundary(
                 close == -1,
                 _decode(tokenizer, ids[start : close if close != -1 else len(ids)]),

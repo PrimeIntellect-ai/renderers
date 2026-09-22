@@ -670,7 +670,12 @@ class Qwen35Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
+        thinking_prefix = self._tokenizer.encode("<think>\n", add_special_tokens=False)
+        prefilled_thinking = bool(
+            prompt_ids and prompt_ids[-len(thinking_prefix) :] == thinking_prefix
+        )
         return parse_qwen35(
             self._tokenizer,
             token_ids,
@@ -680,6 +685,8 @@ class Qwen35Renderer:
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
             tools=tools,
+            prefilled_thinking=prefilled_thinking,
+            tool_start_closes_reasoning=True,
         )
 
     def parse_response_with_prompt(
@@ -689,15 +696,7 @@ class Qwen35Renderer:
         *,
         tools: list[ToolSpec] | None = None,
     ) -> ParsedResponse:
-        thinking_prefix = self._tokenizer.encode("<think>\n", add_special_tokens=False)
-        if (
-            prompt_token_ids[-len(thinking_prefix) :] == thinking_prefix
-            and self._think not in token_ids
-            and self._think_end not in token_ids
-        ):
-            # An unfinished prompt-prefilled think block contains no answer or tool call.
-            return self.parse_response([self._think, *token_ids], tools=tools)
-        return self.parse_response(token_ids, tools=tools)
+        return self.parse_response(token_ids, tools=tools, prompt_ids=prompt_token_ids)
 
     def get_stop_token_ids(self) -> list[int]:
         return [self._im_end, self._endoftext]

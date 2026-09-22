@@ -305,6 +305,8 @@ def parse_qwen35(
     tool_call_id: int,
     tool_call_end_id: int,
     tools: list[ToolSpec] | None = None,
+    prefilled_thinking: bool = False,
+    tool_start_closes_reasoning: bool = False,
 ) -> ParsedResponse:
     """Parse Qwen3.5 completion tokens. XML-style tool calls, token-level thinking.
 
@@ -321,13 +323,25 @@ def parse_qwen35(
     reasoning = None
     parse_offset = 0  # shift to map local indices back to stop-stripped ids
     think_end = _find(ids, think_end_id)
-    if think_end != -1:
+    tool_start = _find(ids, tool_call_id)
+    if (
+        tool_start_closes_reasoning
+        and (prefilled_thinking or think_id in ids)
+        and tool_start != -1
+        and (think_end == -1 or tool_start < think_end)
+    ):
+        think_start = _find(ids, think_id)
+        reasoning_start = think_start + 1 if 0 <= think_start < tool_start else 0
+        reasoning = _decode(tokenizer, ids[reasoning_start:tool_start]).strip()
+        parse_offset = tool_start
+        ids = ids[tool_start:]
+    elif think_end != -1:
         reasoning_ids = ids[:think_end]
         reasoning_ids = [t for t in reasoning_ids if t != think_id]
         reasoning = _decode(tokenizer, reasoning_ids).strip()
         ids = ids[think_end + 1 :]
         parse_offset = think_end + 1
-    elif think_id in set(ids):
+    elif prefilled_thinking or think_id in set(ids):
         # <think> present but no </think> — truncated reasoning. Block
         # present ⇒ string (see docstring), even when nothing follows the
         # opening tag.

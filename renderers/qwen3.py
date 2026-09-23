@@ -96,11 +96,10 @@ class Qwen3Renderer:
     def _content_text(content) -> str:
         """Return the text parts of a message in a renderer-safe form.
 
-        Qwen3's native template is text-only, but OpenAI-compatible clients
-        (notably the pi ACP adapter) commonly serialize even a text-only user
-        message as ``[{"type": "text", "text": ...}]``.  Treat those two
-        representations identically instead of silently dropping the message
-        body.
+        Qwen3's native template is text-only, but text-only messages can also
+        use OpenAI-style content lists: ``[{"type": "text", "text": ...}]``.
+        Treat both representations identically instead of silently dropping
+        the message body.
         """
         if isinstance(content, str):
             return content

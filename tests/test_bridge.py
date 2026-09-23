@@ -206,7 +206,7 @@ def test_bridge_extension_includes_new_message_text(
 
 
 def test_qwen3_renders_openai_text_content_parts(br_renderer, br_tokenizer, br_model):
-    """ACP/OpenAI text blocks must not become an empty user turn."""
+    """Text content lists must not become an empty user turn."""
     if br_model not in {"Qwen/Qwen3-8B", "Qwen/Qwen3-4B"}:
         pytest.skip(f"{br_model}: not a Qwen3 text renderer")
 

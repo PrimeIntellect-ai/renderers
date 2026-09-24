@@ -53,6 +53,8 @@ def test_generic_thinking_retention_does_not_change_full_render(
 
     if isinstance(renderer, DefaultRenderer):
         pytest.skip("DefaultRenderer raises on explicit retention — covered separately")
+    if not renderer.supports_reasoning_content:
+        pytest.skip(f"{model_name}: renderer has no structured reasoning channel")
 
     default = renderer.render_ids(CONVERSATION)
     for retention in ("tool_cycle", "all"):

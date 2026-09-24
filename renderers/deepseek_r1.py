@@ -30,6 +30,7 @@ from renderers.deepseek_v3 import DeepSeekV3Renderer
 class DeepSeekR1Renderer(DeepSeekV3Renderer):
     """Deterministic message → token renderer for DeepSeek-R1 models."""
 
+    supports_reasoning_content = True
     _config_cls: type = DeepSeekR1RendererConfig
     _implied_thinking_retention = "template"
     _GEN_THINK_PREFILL: str = "<think>\n"
@@ -38,10 +39,9 @@ class DeepSeekR1Renderer(DeepSeekV3Renderer):
         """Assistant content with the reasoning trace stripped, mirroring the
         R1 template's ``content.split('</think>')[-1]`` on historical turns.
 
-        Structured ``thinking``/``text`` parts are reconstructed inline first
-        so the same ``</think>`` split applies. The separate
-        ``reasoning_content`` field is ignored — the R1 chat template never
-        reads it, and history reasoning is dropped regardless.
+        Canonical ``reasoning_content`` is accepted by this reasoning-capable
+        renderer, but the R1 template intentionally drops historical reasoning.
+        The visible ``content`` is therefore emitted unchanged.
         """
         content = msg.get("content") or ""
         if isinstance(content, list):
@@ -49,11 +49,7 @@ class DeepSeekR1Renderer(DeepSeekV3Renderer):
             for p in content:
                 if not isinstance(p, dict):
                     continue
-                if p.get("type") == "thinking":
-                    parts.append(f"<think>{p.get('thinking', '')}</think>")
-                elif p.get("type") == "text":
+                if p.get("type") == "text":
                     parts.append(p.get("text", ""))
             content = "".join(parts)
-        if "</think>" in content:
-            content = content.split("</think>")[-1]
         return content

@@ -136,6 +136,11 @@ def test_offsetless_contract_across_renderer_matrix(
 ) -> None:
     """Every configured renderer preserves tokens and non-content metadata."""
 
+    if not renderer.supports_reasoning_content and any(
+        message.get("reasoning_content") for message in messages
+    ):
+        pytest.skip(f"{model_name}: renderer has no structured reasoning channel")
+
     expected = renderer.render(
         messages,
         tools=tools,

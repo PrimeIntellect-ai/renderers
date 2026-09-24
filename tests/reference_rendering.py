@@ -1,9 +1,10 @@
 """Reference-oracle registry for the shared test barrage.
 
 The oracle is selected from the resolved renderer, not assumed to be Hugging
-Face ``apply_chat_template``. Most checkpoints currently route to that adapter,
-DeepSeek V4 routes to its shipped Python-encoder contract, and GPT-OSS routes to
-Harmony. ``render_reference`` is the single invocation path for all three.
+Face ``apply_chat_template``. Most checkpoints currently route to that adapter.
+Kimi K2 first projects canonical reasoning into its content-only native
+template, DeepSeek V4 routes to its shipped Python-encoder contract, and
+GPT-OSS routes to Harmony. ``render_reference`` is the single invocation path.
 
 The compact DSV4 implementation below is deliberately test-side and independent
 of ``renderers.deepseek_v4``.  It mirrors the public chat/tool branches of the
@@ -419,6 +420,23 @@ def _render_hugging_face(
     return list(result)
 
 
+def _render_kimi_k2(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    **kwargs: Any,
+) -> list[int]:
+    """Project canonical reasoning into Kimi K2's content-only Jinja input."""
+    projected = copy.deepcopy(messages)
+    for message in projected:
+        if message.get("role") != "assistant":
+            continue
+        reasoning = message.pop("reasoning_content", None)
+        if isinstance(reasoning, str):
+            content = message.get("content") or ""
+            message["content"] = f"<think>{reasoning}</think>{content}"
+    return _render_hugging_face(tokenizer, projected, **kwargs)
+
+
 def _render_deepseek_v4(
     tokenizer: Any,
     messages: list[dict[str, Any]],
@@ -605,6 +623,7 @@ def _render_harmony(
 REFERENCE_ORACLES: Mapping[str, ReferenceOracle] = MappingProxyType(
     {
         "hugging-face": ReferenceOracle("hugging-face", _render_hugging_face),
+        "kimi-k2": ReferenceOracle("kimi-k2", _render_kimi_k2),
         "deepseek-v4": ReferenceOracle("deepseek-v4", _render_deepseek_v4),
         "harmony": ReferenceOracle("harmony", _render_harmony),
     }
@@ -617,6 +636,7 @@ RENDERER_ORACLE_ROUTES: Mapping[str, str] = MappingProxyType(
     {
         "deepseek-v4": "deepseek-v4",
         "gpt-oss": "harmony",
+        "kimi-k2": "kimi-k2",
     }
 )
 """Renderer families whose canonical reference is not a Jinja template."""

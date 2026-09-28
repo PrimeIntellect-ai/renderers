@@ -331,6 +331,10 @@ class DeepSeekV4Renderer:
             raise ValueError(f"Expected one token for {token!r}, got {ids}")
         return ids[0]
 
+    def _reasoning_effort_prompt(self) -> str:
+        """Text emitted after BOS in thinking mode; subclasses can replace it."""
+        return _REASONING_EFFORT_PROMPTS[self.config.reasoning_effort]
+
     @staticmethod
     def _render_tools(tools: list[ToolSpec]) -> str:
         schemas = [_json(dict(_tool_function(tool))) for tool in tools]
@@ -573,10 +577,7 @@ class DeepSeekV4Renderer:
         if add_bos:
             emit_special(self._bos, -1)
         if add_effort_prompt and self.config.enable_thinking:
-            emit_text(
-                _REASONING_EFFORT_PROMPTS[self.config.reasoning_effort],
-                -1,
-            )
+            emit_text(self._reasoning_effort_prompt(), -1)
 
         last_query_index = -1
         for index, message in enumerate(logical_messages):

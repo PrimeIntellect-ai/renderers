@@ -1424,6 +1424,10 @@ def create_renderer(
         config,
         chat_template_kwargs=chat_template_kwargs,
     )
+    from renderers.configs import PluginRendererConfig
+
+    if isinstance(config, PluginRendererConfig):
+        return config.renderer_class(tokenizer, config.plugin_config)
     cls = RENDERER_REGISTRY.get(config.name)
     if cls is None:
         raise ValueError(
@@ -1440,18 +1444,27 @@ def _merge_chat_template_kwargs(
         return config
     if not isinstance(chat_template_kwargs, Mapping):
         raise TypeError("chat_template_kwargs must be a mapping.")
+    from renderers.configs import PluginRendererConfig
+
     kwargs = dict(chat_template_kwargs)
     config_cls = type(config)
-    allowed = config_cls.template_field_names()
-    if config_cls._allow_opaque_template_kwargs:
-        reserved = frozenset(config_cls.model_fields) - allowed - {"name"}
+    # A plugin config carries its renderer's fields as extras, so the plugin's
+    # own config class decides which kwargs are template controls.
+    fields_cls = (
+        config.plugin_config_class
+        if isinstance(config, PluginRendererConfig)
+        else config_cls
+    )
+    allowed = fields_cls.template_field_names()
+    if fields_cls._allow_opaque_template_kwargs:
+        reserved = frozenset(fields_cls.model_fields) - allowed - {"name"}
         unsupported = frozenset(kwargs) & reserved
     else:
         unsupported = frozenset(kwargs) - allowed
     if unsupported:
         allowed_text = (
             "opaque Jinja kwargs"
-            if config_cls._allow_opaque_template_kwargs
+            if fields_cls._allow_opaque_template_kwargs
             else ", ".join(sorted(allowed)) or "(none)"
         )
         raise ValueError(

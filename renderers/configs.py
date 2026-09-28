@@ -21,7 +21,7 @@ keys its tokenizer's template will honour, so it can't enumerate them.
 
 from __future__ import annotations
 
-from typing import Annotated, ClassVar, Literal, Union
+from typing import Annotated, Any, ClassVar, Literal, Union
 
 from pydantic import ConfigDict, Field, model_validator
 from pydantic_config import BaseConfig
@@ -994,6 +994,54 @@ class DeepSeekV4RendererConfig(BaseRendererConfig):
         return self
 
 
+class PluginRendererConfig(BaseRendererConfig):
+    """Config for a renderer loaded from outside this package.
+
+    ``target`` names the renderer class as ``package.module:Class`` or
+    ``path/to/file.py:Class``; relative paths resolve against the working
+    directory. The class sets ``config_class`` to its own
+    :class:`BaseRendererConfig` subclass, and that class validates every other
+    field of this config. A plugin can therefore ship a model-specific
+    renderer without a change to this package::
+
+        [renderer]
+        name = "plugin"
+        target = "my_renderers/deepseek_v4_depth.py:DeepSeekV4DepthRenderer"
+        enable_thinking = true
+    """
+
+    model_config = ConfigDict(frozen=True, extra="allow")
+
+    name: Literal["plugin"] = "plugin"
+    target: str
+    """Renderer class as ``package.module:Class`` or ``path/to/file.py:Class``."""
+
+    _internal_fields = frozenset({"target"})
+
+    @model_validator(mode="after")
+    def _validate_plugin_fields(self):
+        self.plugin_config
+        return self
+
+    @property
+    def renderer_class(self) -> Any:
+        from renderers.plugins import load_plugin_renderer
+
+        return load_plugin_renderer(self.target)
+
+    @property
+    def plugin_config_class(self) -> type[BaseRendererConfig]:
+        return self.renderer_class.config_class
+
+    @property
+    def plugin_config(self) -> BaseRendererConfig:
+        """The plugin's own typed config, built from this config's other fields."""
+        data = dict(self.model_extra or {})
+        for field_name in self.model_fields_set - {"name", "target"}:
+            data[field_name] = getattr(self, field_name)
+        return self.plugin_config_class.model_validate(data)
+
+
 RendererConfig = Annotated[
     Union[
         AutoRendererConfig,
@@ -1026,6 +1074,7 @@ RendererConfig = Annotated[
         DeepSeekV3RendererConfig,
         DeepSeekR1RendererConfig,
         DeepSeekV4RendererConfig,
+        PluginRendererConfig,
     ],
     Field(discriminator="name"),
 ]

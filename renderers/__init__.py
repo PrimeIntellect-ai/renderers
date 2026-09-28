@@ -67,6 +67,7 @@ from renderers.configs import (
     Nemotron3RendererConfig,
     Nemotron3UltraRendererConfig,
     Nemotron35RendererConfig,
+    PluginRendererConfig,
     PrimeQwen3RendererConfig,
     Qwen3RendererConfig,
     Qwen3VLRendererConfig,
@@ -76,6 +77,7 @@ from renderers.configs import (
     RendererConfig,
     config_from_name,
 )
+from renderers.plugins import load_plugin_object, load_plugin_renderer
 
 # Concrete renderer classes are lazy-loaded so that consumers needing only the
 # config layer (``RendererConfig`` discriminated union) don't import every
@@ -195,6 +197,7 @@ __all__ = [
     "ParsedResponse",
     "ParsedToolCall",
     "PlaceholderRange",
+    "PluginRendererConfig",
     "PrimeQwen3Renderer",
     "PrimeQwen3RendererConfig",
     "Qwen35Renderer",
@@ -228,6 +231,8 @@ __all__ = [
     "create_renderer",
     "extract_message_tool_names",
     "is_multimodal",
+    "load_plugin_object",
+    "load_plugin_renderer",
     "reject_assistant_in_extension",
     "trim_to_turn_close",
 ]

@@ -201,6 +201,38 @@ One shared behaviour flag lives on typed renderer configs: `thinking_retention`,
 
 Generic `thinking_retention` does **not** change full `render()` output: a full re-render always follows the Python chat-template implementation. Only real template knobs can change full-render thinking behaviour. GLM-5 `clear_thinking=False`, Nemotron-3 `truncate_history_thinking=False`, Qwen3.6 `preserve_thinking=True`, and GPT-OSS `auto_drop_analysis=False` all imply bridge policy `"all"`; no-thinking generation knobs also imply `"all"` when `thinking_retention` is unset. Setting a direct keep/drop template knob and a contradictory `thinking_retention` raises at config-load. The full per-renderer mapping lives in [`docs/renderer-config.md`](docs/renderer-config.md).
 
+## Local renderer plugins
+
+A renderer can live outside this package. Point a `plugin` config at the class as `package.module:Class` or `path/to/file.py:Class`; relative paths resolve against the working directory. The class sets `config_class` to its own `BaseRendererConfig` subclass, which validates every other field of the plugin config and supplies its `chat_template_kwargs` allowlist:
+
+```python
+# my_renderers/deepseek_v4_depth.py
+from typing import Literal
+
+from renderers.configs import DeepSeekV4RendererConfig
+from renderers.deepseek_v4 import DeepSeekV4Renderer
+
+
+class DepthConfig(DeepSeekV4RendererConfig):
+    name: Literal["deepseek-v4-depth"] = "deepseek-v4-depth"
+
+
+class DepthRenderer(DeepSeekV4Renderer):
+    config_class = DepthConfig
+```
+
+```python
+from renderers import PluginRendererConfig, create_renderer
+
+config = PluginRendererConfig(
+    target="my_renderers/deepseek_v4_depth.py:DepthRenderer",
+    enable_thinking=True,
+)
+renderer = create_renderer(tokenizer, config)
+```
+
+Downstream TOML configs select it the same way, with `name = "plugin"` and a `target`.
+
 ## `DefaultRenderer`
 
 Fallback for unsupported text-only models. Wraps `apply_chat_template` and accepts `tool_parser` / `reasoning_parser` (vLLM convention) plus arbitrary Jinja kwargs via `DefaultRendererConfig`'s `extra="allow"`. Explicit `thinking_retention` is rejected: `bridge_to_next_turn` returns `None` because the template's close is unknown, so multi-turn rollouts fall back to full re-render. Implementing a hand-coded renderer is a few hundred lines of Python (`render_ids` + `parse_response` + `bridge_to_next_turn`) and is the only path that closes the failure modes above by construction.

@@ -260,6 +260,26 @@ def test_generate_rejects_missing_completion_logprobs_before_parsing():
     assert not hasattr(renderer, "_last_parse_tools")
 
 
+def test_generate_keeps_completion_ids_when_logprobs_are_optional():
+    client = _FakeClient()
+    client.choice.pop("logprobs")
+
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            require_logprobs=False,
+        )
+    )
+
+    assert result["completion_ids"] == [7, 8]
+    assert result["completion_logprobs"] == []
+    assert client.calls[0]["body"]["sampling_params"]["logprobs"] == 1
+
+
 @pytest.mark.parametrize(
     "entry",
     [

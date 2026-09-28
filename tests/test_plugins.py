@@ -13,6 +13,8 @@ from renderers import (
     RendererConfig,
     create_renderer,
     load_plugin_renderer,
+    merge_chat_template_kwargs,
+    template_field_names,
 )
 
 PLUGIN_SOURCE = textwrap.dedent(
@@ -125,3 +127,13 @@ def test_plugin_configs_pickle_and_key_caches(plugin_file):
     cache = {low: "low", high: "high"}
     assert cache[PluginRendererConfig(target=target(plugin_file), effort=9)] == "high"
     assert low != high
+
+
+def test_public_helpers_resolve_plugin_template_fields(plugin_file):
+    config = PluginRendererConfig(target=target(plugin_file))
+    assert template_field_names(config) == frozenset({"effort"})
+    merged = merge_chat_template_kwargs(config, {"effort": 7})
+    assert isinstance(merged, PluginRendererConfig)
+    assert merged.plugin_config.effort == 7
+    with pytest.raises(ValueError, match="cache_size"):
+        merge_chat_template_kwargs(config, {"cache_size": 1})

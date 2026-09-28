@@ -37,7 +37,9 @@ from renderers.base import (
     create_renderer,
     extract_message_tool_names,
     is_multimodal,
+    merge_chat_template_kwargs,
     reject_assistant_in_extension,
+    template_field_names,
     trim_to_turn_close,
 )
 from renderers.client import MalformedGenerateResponseError, OverlongPromptError
@@ -233,6 +235,8 @@ __all__ = [
     "is_multimodal",
     "load_plugin_object",
     "load_plugin_renderer",
+    "merge_chat_template_kwargs",
     "reject_assistant_in_extension",
+    "template_field_names",
     "trim_to_turn_close",
 ]

@@ -1436,6 +1436,23 @@ def create_renderer(
     return cls(tokenizer, config)
 
 
+def template_field_names(config: RendererConfig) -> frozenset[str]:
+    """Chat-template kwargs that ``config``'s renderer accepts, plugins included."""
+    from renderers.configs import PluginRendererConfig
+
+    if isinstance(config, PluginRendererConfig):
+        return config.plugin_config_class.template_field_names()
+    return type(config).template_field_names()
+
+
+def merge_chat_template_kwargs(
+    config: RendererConfig,
+    chat_template_kwargs: Mapping[str, Any] | None,
+) -> RendererConfig:
+    """Return ``config`` with template kwargs applied, validated like ``create_renderer``."""
+    return _merge_chat_template_kwargs(config, chat_template_kwargs)
+
+
 def _merge_chat_template_kwargs(
     config: RendererConfig,
     chat_template_kwargs: Mapping[str, Any] | None,

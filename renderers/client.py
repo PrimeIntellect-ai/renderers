@@ -224,8 +224,8 @@ async def generate(
     mm_placeholders, kwargs_data) before POSTing. The serializer imports
     ``vllm.*`` lazily so text-only consumers never pay for the import.
     With ``process_multimodal=False``, rendering skips image processing and
-    the request carries ``content_parts`` instead; vLLM must return the
-    expanded prompt as ``prompt_token_ids``.
+    the request carries ``content_parts`` with ``return_token_ids=true``;
+    vLLM returns the expanded prompt and multimodal placeholder ranges.
 
     ``max_prompt_len`` controls the pre-flight overflow check. When the
     rendered prompt is strictly longer than the cap, the request is never
@@ -325,6 +325,7 @@ async def generate(
     )
     if content_parts:
         body["content_parts"] = content_parts
+        body["return_token_ids"] = True
     if features is not None:
         body["features"] = features
     if cache_salt is not None:

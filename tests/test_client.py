@@ -240,6 +240,7 @@ def test_generate_process_multimodal_false_sends_content_parts():
 
     body = client.calls[0]["body"]
     assert body["content_parts"] == [{"type": "image_url", "url": image_url}]
+    assert body["return_token_ids"] is True
     assert "features" not in body
     assert result["renderer_prompt_ids"] == [1, 2, 3]
     assert result["prompt_ids"] == [1, 2, 2, 3]

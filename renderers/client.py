@@ -204,12 +204,15 @@ async def generate(
     extra_headers: dict[str, str] | None = None,
     max_prompt_len: int | None = None,
     process_multimodal: bool = True,
+    require_logprobs: bool = True,
 ) -> dict[str, Any]:
     """Tokenize messages, call vLLM /inference/v1/generate, parse the response.
 
     ``sampling_params`` is forwarded to vLLM verbatim. Two fields are always
     set by us and override caller values: ``stop_token_ids`` (from the
-    renderer) and ``logprobs=1`` (we always emit completion_logprobs). Pass
+    renderer) and ``logprobs=1``. By default, each sampled token must have a
+    logprob. With ``require_logprobs=False``, an endpoint that omits the field
+    yields an empty ``completion_logprobs`` list. Pass
     ``prompt_ids`` to skip rendering and use a prebuilt token sequence —
     pair it with ``multi_modal_data`` when the prebuilt prompt has image /
     video placeholders that need engine-side mm payload, and with
@@ -365,7 +368,11 @@ async def generate(
             "Engine response must include mm_placeholders when process_multimodal=False."
         )
 
-    completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
+    completion_logprobs = (
+        _parse_completion_logprobs(choice, completion_ids)
+        if require_logprobs or choice.get("logprobs") is not None
+        else []
+    )
 
     parsed = renderer.parse_response(
         completion_ids,

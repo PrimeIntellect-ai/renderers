@@ -246,3 +246,53 @@ def test_python_style_bool_coerced_for_boolean_param(
     assert parsed.tool_calls, f"{model}: parser returned no tool_calls"
     got = _normalize_args(parsed.tool_calls[0].arguments)
     assert got == {"x": expected}, f"{model}: sent {raw!r}, parser returned {got!r}"
+
+
+WS_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "Write",
+            "description": "Write a file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["file_path", "content"],
+            },
+        },
+    }
+]
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["endclass\n", '  `include "x.sv"\n  `include "y.sv"', "\n\nlead and trail\n\n"],
+    ids=["trailing-newline", "leading-indent", "extra-blank-lines"],
+)
+def test_string_arg_whitespace_preserved(model, renderer_name, renderer, content):
+    """Declared-string args keep their own leading/trailing whitespace; only the
+    template's delimiting newline is consumed (vLLM behaviour). Covers the
+    Qwen3.5-style XML parser (Qwen3.5, Nemotron-3); other parsers are separate."""
+    if not any(k in model for k in ("Qwen3.5", "Nemotron")):
+        pytest.skip(f"{model}: not the Qwen3.5-style XML parser")
+    args = {"file_path": "/a.sv", "content": content}
+    msg = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "functions.Write:0",
+                "function": {"name": "Write", "arguments": args},
+            }
+        ],
+    }
+    completion_ids = _extract_assistant_tokens(renderer, PROMPT, msg, tools=WS_TOOLS)
+    parsed = renderer.parse_response(completion_ids, tools=WS_TOOLS)
+    assert parsed.tool_calls, f"{model}: parser returned no tool_calls"
+    got = _normalize_args(parsed.tool_calls[0].arguments)
+    assert got == args, (
+        f"{model}: whitespace drift — sent {args!r}, parser returned {got!r}"
+    )

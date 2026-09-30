@@ -86,6 +86,14 @@ def _extract_tool_names(tools: list[ToolSpec] | None) -> set[str] | None:
     return names
 
 
+def _declares_string(param_schema: dict[str, Any] | None) -> bool:
+    """True when the param's declared ``type`` is exactly ``string``."""
+    if param_schema is None:
+        return False
+    declared = param_schema.get("type")
+    return declared == "string" or declared == ["string"]
+
+
 def _coerce_arg_value(
     text: str, param_schema: dict[str, Any] | None
 ) -> tuple[Any, bool]:
@@ -418,6 +426,19 @@ def _parse_xml_tool_calls(
     while i < len(ids):
         if ids[i] == tc_id:
             end = _find(ids, tc_end_id, i + 1)
+            restart = _find(ids, tc_id, i + 1)
+            if restart != -1 and (end == -1 or restart < end):
+                # A new <tool_call> opened before this one closed: the model abandoned
+                # this block. Keep it out of the next call instead of merging the two.
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=_decode(tokenizer, ids[i + 1 : restart]),
+                        token_span=(section_offset + i, section_offset + restart),
+                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                    )
+                )
+                i = restart
+                continue
             if end == -1:
                 raw = _decode(tokenizer, ids[i + 1 :])
                 tool_calls.append(
@@ -450,7 +471,12 @@ def _parse_xml_tool_calls(
                 r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>", block_text, re.DOTALL
             ):
                 arg_name = pm.group(1)
-                arg_value = pm.group(2).strip()
+                # The pattern already consumes the one delimiting newline on each side;
+                # a declared-string value keeps any further whitespace verbatim (a Write's
+                # trailing newline, an Edit's leading indentation), as vLLM's parser does.
+                arg_value = pm.group(2)
+                if not _declares_string(params.get(arg_name)):
+                    arg_value = arg_value.strip()
                 value, used_fallback = _coerce_arg_value(
                     arg_value, params.get(arg_name)
                 )

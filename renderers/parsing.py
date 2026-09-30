@@ -110,17 +110,24 @@ def _coerce_arg_value(
     landing there is expected — not a malformed-JSON signal.
     """
     string_is_allowed = False
+    boolean_is_allowed = False
     if param_schema is not None:
         declared = param_schema.get("type")
         if declared == "string" or declared == ["string"]:
             return text, False
+        types = declared if isinstance(declared, list) else [declared]
         for branch in param_schema.get("anyOf") or param_schema.get("oneOf") or []:
-            if isinstance(branch, dict) and branch.get("type") == "string":
-                string_is_allowed = True
-                break
+            if isinstance(branch, dict):
+                types.append(branch.get("type"))
+        string_is_allowed = "string" in types
+        boolean_is_allowed = "boolean" in types
     try:
         return json.loads(text), False
     except (json.JSONDecodeError, ValueError):
+        # Models often write Python-style ``True``/``False``; vLLM's reference
+        # parsers map them to booleans when the schema declares one.
+        if boolean_is_allowed and text.strip().lower() in ("true", "false"):
+            return text.strip().lower() == "true", False
         return text, not string_is_allowed
 
 

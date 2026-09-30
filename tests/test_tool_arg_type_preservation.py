@@ -203,3 +203,46 @@ def test_union_with_string_emits_ok_status(
     assert got == args, (
         f"{model}: tool-arg drift — sent {args!r}, parser returned {got!r}"
     )
+
+
+BOOL_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "f",
+            "description": "Test tool with one boolean parameter.",
+            "parameters": {
+                "type": "object",
+                "properties": {"x": {"type": "boolean", "default": False}},
+            },
+        },
+    }
+]
+
+
+@pytest.mark.parametrize(
+    "raw,expected", [("False", False), ("True", True), ("FALSE", False)]
+)
+def test_python_style_bool_coerced_for_boolean_param(
+    model, renderer_name, renderer, raw, expected
+):
+    """Models often emit Python-style ``True``/``False`` in XML arg values.
+    vLLM's reference parsers return a JSON boolean for a boolean-declared
+    param; returning the string ``"False"`` makes schema-validating harnesses
+    (e.g. Claude Code) reject the call."""
+    msg = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"id": "functions.f:0", "function": {"name": "f", "arguments": {"x": raw}}}
+        ],
+    }
+    completion_ids = _extract_assistant_tokens(renderer, PROMPT, msg, tools=BOOL_TOOLS)
+    if f'"{raw}"' in renderer._tokenizer.decode(completion_ids):
+        pytest.skip(
+            f"{model}: JSON wire format quotes the value; a quoted string stays a string"
+        )
+    parsed = renderer.parse_response(completion_ids, tools=BOOL_TOOLS)
+    assert parsed.tool_calls, f"{model}: parser returned no tool_calls"
+    got = _normalize_args(parsed.tool_calls[0].arguments)
+    assert got == {"x": expected}, f"{model}: sent {raw!r}, parser returned {got!r}"

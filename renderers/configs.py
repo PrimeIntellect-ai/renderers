@@ -21,7 +21,7 @@ keys its tokenizer's template will honour, so it can't enumerate them.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, ClassVar, Literal, Union
+from typing import Annotated, ClassVar, Literal, Union
 
 from pydantic import ConfigDict, Field, model_validator
 from pydantic_config import BaseConfig
@@ -1034,26 +1034,12 @@ class CustomRendererConfig(BaseRendererConfig):
 
     @model_validator(mode="after")
     def _validate_renderer_fields(self):
-        self.renderer_config
+        # Fail at config load, not at the first render: the import path must
+        # resolve and the renderer's config must accept the other fields.
+        from renderers.custom import custom_renderer_config
+
+        custom_renderer_config(self)
         return self
-
-    @property
-    def renderer_class(self) -> Any:
-        from renderers.custom import load_custom_renderer
-
-        return load_custom_renderer(self.import_path)
-
-    @property
-    def renderer_config_class(self) -> type[BaseRendererConfig]:
-        return self.renderer_class.config_class
-
-    @property
-    def renderer_config(self) -> BaseRendererConfig:
-        """The renderer's own typed config, built from this config's other fields."""
-        data = dict(self.model_extra or {})
-        for field_name in self.model_fields_set - {"name", "import_path"}:
-            data[field_name] = getattr(self, field_name)
-        return self.renderer_config_class.model_validate(data)
 
 
 RendererConfig = Annotated[

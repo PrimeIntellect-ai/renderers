@@ -9,10 +9,11 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from renderers import (
-    GLM53RendererConfig,
     CustomRendererConfig,
+    GLM53RendererConfig,
     RendererConfig,
     create_renderer,
+    custom_renderer_config,
     load_custom_renderer,
     merge_chat_template_kwargs,
     template_field_names,
@@ -60,8 +61,8 @@ def import_path(path, name="ToyRenderer"):
 
 def test_custom_fields_validate_through_the_renderer_config(toy_file):
     config = CustomRendererConfig(import_path=import_path(toy_file), effort=3)
-    assert config.renderer_config.effort == 3
-    assert config.renderer_config.name == "toy"
+    assert custom_renderer_config(config).effort == 3
+    assert custom_renderer_config(config).name == "toy"
     with pytest.raises(ValidationError):
         CustomRendererConfig(import_path=import_path(toy_file), unknown=1)
 
@@ -70,7 +71,7 @@ def test_shared_renderer_fields_reach_the_renderer_config(toy_file):
     config = CustomRendererConfig(
         import_path=import_path(toy_file), thinking_retention="all"
     )
-    assert config.renderer_config.thinking_retention == "all"
+    assert custom_renderer_config(config).thinking_retention == "all"
 
 
 def test_discriminated_union_parses_renderer_configs(toy_file):
@@ -78,7 +79,7 @@ def test_discriminated_union_parses_renderer_configs(toy_file):
         {"name": "custom", "import_path": import_path(toy_file), "effort": 2}
     )
     assert isinstance(config, CustomRendererConfig)
-    assert config.renderer_config.effort == 2
+    assert custom_renderer_config(config).effort == 2
 
 
 def test_create_renderer_builds_the_custom_renderer_with_its_own_config(toy_file):
@@ -140,7 +141,7 @@ def test_public_helpers_resolve_custom_template_fields(toy_file):
     assert template_field_names(config) == frozenset({"effort"})
     merged = merge_chat_template_kwargs(config, {"effort": 7})
     assert isinstance(merged, CustomRendererConfig)
-    assert merged.renderer_config.effort == 7
+    assert custom_renderer_config(merged).effort == 7
     with pytest.raises(ValueError, match="cache_size"):
         merge_chat_template_kwargs(config, {"cache_size": 1})
 

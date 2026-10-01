@@ -79,7 +79,7 @@ from renderers.configs import (
     RendererConfig,
     config_from_name,
 )
-from renderers.custom import load_custom_renderer, load_target
+from renderers.custom import custom_renderer_config, load_custom_renderer, load_target
 
 # Concrete renderer classes are lazy-loaded so that consumers needing only the
 # config layer (``RendererConfig`` discriminated union) don't import every
@@ -231,6 +231,7 @@ __all__ = [
     "build_trajectory_step",
     "config_from_name",
     "create_renderer",
+    "custom_renderer_config",
     "extract_message_tool_names",
     "is_multimodal",
     "load_custom_renderer",

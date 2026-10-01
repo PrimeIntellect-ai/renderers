@@ -15,7 +15,10 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from renderers.configs import BaseRendererConfig, CustomRendererConfig
 
 
 def load_target(import_path: str) -> Any:
@@ -85,3 +88,12 @@ def load_custom_renderer(import_path: str) -> Any:
             f"Custom renderer {import_path!r} must set config_class to a BaseRendererConfig subclass"
         )
     return renderer_cls
+
+
+def custom_renderer_config(config: "CustomRendererConfig") -> "BaseRendererConfig":
+    """The renderer's own typed config, built from the fields next to ``import_path``."""
+    config_cls = load_custom_renderer(config.import_path).config_class
+    data = dict(config.model_extra or {})
+    for field_name in config.model_fields_set - {"name", "import_path"}:
+        data[field_name] = getattr(config, field_name)
+    return config_cls.model_validate(data)

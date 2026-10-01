@@ -1425,9 +1425,11 @@ def create_renderer(
         chat_template_kwargs=chat_template_kwargs,
     )
     from renderers.configs import CustomRendererConfig
+    from renderers.custom import custom_renderer_config, load_custom_renderer
 
     if isinstance(config, CustomRendererConfig):
-        return config.renderer_class(tokenizer, config.renderer_config)
+        renderer_cls = load_custom_renderer(config.import_path)
+        return renderer_cls(tokenizer, custom_renderer_config(config))
     cls = RENDERER_REGISTRY.get(config.name)
     if cls is None:
         raise ValueError(
@@ -1439,9 +1441,12 @@ def create_renderer(
 def template_field_names(config: RendererConfig) -> frozenset[str]:
     """Chat-template kwargs that ``config``'s renderer accepts, custom renderers included."""
     from renderers.configs import CustomRendererConfig
+    from renderers.custom import load_custom_renderer
 
     if isinstance(config, CustomRendererConfig):
-        return config.renderer_config_class.template_field_names()
+        return load_custom_renderer(
+            config.import_path
+        ).config_class.template_field_names()
     return type(config).template_field_names()
 
 
@@ -1462,13 +1467,14 @@ def _merge_chat_template_kwargs(
     if not isinstance(chat_template_kwargs, Mapping):
         raise TypeError("chat_template_kwargs must be a mapping.")
     from renderers.configs import CustomRendererConfig
+    from renderers.custom import load_custom_renderer
 
     kwargs = dict(chat_template_kwargs)
     config_cls = type(config)
     # A custom config carries its renderer's fields as extras, so the renderer's
     # own config class decides which kwargs are template controls.
     fields_cls = (
-        config.renderer_config_class
+        load_custom_renderer(config.import_path).config_class
         if isinstance(config, CustomRendererConfig)
         else config_cls
     )

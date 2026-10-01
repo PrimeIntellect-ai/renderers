@@ -1454,14 +1454,7 @@ def merge_chat_template_kwargs(
     config: RendererConfig,
     chat_template_kwargs: Mapping[str, Any] | None,
 ) -> RendererConfig:
-    """Return ``config`` with template kwargs applied, validated like ``create_renderer``."""
-    return _merge_chat_template_kwargs(config, chat_template_kwargs)
-
-
-def _merge_chat_template_kwargs(
-    config: RendererConfig,
-    chat_template_kwargs: Mapping[str, Any] | None,
-) -> RendererConfig:
+    """Return ``config`` with the template kwargs applied, validated against its allowlist."""
     if not chat_template_kwargs:
         return config
     if not isinstance(chat_template_kwargs, Mapping):
@@ -1522,7 +1515,7 @@ def _resolve_renderer_config(
             chat_template_kwargs=chat_template_kwargs,
         )
 
-    return _merge_chat_template_kwargs(config, chat_template_kwargs)
+    return merge_chat_template_kwargs(config, chat_template_kwargs)
 
 
 def _resolve_auto_config(
@@ -1550,7 +1543,7 @@ def _resolve_auto_config(
 
     if renderer_name is not None:
         cfg_cls = _config_class_for(renderer_name)
-        return _merge_chat_template_kwargs(
+        return merge_chat_template_kwargs(
             cfg_cls(**preserve_carry),
             chat_template_kwargs,
         )

@@ -286,11 +286,7 @@ class GLM5Renderer:
         # sampling starts — the model continues from these, never emits
         # them. Always is_sampled=False / is_content=False.
         if add_generation_prompt:
-            emit_special(self._assistant, -1, is_sampled=False, is_content=False)
-            if getattr(self.config, "enable_thinking", True):
-                emit_special(self._think, -1, is_sampled=False, is_content=False)
-            else:
-                emit_special(self._think_end, -1, is_sampled=False, is_content=False)
+            self._emit_generation_prompt(emit_special)
 
         return RenderedTokens(
             token_ids=tokens,
@@ -300,6 +296,16 @@ class GLM5Renderer:
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
+
+    def _emit_generation_prompt(self, emit_special) -> None:
+        """Generation prompt: ``<|assistant|><think>`` when thinking is on, or
+        ``<|assistant|></think>`` when ``enable_thinking=False``. A subclass can
+        override this to prefill a different prompt."""
+        emit_special(self._assistant, -1, is_sampled=False, is_content=False)
+        if getattr(self.config, "enable_thinking", True):
+            emit_special(self._think, -1, is_sampled=False, is_content=False)
+        else:
+            emit_special(self._think_end, -1, is_sampled=False, is_content=False)
 
     @staticmethod
     def _ordered_tool_indices(messages: list[Message], block_start: int) -> list[int]:
@@ -499,11 +505,7 @@ class GLM5Renderer:
                 return None
 
         # Generation prompt — match the gen-prompt branch of ``render()``.
-        emit_special(self._assistant, -1)
-        if getattr(self.config, "enable_thinking", True):
-            emit_special(self._think, -1)
-        else:
-            emit_special(self._think_end, -1)
+        self._emit_generation_prompt(emit_special)
 
         total_len = len(previous_ids) + len(ext)
         return RenderedTokens(

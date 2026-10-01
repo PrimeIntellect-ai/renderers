@@ -184,11 +184,11 @@ def test_readme_example_prefills_the_think_block(tmp_path):
             clear_thinking=True,
         ),
     )
-    builtin = create_renderer(
-        tokenizer, GLM53RendererConfig(enable_thinking=False, clear_thinking=True)
-    )
+    builtin = create_renderer(tokenizer, GLM53RendererConfig(clear_thinking=True))
 
     ids = custom.render_ids(messages, add_generation_prompt=True)
+    builtin_ids = builtin.render_ids(messages, add_generation_prompt=True)
     assert tokenizer.decode(ids[-3:]) == "<|assistant|><think></think>"
-    assert ids == builtin.render_ids(messages, add_generation_prompt=True)
+    assert tokenizer.decode(builtin_ids[-2:]) == "<|assistant|><think>"
+    assert ids[:-1] == builtin_ids
     assert custom.config.clear_thinking is True

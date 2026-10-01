@@ -37,13 +37,16 @@ from renderers.base import (
     create_renderer,
     extract_message_tool_names,
     is_multimodal,
+    merge_chat_template_kwargs,
     reject_assistant_in_extension,
+    template_field_names,
     trim_to_turn_close,
 )
 from renderers.client import MalformedGenerateResponseError, OverlongPromptError
 from renderers.configs import (
     AutoRendererConfig,
     BaseRendererConfig,
+    CustomRendererConfig,
     DeepSeekR1RendererConfig,
     DeepSeekV3RendererConfig,
     DeepSeekV4RendererConfig,
@@ -76,6 +79,7 @@ from renderers.configs import (
     RendererConfig,
     config_from_name,
 )
+from renderers.custom import custom_renderer_config, load_custom_renderer, load_target
 
 # Concrete renderer classes are lazy-loaded so that consumers needing only the
 # config layer (``RendererConfig`` discriminated union) don't import every
@@ -138,6 +142,7 @@ __all__ = [
     "ChatTemplateTokenizer",
     "Content",
     "ContentPart",
+    "CustomRendererConfig",
     "DeepSeekR1Renderer",
     "DeepSeekR1RendererConfig",
     "DeepSeekV3Renderer",
@@ -226,8 +231,13 @@ __all__ = [
     "build_trajectory_step",
     "config_from_name",
     "create_renderer",
+    "custom_renderer_config",
     "extract_message_tool_names",
     "is_multimodal",
+    "load_custom_renderer",
+    "load_target",
+    "merge_chat_template_kwargs",
     "reject_assistant_in_extension",
+    "template_field_names",
     "trim_to_turn_close",
 ]

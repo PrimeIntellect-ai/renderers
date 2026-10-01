@@ -1008,6 +1008,40 @@ class DeepSeekV4RendererConfig(BaseRendererConfig):
         return self
 
 
+class CustomRendererConfig(BaseRendererConfig):
+    """Config for a renderer that lives outside this package.
+
+    ``import_path`` names the renderer class as ``my_module.Class`` or
+    ``path/to/file.py:Class``; relative file paths resolve against the
+    working directory. The class sets ``config_class`` to its own
+    :class:`BaseRendererConfig` subclass, and that class validates every other
+    field of this config. A model-specific renderer can therefore ship without
+    a change to this package::
+
+        [renderer]
+        name = "custom"
+        import_path = "my_renderers.glm53_no_thinking.NoThinkingGLM53Renderer"
+        clear_thinking = true
+    """
+
+    model_config = ConfigDict(frozen=True, extra="allow")
+
+    name: Literal["custom"] = "custom"
+    import_path: str
+    """Renderer class as ``my_module.Class`` or ``path/to/file.py:Class``."""
+
+    _internal_fields = frozenset({"import_path"})
+
+    @model_validator(mode="after")
+    def _validate_renderer_fields(self):
+        # Fail at config load, not at the first render: the import path must
+        # resolve and the renderer's config must accept the other fields.
+        from renderers.custom import custom_renderer_config
+
+        custom_renderer_config(self)
+        return self
+
+
 RendererConfig = Annotated[
     Union[
         AutoRendererConfig,
@@ -1040,6 +1074,7 @@ RendererConfig = Annotated[
         DeepSeekV3RendererConfig,
         DeepSeekR1RendererConfig,
         DeepSeekV4RendererConfig,
+        CustomRendererConfig,
     ],
     Field(discriminator="name"),
 ]

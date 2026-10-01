@@ -1424,12 +1424,38 @@ def create_renderer(
         config,
         chat_template_kwargs=chat_template_kwargs,
     )
+    from renderers.configs import CustomRendererConfig
+    from renderers.custom import custom_renderer_config, load_custom_renderer
+
+    if isinstance(config, CustomRendererConfig):
+        renderer_cls = load_custom_renderer(config.import_path)
+        return renderer_cls(tokenizer, custom_renderer_config(config))
     cls = RENDERER_REGISTRY.get(config.name)
     if cls is None:
         raise ValueError(
             f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
         )
     return cls(tokenizer, config)
+
+
+def template_field_names(config: RendererConfig) -> frozenset[str]:
+    """Chat-template kwargs that ``config``'s renderer accepts, custom renderers included."""
+    from renderers.configs import CustomRendererConfig
+    from renderers.custom import load_custom_renderer
+
+    if isinstance(config, CustomRendererConfig):
+        return load_custom_renderer(
+            config.import_path
+        ).config_class.template_field_names()
+    return type(config).template_field_names()
+
+
+def merge_chat_template_kwargs(
+    config: RendererConfig,
+    chat_template_kwargs: Mapping[str, Any] | None,
+) -> RendererConfig:
+    """Return ``config`` with template kwargs applied, validated like ``create_renderer``."""
+    return _merge_chat_template_kwargs(config, chat_template_kwargs)
 
 
 def _merge_chat_template_kwargs(
@@ -1440,18 +1466,28 @@ def _merge_chat_template_kwargs(
         return config
     if not isinstance(chat_template_kwargs, Mapping):
         raise TypeError("chat_template_kwargs must be a mapping.")
+    from renderers.configs import CustomRendererConfig
+    from renderers.custom import load_custom_renderer
+
     kwargs = dict(chat_template_kwargs)
     config_cls = type(config)
-    allowed = config_cls.template_field_names()
-    if config_cls._allow_opaque_template_kwargs:
-        reserved = frozenset(config_cls.model_fields) - allowed - {"name"}
+    # A custom config carries its renderer's fields as extras, so the renderer's
+    # own config class decides which kwargs are template controls.
+    fields_cls = (
+        load_custom_renderer(config.import_path).config_class
+        if isinstance(config, CustomRendererConfig)
+        else config_cls
+    )
+    allowed = fields_cls.template_field_names()
+    if fields_cls._allow_opaque_template_kwargs:
+        reserved = frozenset(fields_cls.model_fields) - allowed - {"name"}
         unsupported = frozenset(kwargs) & reserved
     else:
         unsupported = frozenset(kwargs) - allowed
     if unsupported:
         allowed_text = (
             "opaque Jinja kwargs"
-            if config_cls._allow_opaque_template_kwargs
+            if fields_cls._allow_opaque_template_kwargs
             else ", ".join(sorted(allowed)) or "(none)"
         )
         raise ValueError(

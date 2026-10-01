@@ -1008,52 +1008,52 @@ class DeepSeekV4RendererConfig(BaseRendererConfig):
         return self
 
 
-class PluginRendererConfig(BaseRendererConfig):
-    """Config for a renderer loaded from outside this package.
+class CustomRendererConfig(BaseRendererConfig):
+    """Config for a renderer that lives outside this package.
 
-    ``target`` names the renderer class as ``package.module:Class`` or
-    ``path/to/file.py:Class``; relative paths resolve against the working
-    directory. The class sets ``config_class`` to its own
+    ``import_path`` names the renderer class as ``my_module.Class`` or
+    ``path/to/file.py:Class``; relative file paths resolve against the
+    working directory. The class sets ``config_class`` to its own
     :class:`BaseRendererConfig` subclass, and that class validates every other
-    field of this config. A plugin can therefore ship a model-specific
-    renderer without a change to this package::
+    field of this config. A model-specific renderer can therefore ship without
+    a change to this package::
 
         [renderer]
-        name = "plugin"
-        target = "my_renderers/deepseek_v4_depth.py:DeepSeekV4DepthRenderer"
-        enable_thinking = true
+        name = "custom"
+        import_path = "my_renderers.glm53_no_thinking.NoThinkingGLM53Renderer"
+        clear_thinking = true
     """
 
     model_config = ConfigDict(frozen=True, extra="allow")
 
-    name: Literal["plugin"] = "plugin"
-    target: str
-    """Renderer class as ``package.module:Class`` or ``path/to/file.py:Class``."""
+    name: Literal["custom"] = "custom"
+    import_path: str
+    """Renderer class as ``my_module.Class`` or ``path/to/file.py:Class``."""
 
-    _internal_fields = frozenset({"target"})
+    _internal_fields = frozenset({"import_path"})
 
     @model_validator(mode="after")
-    def _validate_plugin_fields(self):
-        self.plugin_config
+    def _validate_renderer_fields(self):
+        self.renderer_config
         return self
 
     @property
     def renderer_class(self) -> Any:
-        from renderers.plugins import load_plugin_renderer
+        from renderers.custom import load_custom_renderer
 
-        return load_plugin_renderer(self.target)
+        return load_custom_renderer(self.import_path)
 
     @property
-    def plugin_config_class(self) -> type[BaseRendererConfig]:
+    def renderer_config_class(self) -> type[BaseRendererConfig]:
         return self.renderer_class.config_class
 
     @property
-    def plugin_config(self) -> BaseRendererConfig:
-        """The plugin's own typed config, built from this config's other fields."""
+    def renderer_config(self) -> BaseRendererConfig:
+        """The renderer's own typed config, built from this config's other fields."""
         data = dict(self.model_extra or {})
-        for field_name in self.model_fields_set - {"name", "target"}:
+        for field_name in self.model_fields_set - {"name", "import_path"}:
             data[field_name] = getattr(self, field_name)
-        return self.plugin_config_class.model_validate(data)
+        return self.renderer_config_class.model_validate(data)
 
 
 RendererConfig = Annotated[
@@ -1088,7 +1088,7 @@ RendererConfig = Annotated[
         DeepSeekV3RendererConfig,
         DeepSeekR1RendererConfig,
         DeepSeekV4RendererConfig,
-        PluginRendererConfig,
+        CustomRendererConfig,
     ],
     Field(discriminator="name"),
 ]

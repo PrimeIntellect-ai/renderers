@@ -1424,10 +1424,10 @@ def create_renderer(
         config,
         chat_template_kwargs=chat_template_kwargs,
     )
-    from renderers.configs import PluginRendererConfig
+    from renderers.configs import CustomRendererConfig
 
-    if isinstance(config, PluginRendererConfig):
-        return config.renderer_class(tokenizer, config.plugin_config)
+    if isinstance(config, CustomRendererConfig):
+        return config.renderer_class(tokenizer, config.renderer_config)
     cls = RENDERER_REGISTRY.get(config.name)
     if cls is None:
         raise ValueError(
@@ -1437,11 +1437,11 @@ def create_renderer(
 
 
 def template_field_names(config: RendererConfig) -> frozenset[str]:
-    """Chat-template kwargs that ``config``'s renderer accepts, plugins included."""
-    from renderers.configs import PluginRendererConfig
+    """Chat-template kwargs that ``config``'s renderer accepts, custom renderers included."""
+    from renderers.configs import CustomRendererConfig
 
-    if isinstance(config, PluginRendererConfig):
-        return config.plugin_config_class.template_field_names()
+    if isinstance(config, CustomRendererConfig):
+        return config.renderer_config_class.template_field_names()
     return type(config).template_field_names()
 
 
@@ -1461,15 +1461,15 @@ def _merge_chat_template_kwargs(
         return config
     if not isinstance(chat_template_kwargs, Mapping):
         raise TypeError("chat_template_kwargs must be a mapping.")
-    from renderers.configs import PluginRendererConfig
+    from renderers.configs import CustomRendererConfig
 
     kwargs = dict(chat_template_kwargs)
     config_cls = type(config)
-    # A plugin config carries its renderer's fields as extras, so the plugin's
+    # A custom config carries its renderer's fields as extras, so the renderer's
     # own config class decides which kwargs are template controls.
     fields_cls = (
-        config.plugin_config_class
-        if isinstance(config, PluginRendererConfig)
+        config.renderer_config_class
+        if isinstance(config, CustomRendererConfig)
         else config_cls
     )
     allowed = fields_cls.template_field_names()

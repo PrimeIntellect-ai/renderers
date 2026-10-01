@@ -201,37 +201,41 @@ One shared behaviour flag lives on typed renderer configs: `thinking_retention`,
 
 Generic `thinking_retention` does **not** change full `render()` output: a full re-render always follows the Python chat-template implementation. Only real template knobs can change full-render thinking behaviour. GLM-5 `clear_thinking=False`, Nemotron-3 `truncate_history_thinking=False`, Qwen3.6 `preserve_thinking=True`, and GPT-OSS `auto_drop_analysis=False` all imply bridge policy `"all"`; no-thinking generation knobs also imply `"all"` when `thinking_retention` is unset. Setting a direct keep/drop template knob and a contradictory `thinking_retention` raises at config-load. The full per-renderer mapping lives in [`docs/renderer-config.md`](docs/renderer-config.md).
 
-## Local renderer plugins
+## Custom renderers
 
-A renderer can live outside this package. Point a `plugin` config at the class as `package.module:Class` or `path/to/file.py:Class`; relative paths resolve against the working directory. The class sets `config_class` to its own `BaseRendererConfig` subclass, which validates every other field of the plugin config and supplies its `chat_template_kwargs` allowlist:
+A renderer can live outside this package. Point a `custom` config at the class with `import_path`, as `my_module.Class` or `path/to/file.py:Class`; relative file paths resolve against the working directory. The class sets `config_class` to its own `BaseRendererConfig` subclass, which validates every other field of the config and supplies its `chat_template_kwargs` allowlist. For example, a GLM-5.3 renderer whose generation prompt prefills an empty think block, so the model starts at the answer:
 
 ```python
-# my_renderers/deepseek_v4_depth.py
 from typing import Literal
 
-from renderers.configs import DeepSeekV4RendererConfig
-from renderers.deepseek_v4 import DeepSeekV4Renderer
+from renderers.configs import GLM53RendererConfig
+from renderers.glm5 import GLM53Renderer
 
 
-class DepthConfig(DeepSeekV4RendererConfig):
-    name: Literal["deepseek-v4-depth"] = "deepseek-v4-depth"
+class NoThinkingGLM53Config(GLM53RendererConfig):
+    name: Literal["glm-5.3-no-thinking"] = "glm-5.3-no-thinking"
 
 
-class DepthRenderer(DeepSeekV4Renderer):
-    config_class = DepthConfig
+class NoThinkingGLM53Renderer(GLM53Renderer):
+    config_class = NoThinkingGLM53Config
+
+    def _emit_generation_prompt(self, emit_special) -> None:
+        emit_special(self._assistant, -1, is_sampled=False, is_content=False)
+        emit_special(self._think, -1, is_sampled=False, is_content=False)
+        emit_special(self._think_end, -1, is_sampled=False, is_content=False)
 ```
 
 ```python
-from renderers import PluginRendererConfig, create_renderer
+from renderers import CustomRendererConfig, create_renderer
 
-config = PluginRendererConfig(
-    target="my_renderers/deepseek_v4_depth.py:DepthRenderer",
-    enable_thinking=True,
+config = CustomRendererConfig(
+    import_path="my_renderers.glm53_no_thinking.NoThinkingGLM53Renderer",
+    clear_thinking=True,
 )
 renderer = create_renderer(tokenizer, config)
 ```
 
-Downstream TOML configs select it the same way, with `name = "plugin"` and a `target`.
+Downstream TOML configs select it the same way, with `name = "custom"` and an `import_path`.
 
 ## `DefaultRenderer`
 

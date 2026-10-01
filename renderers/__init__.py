@@ -46,6 +46,7 @@ from renderers.client import MalformedGenerateResponseError, OverlongPromptError
 from renderers.configs import (
     AutoRendererConfig,
     BaseRendererConfig,
+    CustomRendererConfig,
     DeepSeekR1RendererConfig,
     DeepSeekV3RendererConfig,
     DeepSeekV4RendererConfig,
@@ -69,7 +70,6 @@ from renderers.configs import (
     Nemotron3RendererConfig,
     Nemotron3UltraRendererConfig,
     Nemotron35RendererConfig,
-    PluginRendererConfig,
     PrimeQwen3RendererConfig,
     Qwen3RendererConfig,
     Qwen3VLRendererConfig,
@@ -79,7 +79,7 @@ from renderers.configs import (
     RendererConfig,
     config_from_name,
 )
-from renderers.plugins import load_plugin_object, load_plugin_renderer
+from renderers.custom import load_custom_renderer, load_target
 
 # Concrete renderer classes are lazy-loaded so that consumers needing only the
 # config layer (``RendererConfig`` discriminated union) don't import every
@@ -142,6 +142,7 @@ __all__ = [
     "ChatTemplateTokenizer",
     "Content",
     "ContentPart",
+    "CustomRendererConfig",
     "DeepSeekR1Renderer",
     "DeepSeekR1RendererConfig",
     "DeepSeekV3Renderer",
@@ -199,7 +200,6 @@ __all__ = [
     "ParsedResponse",
     "ParsedToolCall",
     "PlaceholderRange",
-    "PluginRendererConfig",
     "PrimeQwen3Renderer",
     "PrimeQwen3RendererConfig",
     "Qwen35Renderer",
@@ -233,8 +233,8 @@ __all__ = [
     "create_renderer",
     "extract_message_tool_names",
     "is_multimodal",
-    "load_plugin_object",
-    "load_plugin_renderer",
+    "load_custom_renderer",
+    "load_target",
     "merge_chat_template_kwargs",
     "reject_assistant_in_extension",
     "template_field_names",

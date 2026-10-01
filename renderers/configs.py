@@ -412,10 +412,24 @@ class GLM51RendererConfig(BaseRendererConfig):
 
 
 class GLM53RendererConfig(BaseRendererConfig):
-    """GLM-5.3 renderer config."""
+    """GLM-5.3 renderer config.
+
+    ``enable_thinking`` is renderer-internal: the official GLM-5.3 chat
+    template exposes no thinking-off kwarg, so ``enable_thinking=False``
+    is a deliberate, documented departure from it — see
+    ``GLM53Renderer`` for exactly what changes.
+    """
 
     name: Literal["glm-5.3"] = "glm-5.3"
     _template_fields = frozenset({"clear_thinking", "reasoning_effort"})
+    _internal_fields = frozenset({"enable_thinking"})
+
+    enable_thinking: bool = True
+    """When ``False``, the generation prompt prefills the empty think
+    block and the block's closing token stops being trained, so SFT on
+    short answers trains only the answer and the stop token. Inference
+    (vLLM chat template / ``parse_response``) must render the same
+    prompt, or the trained prefix differs from serve time."""
 
     clear_thinking: bool = False
     """Drop reasoning from historical assistant turns when ``True``."""

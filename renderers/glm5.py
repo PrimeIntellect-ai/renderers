@@ -286,11 +286,7 @@ class GLM5Renderer:
         # sampling starts — the model continues from these, never emits
         # them. Always is_sampled=False / is_content=False.
         if add_generation_prompt:
-            emit_special(self._assistant, -1, is_sampled=False, is_content=False)
-            if getattr(self.config, "enable_thinking", True):
-                emit_special(self._think, -1, is_sampled=False, is_content=False)
-            else:
-                emit_special(self._think_end, -1, is_sampled=False, is_content=False)
+            self._emit_generation_prompt(emit_special)
 
         return RenderedTokens(
             token_ids=tokens,
@@ -300,6 +296,17 @@ class GLM5Renderer:
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
+
+    def _emit_generation_prompt(self, emit_special) -> None:
+        """Generation prompt: ``<|assistant|><think>`` when thinking is on, or
+        the lone close token (``<|assistant|></think>``) when ``enable_thinking=False``.
+        ``GLM53Renderer`` overrides this to prefill the whole empty think
+        block in its thinking-off mode."""
+        emit_special(self._assistant, -1, is_sampled=False, is_content=False)
+        if getattr(self.config, "enable_thinking", True):
+            emit_special(self._think, -1, is_sampled=False, is_content=False)
+        else:
+            emit_special(self._think_end, -1, is_sampled=False, is_content=False)
 
     @staticmethod
     def _ordered_tool_indices(messages: list[Message], block_start: int) -> list[int]:
@@ -499,11 +506,7 @@ class GLM5Renderer:
                 return None
 
         # Generation prompt — match the gen-prompt branch of ``render()``.
-        emit_special(self._assistant, -1)
-        if getattr(self.config, "enable_thinking", True):
-            emit_special(self._think, -1)
-        else:
-            emit_special(self._think_end, -1)
+        self._emit_generation_prompt(emit_special)
 
         total_len = len(previous_ids) + len(ext)
         return RenderedTokens(
@@ -778,6 +781,17 @@ class GLM53Renderer(GLM5Renderer):
         }
         return [by_id[identifier] for identifier in call_ids]
 
+    def _emit_generation_prompt(self, emit_special) -> None:
+        # A deliberate departure from the official template, which has no
+        # thinking-off kwarg: with ``enable_thinking=False`` prefill the
+        # whole empty think block so the model starts at the answer.
+        # Inference must render this same prompt, or a model trained
+        # this way sees a different prefix at serve time.
+        emit_special(self._assistant, -1, is_sampled=False, is_content=False)
+        emit_special(self._think, -1, is_sampled=False, is_content=False)
+        if not self.config.enable_thinking:
+            emit_special(self._think_end, -1, is_sampled=False, is_content=False)
+
     def render(
         self,
         messages: list[Message],
@@ -828,10 +842,20 @@ class GLM53Renderer(GLM5Renderer):
         include_thinking = has_reasoning and (
             not self.config.clear_thinking or msg_idx > last_user_index
         )
+        # With ``enable_thinking=False`` the empty think block mirrors the
+        # prefilled generation prompt — the model never samples it — so the
+        # close token stays scaffold. Reasoning-bearing turns were not
+        # sampled under this config and keep the template-faithful marking.
+        think_end_is_sampled = include_thinking or self.config.enable_thinking
         emit_special(self._think, msg_idx, is_sampled=False, is_content=False)
         if include_thinking:
             emit_text(reasoning_content, msg_idx, is_sampled=True, is_content=True)
-        emit_special(self._think_end, msg_idx, is_sampled=True, is_content=True)
+        emit_special(
+            self._think_end,
+            msg_idx,
+            is_sampled=think_end_is_sampled,
+            is_content=think_end_is_sampled,
+        )
         if content.strip():
             emit_text(content.strip(), msg_idx, is_sampled=True, is_content=True)
 

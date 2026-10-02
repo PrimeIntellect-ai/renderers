@@ -23,6 +23,7 @@ path and remain byte-identical to ``apply_chat_template``.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Any
 
 from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
@@ -252,7 +253,11 @@ class Qwen35Renderer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _render_content(content: Any) -> str:
+    def _iter_content_parts(content: list[Any]) -> Iterable[Any]:
+        return content
+
+    @classmethod
+    def _render_content(cls, content: Any) -> str:
         """Render message content to a text string (before tokenization).
 
         Handles string, list of text parts, and None. Image / video parts
@@ -268,7 +273,7 @@ class Qwen35Renderer:
             return content
         if isinstance(content, list):
             parts: list[str] = []
-            for item in content:
+            for item in cls._iter_content_parts(content):
                 if isinstance(item, str):
                     parts.append(item)
                 elif isinstance(item, dict):
@@ -489,7 +494,7 @@ class Qwen35Renderer:
                     emit_text_segments(buf_segments, msg_idx, is_sampled=False)
                     buf_segments.clear()
 
-            for item in content_list:
+            for item in self._iter_content_parts(content_list):
                 if isinstance(item, str):
                     if item:
                         buf_segments.append((item, True))
@@ -864,7 +869,7 @@ class Qwen35Renderer:
                     emit_text_segments(buf_segments, msg_idx)
                     buf_segments.clear()
 
-            for item in content_list:
+            for item in self._iter_content_parts(content_list):
                 if isinstance(item, str):
                     if item:
                         buf_segments.append((item, True))
@@ -1192,7 +1197,7 @@ class Qwen35Renderer:
                     emit_text_segments(buf_segments, msg_idx, is_sampled=False)
                     buf_segments.clear()
 
-            for item in raw_content:
+            for item in self._iter_content_parts(raw_content):
                 if isinstance(item, str):
                     if item:
                         buf_segments.append((item, True))

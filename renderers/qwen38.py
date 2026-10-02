@@ -14,10 +14,13 @@ argument serialization, with three template changes:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from typing import Any
+
 from renderers.base import Message
 from renderers.configs import Qwen38RendererConfig
-from renderers.qwen35 import Qwen35Renderer
 from renderers.qwen36 import Qwen36Renderer
+from renderers.qwen3_vl import _is_image_part, _is_video_part
 
 
 _REASONING_INSTRUCTIONS = {
@@ -49,11 +52,34 @@ class Qwen38Renderer(Qwen36Renderer):
         return True
 
     @staticmethod
+    def _iter_content_parts(content: list[Any]) -> Iterable[Any]:
+        """Keep media and string-valued text in every rendering path."""
+        for item in content:
+            if isinstance(item, str):
+                yield item
+            elif isinstance(item, dict) and (
+                _is_image_part(item)
+                or _is_video_part(item)
+                or isinstance(item.get("text"), str)
+            ):
+                yield item
+
+    @staticmethod
+    def _is_user_query_message(msg: Message) -> bool:
+        if msg.get("role") != "user":
+            return False
+        content = Qwen38Renderer._render_content(msg.get("content")).strip()
+        return not (
+            content.startswith("<tool_response>")
+            and content.endswith("</tool_response>")
+        )
+
+    @staticmethod
     def _last_query_index(messages: list[Message]) -> int:
-        last_query_index = Qwen35Renderer._last_query_index(messages)
-        if last_query_index == len(messages):
-            raise ValueError("No user query found in messages.")
-        return last_query_index
+        for i in range(len(messages) - 1, -1, -1):
+            if Qwen38Renderer._is_user_query_message(messages[i]):
+                return i
+        raise ValueError("No user query found in messages.")
 
     @staticmethod
     def _extract_assistant_parts(msg: Message, content: str) -> tuple[str, str]:

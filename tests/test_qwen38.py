@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from copy import deepcopy
 
 import pytest
 from pydantic import TypeAdapter
@@ -176,3 +177,76 @@ def test_qwen38_requires_a_real_user_query(qwen38_model):
 
     with pytest.raises(ValueError, match="No user query found"):
         renderer.render_ids([{"role": "system", "content": "System only."}])
+
+
+@pytest.mark.parametrize(
+    "role,with_image",
+    [
+        ("system", False),
+        ("user", False),
+        ("assistant", False),
+        ("tool", False),
+        ("user", True),
+        ("tool", True),
+    ],
+)
+def test_qwen38_structured_content_render_and_bridge(role, with_image):
+    _, renderer = _qwen38(QWEN38_MODELS[0])
+    parts = ["Hello", {"type": "text", "text": " world"}]
+    if with_image:
+        parts.append({"type": "image", "image": "unused", "text": 123})
+        parts.append({"type": "text", "text": "After image"})
+    noisy_parts = [
+        {"type": "unsupported"},
+        *parts,
+        {"type": "text", "text": None},
+        {"type": "text", "text": 123},
+        None,
+    ]
+    prior = [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "First answer"},
+    ]
+    clean = {"role": role, "content": parts}
+    noisy = {"role": role, "content": noisy_parts}
+    original = deepcopy(noisy)
+    messages = [noisy, *prior] if role == "system" else [*prior, noisy]
+    expected_messages = [clean, *prior] if role == "system" else [*prior, clean]
+    assert renderer.render(messages, process_multimodal=False) == renderer.render(
+        expected_messages, process_multimodal=False
+    )
+    if role in {"user", "tool"}:
+        previous = renderer.render_ids(prior)
+        actual = renderer.bridge_to_next_turn(
+            previous, [], [noisy], process_multimodal=False
+        )
+        assert actual is not None
+        assert actual == renderer.bridge_to_next_turn(
+            previous, [], [clean], process_multimodal=False
+        )
+    assert noisy == original
+
+
+def test_qwen38_structured_tool_response_keeps_current_reasoning():
+    tokenizer, _ = _qwen38(QWEN38_MODELS[0])
+    renderer = Qwen38Renderer(tokenizer, Qwen38RendererConfig(preserve_thinking=False))
+    prior = [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "reasoning_content": "Keep me", "content": ""},
+    ]
+    content = [
+        {"type": "text", "text": "  <tool_response>"},
+        {"type": "unsupported"},
+        {"type": "text", "text": None},
+        "result",
+        {"type": "text", "text": "</tool_response>  "},
+    ]
+    messages = [*prior, {"role": "user", "content": content}]
+    expected = [
+        *prior,
+        {"role": "user", "content": "<tool_response>result</tool_response>"},
+    ]
+    assert renderer.render(messages) == renderer.render(expected)
+    assert "Keep me" in tokenizer.decode(renderer.render_ids(messages))
+    with pytest.raises(ValueError, match="No user query found"):
+        renderer.render([messages[-1]])

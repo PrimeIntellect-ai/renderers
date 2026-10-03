@@ -376,8 +376,10 @@ async def generate(
 
     routed_experts = choice.get("routed_experts")
     # vLLM's native kept-set sampling masks (``--return-sampling-mask``):
-    # one list of surviving vocab ids per completion token.
+    # one list of surviving vocab ids per completion token, plus (prime-rl's
+    # server) the sampler's renormalized logprob of each of those ids.
     sampling_mask = choice.get("sampling_mask")
+    sampling_mask_logprobs = choice.get("sampling_mask_logprobs")
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
@@ -409,6 +411,7 @@ async def generate(
         "reasoning_complete": parsed.reasoning_complete,
         "routed_experts": routed_experts,
         "sampling_mask": sampling_mask,
+        "sampling_mask_logprobs": sampling_mask_logprobs,
         # The mm sidecar consumed on the request side, surfaced back so
         # callers can persist it on the trajectory step for downstream
         # multi-turn bridging and training-sample construction.

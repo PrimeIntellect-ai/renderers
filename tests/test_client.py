@@ -179,6 +179,8 @@ def test_generate_builds_request_body_and_parses_response(usage):
     assert result["prompt_ids"] == [1, 2, 3]
     assert result["completion_ids"] == [7, 8]
     assert result["completion_logprobs"] == [-0.1, -0.2]
+    assert result["completion_top_ids"] is None
+    assert result["completion_top_logprobs"] is None
     assert result["routed_experts"]["shape"] == [2, 1, 1]
     assert isinstance(result["routed_experts"]["data"], memoryview)
     assert result["routed_experts"]["data"].tobytes() == base64.b64encode(b"\x01\x02")
@@ -334,6 +336,49 @@ def test_generate_preserves_zero_completion_logprob():
     result = _run_generate(client)
 
     assert result["completion_logprobs"] == [0.0, -0.2]
+
+
+def _run_generate_top_k(client, k):
+    return asyncio.run(
+        generate(
+            client=client,
+            renderer=_FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+            sampling_params={"logprobs": k},
+        )
+    )
+
+
+def test_generate_returns_top_logprobs_when_requested():
+    client = _FakeClient()
+    content = client.choice["logprobs"]["content"]
+    content[0]["top_logprobs"] = [
+        {"token": "token_id:7", "logprob": -0.1},
+        {"token": "token_id:3", "logprob": -2.5},
+    ]
+    content[1]["top_logprobs"] = [
+        {"token": "token_id:4", "logprob": -0.05},
+        {"token": "token_id:8", "logprob": -0.2},
+    ]
+
+    result = _run_generate_top_k(client, 2)
+
+    assert client.calls[0]["body"]["sampling_params"]["logprobs"] == 2
+    assert result["completion_logprobs"] == [-0.1, -0.2]
+    assert result["completion_top_ids"] == [[7, 3], [4, 8]]
+    assert result["completion_top_logprobs"] == [[-0.1, -2.5], [-0.05, -0.2]]
+
+
+def test_generate_rejects_missing_top_logprobs_when_requested():
+    client = _FakeClient()
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"content\[0\]\.top_logprobs must be a non-empty list",
+    ):
+        _run_generate_top_k(client, 2)
 
 
 class _MalformedToolRenderer(_FakeRenderer):

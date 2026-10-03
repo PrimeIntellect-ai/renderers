@@ -188,22 +188,6 @@ def _parse_completion_logprobs(
     return completion_logprobs
 
 
-def _parse_completion_top_logprobs(
-    choice: Mapping[str, Any],
-) -> tuple[list[list[int]], list[list[float]]]:
-    """Per-token top-k candidate ids and logprobs, in vLLM's order. Call after
-    ``_parse_completion_logprobs``, which validates ``content`` itself."""
-    try:
-        rows = [entry["top_logprobs"] for entry in choice["logprobs"]["content"]]
-        ids = [[int(c["token"].removeprefix("token_id:")) for c in row] for row in rows]
-        logprobs = [[float(c["logprob"]) for c in row] for row in rows]
-    except (KeyError, TypeError, ValueError, AttributeError) as exc:
-        raise MalformedGenerateResponseError(
-            "Engine response choice.logprobs.content[].top_logprobs is malformed."
-        ) from exc
-    return ids, logprobs
-
-
 async def generate(
     *,
     client: AsyncOpenAI,
@@ -225,9 +209,7 @@ async def generate(
 
     ``sampling_params`` is forwarded to vLLM verbatim. Two fields are always
     set by us and override caller values: ``stop_token_ids`` (from the
-    renderer) and ``logprobs=1`` (we always emit completion_logprobs), unless the
-    caller passes an int ``logprobs`` k > 1, which also returns the per-token top-k
-    candidates as ``completion_top_ids`` / ``completion_top_logprobs``. Pass
+    renderer) and ``logprobs=1`` (we always emit completion_logprobs). Pass
     ``prompt_ids`` to skip rendering and use a prebuilt token sequence —
     pair it with ``multi_modal_data`` when the prebuilt prompt has image /
     video placeholders that need engine-side mm payload, and with
@@ -327,9 +309,7 @@ async def generate(
 
     sp: dict[str, Any] = dict(sampling_params or {})
     sp["stop_token_ids"] = stop_token_ids
-    top_k = sp.get("logprobs")
-    top_k = top_k if type(top_k) is int and top_k > 1 else None
-    sp["logprobs"] = top_k or 1
+    sp["logprobs"] = 1
     sp.setdefault("skip_special_tokens", False)
 
     body: dict[str, Any] = {
@@ -387,11 +367,6 @@ async def generate(
         )
 
     completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
-    completion_top_ids = completion_top_logprobs = None
-    if top_k is not None:
-        completion_top_ids, completion_top_logprobs = _parse_completion_top_logprobs(
-            choice
-        )
 
     parsed = renderer.parse_response(
         completion_ids,
@@ -401,8 +376,10 @@ async def generate(
 
     routed_experts = choice.get("routed_experts")
     # vLLM's native kept-set sampling masks (``--return-sampling-mask``):
-    # one list of surviving vocab ids per completion token.
+    # one list of surviving vocab ids per completion token, plus (prime-rl's
+    # server) the sampler's renormalized logprob of each of those ids.
     sampling_mask = choice.get("sampling_mask")
+    sampling_mask_logprobs = choice.get("sampling_mask_logprobs")
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
@@ -427,8 +404,6 @@ async def generate(
         "mm_placeholders": mm_placeholders,
         "completion_ids": list(completion_ids),
         "completion_logprobs": completion_logprobs,
-        "completion_top_ids": completion_top_ids,
-        "completion_top_logprobs": completion_top_logprobs,
         "content": parsed.content,
         "reasoning_content": parsed.reasoning_content,
         "tool_calls": parsed.tool_calls,
@@ -436,6 +411,7 @@ async def generate(
         "reasoning_complete": parsed.reasoning_complete,
         "routed_experts": routed_experts,
         "sampling_mask": sampling_mask,
+        "sampling_mask_logprobs": sampling_mask_logprobs,
         # The mm sidecar consumed on the request side, surfaced back so
         # callers can persist it on the trajectory step for downstream
         # multi-turn bridging and training-sample construction.

@@ -191,49 +191,17 @@ def _parse_completion_logprobs(
 def _parse_completion_top_logprobs(
     choice: Mapping[str, Any],
 ) -> tuple[list[list[int]], list[list[float]]]:
-    """Per-token candidate ids/logprobs, in vLLM's order.
-
-    Call after ``_parse_completion_logprobs``, which validates the
-    ``content`` list itself.
-    """
-    top_ids: list[list[int]] = []
-    top_logprobs: list[list[float]] = []
-    for index, entry in enumerate(choice["logprobs"]["content"]):
-        candidates = entry.get("top_logprobs")
-        if not isinstance(candidates, list) or not candidates:
-            raise MalformedGenerateResponseError(
-                f"Engine response choice.logprobs.content[{index}].top_logprobs must be a non-empty list."
-            )
-        ids: list[int] = []
-        logprobs: list[float] = []
-        for rank, candidate in enumerate(candidates):
-            where = f"choice.logprobs.content[{index}].top_logprobs[{rank}]"
-            if not isinstance(candidate, Mapping):
-                raise MalformedGenerateResponseError(
-                    f"Engine response {where} must be an object."
-                )
-            token = candidate.get("token")
-            token_id = token.removeprefix("token_id:") if isinstance(token, str) else ""
-            if token_id == token or not (token_id.isascii() and token_id.isdigit()):
-                raise MalformedGenerateResponseError(
-                    f"Engine response {where}.token must be 'token_id:<id>'."
-                )
-            raw_logprob = candidate.get("logprob")
-            if isinstance(raw_logprob, bool) or not isinstance(
-                raw_logprob, (int, float)
-            ):
-                raise MalformedGenerateResponseError(
-                    f"Engine response {where}.logprob must be a number."
-                )
-            if not math.isfinite(raw_logprob):
-                raise MalformedGenerateResponseError(
-                    f"Engine response {where}.logprob must be finite."
-                )
-            ids.append(int(token_id))
-            logprobs.append(float(raw_logprob))
-        top_ids.append(ids)
-        top_logprobs.append(logprobs)
-    return top_ids, top_logprobs
+    """Per-token top-k candidate ids and logprobs, in vLLM's order. Call after
+    ``_parse_completion_logprobs``, which validates ``content`` itself."""
+    try:
+        rows = [entry["top_logprobs"] for entry in choice["logprobs"]["content"]]
+        ids = [[int(c["token"].removeprefix("token_id:")) for c in row] for row in rows]
+        logprobs = [[float(c["logprob"]) for c in row] for row in rows]
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise MalformedGenerateResponseError(
+            "Engine response choice.logprobs.content[].top_logprobs is malformed."
+        ) from exc
+    return ids, logprobs
 
 
 async def generate(
@@ -257,9 +225,9 @@ async def generate(
 
     ``sampling_params`` is forwarded to vLLM verbatim. Two fields are always
     set by us and override caller values: ``stop_token_ids`` (from the
-    renderer) and ``logprobs`` (always at least 1, so we always emit
-    completion_logprobs; an int ``logprobs`` k > 1 is forwarded and also
-    returns the per-token top-k candidates). Pass
+    renderer) and ``logprobs=1`` (we always emit completion_logprobs), unless the
+    caller passes an int ``logprobs`` k > 1, which also returns the per-token top-k
+    candidates as ``completion_top_ids`` / ``completion_top_logprobs``. Pass
     ``prompt_ids`` to skip rendering and use a prebuilt token sequence —
     pair it with ``multi_modal_data`` when the prebuilt prompt has image /
     video placeholders that need engine-side mm payload, and with
@@ -292,11 +260,7 @@ async def generate(
     Returns a dict with: request_id, prompt_ids, renderer_prompt_ids,
     mm_placeholders, completion_ids, completion_logprobs, content,
     reasoning_content, tool_calls, finish_reason, routed_experts,
-    multi_modal_data, prompt_attribution, completion_top_ids,
-    completion_top_logprobs. ``completion_top_ids`` /
-    ``completion_top_logprobs`` hold one row per completion token with the
-    candidates vLLM returned, in its order, when ``logprobs`` k > 1 was
-    requested, and ``None`` otherwise. ``renderer_prompt_ids`` is the
+    multi_modal_data, prompt_attribution. ``renderer_prompt_ids`` is the
     unexpanded logical prompt when ``process_multimodal=False`` and ``None``
     otherwise.
 
@@ -364,8 +328,7 @@ async def generate(
     sp: dict[str, Any] = dict(sampling_params or {})
     sp["stop_token_ids"] = stop_token_ids
     top_k = sp.get("logprobs")
-    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 1:
-        top_k = None
+    top_k = top_k if type(top_k) is int and top_k > 1 else None
     sp["logprobs"] = top_k or 1
     sp.setdefault("skip_special_tokens", False)
 

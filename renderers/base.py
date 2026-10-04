@@ -1026,6 +1026,10 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # construction to pin a different date.
     "meta-llama/Llama-3.2-1B-Instruct": "llama-3",
     "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
+    # Mistral-3. Instruct checkpoints share the [INST]/[/INST] v3 template.
+    "mistralai/Mistral-Small-3.1-24B-Instruct-2503": "mistral-3",
+    "mistralai/Mistral-Small-3.2-24B-Instruct-2506": "mistral-3",
+    "mistralai/Mistral-Nemo-Instruct-2407": "mistral-3",
     # Poolside Laguna. These checkpoints ship distinct chat templates, each
     # mirrored by its own renderer class/config discriminator.
     "poolside/Laguna-XS.2": "laguna-xs.2",

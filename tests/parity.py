@@ -239,6 +239,11 @@ MODEL_CATALOG = (
     _model("poolside/Laguna-XS-2.1", roundtrip=False, bridge=False),
     _model("poolside/Laguna-S-2.1", roundtrip=False, bridge=False),
     _model(
+        "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+        bridge=True,
+        excluded={"multiple-tool-calls", "consecutive-tool-responses"},
+    ),
+    _model(
         "meta-llama/Llama-3.2-1B-Instruct",
         bridge=True,
         excluded={"multiple-tool-calls", "consecutive-tool-responses"},

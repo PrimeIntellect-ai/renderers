@@ -7,6 +7,7 @@ messages → Renderer.render_ids() → token IDs → POST /inference/v1/generate
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import math
@@ -14,6 +15,7 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 import httpx
+import numpy as np
 from openai import AsyncOpenAI
 
 from renderers.base import (
@@ -134,9 +136,40 @@ def parse_generate_response(raw: bytes) -> dict[str, Any]:
     return payload
 
 
+def _parse_packed_completion_logprobs(
+    packed: Mapping[str, Any], completion_ids: list[int]
+) -> list[float]:
+    """prime-rl's packed form: base64 float32 ``{data, shape, dtype}``, one per token."""
+    try:
+        values = np.frombuffer(
+            base64.b64decode(packed["data"]), dtype=packed["dtype"]
+        ).astype(np.float64)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MalformedGenerateResponseError(
+            "Engine response choice.completion_logprobs must be a packed float array."
+        ) from exc
+    if len(values) != len(completion_ids):
+        raise MalformedGenerateResponseError(
+            "Engine response completion token count "
+            f"({len(completion_ids)}) does not match logprob count ({len(values)})."
+        )
+    if not np.isfinite(values).all():
+        raise MalformedGenerateResponseError(
+            "Engine response choice.completion_logprobs must be finite."
+        )
+    if (values == VLLM_LOGPROB_SENTINEL).any():
+        raise MalformedGenerateResponseError(
+            "Engine response choice.completion_logprobs does not contain sampling evidence."
+        )
+    return values.tolist()
+
+
 def _parse_completion_logprobs(
     choice: Mapping[str, Any], completion_ids: list[int]
 ) -> list[float]:
+    packed = choice.get("completion_logprobs")
+    if packed is not None:
+        return _parse_packed_completion_logprobs(packed, completion_ids)
     raw_logprobs = choice.get("logprobs")
     if not isinstance(raw_logprobs, Mapping):
         raise MalformedGenerateResponseError(
@@ -376,7 +409,8 @@ async def generate(
 
     routed_experts = choice.get("routed_experts")
     # vLLM's native kept-set sampling masks (``--return-sampling-mask``):
-    # one list of surviving vocab ids per completion token.
+    # one list of surviving vocab ids per completion token, or (prime-rl's
+    # server) packed CSR ``{"ids", "counts"}`` base64 int32 arrays.
     sampling_mask = choice.get("sampling_mask")
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —

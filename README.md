@@ -108,6 +108,7 @@ class Renderer(Protocol):
 ```
 
 - `RenderedTokens` carries `token_ids` **and** `message_indices` — one entry per token attributing each to its source message (`-1` for structural scaffolding). Lets `build_training_sample` build a per-token loss mask in one render.
+- A message may carry an optional `trainable_mask`: `1` trains the tokens it owns, `0` masks them out, `None` or absent keeps the role-level default. `build_training_sample` credits a sampled turn-closing marker that the template places in the next message (e.g. GLM's `<|user|>`) to the assistant turn that sampled it. The key is never rendered.
 - `ParsedResponse` is `(content, reasoning_content, tool_calls)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
 - Round-trip: rendering `[user, assistant(content, reasoning, tool_calls)]`, slicing the assistant completion, and feeding it through `parse_response` returns an equivalent structured message. Tested per-renderer in `tests/test_roundtrip.py`.
 

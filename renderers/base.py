@@ -117,6 +117,10 @@ class Message(TypedDict, total=False):
     name: str
     reasoning: str
     reasoning_content: str
+    trainable_mask: bool | int | None
+    """Per-message training override read by ``build_training_sample``:
+    1 trains the message, 0 masks it out, ``None`` (or absent) keeps the
+    role-level default. Never rendered."""
 
 
 def extract_message_tool_names(messages: list[Message]) -> list[str | None]:
@@ -1632,6 +1636,22 @@ def _build_mm_token_type_ids(
     return ids
 
 
+def _trainable_flags(messages: list[Message]) -> list[bool | None]:
+    """Each message's ``trainable_mask`` as True / False, or None when unset."""
+    flags: list[bool | None] = []
+    for index, message in enumerate(messages):
+        value = message.get("trainable_mask")
+        if value is None or value == "":
+            flags.append(None)
+        elif isinstance(value, (bool, int)) and value in (0, 1):
+            flags.append(bool(value))
+        else:
+            raise ValueError(
+                f"messages[{index}]['trainable_mask'] must be 1, 0, or None; got {value!r}"
+            )
+    return flags
+
+
 def build_training_sample(
     renderer: Renderer,
     messages: list[Message],
@@ -1706,8 +1726,30 @@ def build_training_sample(
     fires, the output intentionally diverges from ``apply_chat_template``.
     Ignored for renderers without ``sampled_mask`` (``DefaultRenderer``) —
     the close of an opaque template can't be located reliably.
+
+    A message's optional ``trainable_mask`` overrides all of the above for
+    the tokens it owns: ``1`` trains them, ``0`` masks them out, and
+    ``None`` (or an absent key) keeps the default behaviour. A sampled
+    token belongs to the nearest assistant message at or before the
+    message it is attributed to, so a turn-closing marker the template
+    places in the next message's span (GLM's ``<|user|>`` /
+    ``<|observation|>``) follows the assistant turn that sampled it. With
+    ``1``, an assistant message trains its sampled tokens and any other
+    message trains its body (``is_content``) tokens, never the template
+    scaffolding. Use it to keep earlier turns as context without training
+    on them, e.g. ``0`` on prior assistant turns and ``1`` on the new ones.
+    ``ensure_final_stop`` follows the final message's flag. The key is
+    stripped before rendering, so token ids do not depend on it.
     """
-    rendered = renderer.render(messages, tools=tools)
+    flags = _trainable_flags(messages)
+    if any(flag is not None for flag in flags):
+        messages_to_render = [
+            {key: value for key, value in message.items() if key != "trainable_mask"}
+            for message in messages
+        ]
+    else:
+        messages_to_render = messages
+    rendered = renderer.render(messages_to_render, tools=tools)
     has_sampled_info = len(rendered.sampled_mask) == len(rendered.token_ids)
     has_content_info = len(rendered.is_content) == len(rendered.token_ids)
     body_roles: "frozenset[str]"
@@ -1723,12 +1765,44 @@ def build_training_sample(
             "lambda m: m['role'] == 'assistant') for this renderer."
         )
 
+    # Nearest assistant message at or before each message: the owner of
+    # sampled tokens the template attributes to a following message.
+    previous_assistant: list[int] = []
+    for index, message in enumerate(messages):
+        if message.get("role") == "assistant":
+            previous_assistant.append(index)
+        else:
+            previous_assistant.append(previous_assistant[-1] if index else -1)
+
     loss_mask: list[bool] = []
     for k, msg_idx in enumerate(rendered.message_indices):
         if msg_idx < 0:
             loss_mask.append(False)
             continue
         msg = messages[msg_idx]
+        sampled = has_sampled_info and rendered.sampled_mask[k]
+        owner = msg_idx
+        if (
+            sampled
+            and msg.get("role") != "assistant"
+            and previous_assistant[msg_idx] >= 0
+        ):
+            owner = previous_assistant[msg_idx]
+        flag = flags[owner]
+        if flag is False:
+            loss_mask.append(False)
+            continue
+        if flag is True:
+            if not has_sampled_info or sampled:
+                # Without sampled_mask, attribution alone decides, as with role_to_mask.
+                loss_mask.append(True)
+            else:
+                loss_mask.append(
+                    has_content_info
+                    and msg.get("role") != "assistant"
+                    and rendered.is_content[k]
+                )
+            continue
         # Body-only path for opt-in roles. Fires only on tokens whose
         # is_content bit is set; never adds the scaffolding around the
         # message, so the model isn't supervised on emitting the role
@@ -1753,7 +1827,11 @@ def build_training_sample(
         ensure_final_stop
         and has_sampled_info
         and messages[-1].get("role") == "assistant"
-        and (role_to_mask is None or role_to_mask(messages[-1]))
+        and (
+            flags[-1]
+            if flags[-1] is not None
+            else role_to_mask is None or role_to_mask(messages[-1])
+        )
     ):
         stop_ids = set(renderer.get_stop_token_ids())
         last_trainable = next(

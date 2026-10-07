@@ -353,7 +353,7 @@ def test_generate_reads_packed_completion_logprobs():
     client.choice["completion_logprobs"]["data"] = base64.b64encode(
         np.array([-0.1, -9999.0], dtype=np.float32).tobytes()
     ).decode()
-    with pytest.raises(MalformedGenerateResponseError, match="sampling evidence"):
+    with pytest.raises(MalformedGenerateResponseError, match="missing"):
         _run_generate(client)
 
 

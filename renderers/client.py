@@ -140,28 +140,13 @@ def _parse_packed_completion_logprobs(
     packed: Mapping[str, Any], completion_ids: list[int]
 ) -> list[float]:
     """prime-rl's packed form: base64 float32 ``{data, shape, dtype}``, one per token."""
-    try:
-        values = np.frombuffer(
-            base64.b64decode(packed["data"]), dtype=packed["dtype"]
-        ).astype(np.float64)
-    except (KeyError, TypeError, ValueError) as exc:
+    values = np.frombuffer(base64.b64decode(packed["data"]), dtype=packed["dtype"])
+    if len(values) != len(completion_ids) or not (values > VLLM_LOGPROB_SENTINEL).all():
         raise MalformedGenerateResponseError(
-            "Engine response choice.completion_logprobs must be a packed float array."
-        ) from exc
-    if len(values) != len(completion_ids):
-        raise MalformedGenerateResponseError(
-            "Engine response completion token count "
-            f"({len(completion_ids)}) does not match logprob count ({len(values)})."
+            f"Engine response choice.completion_logprobs: {len(values)} values for "
+            f"{len(completion_ids)} completion tokens, or a missing (-9999) logprob."
         )
-    if not np.isfinite(values).all():
-        raise MalformedGenerateResponseError(
-            "Engine response choice.completion_logprobs must be finite."
-        )
-    if (values == VLLM_LOGPROB_SENTINEL).any():
-        raise MalformedGenerateResponseError(
-            "Engine response choice.completion_logprobs does not contain sampling evidence."
-        )
-    return values.tolist()
+    return values.astype(np.float64).tolist()
 
 
 def _parse_completion_logprobs(

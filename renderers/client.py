@@ -141,10 +141,11 @@ def _parse_packed_completion_logprobs(
 ) -> list[float]:
     """prime-rl's packed form: base64 float32 ``{data, shape, dtype}``, one per token."""
     values = np.frombuffer(base64.b64decode(packed["data"]), dtype=packed["dtype"])
-    if len(values) != len(completion_ids) or not (values > VLLM_LOGPROB_SENTINEL).all():
+    valid = np.isfinite(values) & (values > VLLM_LOGPROB_SENTINEL)
+    if len(values) != len(completion_ids) or not valid.all():
         raise MalformedGenerateResponseError(
             f"Engine response choice.completion_logprobs: {len(values)} values for "
-            f"{len(completion_ids)} completion tokens, or a missing (-9999) logprob."
+            f"{len(completion_ids)} completion tokens, or a non-finite or missing (-9999) logprob."
         )
     return values.astype(np.float64).tolist()
 

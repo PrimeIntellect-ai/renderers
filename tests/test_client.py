@@ -356,6 +356,12 @@ def test_generate_reads_packed_completion_logprobs():
     with pytest.raises(MalformedGenerateResponseError, match="missing"):
         _run_generate(client)
 
+    client.choice["completion_logprobs"]["data"] = base64.b64encode(
+        np.array([-0.1, np.inf], dtype=np.float32).tobytes()
+    ).decode()
+    with pytest.raises(MalformedGenerateResponseError, match="non-finite"):
+        _run_generate(client)
+
 
 class _MalformedToolRenderer(_FakeRenderer):
     """Returns only a malformed tool-call attempt — finish_reason must stay "stop"."""

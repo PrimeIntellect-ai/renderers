@@ -1728,18 +1728,13 @@ def build_training_sample(
     the close of an opaque template can't be located reliably.
 
     A message's optional ``trainable_mask`` overrides all of the above for
-    the tokens it owns: ``1`` trains them, ``0`` masks them out, and
-    ``None`` (or an absent key) keeps the default behaviour. A sampled
-    token belongs to the nearest assistant message at or before the
-    message it is attributed to, so a turn-closing marker the template
-    places in the next message's span (GLM's ``<|user|>`` /
-    ``<|observation|>``) follows the assistant turn that sampled it. With
-    ``1``, an assistant message trains its sampled tokens and any other
-    message trains its body (``is_content``) tokens, never the template
-    scaffolding. Use it to keep earlier turns as context without training
-    on them, e.g. ``0`` on prior assistant turns and ``1`` on the new ones.
-    ``ensure_final_stop`` follows the final message's flag. The key is
-    stripped before rendering, so token ids do not depend on it.
+    the tokens attributed to it: ``1`` trains its sampled tokens (and the
+    body of a non-assistant message), ``0`` masks all of them, and ``None``
+    (or an absent key) keeps the default behaviour. GLM-family templates
+    attribute the sampled turn-closing marker (``<|user|>`` /
+    ``<|observation|>``) to the next message, so it follows that message's
+    flag. ``ensure_final_stop`` follows the final message's flag. The key
+    is stripped before rendering, so token ids do not depend on it.
     """
     flags = _trainable_flags(messages)
     if any(flag is not None for flag in flags):
@@ -1765,43 +1760,21 @@ def build_training_sample(
             "lambda m: m['role'] == 'assistant') for this renderer."
         )
 
-    # Nearest assistant message at or before each message: the owner of
-    # sampled tokens the template attributes to a following message.
-    previous_assistant: list[int] = []
-    for index, message in enumerate(messages):
-        if message.get("role") == "assistant":
-            previous_assistant.append(index)
-        else:
-            previous_assistant.append(previous_assistant[-1] if index else -1)
-
     loss_mask: list[bool] = []
     for k, msg_idx in enumerate(rendered.message_indices):
         if msg_idx < 0:
             loss_mask.append(False)
             continue
         msg = messages[msg_idx]
-        sampled = has_sampled_info and rendered.sampled_mask[k]
-        owner = msg_idx
-        if (
-            sampled
-            and msg.get("role") != "assistant"
-            and previous_assistant[msg_idx] >= 0
-        ):
-            owner = previous_assistant[msg_idx]
-        flag = flags[owner]
-        if flag is False:
-            loss_mask.append(False)
-            continue
-        if flag is True:
-            if not has_sampled_info or sampled:
-                # Without sampled_mask, attribution alone decides, as with role_to_mask.
-                loss_mask.append(True)
-            else:
-                loss_mask.append(
-                    has_content_info
-                    and msg.get("role") != "assistant"
-                    and rendered.is_content[k]
-                )
+        flag = flags[msg_idx]
+        if flag is not None:
+            sampled = not has_sampled_info or rendered.sampled_mask[k]
+            body = (
+                has_content_info
+                and msg.get("role") != "assistant"
+                and rendered.is_content[k]
+            )
+            loss_mask.append(flag and (sampled or body))
             continue
         # Body-only path for opt-in roles. Fires only on tokens whose
         # is_content bit is set; never adds the scaffolding around the

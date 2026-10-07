@@ -138,27 +138,11 @@ def _default_kwargs(renderer, msgs):
     return {"role_to_mask": lambda m: m["role"] == "assistant"}
 
 
-def _owners(renderer, msgs):
-    """Message that owns each token: sampled tokens belong to the nearest assistant at or before."""
-    rendered = renderer.render(msgs)
-    has_sampled = len(rendered.sampled_mask) == len(rendered.token_ids)
-    owners = []
-    for k, index in enumerate(rendered.message_indices):
-        owner = index
-        if has_sampled and rendered.sampled_mask[k] and index >= 0:
-            while owner >= 0 and msgs[owner]["role"] != "assistant":
-                owner -= 1
-            if owner < 0:
-                owner = index
-        owners.append(owner)
-    return owners
-
-
 @pytest.mark.parametrize("masked_turn", [1, 3])
 def test_build_training_sample_trainable_mask_masks_one_assistant_turn(
     model_name, tokenizer, renderer, masked_turn
 ):
-    """0 masks every token the turn owns; the other turn trains as by default; ids are unchanged."""
+    """0 masks every token attributed to the turn; the other turn trains as by default; ids are unchanged."""
     plain = _trainable_mask_messages([None] * 4)
     flags = [None, 1, None, 1]
     flags[masked_turn] = 0
@@ -168,10 +152,10 @@ def test_build_training_sample_trainable_mask_masks_one_assistant_turn(
     sample = build_training_sample(renderer, msgs, **kwargs)
 
     assert sample.token_ids == baseline.token_ids
-    owners = _owners(renderer, plain)
+    attributed = renderer.render(plain).message_indices
     expected = [
-        trainable and owner != masked_turn
-        for trainable, owner in zip(baseline.loss_mask, owners)
+        trainable and index != masked_turn
+        for trainable, index in zip(baseline.loss_mask, attributed)
     ]
     assert sample.loss_mask == expected
     assert 0 < sum(sample.loss_mask) < sum(baseline.loss_mask)
@@ -227,9 +211,11 @@ def test_build_training_sample_trainable_mask_final_turn_skips_final_stop(
     sample = build_training_sample(renderer, msgs, ensure_final_stop=True, **kwargs)
     plain = _trainable_mask_messages([None] * 4)
     assert sample.token_ids == renderer.render_ids(plain)
-    owners = _owners(renderer, plain)
+    attributed = renderer.render(plain).message_indices
     assert not any(
-        trainable for trainable, owner in zip(sample.loss_mask, owners) if owner == 3
+        trainable
+        for trainable, index in zip(sample.loss_mask, attributed)
+        if index == 3
     )
 
 

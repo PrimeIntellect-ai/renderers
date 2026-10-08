@@ -118,3 +118,63 @@ def test_kimi_k2_unknown_role_message_indices():
         f"out-of-range message_indices on Kimi K2 unknown-role fallback "
         f"(k, idx): {bad[:8]}"
     )
+
+
+def test_default_renderer_indices_match_tokens_when_template_shrinks():
+    """``DefaultRenderer`` must not out-run ``token_ids`` on a non-monotone
+    template.
+
+    Jinja chat templates are not prefix-monotone: a cumulative render can be
+    shorter than the previous one, because Qwen3 drops a historical
+    assistant's reasoning block once a later user query arrives. Building
+    ``message_indices`` by assuming strict extension produced a list longer
+    than ``token_ids``, which silently propagated into a mismatched
+    ``loss_mask`` from ``build_training_sample``.
+
+    ``DefaultRenderer`` is not part of the ``conftest`` parametrisation
+    matrix, so the shared ``test_message_indices_in_range`` never exercised
+    it — this test covers the renderer directly.
+    """
+    from renderers.base import build_training_sample, load_tokenizer
+    from renderers.default import DefaultRenderer
+
+    tok = load_tokenizer("Qwen/Qwen3-8B")
+    renderer = DefaultRenderer(tok)
+
+    messages = [
+        {"role": "user", "content": "What is 2+2?"},
+        {
+            "role": "assistant",
+            "reasoning_content": "Two plus two is four.",
+            "content": "4",
+        },
+        {"role": "user", "content": ""},
+    ]
+
+    # Guard the premise: the third cumulative render really is shorter.
+    lengths = [
+        len(renderer.render_ids(messages[: i + 1])) for i in range(len(messages))
+    ]
+    assert lengths[-1] < lengths[-2], (
+        f"premise broken: cumulative renders {lengths} are prefix-monotone, "
+        "so this test no longer exercises the shrinking path"
+    )
+
+    for add_generation_prompt in (False, True):
+        rendered = renderer.render(
+            messages, add_generation_prompt=add_generation_prompt
+        )
+        assert len(rendered.message_indices) == len(rendered.token_ids), (
+            "message_indices length "
+            f"{len(rendered.message_indices)} != token_ids length "
+            f"{len(rendered.token_ids)} (add_generation_prompt="
+            f"{add_generation_prompt})"
+        )
+
+    sample = build_training_sample(
+        renderer, messages, role_to_mask=lambda m: m.get("role") == "assistant"
+    )
+    assert len(sample.loss_mask) == len(sample.token_ids), (
+        f"loss_mask length {len(sample.loss_mask)} != token_ids length "
+        f"{len(sample.token_ids)}"
+    )

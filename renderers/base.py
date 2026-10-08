@@ -1640,6 +1640,7 @@ def build_training_sample(
     tools: list[ToolSpec] | None = None,
     content_sft_roles: "set[str] | frozenset[str] | None" = None,
     ensure_final_stop: bool = False,
+    train_from_message: int | None = None,
 ) -> RenderedTrainingSample:
     """Build a :class:`RenderedTrainingSample` for supervised training.
 
@@ -1706,7 +1707,28 @@ def build_training_sample(
     fires, the output intentionally diverges from ``apply_chat_template``.
     Ignored for renderers without ``sampled_mask`` (``DefaultRenderer``) —
     the close of an opaque template can't be located reliably.
+
+    ``train_from_message`` is the zero-based index of the first assistant
+    message to train. Earlier messages remain context, but their tokens
+    receive no loss. The cutoff only restricts the existing mask; it does
+    not enable supervision for any role. ``None`` keeps the full sample.
+    The index must point to an assistant: GLM attributes an assistant's
+    sampled closing marker to the following user/tool message, so starting
+    at that user/tool message would retain a target from the excluded turn.
+    Token ids and attribution are unchanged, including any final stop
+    appended by ``ensure_final_stop`` for the retained suffix.
     """
+    if train_from_message is not None:
+        if (
+            isinstance(train_from_message, bool)
+            or not isinstance(train_from_message, int)
+            or not 0 <= train_from_message < len(messages)
+        ):
+            raise ValueError(
+                "train_from_message must be an in-range integer message index"
+            )
+        if messages[train_from_message].get("role") != "assistant":
+            raise ValueError("train_from_message must point to an assistant message")
     rendered = renderer.render(messages, tools=tools)
     has_sampled_info = len(rendered.sampled_mask) == len(rendered.token_ids)
     has_content_info = len(rendered.is_content) == len(rendered.token_ids)
@@ -1764,6 +1786,13 @@ def build_training_sample(
             # loss_mask=True marks the token as trainable — the appended
             # stop is a training target, like any sampled token.
             loss_mask.append(True)
+
+    if train_from_message is not None:
+        for k, msg_idx in enumerate(rendered.message_indices):
+            if msg_idx < train_from_message:
+                loss_mask[k] = False
+        # An appended final stop belongs to the final assistant, which is
+        # always in the retained suffix for a valid cutoff.
 
     # Surface the multimodal payload for VLM renderers. ``None`` for text
     # renderers and for text-only samples (empty media) so downstream

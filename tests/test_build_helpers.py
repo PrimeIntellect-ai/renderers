@@ -95,6 +95,89 @@ def test_build_training_sample_ensures_final_stop(model_name, tokenizer, rendere
         assert sample.token_ids == baseline.token_ids
 
 
+@pytest.mark.parametrize("cutoff", [1, 3])
+@pytest.mark.parametrize("ensure_final_stop", [False, True])
+@pytest.mark.parametrize("body_roles", [None, {"user", "tool"}])
+@pytest.mark.parametrize("tool_turn", [False, True])
+def test_build_training_sample_train_from_message(
+    model_name, tokenizer, renderer, cutoff, ensure_final_stop, body_roles, tool_turn
+):
+    """A prefilled prefix has no targets, including GLM's cross-message stop."""
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Earlier answer."},
+        {"role": "user", "content": "Next question"},
+        {"role": "assistant", "content": "New answer."},
+        {"role": "user", "content": "One more question"},
+        {"role": "assistant", "content": "Final answer."},
+    ]
+    if tool_turn:
+        messages[1]["tool_calls"] = [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": '{"q":"x"}'},
+            }
+        ]
+        messages[2] = {
+            "role": "tool",
+            "content": "Lookup result",
+            "tool_call_id": "call_1",
+            "name": "lookup",
+        }
+    rendered = renderer.render(messages)
+    kwargs = {
+        "ensure_final_stop": ensure_final_stop,
+        "content_sft_roles": body_roles,
+    }
+    if not rendered.sampled_mask:
+        kwargs["role_to_mask"] = lambda m: m["role"] == "assistant"
+    baseline = build_training_sample(renderer, messages, **kwargs)
+    sample = build_training_sample(
+        renderer, messages, train_from_message=cutoff, **kwargs
+    )
+    assert sample.token_ids == baseline.token_ids
+    assert len(sample.loss_mask) == len(sample.token_ids)
+    for k, index in enumerate(rendered.message_indices):
+        if index < cutoff:
+            assert not sample.loss_mask[k]
+        else:
+            assert sample.loss_mask[k] == baseline.loss_mask[k]
+    # Retain any synthesized stop and do not re-enable disabled role targets.
+    assert (
+        sample.loss_mask[len(rendered.token_ids) :]
+        == baseline.loss_mask[len(rendered.token_ids) :]
+    )
+    assert any(sample.loss_mask)
+    disabled = build_training_sample(
+        renderer,
+        messages,
+        train_from_message=cutoff,
+        role_to_mask=lambda _: False,
+        ensure_final_stop=ensure_final_stop,
+    )
+    assert not any(disabled.loss_mask)
+    # Compare the actual target text after prime-rl's causal shift.
+    trained = tokenizer.decode(
+        [t for t, keep in zip(sample.token_ids[1:], sample.loss_mask[1:]) if keep]
+    )
+    assert "New answer." in trained and "Final answer." in trained
+    if cutoff == 3:
+        assert "Earlier answer." not in trained
+
+
+@pytest.mark.parametrize("cutoff", [-1, 4, 0, 2, True, False, 1.0, "1"])
+def test_build_training_sample_rejects_invalid_cutoff(cutoff):
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Answer"},
+        {"role": "tool", "content": "Result"},
+        {"role": "assistant", "content": "Final"},
+    ]
+    with pytest.raises(ValueError, match="train_from_message"):
+        build_training_sample(None, messages, train_from_message=cutoff)
+
+
 def test_build_trajectory_step_reconstructs_full(model_name, tokenizer, renderer):
     """prompt_ids + completion_ids must equal the full rendered sequence."""
     prompt = [

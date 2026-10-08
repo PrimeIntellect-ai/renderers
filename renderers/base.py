@@ -1812,11 +1812,28 @@ def trim_to_turn_close(
     canonical close by passing ``synthesize_close`` (its token id).
     Otherwise the caller falls back to a fresh re-render.
 
+    An empty ``prev_completion_ids`` means the step sampled nothing, so no
+    turn was truncated: ``prev_prompt_ids`` is returned unchanged and
+    ``synthesize_close`` is not appended. This keeps the result a prefix of
+    the caller's input.
+
+    Synthesis is the one path that can return more tokens than the input:
+    ``prev_prompt + prev_completion + [synthesize_close]``. That is
+    deliberate — the synthetic close replaces content the model never
+    emitted — and only happens for a *non-empty* completion that contains no
+    close token.
+
     Hand-coded renderers pass this helper a set they know describes their
     turn boundaries. DefaultRenderer can't know its template's close, so
     it doesn't call this — it returns ``None`` from ``bridge_to_next_turn``
     unconditionally.
     """
+    if not previous_completion_ids:
+        # Nothing was sampled, so no turn was truncated and there is no turn
+        # boundary to close. The close token already terminating the prompt is
+        # structural scaffolding (see above), so synthesising another one here
+        # would append a duplicate past the end of the caller's input.
+        return list(previous_prompt_ids)
     previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
     for idx in range(len(previous_ids) - 1, len(previous_prompt_ids) - 1, -1):
         if previous_ids[idx] in close_token_ids:

@@ -241,6 +241,9 @@ MODEL_CATALOG = (
     _model(
         "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
         bridge=True,
+        # tokenizer.chat_template is None on the Hub; parity oracle cannot
+        # produce a reference rendering, so the parity suite is skipped.
+        roundtrip=False,
         excluded={"multiple-tool-calls", "consecutive-tool-responses"},
     ),
     _model(

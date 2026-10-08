@@ -95,6 +95,110 @@ def test_build_training_sample_ensures_final_stop(model_name, tokenizer, rendere
         assert sample.token_ids == baseline.token_ids
 
 
+@pytest.mark.parametrize(
+    "selection",
+    [[0] * 6, [1] * 6, [0, 1, 0, 0, 1, 0], [False, False, True, True, False, True]],
+)
+@pytest.mark.parametrize("ensure_final_stop", [False, True])
+@pytest.mark.parametrize("body_roles", [None, {"user", "tool"}])
+@pytest.mark.parametrize("tool_turn", [False, True])
+def test_build_training_sample_message_loss_mask(
+    model_name, tokenizer, renderer, selection, ensure_final_stop, body_roles, tool_turn
+):
+    """Select arbitrary messages without changing tokens or enabling new targets."""
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Earlier answer."},
+        {"role": "user", "content": "Next question"},
+        {"role": "assistant", "content": "New answer."},
+        {"role": "user", "content": "One more question"},
+        {"role": "assistant", "content": "Final answer."},
+    ]
+    if tool_turn:
+        messages[1]["tool_calls"] = [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": '{"q":"x"}'},
+            }
+        ]
+        messages[2] = {
+            "role": "tool",
+            "content": "Lookup result",
+            "tool_call_id": "call_1",
+            "name": "lookup",
+        }
+    rendered = renderer.render(messages)
+    kwargs = {
+        "ensure_final_stop": ensure_final_stop,
+        "content_sft_roles": body_roles,
+    }
+    if not rendered.sampled_mask:
+        kwargs["role_to_mask"] = lambda m: m["role"] == "assistant"
+    baseline = build_training_sample(renderer, messages, **kwargs)
+    sample = build_training_sample(
+        renderer, messages, message_loss_mask=selection, **kwargs
+    )
+    assert sample.token_ids == baseline.token_ids
+    assert len(sample.loss_mask) == len(sample.token_ids)
+    for k, index in enumerate(rendered.message_indices):
+        if index < 0 or not selection[index]:
+            assert not sample.loss_mask[k]
+        else:
+            assert sample.loss_mask[k] == baseline.loss_mask[k]
+    # A synthesized stop is controlled by the final assistant's flag.
+    assert sample.loss_mask[len(rendered.token_ids) :] == [
+        keep and bool(selection[-1])
+        for keep in baseline.loss_mask[len(rendered.token_ids) :]
+    ]
+    disabled = build_training_sample(
+        renderer,
+        messages,
+        message_loss_mask=selection,
+        role_to_mask=lambda _: False,
+        ensure_final_stop=ensure_final_stop,
+    )
+    assert not any(disabled.loss_mask)
+    trained = tokenizer.decode(
+        [t for t, keep in zip(sample.token_ids[1:], sample.loss_mask[1:]) if keep]
+    )
+    for index, text in [
+        (1, "Earlier answer."),
+        (3, "New answer."),
+        (5, "Final answer."),
+    ]:
+        assert (text in trained) == bool(selection[index])
+    # Closing tokens are assistant output, including markers emitted while
+    # rendering the next user/tool message. Its body keeps its own owner.
+    for index, sampled in zip(rendered.message_indices, rendered.sampled_mask):
+        if sampled:
+            assert index >= 0 and messages[index]["role"] == "assistant"
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        [],
+        [1],
+        [1] * 5,
+        [1, 0, 2, 1],
+        [1, -1, 0, 1],
+        [1, "0", 0, 1],
+        [1, 1.0, 0, 1],
+        [1, None, 0, 1],
+    ],
+)
+def test_build_training_sample_rejects_invalid_message_loss_mask(selection):
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Answer"},
+        {"role": "tool", "content": "Result"},
+        {"role": "assistant", "content": "Final"},
+    ]
+    with pytest.raises(ValueError, match="message_loss_mask"):
+        build_training_sample(None, messages, message_loss_mask=selection)
+
+
 def test_build_trajectory_step_reconstructs_full(model_name, tokenizer, renderer):
     """prompt_ids + completion_ids must equal the full rendered sequence."""
     prompt = [

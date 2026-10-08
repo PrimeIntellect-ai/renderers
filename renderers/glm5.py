@@ -225,20 +225,8 @@ class GLM5Renderer:
             role = msg["role"]
             content = self._visible_text(msg.get("content"))
 
-            # When the previous message is an assistant, this message's
-            # role-opening token (``<|user|>`` / ``<|observation|>``) is
-            # the inference-time stop signal that closes the assistant's
-            # turn (see ``get_stop_token_ids``). Mark it
-            # ``is_sampled=True`` so the loss-mask pipeline trains the
-            # model to emit it after ``</tool_call>`` (instead of
-            # continuing with another ``<tool_call>`` block). The token
-            # stays attributed to this message (msg_idx=i) and remains
-            # ``is_content=False`` — it's a role-marker / scaffold, not
-            # body bytes, so ``content_mask_for_roles({"tool"})`` and
-            # ``content_token_spans_by_role()`` correctly exclude it
-            # from "tool body" views. Byte stream is unchanged.
-            # ``system`` only appears at the start of a GLM conversation,
-            # so its opener is never the closer of an assistant turn.
+            # A user/tool role marker that closes generation belongs to
+            # the preceding assistant's sampled output, not the next body.
             closes_assistant_turn = i > 0 and messages[i - 1]["role"] == "assistant"
 
             if role == "system":
@@ -248,9 +236,9 @@ class GLM5Renderer:
             elif role == "user":
                 emit_special(
                     self._user,
-                    i,
+                    i - 1 if closes_assistant_turn else i,
                     is_sampled=closes_assistant_turn,
-                    is_content=False,
+                    is_content=closes_assistant_turn,
                 )
                 emit_text(content, i, is_sampled=False, is_content=True)
 
@@ -272,13 +260,17 @@ class GLM5Renderer:
                     ):
                         tool_message = messages[tool_idx]
                         self._render_tool(
-                            messages,
                             tool_idx,
                             self._visible_text(tool_message.get("content")),
                             emit_special=emit_special,
                             emit_text=emit_text,
                             emit_text_segments=emit_text_segments,
                             starts_block=position == 0,
+                            closing_assistant_index=(
+                                i - 1
+                                if position == 0 and closes_assistant_turn
+                                else None
+                            ),
                         )
 
         # ── Generation prompt ───────────────────────────────────────
@@ -649,7 +641,6 @@ class GLM5Renderer:
 
     def _render_tool(
         self,
-        messages: list[Message],
         msg_idx: int,
         content: str,
         *,
@@ -657,24 +648,22 @@ class GLM5Renderer:
         emit_text,
         emit_text_segments,
         starts_block: bool = False,
+        closing_assistant_index: int | None = None,
     ) -> None:
-        # Tool body bytes get ``is_content=True``; the wraps are
-        # scaffold. The ``<|observation|>`` role tag is scaffold too
-        # (``is_content=False`` so ``content_mask_for_roles({"tool"})``
-        # excludes it). When the previous message is an assistant it
-        # doubles as the inference stop signal for that assistant's
-        # turn — mark it ``is_sampled=True`` so SFT trains the model to
-        # emit it after ``</tool_call>``. The token stays attributed to
-        # this tool message; byte stream is unchanged.
-        prev_role = messages[msg_idx - 1]["role"] if msg_idx > 0 else None
-        closes_assistant_turn = prev_role == "assistant"
+        # Tool bodies keep their own attribution; a sampled observation
+        # marker belongs to the assistant that generated it.
+        # The caller supplies the block's assistant because results may
+        # be reordered relative to their input-message indices.
+        closes_assistant_turn = closing_assistant_index is not None
 
-        if starts_block or prev_role != "tool":
+        if starts_block:
             emit_special(
                 self._observation,
-                msg_idx,
+                closing_assistant_index
+                if closing_assistant_index is not None
+                else msg_idx,
                 is_sampled=closes_assistant_turn,
-                is_content=False,
+                is_content=closes_assistant_turn,
             )
 
         emit_special(

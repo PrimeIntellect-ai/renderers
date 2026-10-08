@@ -107,7 +107,8 @@ class Renderer(Protocol):
     def bridge_to_next_turn(prev_prompt_ids, prev_completion_ids, new_messages, *, tools=None) -> list[int] | None: ...
 ```
 
-- `RenderedTokens` carries `token_ids` **and** `message_indices` — one entry per token attributing each to its source message (`-1` for structural scaffolding). Lets `build_training_sample` build a per-token loss mask in one render.
+- `RenderedTokens` carries `token_ids` **and** `message_indices` — one entry per token attributing each to its owning message (`-1` for structural scaffolding). Sampled closing markers belong to their assistant, including GLM markers emitted at the next user/tool boundary; user/tool bodies keep their own ownership.
+- `build_training_sample(..., message_loss_mask=[0, 0, 0, 1])` keeps all messages as context but restricts loss to selected messages. Supply one boolean or integer `0`/`1` per message, or `None` for the normal mask. Excluding an assistant also excludes its closing token. Selection never enables targets disabled by the existing role/content settings or changes token IDs.
 - `ParsedResponse` is `(content, reasoning_content, tool_calls)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
 - Round-trip: rendering `[user, assistant(content, reasoning, tool_calls)]`, slicing the assistant completion, and feeding it through `parse_response` returns an equivalent structured message. Tested per-renderer in `tests/test_roundtrip.py`.
 

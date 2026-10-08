@@ -224,8 +224,11 @@ class MultiModalData:
 class RenderedTokens:
     """Result of rendering messages to tokens.
 
-    Each token carries an index into the original message list so callers can
-    build per-token loss masks without re-rendering. Tokens from structural
+    Each token carries its owning message's index into the original message
+    list so callers can build per-token loss masks without re-rendering.
+    Sampled closing tokens belong to the assistant that generated them, even
+    when emitted while rendering the next message's role marker. User/tool
+    bodies retain their own message indices. Tokens from structural
     scaffolding the renderer adds outside any single message (e.g. the
     trailing generation prompt) carry index ``-1``.
 
@@ -383,7 +386,10 @@ class RenderedTokens:
         is not represented.
 
         Hand-coded renderers emit each message's tokens contiguously,
-        so the span is well-defined. The implementation tolerates
+        so the span is well-defined. Spans follow input-message indices,
+        not necessarily token order: templates can reorder tool results.
+        Empty messages whose role marker closes the preceding assistant
+        may have no tokens of their own. The implementation tolerates
         non-contiguous attribution by returning the outer span
         ``(first_k, last_k + 1)``; if you suspect interleaving, slice
         ``message_indices`` yourself to verify.
@@ -1640,7 +1646,7 @@ def build_training_sample(
     tools: list[ToolSpec] | None = None,
     content_sft_roles: "set[str] | frozenset[str] | None" = None,
     ensure_final_stop: bool = False,
-    train_from_message: int | None = None,
+    message_loss_mask: list[bool | int] | None = None,
 ) -> RenderedTrainingSample:
     """Build a :class:`RenderedTrainingSample` for supervised training.
 
@@ -1657,11 +1663,8 @@ def build_training_sample(
     it's attributed to. This is the recommended default for renderer
     callers — the renderer owns the per-token "is this model output"
     signal, so role-level filtering becomes a downstream constraint
-    rather than a precondition. (Some role markers — e.g. GLM
-    ``<|user|>`` / ``<|observation|>`` after a tool-calling assistant
-    turn — *are* sampled by the model at inference and live inside the
-    next message's span; ``sampled_mask`` captures that, but a
-    naive role filter would mask them out.)
+    rather than a precondition. Sampled closing markers, including GLM's
+    ``<|user|>`` / ``<|observation|>``, are attributed to their assistant.
 
     When ``role_to_mask`` is provided, ``loss_mask`` is the AND of the
     role-based attribution and the sampled signal: only tokens the
@@ -1708,27 +1711,26 @@ def build_training_sample(
     Ignored for renderers without ``sampled_mask`` (``DefaultRenderer``) —
     the close of an opaque template can't be located reliably.
 
-    ``train_from_message`` is the zero-based index of the first assistant
-    message to train. Earlier messages remain context, but their tokens
-    receive no loss. The cutoff only restricts the existing mask; it does
-    not enable supervision for any role. ``None`` keeps the full sample.
-    The index must point to an assistant: GLM attributes an assistant's
-    sampled closing marker to the following user/tool message, so starting
-    at that user/tool message would retain a target from the excluded turn.
-    Token ids and attribution are unchanged, including any final stop
-    appended by ``ensure_final_stop`` for the retained suffix.
+    ``message_loss_mask`` optionally selects messages for supervision with
+    one boolean or integer 0/1 per message. It only restricts the existing
+    mask: selecting a message never enables targets disabled by the role,
+    sampled, or content settings. Unselected messages remain context,
+    including prefilled assistant turns at arbitrary positions. Sampled
+    closing tokens follow their owning assistant, even when a template
+    emits them at the next message boundary. A synthesized final stop
+    follows the final message's selection. Token ids are unaffected.
+    ``None`` preserves the existing mask.
     """
-    if train_from_message is not None:
-        if (
-            isinstance(train_from_message, bool)
-            or not isinstance(train_from_message, int)
-            or not 0 <= train_from_message < len(messages)
+    if message_loss_mask is not None:
+        if len(message_loss_mask) != len(messages):
+            raise ValueError("message_loss_mask must have one entry per message")
+        if any(
+            not isinstance(value, (bool, int)) or value not in (0, 1)
+            for value in message_loss_mask
         ):
             raise ValueError(
-                "train_from_message must be an in-range integer message index"
+                "message_loss_mask entries must be booleans or integers 0/1"
             )
-        if messages[train_from_message].get("role") != "assistant":
-            raise ValueError("train_from_message must point to an assistant message")
     rendered = renderer.render(messages, tools=tools)
     has_sampled_info = len(rendered.sampled_mask) == len(rendered.token_ids)
     has_content_info = len(rendered.is_content) == len(rendered.token_ids)
@@ -1787,12 +1789,18 @@ def build_training_sample(
             # stop is a training target, like any sampled token.
             loss_mask.append(True)
 
-    if train_from_message is not None:
-        for k, msg_idx in enumerate(rendered.message_indices):
-            if msg_idx < train_from_message:
-                loss_mask[k] = False
-        # An appended final stop belongs to the final assistant, which is
-        # always in the retained suffix for a valid cutoff.
+    if message_loss_mask is not None:
+        for k in range(len(loss_mask)):
+            # Any synthesized stop after the rendered sequence belongs to
+            # the final assistant, just like an in-message closing token.
+            msg_idx = (
+                rendered.message_indices[k]
+                if k < len(rendered.message_indices)
+                else len(messages) - 1
+            )
+            loss_mask[k] = (
+                loss_mask[k] and msg_idx >= 0 and bool(message_loss_mask[msg_idx])
+            )
 
     # Surface the multimodal payload for VLM renderers. ``None`` for text
     # renderers and for text-only samples (empty media) so downstream

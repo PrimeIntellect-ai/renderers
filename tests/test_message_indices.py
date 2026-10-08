@@ -40,6 +40,69 @@ Tests in this file:
 
 from __future__ import annotations
 
+import pytest
+
+from renderers import build_training_sample
+from renderers.glm45 import GLM45Renderer
+from renderers.glm5 import GLM5Renderer
+from tests.reference_rendering import render_reference
+
+
+def test_glm_tool_stop_ownership(model_name, tokenizer, renderer):
+    """The first emitted observation closes the assistant, even after reordering."""
+    if not isinstance(renderer, (GLM5Renderer, GLM45Renderer)):
+        pytest.skip("GLM turn-closing role markers")
+    messages = [
+        {"role": "user", "content": "Look up both"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": f"c{i}",
+                    "type": "function",
+                    "function": {"name": f"f{i}", "arguments": {}},
+                }
+                for i in (1, 2)
+            ],
+        },
+        {
+            "role": "tool",
+            "content": "Second result",
+            "tool_call_id": "c2",
+            "name": "f2",
+        },
+        {"role": "tool", "content": "First result", "tool_call_id": "c1", "name": "f1"},
+        {"role": "assistant", "content": "Done"},
+    ]
+    rendered = renderer.render(messages)
+    assert rendered.token_ids == render_reference(tokenizer, messages)
+    observation = tokenizer.encode("<|observation|>", add_special_tokens=False)[0]
+    positions = [
+        k for k, token in enumerate(rendered.token_ids) if token == observation
+    ]
+    first, *rest = positions
+    assert rendered.message_indices[first] == 1
+    assert rendered.sampled_mask[first] and rendered.is_content[first]
+    assert not any(rendered.sampled_mask[k] for k in rest)
+    assert not rendered.content_mask_for_roles({"tool"})[first]
+    span = rendered.message_token_spans()[1]
+    assert span is not None
+    assert all(index == 1 for index in rendered.message_indices[span[0] : span[1]])
+    for selected in (False, True):
+        sample = build_training_sample(
+            renderer,
+            messages,
+            message_loss_mask=[0, selected, not selected, not selected, 0],
+            content_sft_roles={"tool"},
+            ensure_final_stop=True,
+        )
+        assert sample.loss_mask[first] == selected
+        for k, is_tool_body in enumerate(rendered.content_mask_for_roles({"tool"})):
+            if is_tool_body:
+                assert sample.loss_mask[k] == (not selected)
+        assert not sample.loss_mask[-1]
+
 
 def test_message_indices_in_range(model_name, renderer):
     """Every emitted token's ``message_indices`` must be in

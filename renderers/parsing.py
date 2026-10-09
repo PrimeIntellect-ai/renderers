@@ -403,7 +403,14 @@ def _parse_xml_tool_calls(
     section_offset: int,
     param_index: dict[str, dict[str, dict[str, Any]]],
 ) -> list[ParsedToolCall]:
-    """Parse Qwen3.5-style XML tool calls from token IDs."""
+    """Parse Qwen3.5-style XML tool calls from token IDs.
+
+    A ``<tool_call>`` block yields one call per ``<function=...>`` body, as
+    vLLM's ``qwen3_coder`` parser splits it: a body runs to the next
+    ``</function>`` (or to the end of the block when unclosed), and only the
+    ``<parameter>`` tags inside it are its arguments. The calls of one block
+    share its ``raw`` text and ``token_span``.
+    """
     import re
 
     tool_calls: list[ParsedToolCall] = []
@@ -423,8 +430,14 @@ def _parse_xml_tool_calls(
                 break
             block_text = _decode(tokenizer, ids[i + 1 : end])
             span = (section_offset + i, section_offset + end + 1)
-            name_match = re.search(r"<function=([^>]+)>", block_text)
-            if not name_match:
+            functions = list(
+                re.finditer(
+                    r"<function=([^>]+)>(.*?)</function>|<function=([^>]+)>(.*)$",
+                    block_text,
+                    re.DOTALL,
+                )
+            )
+            if not functions:
                 tool_calls.append(
                     ParsedToolCall(
                         raw=block_text,
@@ -435,33 +448,36 @@ def _parse_xml_tool_calls(
                 i = end + 1
                 continue
 
-            name = name_match.group(1)
-            params = param_index.get(name, {})
-            arguments: dict = {}
-            any_json_fallback = False
-            for pm in re.finditer(
-                r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>", block_text, re.DOTALL
-            ):
-                arg_name = pm.group(1)
-                arg_value = pm.group(2).strip()
-                value, used_fallback = _coerce_arg_value(
-                    arg_value, params.get(arg_name)
+            for function in functions:
+                closed = function.group(1) is not None
+                name = function.group(1) if closed else function.group(3)
+                body = function.group(2) if closed else function.group(4)
+                params = param_index.get(name, {})
+                arguments: dict = {}
+                any_json_fallback = False
+                for pm in re.finditer(
+                    r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>", body, re.DOTALL
+                ):
+                    arg_name = pm.group(1)
+                    arg_value = pm.group(2).strip()
+                    value, used_fallback = _coerce_arg_value(
+                        arg_value, params.get(arg_name)
+                    )
+                    arguments[arg_name] = value
+                    any_json_fallback = any_json_fallback or used_fallback
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=block_text,
+                        name=name,
+                        arguments=arguments,
+                        token_span=span,
+                        status=(
+                            ToolCallParseStatus.INVALID_JSON
+                            if any_json_fallback
+                            else ToolCallParseStatus.OK
+                        ),
+                    )
                 )
-                arguments[arg_name] = value
-                any_json_fallback = any_json_fallback or used_fallback
-            tool_calls.append(
-                ParsedToolCall(
-                    raw=block_text,
-                    name=name,
-                    arguments=arguments,
-                    token_span=span,
-                    status=(
-                        ToolCallParseStatus.INVALID_JSON
-                        if any_json_fallback
-                        else ToolCallParseStatus.OK
-                    ),
-                )
-            )
             i = end + 1
         else:
             i += 1

@@ -21,7 +21,7 @@ keys its tokenizer's template will honour, so it can't enumerate them.
 
 from __future__ import annotations
 
-from typing import Annotated, ClassVar, Literal, Union
+from typing import Annotated, ClassVar, Literal, Self, Union
 
 from pydantic import ConfigDict, Field, model_validator
 from pydantic_config import BaseConfig
@@ -159,7 +159,7 @@ class DefaultRendererConfig(BaseRendererConfig):
     _allow_opaque_template_kwargs = True
 
     @model_validator(mode="after")
-    def _reject_legacy_preserve_flags(self):
+    def _reject_legacy_preserve_flags(self) -> Self:
         # ``extra="allow"`` would otherwise swallow the removed ``preserve_*``
         # bools into ``model_extra`` and forward them to apply_chat_template,
         # silently dropping the user's intent (DefaultRenderer can't
@@ -261,7 +261,7 @@ class Qwen36RendererConfig(BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "preserve_thinking",
@@ -307,7 +307,7 @@ class Qwen38RendererConfig(BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "preserve_thinking",
@@ -350,7 +350,7 @@ class Gemma4RendererConfig(BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "preserve_thinking",
@@ -377,7 +377,7 @@ class GLM5RendererConfig(BaseRendererConfig):
     to ``"all"``."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "clear_thinking",
@@ -401,7 +401,7 @@ class GLM51RendererConfig(BaseRendererConfig):
     """See :class:`GLM5RendererConfig.clear_thinking`."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "clear_thinking",
@@ -424,7 +424,7 @@ class GLM53RendererConfig(BaseRendererConfig):
     """Reasoning-effort system preamble emitted by the canonical template."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "clear_thinking",
@@ -506,7 +506,7 @@ class Hy3RendererConfig(BaseRendererConfig):
     and suppresses the generation prompt (``add_generation_prompt=False``)."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         if self.preserved_thinking is not None and self.thinking_retention is not None:
             implied = "all" if self.preserved_thinking else "tool_cycle"
             if self.thinking_retention != implied:
@@ -566,7 +566,7 @@ class InklingRendererConfig(BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max", "audio_cache_max"})
 
     @model_validator(mode="after")
-    def _check_reasoning_effort(self):
+    def _check_reasoning_effort(self) -> Self:
         eff = self.reasoning_effort
         if isinstance(eff, str):
             if eff.strip() not in INKLING_EFFORT_MAP:
@@ -631,7 +631,7 @@ class GptOssRendererConfig(BaseRendererConfig):
     )
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "auto_drop_analysis",
@@ -836,7 +836,7 @@ class Nemotron3RendererConfig(BaseRendererConfig):
     policy to ``"all"``."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "truncate_history_thinking",
@@ -877,7 +877,7 @@ class Nemotron3UltraRendererConfig(BaseRendererConfig):
     """See :class:`Nemotron3RendererConfig.truncate_history_thinking`."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "truncate_history_thinking",
@@ -913,7 +913,7 @@ class Nemotron35RendererConfig(BaseRendererConfig):
     """See :class:`Nemotron3RendererConfig.truncate_history_thinking`."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "truncate_history_thinking",
@@ -984,7 +984,7 @@ class DeepSeekV4RendererConfig(BaseRendererConfig):
     """
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "drop_thinking",
@@ -1019,7 +1019,7 @@ class CustomRendererConfig(BaseRendererConfig):
     _internal_fields = frozenset({"import_path"})
 
     @model_validator(mode="after")
-    def _validate_renderer_fields(self):
+    def _validate_renderer_fields(self) -> Self:
         # Fail at config load, not at the first render: the import path must
         # resolve and the renderer's config must accept the other fields.
         from renderers.custom import custom_renderer_config

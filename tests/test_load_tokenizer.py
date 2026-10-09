@@ -12,6 +12,8 @@ import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from renderers import base
 from renderers.base import TOKENIZER_SOURCE_OVERRIDES, TRUSTED_REVISIONS, load_tokenizer
 
@@ -169,3 +171,20 @@ def test_load_tokenizer_real_kimi_uses_pinned_revision():
     assert tok is not None
     ids = tok.encode("hello", add_special_tokens=False)
     assert len(ids) > 0
+
+
+def test_load_failure_preserves_exception_with_requested_model_note(monkeypatch):
+    error = OSError("tokenizer files unavailable")
+    error.add_note("upstream detail")
+    monkeypatch.setattr(base, "_require_transformers", lambda feature: None)
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(base, "_load_tokenizer_via_auto", fail)
+    model = "meta-llama/Llama-3.2-1B-Instruct"
+    with pytest.raises(OSError) as caught:
+        load_tokenizer(model)
+    assert caught.value is error
+    assert str(error) == "tokenizer files unavailable"
+    assert error.__notes__ == ["upstream detail", f"While loading tokenizer {model!r}."]

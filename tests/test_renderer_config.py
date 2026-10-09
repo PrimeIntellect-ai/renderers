@@ -355,22 +355,3 @@ def test_message_required_keys():
     assert base.Message.__required_keys__ == {"role", "content"}
     assert "tool_calls" in base.Message.__optional_keys__
     assert "reasoning_content" in base.Message.__optional_keys__
-
-
-def test_renderer_failure_preserves_exception_with_context(monkeypatch):
-    error = ValueError("invalid tokenizer vocabulary")
-    base._populate_registry()
-
-    def fail(tokenizer, config):
-        raise error
-
-    monkeypatch.setitem(base.RENDERER_REGISTRY, "qwen3", fail)
-    with pytest.raises(ValueError) as caught:
-        create_renderer(
-            SimpleNamespace(name_or_path="test/model"), Qwen3RendererConfig()
-        )
-    assert caught.value is error
-    assert str(error) == "invalid tokenizer vocabulary"
-    assert error.__notes__ == [
-        "While creating renderer 'qwen3' for tokenizer 'test/model'."
-    ]

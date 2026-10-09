@@ -678,8 +678,14 @@ class DeepSeekV4Renderer:
                     rendered_calls = "\n".join(
                         self._render_tool_call(call) for call in message.tool_calls
                     )
+                    # Separate the block from preceding content only when there is content.
+                    # Without this an assistant turn that carries only tool calls starts with
+                    # "\n\n" right after </think>, making it the first trainable token of the
+                    # turn; on corpora where most tool-calling turns have empty content the
+                    # model learns to emit runs of newlines there.
+                    separator = "\n\n" if (message.content or "") else ""
                     emit_text(
-                        f"\n\n<{_DSML}tool_calls>\n{rendered_calls}\n"
+                        f"{separator}<{_DSML}tool_calls>\n{rendered_calls}\n"
                         f"</{_DSML}tool_calls>",
                         msg_idx,
                         sampled=True,

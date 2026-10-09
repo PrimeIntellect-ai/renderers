@@ -1,15 +1,14 @@
-from __future__ import annotations
-
-import enum
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Literal,
     Protocol,
+    Required,
     TypedDict,
     cast,
     runtime_checkable,
@@ -110,8 +109,8 @@ class Message(TypedDict, total=False):
     Optional keys mirror the OpenAI chat format for tool calling.
     """
 
-    role: str
-    content: Content
+    role: Required[str]
+    content: Required[Content]
     tool_calls: list[ToolCall]
     tool_call_id: str
     name: str
@@ -562,7 +561,7 @@ class RenderedTokens:
         return mask
 
 
-class ToolCallParseStatus(str, enum.Enum):
+class ToolCallParseStatus(StrEnum):
     """Per-attempt outcome of parsing a single ``<tool_call>`` block.
 
     The renderer parser's job is JSON-syntax → ``dict`` (the parser-level
@@ -1310,15 +1309,19 @@ def load_tokenizer(model_name_or_path: str):
     the requested Meta ID so auto-resolution still selects ``Llama3Renderer``.
     Requires the ``renderers[transformers]`` extra.
     """
-    _require_transformers("Loading a tokenizer")
-    load_name_or_path = _tokenizer_source_for(model_name_or_path)
-    kwargs = _tokenizer_load_kwargs(load_name_or_path)
-    tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
-    return _preserve_requested_tokenizer_name(
-        tok,
-        requested_name_or_path=model_name_or_path,
-        loaded_name_or_path=load_name_or_path,
-    )
+    try:
+        _require_transformers("Loading a tokenizer")
+        load_name_or_path = _tokenizer_source_for(model_name_or_path)
+        kwargs = _tokenizer_load_kwargs(load_name_or_path)
+        tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
+        return _preserve_requested_tokenizer_name(
+            tok,
+            requested_name_or_path=model_name_or_path,
+            loaded_name_or_path=load_name_or_path,
+        )
+    except Exception as exc:
+        exc.add_note(f"While loading tokenizer {model_name_or_path!r}.")
+        raise
 
 
 def _populate_registry():
@@ -1393,7 +1396,7 @@ def _populate_registry():
 
 def create_renderer(
     tokenizer,
-    config: RendererConfig | None = None,
+    config: "RendererConfig | None" = None,
     *,
     chat_template_kwargs: Mapping[str, Any] | None = None,
 ) -> Renderer:
@@ -1425,26 +1428,34 @@ def create_renderer(
     """
     _populate_registry()
 
-    config = _resolve_renderer_config(
-        tokenizer,
-        config,
-        chat_template_kwargs=chat_template_kwargs,
-    )
-    from renderers.configs import CustomRendererConfig
-    from renderers.custom import custom_renderer_config, load_custom_renderer
-
-    if isinstance(config, CustomRendererConfig):
-        renderer_cls = load_custom_renderer(config.import_path)
-        return renderer_cls(tokenizer, custom_renderer_config(config))
-    cls = RENDERER_REGISTRY.get(config.name)
-    if cls is None:
-        raise ValueError(
-            f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
+    try:
+        config = _resolve_renderer_config(
+            tokenizer,
+            config,
+            chat_template_kwargs=chat_template_kwargs,
         )
-    return cls(tokenizer, config)
+        from renderers.configs import CustomRendererConfig
+        from renderers.custom import custom_renderer_config, load_custom_renderer
+
+        if isinstance(config, CustomRendererConfig):
+            renderer_cls = load_custom_renderer(config.import_path)
+            return renderer_cls(tokenizer, custom_renderer_config(config))
+        cls = RENDERER_REGISTRY.get(config.name)
+        if cls is None:
+            raise ValueError(
+                f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
+            )
+        return cls(tokenizer, config)
+    except Exception as exc:
+        model_name = getattr(tokenizer, "name_or_path", "<unnamed tokenizer>")
+        renderer_name = config.name if config is not None else "auto"
+        exc.add_note(
+            f"While creating renderer {renderer_name!r} for tokenizer {model_name!r}."
+        )
+        raise
 
 
-def template_field_names(config: RendererConfig) -> frozenset[str]:
+def template_field_names(config: "RendererConfig") -> frozenset[str]:
     """Chat-template kwargs that ``config``'s renderer accepts, custom renderers included."""
     from renderers.configs import CustomRendererConfig
     from renderers.custom import load_custom_renderer
@@ -1457,9 +1468,9 @@ def template_field_names(config: RendererConfig) -> frozenset[str]:
 
 
 def merge_chat_template_kwargs(
-    config: RendererConfig,
+    config: "RendererConfig",
     chat_template_kwargs: Mapping[str, Any] | None,
-) -> RendererConfig:
+) -> "RendererConfig":
     """Return ``config`` with the template kwargs applied, validated against its allowlist."""
     if not chat_template_kwargs:
         return config
@@ -1504,10 +1515,10 @@ def merge_chat_template_kwargs(
 
 def _resolve_renderer_config(
     tokenizer,
-    config: RendererConfig | None,
+    config: "RendererConfig | None",
     *,
     chat_template_kwargs: Mapping[str, Any] | None = None,
-) -> RendererConfig:
+) -> "RendererConfig":
     """Resolve auto/default config and merge chat-template kwargs."""
     from renderers.configs import AutoRendererConfig
 
@@ -1526,10 +1537,10 @@ def _resolve_renderer_config(
 
 def _resolve_auto_config(
     tokenizer,
-    auto: AutoRendererConfig,
+    auto: "AutoRendererConfig",
     *,
     chat_template_kwargs: Mapping[str, Any] | None = None,
-) -> RendererConfig:
+) -> "RendererConfig":
     """Map ``AutoRendererConfig`` → concrete typed config via the
     tokenizer's ``name_or_path``.
 
@@ -2117,8 +2128,8 @@ def introduces_user_query(
 
 def resolve_thinking_retention(
     config: Any,
-    implied: ResolvedThinkingRetention,
-) -> ResolvedThinkingRetention:
+    implied: "ResolvedThinkingRetention",
+) -> "ResolvedThinkingRetention":
     """Resolve the effective bridge policy for a renderer instance.
 
     ``config.thinking_retention is None`` means "derive from template knobs";
@@ -2132,7 +2143,7 @@ def resolve_thinking_retention(
 
 
 def should_rerender_for_thinking_retention(
-    thinking_retention: ResolvedThinkingRetention,
+    thinking_retention: "ResolvedThinkingRetention",
     new_messages: list[Message],
     *,
     is_user_query: Callable[[Message], bool] = _is_user_message,

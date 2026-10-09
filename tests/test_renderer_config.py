@@ -349,3 +349,9 @@ def test_default_renderer_config_rejects_legacy_preserve_flags():
 
     cfg = DefaultRendererConfig(some_jinja_kwarg=True)
     assert cfg.model_extra["some_jinja_kwarg"] is True
+
+
+def test_message_required_keys():
+    assert base.Message.__required_keys__ == {"role", "content"}
+    assert "tool_calls" in base.Message.__optional_keys__
+    assert "reasoning_content" in base.Message.__optional_keys__

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from renderers.base import ToolCallParseStatus, load_tokenizer
@@ -160,3 +162,11 @@ def test_default_renderer_without_parsers_is_backward_compatible():
 def test_think_parser_requires_initial_opener(text):
     parser = get_reasoning_parser("think", None)
     assert parser.extract(text) == (None, text)
+
+
+def test_parse_status_uses_wire_value_as_string():
+    for status in ToolCallParseStatus:
+        assert str(status) == status.value
+        assert f"{status}" == status.value
+        assert json.loads(json.dumps({"status": status})) == {"status": status.value}
+        assert ToolCallParseStatus(status.value) is status

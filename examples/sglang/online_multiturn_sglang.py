@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.10,<3.14"
+# requires-python = ">=3.11,<3.14"
 # dependencies = [
 #   "renderers>=0.1.6",
 #   "transformers>=5.3.0",

@@ -336,6 +336,33 @@ def test_generate_preserves_zero_completion_logprob():
     assert result["completion_logprobs"] == [0.0, -0.2]
 
 
+def test_generate_reads_packed_completion_logprobs():
+    client = _FakeClient()
+    client.choice.pop("logprobs")
+    values = np.array([-0.1, 0.0], dtype=np.float32)
+    client.choice["completion_logprobs"] = {
+        "data": base64.b64encode(values.tobytes()).decode(),
+        "shape": [2],
+        "dtype": "float32",
+    }
+
+    result = _run_generate(client)
+
+    assert result["completion_logprobs"] == values.tolist()
+
+    client.choice["completion_logprobs"]["data"] = base64.b64encode(
+        np.array([-0.1, -9999.0], dtype=np.float32).tobytes()
+    ).decode()
+    with pytest.raises(MalformedGenerateResponseError, match="missing"):
+        _run_generate(client)
+
+    client.choice["completion_logprobs"]["data"] = base64.b64encode(
+        np.array([-0.1, np.inf], dtype=np.float32).tobytes()
+    ).decode()
+    with pytest.raises(MalformedGenerateResponseError, match="non-finite"):
+        _run_generate(client)
+
+
 class _MalformedToolRenderer(_FakeRenderer):
     """Returns only a malformed tool-call attempt — finish_reason must stay "stop"."""
 

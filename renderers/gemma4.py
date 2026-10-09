@@ -44,6 +44,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
+    validate_canonical_messages,
 )
 
 from renderers.configs import Gemma4RendererConfig
@@ -431,6 +432,7 @@ class _ArgumentParser:
 class Gemma4Renderer:
     """Deterministic renderer for the canonical Gemma 4 instruction models."""
 
+    supports_reasoning_content = True
     _config_cls = Gemma4RendererConfig
 
     def __init__(
@@ -727,6 +729,11 @@ class Gemma4Renderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
+        validate_canonical_messages(
+            messages,
+            supports_reasoning_content=self.supports_reasoning_content,
+            renderer_name=type(self).__name__,
+        )
         if not messages:
             raise ValueError("No messages provided.")
 
@@ -822,7 +829,7 @@ class Gemma4Renderer:
                 em.text(f"{wire_role}\n", is_sampled=False, is_content=False)
 
             is_assistant = role == "assistant"
-            thinking = msg.get("reasoning") or msg.get("reasoning_content")
+            thinking = msg.get("reasoning_content")
             thinking_gate = pos > last_user_pos or (
                 self.config.preserve_thinking and bool(msg.get("tool_calls"))
             )

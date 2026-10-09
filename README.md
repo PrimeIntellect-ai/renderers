@@ -100,6 +100,7 @@ Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.
 
 ```python
 class Renderer(Protocol):
+    supports_reasoning_content: bool
     def render(messages, *, tools=None, add_generation_prompt=False) -> RenderedTokens: ...
     def render_ids(messages, *, tools=None, add_generation_prompt=False) -> list[int]: ...
     def parse_response(token_ids) -> ParsedResponse: ...
@@ -111,6 +112,28 @@ class Renderer(Protocol):
 - `build_training_sample(..., message_loss_mask=[0, 0, 0, 1])` keeps all messages as context but restricts loss to selected messages. Supply one boolean or integer `0`/`1` per message, or `None` for the normal mask. Excluding an assistant also excludes its closing token. Selection never enables targets disabled by the existing role/content settings or changes token IDs.
 - `ParsedResponse` is `(content, reasoning_content, tool_calls)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
 - Round-trip: rendering `[user, assistant(content, reasoning, tool_calls)]`, slicing the assistant completion, and feeding it through `parse_response` returns an equivalent structured message. Tested per-renderer in `tests/test_roundtrip.py`.
+
+### Structured assistant messages
+
+Canonical assistant messages use separate `reasoning_content`, `content`, and
+`tool_calls` fields. Reasoning-capable renderers project `reasoning_content`
+into the model's native wire format; they never infer it from `content`.
+Reserved inline `<think>...</think>` markup, the legacy model-specific
+`reasoning` field, and `thinking` content parts are rejected as ambiguous.
+Normalize legacy SFT datasets before rendering.
+
+Not every model has a structured reasoning channel. Each renderer exposes
+`supports_reasoning_content`; non-reasoning renderers (currently DeepSeek V3,
+Qwen3-VL, Llama 3, and the opaque `DefaultRenderer`) reject non-empty
+`reasoning_content` instead of silently discarding it. Explicit native-wire
+passthrough modes remain raw by definition and likewise do not accept
+structured reasoning.
+
+This restriction applies to render input, not model output. `parse_response`
+still decodes each model's sampled reasoning and tool delimiters into the
+structured `ParsedResponse` fields. Content-only upstream templates, such as
+Kimi K2, are adapted internally by projecting canonical reasoning into their
+native assistant content before applying the wire format.
 
 ### `bridge_to_next_turn` (the core contract)
 

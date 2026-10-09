@@ -24,7 +24,6 @@ from renderers.base import (
     RenderedTrainingSample,
     Renderer,
     TextPart,
-    ThinkingPart,
     Tokenizer,
     ToolCall,
     ToolCallFunction,
@@ -41,6 +40,7 @@ from renderers.base import (
     reject_assistant_in_extension,
     template_field_names,
     trim_to_turn_close,
+    validate_canonical_messages,
 )
 from renderers.client import MalformedGenerateResponseError, OverlongPromptError
 from renderers.configs import (
@@ -218,7 +218,6 @@ __all__ = [
     "Renderer",
     "RendererConfig",
     "TextPart",
-    "ThinkingPart",
     "Tokenizer",
     "ToolCall",
     "ToolCallFunction",
@@ -240,4 +239,5 @@ __all__ = [
     "reject_assistant_in_extension",
     "template_field_names",
     "trim_to_turn_close",
+    "validate_canonical_messages",
 ]

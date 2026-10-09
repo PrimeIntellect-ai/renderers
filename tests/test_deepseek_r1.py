@@ -7,6 +7,8 @@ stripping of ``</think>`` from historical assistant turns.
 
 from functools import lru_cache
 
+import pytest
+
 from renderers import (
     DeepSeekR1Renderer,
     DeepSeekV3Renderer,
@@ -52,14 +54,15 @@ def test_generation_prompt_differs():
 
 
 def test_r1_strips_reasoning_from_history():
-    """A historical assistant turn carrying an inline ``<think>…</think>``
-    trace renders only the post-``</think>`` answer, byte-identical to the R1
-    chat template's ``content.split('</think>')[-1]``.
-    """
+    """R1 accepts canonical reasoning but its template drops it from history."""
     tok, r1 = _r1()
     msgs = [
         {"role": "user", "content": "q"},
-        {"role": "assistant", "content": "<think>private reasoning</think>The answer."},
+        {
+            "role": "assistant",
+            "reasoning_content": "private reasoning",
+            "content": "The answer.",
+        },
         {"role": "user", "content": "q2"},
     ]
     got = r1.render_ids(msgs)
@@ -70,16 +73,12 @@ def test_r1_strips_reasoning_from_history():
     assert "private reasoning" not in tok.decode(got)
 
 
-def test_v3_emits_content_verbatim_ignoring_reasoning():
-    """V3 (non-reasoning) ignores ``reasoning_content`` — matching its
-    template, which only reads ``content``."""
-    tok, v3 = _v3()
+def test_v3_rejects_structured_reasoning():
+    """V3 must not silently discard canonical reasoning."""
+    _, v3 = _v3()
     msgs = [
         {"role": "user", "content": "x"},
         {"role": "assistant", "reasoning_content": "should be ignored", "content": "4"},
     ]
-    got = v3.render_ids(msgs)
-    expected = list(tok.apply_chat_template(msgs, tokenize=True, return_dict=False))
-
-    assert got == expected
-    assert "should be ignored" not in tok.decode(got)
+    with pytest.raises(ValueError, match="does not support structured reasoning"):
+        v3.render_ids(msgs)

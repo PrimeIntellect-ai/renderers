@@ -234,6 +234,81 @@ def test_qwen3_distinct_parallel_calls_after_think_are_preserved():
 
 
 @lru_cache
+def _qwen35():
+    tokenizer = load_tokenizer("Qwen/Qwen3.5-0.8B")
+    renderer = create_renderer(tokenizer)
+    return tokenizer, renderer
+
+
+_BASH = {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+}
+
+
+def _bash(command: str) -> str:
+    return (
+        f"<function=bash>\n<parameter=command>\n{command}\n</parameter>\n</function>\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("block", "expected"),
+    [
+        pytest.param(_bash("ls"), ["ls"], id="one-function"),
+        pytest.param(_bash("ls") + _bash("pwd"), ["ls", "pwd"], id="two-functions"),
+        pytest.param(
+            _bash("ls") + "<parameter=command>\npwd\n</parameter>\n</function>\n",
+            ["ls"],
+            id="parameter-after-function",
+        ),
+        pytest.param(
+            "<parameter=command>\npwd\n</parameter>\n" + _bash("ls"),
+            ["ls"],
+            id="parameter-before-function",
+        ),
+        pytest.param(
+            "<function=bash>\n<parameter=command>\nls\n</parameter>\n",
+            ["ls"],
+            id="unclosed-function",
+        ),
+        pytest.param(
+            "<function=bash>\n<parameter=command>\nls\n</parameter>\n" + _bash("pwd"),
+            ["pwd"],
+            id="first-function-unclosed",
+        ),
+        pytest.param(
+            "<function=bash>\n<parameter=command>\nls\n</parameter>\n"
+            "<parameter=command>\npwd\n</parameter>\n</function>\n",
+            ["pwd"],
+            id="parameter-repeated",
+        ),
+    ],
+)
+def test_qwen35_tool_call_block_splits_like_vllm(block, expected):
+    """One ``<tool_call>`` block holding several ``<function>`` bodies is several
+    calls, and a ``<parameter>`` outside a body belongs to none of them.
+
+    The model sometimes packs commands into one block. The parser used to read
+    every ``<parameter>`` of the block into a single call, so a packed block
+    ran its last command alone, reported OK, and the others were lost without
+    a trace. ``expected`` is what vLLM's ``qwen3_coder`` tool parser (the one
+    served for Qwen3.5) returns for the same text, checked against vLLM 0.31.
+    """
+    tokenizer, renderer = _qwen35()
+    parsed = renderer.parse_response(
+        tokenizer.encode(f"<tool_call>\n{block}</tool_call>", add_special_tokens=False),
+        prompt_ids=[],
+        tools=[_BASH],
+    )
+
+    assert [(tc.name, tc.arguments, tc.status) for tc in parsed.tool_calls] == [
+        ("bash", {"command": command}, ToolCallParseStatus.OK) for command in expected
+    ]
+
+
+@lru_cache
 def _kimi_k25():
     tokenizer = load_tokenizer("moonshotai/Kimi-K2.5")
     renderer = create_renderer(tokenizer)

@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -28,6 +29,8 @@ from renderers.base import (
 
 _request_logger = logging.getLogger("renderers.client")
 ROUTED_EXPERTS_DATA_PREFIX = b'"routed_experts":{"data":"'
+ROUTED_EXPERT_WEIGHTS_DATA_PREFIX = b'"weights":{"data":"'
+_BASE64_CHARACTERS = re.compile(rb"[A-Za-z0-9+/=]*")
 # vLLM uses this value both when sampled-token evidence is missing and as a
 # lower-bound clamp, so receiving it cannot prove the real logprob was returned.
 VLLM_LOGPROB_SENTINEL = -9999.0
@@ -109,28 +112,74 @@ async def _resolve_max_prompt_len(client: AsyncOpenAI, model: str) -> int | None
         return value
 
 
-def _strip_base64_field(raw: bytes, prefix: bytes) -> tuple[bytes, memoryview | None]:
-    """Splice a large base64 string field out of raw JSON bytes.
-
-    Avoids json-decoding megabytes of base64; the returned memoryview
-    references ``raw`` and is re-inserted into the parsed payload.
-    """
+def _base64_field_span(raw: bytes, prefix: bytes) -> tuple[int, int] | None:
+    """Find a compact JSON base64 value, excluding its surrounding quotes."""
     data_start = raw.find(prefix)
     if data_start < 0:
-        return raw, None
+        return None
 
     data_start += len(prefix)
-    data_end = raw.index(b'"', data_start)
-    data = memoryview(raw)[data_start:data_end]
-    stripped = raw[:data_start] + raw[data_end:]
-    return stripped, data
+    data_end = raw.find(b'"', data_start)
+    if data_end < 0 or _BASE64_CHARACTERS.fullmatch(raw, data_start, data_end) is None:
+        # Do not hide invalid JSON, or strip escaped strings before JSON has
+        # unescaped them. Actual base64/shape/dtype validation is downstream.
+        return None
+    return data_start, data_end
 
 
 def parse_generate_response(raw: bytes) -> dict[str, Any]:
-    stripped, routed_data = _strip_base64_field(raw, ROUTED_EXPERTS_DATA_PREFIX)
-    payload: dict[str, Any] = json.loads(stripped)
-    if routed_data is not None:
-        payload["choices"][0]["routed_experts"]["data"] = routed_data
+    """Parse a generate response without JSON-decoding large routing strings.
+
+    The compact server encoding uses raw-backed memoryviews for ID data and
+    optional FP32 weight data. All metadata is passed through unchanged.
+    Other JSON layouts use the normal decoder and retain base64 strings.
+    """
+    ids_span = _base64_field_span(raw, ROUTED_EXPERTS_DATA_PREFIX)
+    if ids_span is None:
+        return json.loads(raw)
+    weights_span = _base64_field_span(raw, ROUTED_EXPERT_WEIGHTS_DATA_PREFIX)
+
+    # Numeric placeholders bind each view to its exact JSON value through
+    # parse_float, rather than blindly reattaching a substring to choice[0].
+    # Reserve spellings absent from the input, including unrelated metadata.
+    # JSON numbers cannot use escaped spellings, unlike string sentinels.
+    markers = (b"0.0e+0", b"0.0e+1")
+    if any(marker in raw for marker in markers):
+        return json.loads(raw)
+    spans = [(ids_span, markers[0])]
+    if weights_span is not None:
+        spans.append((weights_span, markers[1]))
+
+    raw_view = memoryview(raw)
+    buffers: dict[str, memoryview] = {}
+    chunks: list[bytes | memoryview] = []
+    cursor = 0
+    for (start, end), marker in sorted(spans):
+        buffers[marker.decode("ascii")] = raw_view[start:end]
+        chunks.extend((raw_view[cursor : start - 1], marker))
+        cursor = end + 1
+    chunks.append(raw_view[cursor:])
+
+    def parse_float(value: str) -> float | memoryview:
+        data = buffers.get(value)
+        return float(value) if data is None else data
+
+    payload = json.loads(b"".join(chunks), parse_float=parse_float)
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    routed = choice.get("routed_experts") if isinstance(choice, dict) else None
+    if not isinstance(routed, dict) or routed.get("data") is not buffers["0.0e+0"]:
+        # A prefix can occur in another choice, an unrelated object, or a
+        # duplicate key that the JSON decoder overwrites. Do not misattribute
+        # its buffer, or change any non-routing metadata in these cases.
+        return json.loads(raw)
+    if weights_span is not None:
+        weights = routed.get("weights")
+        if (
+            not isinstance(weights, dict)
+            or weights.get("data") is not buffers["0.0e+1"]
+        ):
+            return json.loads(raw)
     return payload
 
 

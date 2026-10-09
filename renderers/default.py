@@ -97,6 +97,12 @@ class DefaultRenderer:
     :class:`renderers.DefaultRendererConfig`).
     """
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # An opaque Jinja template cannot promise prefix stability.
+        return False
+
     def __init__(
         self,
         tokenizer: ChatTemplateTokenizer,

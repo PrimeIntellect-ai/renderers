@@ -100,6 +100,8 @@ Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.
 
 ```python
 class Renderer(Protocol):
+    @property
+    def is_prefix_stable(self) -> bool: ...
     def render(messages, *, tools=None, add_generation_prompt=False) -> RenderedTokens: ...
     def render_ids(messages, *, tools=None, add_generation_prompt=False) -> list[int]: ...
     def parse_response(token_ids) -> ParsedResponse: ...
@@ -111,6 +113,31 @@ class Renderer(Protocol):
 - `build_training_sample(..., message_loss_mask=[0, 0, 0, 1])` keeps all messages as context but restricts loss to selected messages. Supply one boolean or integer `0`/`1` per message, or `None` for the normal mask. Excluding an assistant also excludes its closing token. Selection never enables targets disabled by the existing role/content settings or changes token IDs.
 - `ParsedResponse` is `(content, reasoning_content, tool_calls)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
 - Round-trip: rendering `[user, assistant(content, reasoning, tool_calls)]`, slicing the assistant completion, and feeding it through `parse_response` returns an equivalent structured message. Tested per-renderer in `tests/test_roundtrip.py`.
+
+### Prefix stability
+
+`renderer.is_prefix_stable` describes the constructed renderer after config and
+`chat_template_kwargs` resolution. A `True` value guarantees that full renders
+of assistant-terminated conversations stay token prefixes when more
+user/tool/assistant messages are appended, with a fixed system/developer
+preamble, tools, and `add_generation_prompt=False`. `False` means this is not
+guaranteed; opaque `DefaultRenderer` templates report `False`.
+
+The flag follows the template's emit rules, independently of the
+`thinking_retention` bridge override. For example, GLM-5 with
+`clear_thinking=False` is stable, while the default strips earlier reasoning.
+Disabling thinking generation alone does not guarantee stability for datasets
+that already contain reasoning. Other causes include GPT-OSS's final-turn
+terminator and Nemotron's moving effort hint.
+
+SFT consumers can use this flag to warn that a single full-conversation render
+may omit earlier reasoning. `build_training_sample` still returns one sample
+per conversation, without expanding it into one sample per assistant turn.
+Stability does not guarantee that the template emits every input field (some
+always omit reasoning), or that rendering reproduces sampled tokens. Continue
+using `bridge_to_next_turn` for sampled trajectories. Custom renderers should
+expose the same property; consumers supporting older/custom implementations
+can conservatively use `getattr(renderer, "is_prefix_stable", False)`.
 
 ### `bridge_to_next_turn` (the core contract)
 

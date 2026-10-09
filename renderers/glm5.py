@@ -57,6 +57,14 @@ _TOOLS_FOOTER = (
 class GLM5Renderer:
     """Deterministic message → token renderer for GLM-5 models."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # GLM-5.1 also changes empty thinking wrappers across user boundaries.
+        return not self.config.clear_thinking and not (
+            self.empty_think_on_last_assistant and self.config.enable_thinking
+        )
+
     # GLM-5.1 flips this on: even when the most-recent assistant has no
     # reasoning content, the template wraps it with ``<think></think>``
     # instead of just emitting ``</think>`` as a separator. Subclassed in

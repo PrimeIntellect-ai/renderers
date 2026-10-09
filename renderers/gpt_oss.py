@@ -121,6 +121,12 @@ def _arguments_to_str(arguments: Any) -> str:
 class GptOssRenderer:
     """Deterministic message → token renderer for OpenAI gpt-oss (harmony)."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # The final assistant terminator changes even when auto_drop_analysis=False.
+        return False
+
     def __init__(
         self,
         tokenizer: Tokenizer,

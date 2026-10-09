@@ -431,6 +431,12 @@ class _ArgumentParser:
 class Gemma4Renderer:
     """Deterministic renderer for the canonical Gemma 4 instruction models."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # preserve_thinking only retains tool-call reasoning, not final answers.
+        return False
+
     _config_cls = Gemma4RendererConfig
 
     def __init__(

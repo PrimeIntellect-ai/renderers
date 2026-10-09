@@ -59,6 +59,12 @@ _TOOLS_FOOTER = (
 class Qwen3Renderer:
     """Deterministic message → token renderer for Qwen3 models."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Even with thinking disabled, supplied reasoning is stripped from history.
+        return False
+
     def __init__(
         self,
         tokenizer: Tokenizer,

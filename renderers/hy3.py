@@ -76,6 +76,14 @@ _TOOL_RESPONSE_END = f"</tool_response{_HYTK}>"
 class Hy3Renderer:
     """Deterministic message → token renderer for Tencent Hy3 models."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Require retention regardless of whether tools are supplied.
+        return not self.config.raw_last_assistant and (
+            self.config.is_training or self.config.preserved_thinking is True
+        )
+
     def __init__(
         self,
         tokenizer: Tokenizer,

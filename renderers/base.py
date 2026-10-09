@@ -722,6 +722,26 @@ class ChatTemplateTokenizer(Tokenizer, Protocol):
 class Renderer(Protocol):
     """Owns message ↔ token conversion for a specific model family."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether extending a conversation preserves its rendered token prefix.
+
+        For valid conversations ending in an assistant message, ``True`` means
+        that appending user/tool/assistant messages leaves the existing token
+        IDs unchanged when both renders use ``add_generation_prompt=False``.
+        The system/developer preamble, tools, and renderer configuration must
+        stay fixed. This describes full renders, not sampled completions or
+        the ability to bridge them; keep using ``bridge_to_next_turn`` for that.
+
+        The declaration is conservative over message contents (including
+        supplied reasoning even when thinking generation is disabled) and
+        tools. ``False`` means stability is not guaranteed, including opaque
+        templates. It does not mean every conversation changes. Conversely,
+        ``True`` does not promise to emit fields the template always ignores.
+        Custom renderers should declare this property from their emit rules.
+        """
+        ...
+
     def render(
         self,
         messages: list[Message],

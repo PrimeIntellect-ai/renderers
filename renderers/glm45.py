@@ -55,6 +55,12 @@ _TOOLS_FOOTER = (
 class GLM45Renderer:
     """Deterministic message → token renderer for GLM-4.5 Air models."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Historical reasoning is stripped regardless of bridge policy.
+        return False
+
     def __init__(
         self,
         tokenizer: Tokenizer,

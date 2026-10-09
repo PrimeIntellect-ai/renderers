@@ -58,6 +58,12 @@ _TOOLS_INSTRUCTIONS = (
 class MiniMaxM2Renderer:
     """Deterministic message → token renderer for MiniMax M2 / M2.5 models."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Only assistants after the last user retain reasoning.
+        return False
+
     def __init__(
         self,
         tokenizer: Tokenizer,

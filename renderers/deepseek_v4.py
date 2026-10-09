@@ -294,6 +294,12 @@ def _prepare_messages(messages: list[Message]) -> list[_LogicalMessage]:
 class DeepSeekV4Renderer:
     """Renderer for ``deepseek-ai/DeepSeek-V4-Flash-0731``."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Use the no-tools case: supplying tools can only widen reasoning retention.
+        return not self.config.enable_thinking or not self.config.drop_thinking
+
     _implied_thinking_retention = "tool_cycle"
 
     def __init__(

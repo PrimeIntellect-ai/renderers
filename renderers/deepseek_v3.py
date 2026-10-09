@@ -56,6 +56,11 @@ class DeepSeekV3Renderer:
     stored for protocol uniformity.
     """
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        return True
+
     #: Default typed config; the R1 subclass overrides this.
     _config_cls: type = DeepSeekV3RendererConfig
     _implied_thinking_retention = "all"

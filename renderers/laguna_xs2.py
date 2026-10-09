@@ -120,6 +120,11 @@ _TOOLS_HEADER_XS21 = (
 
 
 class LagunaXS2Renderer:
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        return True
+
     def __init__(
         self,
         tokenizer: Tokenizer,

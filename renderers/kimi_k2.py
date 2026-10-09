@@ -47,6 +47,11 @@ class KimiK2Renderer:
     but have no effect on the byte-level output.
     """
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        return True
+
     def __init__(
         self,
         tokenizer: Tokenizer,

@@ -297,8 +297,8 @@ class DeepSeekV4Renderer:
     @property
     def is_prefix_stable(self) -> bool:
         """Whether full renders preserve completed conversation prefixes."""
-        # Use the no-tools case: supplying tools can only widen reasoning retention.
-        return not self.config.enable_thinking or not self.config.drop_thinking
+        # Task transitions and unterminated assistant continuations can rewrite the prefix.
+        return False
 
     _implied_thinking_retention = "tool_cycle"
 

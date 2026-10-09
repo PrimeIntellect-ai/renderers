@@ -128,13 +128,17 @@ The flag follows the template's emit rules, independently of the
 `clear_thinking=False` is stable, while the default strips earlier reasoning.
 Disabling thinking generation alone does not guarantee stability for datasets
 that already contain reasoning. Other causes include GPT-OSS's final-turn
-terminator and Nemotron's moving effort hint.
+terminator and Nemotron's moving effort hint. DeepSeek V4 reports `False`
+because its task/continuation message controls can rewrite the prefix; Inkling
+reports `False` because reused tool-call IDs can change earlier tool-response
+names, even though it retains reasoning.
 
 SFT consumers can use this flag to warn that a single full-conversation render
 may omit earlier reasoning. `build_training_sample` still returns one sample
 per conversation, without expanding it into one sample per assistant turn.
-Stability does not guarantee that the template emits every input field (some
-always omit reasoning), or that rendering reproduces sampled tokens. Continue
+The guarantee assumes unchanged message contents and deterministic tokenization
+and media preprocessing. Stability does not guarantee that the template emits
+every input field (some always omit reasoning), or that rendering reproduces sampled tokens. Continue
 using `bridge_to_next_turn` for sampled trajectories. Custom renderers should
 expose the same property; consumers supporting older/custom implementations
 can conservatively use `getattr(renderer, "is_prefix_stable", False)`.
@@ -282,6 +286,18 @@ uv run pytest
 ```
 
 Round-trip parity (render → parse → original) and token-level parity against each model's independent reference encoder are tested per renderer. Most references use `apply_chat_template`; DeepSeek V4 uses its shipped Python encoder, and GPT-OSS uses Harmony.
+
+The prefix-stability suite covers every built-in renderer and every Boolean,
+Literal, and optional finite template setting in the shared model catalog,
+including valid combinations with `thinking_retention`. Unbounded strings and
+numbers use representative values; arbitrary Jinja/custom renderers remain
+outside this finite matrix. Stable declarations are checked against the shared
+conversation corpus, alternate content formats, tool cycles, consecutive
+assistant messages, and fixed preambles. Image tests cover expansion and cache
+eviction across configurations, plus actual processors for Qwen3-VL, Qwen3.6,
+and both catalogued Qwen3.8 checkpoints. Video inputs are currently unsupported
+by these stable image renderers; the matrix is not a claim about arbitrary
+processors or all possible conversations.
 
 ## License
 

@@ -176,7 +176,8 @@ class InklingRenderer:
     @property
     def is_prefix_stable(self) -> bool:
         """Whether full renders preserve completed conversation prefixes."""
-        return True
+        # Reused tool-call IDs can change names resolved for earlier tool responses.
+        return False
 
     def __init__(
         self,

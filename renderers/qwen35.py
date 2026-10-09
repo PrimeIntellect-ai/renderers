@@ -126,6 +126,12 @@ def _default_enable_thinking(tokenizer) -> bool:
 class Qwen35Renderer:
     """Deterministic message → token renderer for Qwen3.5 models."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Qwen3.6/3.8 can retain every thinking block through their template knob.
+        return bool(getattr(self.config, "preserve_thinking", False))
+
     supports_process_multimodal = True
     _config_cls: type = Qwen35RendererConfig
 

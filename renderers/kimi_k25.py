@@ -593,6 +593,12 @@ class KimiK25Renderer:
     The tokenizer should be ``moonshotai/Kimi-K2-Instruct`` (same as K2).
     """
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Completing a tool cycle strips its earlier reasoning, even with thinking=False.
+        return False
+
     supports_process_multimodal = True
 
     def __init__(

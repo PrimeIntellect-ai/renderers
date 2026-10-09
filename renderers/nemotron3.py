@@ -118,6 +118,12 @@ class Nemotron3Renderer:
     their own discriminator and differ only by the class-level hooks here.
     """
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # An effort hint moves to the newest user, independently of thinking retention.
+        return not self.config.truncate_history_thinking and not self._effort_hint
+
     # Variant hooks (overridden by ``Nemotron3UltraRenderer``): the default
     # config to build when none is passed, and whether to use Ultra's
     # reasoning-block glue.

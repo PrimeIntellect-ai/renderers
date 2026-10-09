@@ -173,6 +173,12 @@ class InklingRenderer:
     the :class:`~renderers.base.MultimodalRenderer` protocol.
     """
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Reused tool-call IDs can change names resolved for earlier tool responses.
+        return False
+
     def __init__(
         self,
         tokenizer: Tokenizer,

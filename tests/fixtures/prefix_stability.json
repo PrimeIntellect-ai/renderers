@@ -1,0 +1,792 @@
+{
+  "scenarios": {
+    "later-user-with-reasoning": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "First question?"
+        },
+        {
+          "role": "assistant",
+          "content": "First answer.",
+          "reasoning_content": "First reasoning."
+        }
+      ],
+      "append": [
+        {
+          "role": "user",
+          "content": "Second question?"
+        }
+      ]
+    },
+    "later-user-with-empty-reasoning": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "First question?"
+        },
+        {
+          "role": "assistant",
+          "content": "First answer.",
+          "reasoning_content": ""
+        }
+      ],
+      "append": [
+        {
+          "role": "user",
+          "content": "Second question?"
+        }
+      ]
+    },
+    "complete-tool-cycle": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "Weather in Paris?"
+        },
+        {
+          "role": "assistant",
+          "content": "First answer.",
+          "reasoning_content": "First reasoning.",
+          "tool_calls": [
+            {
+              "id": "call_0",
+              "type": "function",
+              "function": {
+                "name": "get_weather",
+                "arguments": {
+                  "city": "Paris"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "append": [
+        {
+          "role": "tool",
+          "name": "get_weather",
+          "tool_call_id": "call_0",
+          "content": "Sunny."
+        },
+        {
+          "role": "assistant",
+          "content": "It is sunny.",
+          "reasoning_content": "Summarize."
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a city",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string",
+                  "description": "The city name"
+                }
+              },
+              "required": [
+                "city"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "assistant-task-marker": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "Question?"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer.",
+          "task": "query"
+        }
+      ],
+      "append": [
+        {
+          "role": "user",
+          "content": "Follow up?"
+        }
+      ]
+    },
+    "reused-tool-call-id": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "First?"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_0",
+              "function": {
+                "name": "first",
+                "arguments": {}
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_0",
+          "content": "Result."
+        },
+        {
+          "role": "assistant",
+          "content": "Done."
+        }
+      ],
+      "append": [
+        {
+          "role": "user",
+          "content": "Second?"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_0",
+              "function": {
+                "name": "second",
+                "arguments": {}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "open-continuation": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "Question?"
+        },
+        {
+          "role": "assistant",
+          "content": "a",
+          "wo_eos": true
+        }
+      ],
+      "append": [
+        {
+          "role": "assistant",
+          "content": "b"
+        }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": "qwen3-default",
+      "model": "Qwen/Qwen3-8B",
+      "config": {
+        "name": "qwen3"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning, even when thinking generation is disabled."
+    },
+    {
+      "id": "qwen3-enable_thinking=false",
+      "model": "Qwen/Qwen3-8B",
+      "config": {
+        "name": "qwen3",
+        "enable_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning, even when thinking generation is disabled."
+    },
+    {
+      "id": "qwen3-thinking_retention=all",
+      "model": "Qwen/Qwen3-8B",
+      "config": {
+        "name": "qwen3",
+        "thinking_retention": "all"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning, even when thinking generation is disabled."
+    },
+    {
+      "id": "prime-qwen3-default",
+      "model": "PrimeIntellect/Qwen3-0.6B",
+      "config": {
+        "name": "prime-qwen3"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "qwen3.5-default",
+      "model": "Qwen/Qwen3.5-9B",
+      "config": {
+        "name": "qwen3.5"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier thinking blocks."
+    },
+    {
+      "id": "qwen3.5-enable_thinking=false",
+      "model": "Qwen/Qwen3.5-9B",
+      "config": {
+        "name": "qwen3.5",
+        "enable_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier thinking blocks."
+    },
+    {
+      "id": "qwen3.6-default",
+      "model": "Qwen/Qwen3.6-35B-A3B",
+      "config": {
+        "name": "qwen3.6"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "preserve_thinking=False removes earlier thinking blocks."
+    },
+    {
+      "id": "qwen3.6-preserve_thinking=true",
+      "model": "Qwen/Qwen3.6-35B-A3B",
+      "config": {
+        "name": "qwen3.6",
+        "preserve_thinking": true
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "qwen3.8-default",
+      "model": "Qwen/Qwen3.8-27B",
+      "config": {
+        "name": "qwen3.8"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "qwen3.8-preserve_thinking=false",
+      "model": "Qwen/Qwen3.8-27B",
+      "config": {
+        "name": "qwen3.8",
+        "preserve_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "preserve_thinking=False removes earlier thinking blocks."
+    },
+    {
+      "id": "qwen3-vl-default",
+      "model": "Qwen/Qwen3-VL-4B-Instruct",
+      "config": {
+        "name": "qwen3-vl"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "gemma4-default",
+      "model": "google/gemma-4-31B-it",
+      "config": {
+        "name": "gemma4"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "Historical final-answer reasoning is removed even when tool reasoning is preserved."
+    },
+    {
+      "id": "gemma4-preserve_thinking=true",
+      "model": "google/gemma-4-31B-it",
+      "config": {
+        "name": "gemma4",
+        "preserve_thinking": true
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "Historical final-answer reasoning is removed even when tool reasoning is preserved."
+    },
+    {
+      "id": "gemma4-enable_thinking=false",
+      "model": "google/gemma-4-31B-it",
+      "config": {
+        "name": "gemma4",
+        "enable_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "Historical final-answer reasoning is removed even when tool reasoning is preserved."
+    },
+    {
+      "id": "glm-5-default",
+      "model": "zai-org/GLM-5",
+      "config": {
+        "name": "glm-5"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "clear_thinking=True removes earlier reasoning."
+    },
+    {
+      "id": "glm-5-clear_thinking=false",
+      "model": "zai-org/GLM-5",
+      "config": {
+        "name": "glm-5",
+        "clear_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "glm-5-enable_thinking=false",
+      "model": "zai-org/GLM-5",
+      "config": {
+        "name": "glm-5",
+        "enable_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "clear_thinking=True removes earlier reasoning."
+    },
+    {
+      "id": "glm-5.1-default",
+      "model": "zai-org/GLM-5.1",
+      "config": {
+        "name": "glm-5.1"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning."
+    },
+    {
+      "id": "glm-5.1-clear_thinking=false",
+      "model": "zai-org/GLM-5.1",
+      "config": {
+        "name": "glm-5.1",
+        "clear_thinking": false
+      },
+      "scenario": "later-user-with-empty-reasoning",
+      "stable": false,
+      "reason": "The final empty thinking wrapper is removed from history."
+    },
+    {
+      "id": "glm-5.1-clear_thinking=false-enable_thinking=false",
+      "model": "zai-org/GLM-5.1",
+      "config": {
+        "name": "glm-5.1",
+        "clear_thinking": false,
+        "enable_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "glm-5.3-default",
+      "model": "zai-org/GLM-5.3",
+      "config": {
+        "name": "glm-5.3"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "glm-5.3-clear_thinking=true",
+      "model": "zai-org/GLM-5.3",
+      "config": {
+        "name": "glm-5.3",
+        "clear_thinking": true
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "clear_thinking=True removes earlier reasoning."
+    },
+    {
+      "id": "glm-4.5-default",
+      "model": "THUDM/GLM-4.5-Air",
+      "config": {
+        "name": "glm-4.5"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning."
+    },
+    {
+      "id": "minimax-m2-default",
+      "model": "MiniMaxAI/MiniMax-M2.5",
+      "config": {
+        "name": "minimax-m2"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning."
+    },
+    {
+      "id": "kimi-k2-default",
+      "model": "moonshotai/Kimi-K2-Instruct",
+      "config": {
+        "name": "kimi-k2"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "kimi-k2.5-default",
+      "model": "moonshotai/Kimi-K2.5",
+      "config": {
+        "name": "kimi-k2.5"
+      },
+      "scenario": "complete-tool-cycle",
+      "stable": false,
+      "reason": "Completing a tool cycle removes its earlier reasoning."
+    },
+    {
+      "id": "kimi-k2.5-thinking=false",
+      "model": "moonshotai/Kimi-K2.5",
+      "config": {
+        "name": "kimi-k2.5",
+        "thinking": false
+      },
+      "scenario": "complete-tool-cycle",
+      "stable": false,
+      "reason": "Completing a tool cycle removes its earlier reasoning."
+    },
+    {
+      "id": "deepseek-v4-default",
+      "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "config": {
+        "name": "deepseek-v4"
+      },
+      "scenario": "assistant-task-marker",
+      "stable": false,
+      "reason": "A task marker at the end of an assistant disappears when a user is appended."
+    },
+    {
+      "id": "deepseek-v4-enable_thinking=true",
+      "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "config": {
+        "name": "deepseek-v4",
+        "enable_thinking": true
+      },
+      "scenario": "assistant-task-marker",
+      "stable": false,
+      "reason": "A task marker at the end of an assistant disappears when a user is appended."
+    },
+    {
+      "id": "deepseek-v4-enable_thinking=true-drop_thinking=false",
+      "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "config": {
+        "name": "deepseek-v4",
+        "enable_thinking": true,
+        "drop_thinking": false
+      },
+      "scenario": "assistant-task-marker",
+      "stable": false,
+      "reason": "A task marker at the end of an assistant disappears when a user is appended."
+    },
+    {
+      "id": "nemotron-3-default",
+      "model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "config": {
+        "name": "nemotron-3"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning."
+    },
+    {
+      "id": "nemotron-3-truncate_history_thinking=false",
+      "model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "config": {
+        "name": "nemotron-3",
+        "truncate_history_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "nemotron-3-enable_thinking=false",
+      "model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "config": {
+        "name": "nemotron-3",
+        "enable_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning."
+    },
+    {
+      "id": "nemotron-3-default-super",
+      "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "config": {
+        "name": "nemotron-3"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning."
+    },
+    {
+      "id": "nemotron-3-truncate_history_thinking=false-super",
+      "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "config": {
+        "name": "nemotron-3",
+        "truncate_history_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "nemotron-3-enable_thinking=false-super",
+      "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "config": {
+        "name": "nemotron-3",
+        "enable_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning."
+    },
+    {
+      "id": "nemotron-3-truncate_history_thinking=false-low_effort=true-super",
+      "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "config": {
+        "name": "nemotron-3",
+        "truncate_history_thinking": false,
+        "low_effort": true
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "The effort hint moves from the first user to the appended user."
+    },
+    {
+      "id": "nemotron-3-ultra-default",
+      "model": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+      "config": {
+        "name": "nemotron-3-ultra"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning."
+    },
+    {
+      "id": "nemotron-3-ultra-truncate_history_thinking=false",
+      "model": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+      "config": {
+        "name": "nemotron-3-ultra",
+        "truncate_history_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "nemotron-3-ultra-truncate_history_thinking=false-medium_effort=true",
+      "model": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+      "config": {
+        "name": "nemotron-3-ultra",
+        "truncate_history_thinking": false,
+        "medium_effort": true
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "The effort hint moves from the first user to the appended user."
+    },
+    {
+      "id": "nemotron-3.5-default",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+      "config": {
+        "name": "nemotron-3.5"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning."
+    },
+    {
+      "id": "nemotron-3.5-truncate_history_thinking=false",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+      "config": {
+        "name": "nemotron-3.5",
+        "truncate_history_thinking": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "laguna-xs.2-default",
+      "model": "poolside/Laguna-XS.2",
+      "config": {
+        "name": "laguna-xs.2"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "laguna-m.1-default",
+      "model": "poolside/Laguna-M.1",
+      "config": {
+        "name": "laguna-m.1"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "laguna-xs-2.1-default",
+      "model": "poolside/Laguna-XS-2.1",
+      "config": {
+        "name": "laguna-xs-2.1"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "laguna-s-2.1-default",
+      "model": "poolside/Laguna-S-2.1",
+      "config": {
+        "name": "laguna-s-2.1"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "llama-3-default",
+      "model": "meta-llama/Llama-3.2-1B-Instruct",
+      "config": {
+        "name": "llama-3"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "gpt-oss-default",
+      "model": "openai/gpt-oss-20b",
+      "config": {
+        "name": "gpt-oss"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "The last assistant terminator changes when another turn is appended."
+    },
+    {
+      "id": "gpt-oss-auto_drop_analysis=false",
+      "model": "openai/gpt-oss-20b",
+      "config": {
+        "name": "gpt-oss",
+        "auto_drop_analysis": false
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "The last assistant terminator changes when another turn is appended."
+    },
+    {
+      "id": "hy3-default",
+      "model": "tencent/Hy3",
+      "config": {
+        "name": "hy3"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A later user query removes earlier reasoning."
+    },
+    {
+      "id": "hy3-preserved_thinking=true",
+      "model": "tencent/Hy3",
+      "config": {
+        "name": "hy3",
+        "preserved_thinking": true
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "hy3-is_training=true",
+      "model": "tencent/Hy3",
+      "config": {
+        "name": "hy3",
+        "is_training": true
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "hy3-preserved_thinking=true-raw_last_assistant=true",
+      "model": "tencent/Hy3",
+      "config": {
+        "name": "hy3",
+        "preserved_thinking": true,
+        "raw_last_assistant": true
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": false,
+      "reason": "A raw final assistant becomes a wrapped historical turn."
+    },
+    {
+      "id": "inkling-default",
+      "model": "thinkingmachines/Inkling",
+      "config": {
+        "name": "inkling"
+      },
+      "scenario": "reused-tool-call-id",
+      "stable": false,
+      "reason": "A reused tool-call ID changes a historical tool response name."
+    },
+    {
+      "id": "deepseek-v4-default-open-continuation",
+      "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "config": {
+        "name": "deepseek-v4"
+      },
+      "scenario": "open-continuation",
+      "stable": false,
+      "reason": "Unterminated assistant content is re-tokenized with the appended continuation."
+    },
+    {
+      "id": "deepseek-v3-default",
+      "model": "deepseek-ai/DeepSeek-V3",
+      "config": {
+        "name": "deepseek-v3"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "deepseek-r1-default",
+      "model": "deepseek-ai/DeepSeek-R1",
+      "config": {
+        "name": "deepseek-r1"
+      },
+      "scenario": "later-user-with-reasoning",
+      "stable": true,
+      "reason": "Stable control: these tokens must remain a prefix."
+    }
+  ]
+}

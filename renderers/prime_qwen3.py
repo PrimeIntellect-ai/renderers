@@ -193,6 +193,11 @@ class _TokenBuilder:
 class PrimeQwen3Renderer:
     """Renderer for PrimeIntellect/Qwen3-0.6B and Qwen3-1.7B."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        return True
+
     def __init__(
         self,
         tokenizer: Tokenizer,

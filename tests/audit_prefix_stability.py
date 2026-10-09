@@ -1,23 +1,18 @@
-"""Replay small, reviewable counterexamples instead of a configuration sweep."""
+"""Manual audit: uv run pytest tests/audit_prefix_stability.py -q."""
 
 import json
 from difflib import unified_diff
-from functools import lru_cache
 from pathlib import Path
 
 import pytest
+from conftest import _load
 from renderers import DefaultRenderer, create_renderer
-from renderers.base import RENDERER_REGISTRY, _populate_registry, load_tokenizer
+from renderers.base import RENDERER_REGISTRY, _populate_registry
 from renderers.configs import _config_class_for
 
 _CORPUS = json.loads(
     (Path(__file__).parent / "fixtures" / "prefix_stability.json").read_text()
 )
-
-
-@lru_cache(maxsize=None)
-def _tokenizer(model):
-    return load_tokenizer(model)
 
 
 def _prefix_diff(tokenizer, before, after):
@@ -47,8 +42,9 @@ def _prefix_diff(tokenizer, before, after):
 @pytest.mark.parametrize("case", _CORPUS["cases"], ids=lambda case: case["id"])
 def test_prefix_stability_witness(case):
     config = dict(case["config"])
-    config_cls = _config_class_for(config.pop("name"))
-    tokenizer = _tokenizer(case["model"])
+    name = config.pop("name")
+    config_cls = _config_class_for(name)
+    tokenizer, _ = _load(case["model"], name)
     renderer = create_renderer(tokenizer, config_cls(**config))
     scenario = _CORPUS["scenarios"][case["scenario"]]
     messages = scenario["messages"]
@@ -75,7 +71,7 @@ def test_corpus_covers_builtin_renderers():
 
 
 def test_stability_uses_auto_resolved_template_kwargs():
-    tokenizer = _tokenizer("Qwen/Qwen3.8-27B")
+    tokenizer, _ = _load("Qwen/Qwen3.8-27B", "qwen3.8")
     assert create_renderer(tokenizer).is_prefix_stable is True
     assert (
         create_renderer(

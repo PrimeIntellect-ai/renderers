@@ -287,17 +287,27 @@ uv run pytest
 
 Round-trip parity (render → parse → original) and token-level parity against each model's independent reference encoder are tested per renderer. Most references use `apply_chat_template`; DeepSeek V4 uses its shipped Python encoder, and GPT-OSS uses Harmony.
 
-The prefix-stability suite covers every built-in renderer and every Boolean,
-Literal, and optional finite template setting in the shared model catalog,
-including valid combinations with `thinking_retention`. Unbounded strings and
-numbers use representative values; arbitrary Jinja/custom renderers remain
-outside this finite matrix. Stable declarations are checked against the shared
-conversation corpus, alternate content formats, tool cycles, consecutive
-assistant messages, and fixed preambles. Image tests cover expansion and cache
-eviction across configurations, plus actual processors for Qwen3-VL, Qwen3.6,
-and both catalogued Qwen3.8 checkpoints. Video inputs are currently unsupported
-by these stable image renderers; the matrix is not a claim about arbitrary
-processors or all possible conversations.
+Prefix-stability regressions live in
+[`tests/fixtures/prefix_stability.json`](tests/fixtures/prefix_stability.json).
+Each case records a renderer/config, a conversation ending in an assistant,
+messages to append, and the reason the original tokens stop being a prefix.
+Shared scenarios keep the corpus small; paired stable settings guard the
+configuration switches. `DefaultRenderer` is treated as unknown, without
+inventing a witness for its opaque template.
+
+Run only these focused checks with:
+
+```bash
+uv run pytest tests/test_prefix_stability.py -q
+```
+
+The tests render both inputs and compare the original token IDs with the
+same-length prefix of the extended render. They print the first differing
+tokens and a decoded text diff on failure. These are executable witnesses,
+not snapshots of token IDs that could pass without exercising the renderer.
+Add a named case for each new instability mechanism or configuration branch.
+A witness disproves stability; finite positive controls do not prove stability
+for every possible conversation or third-party tokenizer/processor.
 
 ## License
 

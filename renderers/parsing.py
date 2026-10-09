@@ -2156,3 +2156,54 @@ def _build_inkling_tool_call(
         token_span=token_span,
         status=status,
     )
+
+
+def parse_mistral3(
+    tokenizer,
+    token_ids: list[int],
+    *,
+    stop_ids: set[int],
+) -> ParsedResponse:
+    """Parse Mistral-3 completion tokens.
+
+    Tool calls are emitted as a JSON array after ``[TOOL_CALLS]``:
+    ``[TOOL_CALLS] [{"name": "...", "arguments": {...}}] </s>``.
+    Plain replies are bare text followed by ``</s>``.
+    Mistral-3 ships no reasoning channel, so ``reasoning_content`` is
+    always ``None``.
+    """
+    ids = _strip_stop_tokens(token_ids, stop_ids)
+    text = _decode(tokenizer, ids).strip()
+
+    tool_calls_id = tokenizer.convert_tokens_to_ids("[TOOL_CALLS]")
+    if isinstance(tool_calls_id, int) and tool_calls_id in ids:
+        # Slice from the token after [TOOL_CALLS]
+        tc_pos = ids.index(tool_calls_id)
+        call_ids = ids[tc_pos + 1 :]
+        call_text = _decode(tokenizer, call_ids).strip()
+        try:
+            parsed = json.loads(call_text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list) and parsed:
+            tool_calls = []
+            for item in parsed:
+                if not isinstance(item, dict) or not item.get("name"):
+                    continue
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=json.dumps(item, ensure_ascii=False),
+                        name=item["name"],
+                        arguments=item.get("arguments", {}),
+                        token_span=(tc_pos + 1, len(ids)),
+                        status=ToolCallParseStatus.OK,
+                    )
+                )
+            if tool_calls:
+                return ParsedResponse(
+                    content="",
+                    reasoning_content=None,
+                    tool_calls=tool_calls,
+                )
+
+    return ParsedResponse(content=text, reasoning_content=None)

@@ -1051,6 +1051,9 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # construction to pin a different date.
     "meta-llama/Llama-3.2-1B-Instruct": "llama-3",
     "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
+    # Mistral-3. Instruct checkpoints share the [INST]/[/INST] v3 template.
+    "mistralai/Mistral-Small-3.1-24B-Instruct-2503": "mistral-3",
+    "mistralai/Mistral-Nemo-Instruct-2407": "mistral-3",
     # Poolside Laguna. These checkpoints ship distinct chat templates, each
     # mirrored by its own renderer class/config discriminator.
     "poolside/Laguna-XS.2": "laguna-xs.2",
@@ -1366,6 +1369,7 @@ def _populate_registry():
         LagunaXS21Renderer,
     )
     from renderers.llama_3 import Llama3Renderer
+    from renderers.mistral3 import Mistral3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
     from renderers.nemotron3 import (
         Nemotron3Renderer,
@@ -1406,6 +1410,7 @@ def _populate_registry():
             "laguna-xs-2.1": LagunaXS21Renderer,
             "laguna-s-2.1": LagunaS21Renderer,
             "llama-3": Llama3Renderer,
+            "mistral-3": Mistral3Renderer,
             "nemotron-3": Nemotron3Renderer,
             "nemotron-3-ultra": Nemotron3UltraRenderer,
             "nemotron-3.5": Nemotron35Renderer,

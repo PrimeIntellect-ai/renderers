@@ -994,6 +994,21 @@ class DeepSeekV4RendererConfig(BaseRendererConfig):
         return self
 
 
+
+class Mistral3RendererConfig(BaseRendererConfig):
+    """Mistral-3.x Instruct renderer config.
+
+    Covers mistralai/Mistral-Small-3.1-24B-Instruct-2503,
+    mistralai/Mistral-Small-3.2-24B-Instruct-2506, and
+    mistralai/Mistral-Nemo-Instruct-2407.
+
+    Mistral-3 ships no reasoning channel, so ``thinking_retention`` is a
+    no-op: there is never any past-assistant thinking to retain or drop.
+    """
+
+    name: Literal["mistral-3"] = "mistral-3"
+    _template_fields = frozenset()
+
 class CustomRendererConfig(BaseRendererConfig):
     """Config for a renderer that lives outside this package.
 
@@ -1053,6 +1068,7 @@ RendererConfig = Annotated[
         LagunaXS21RendererConfig,
         LagunaS21RendererConfig,
         Llama3RendererConfig,
+        Mistral3RendererConfig,
         MiniMaxM2RendererConfig,
         Nemotron3RendererConfig,
         Nemotron3UltraRendererConfig,
@@ -1102,6 +1118,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "laguna-xs-2.1": LagunaXS21RendererConfig,
     "laguna-s-2.1": LagunaS21RendererConfig,
     "llama-3": Llama3RendererConfig,
+    "mistral-3": Mistral3RendererConfig,
     "minimax-m2": MiniMaxM2RendererConfig,
     "nemotron-3": Nemotron3RendererConfig,
     "nemotron-3-ultra": Nemotron3UltraRendererConfig,
@@ -1158,6 +1175,7 @@ __all__ = [
     "LagunaXS2RendererConfig",
     "LagunaXS21RendererConfig",
     "Llama3RendererConfig",
+    "Mistral3RendererConfig",
     "MiniMaxM2RendererConfig",
     "Nemotron35RendererConfig",
     "Nemotron3RendererConfig",

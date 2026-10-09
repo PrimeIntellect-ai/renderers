@@ -131,23 +131,43 @@ class DefaultRenderer:
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
-        # Incremental rendering to get per-token message attribution
+        # Incremental rendering to get per-token message attribution.
+        #
+        # Jinja chat templates are not prefix-monotone: a cumulative render
+        # can be *shorter* than the previous one (e.g. Qwen3 drops a
+        # historical assistant's reasoning block once a later user query
+        # arrives). When that happens the tokens after the common prefix no
+        # longer exist, so the attribution collected for them is discarded
+        # and re-collected from the diverging point. Assuming strict
+        # extension here produced ``message_indices`` longer than
+        # ``token_ids``.
         token_ids: list[int] = []
         message_indices: list[int] = []
-        prev_len = 0
 
         for idx, message in enumerate(messages):
             cur_ids = self._apply(messages[: idx + 1], tools=tools)
-            new_tokens = cur_ids[prev_len:]
+
+            # Longest common prefix with the previous cumulative render.
+            shared = 0
+            limit = min(len(cur_ids), len(token_ids))
+            while shared < limit and cur_ids[shared] == token_ids[shared]:
+                shared += 1
+
+            del message_indices[shared:]
+            message_indices.extend([idx] * (len(cur_ids) - shared))
             token_ids = cur_ids
-            message_indices.extend([idx] * len(new_tokens))
-            prev_len = len(cur_ids)
 
         if add_generation_prompt:
             full_ids = self._apply(messages, tools=tools, add_generation_prompt=True)
-            gen_tokens = full_ids[prev_len:]
+
+            shared = 0
+            limit = min(len(full_ids), len(token_ids))
+            while shared < limit and full_ids[shared] == token_ids[shared]:
+                shared += 1
+
+            del message_indices[shared:]
+            message_indices.extend([-1] * (len(full_ids) - shared))
             token_ids = full_ids
-            message_indices.extend([-1] * len(gen_tokens))
 
         message_roles = [m.get("role") or "" for m in messages]
         return RenderedTokens(

@@ -63,6 +63,53 @@ def test_trim_to_turn_close_returns_none_on_truncation_without_synth():
     assert result is None
 
 
+def test_trim_to_turn_close_empty_completion_is_verbatim_prompt():
+    # Nothing was sampled, so no turn was truncated. A close token already
+    # terminating the prompt is scaffolding, not a boundary this step
+    # produced, so synthesising another one would duplicate it and return a
+    # list longer than the caller's input.
+    prompt = [1, 2, 99]
+    result = trim_to_turn_close(prompt, [], {99}, synthesize_close=99)
+    assert result == prompt
+    assert len(result) <= len(prompt)
+
+
+def test_trim_to_turn_close_empty_completion_without_close_token():
+    # Same empty-completion case when the prompt does not end at a close.
+    prompt = [1, 2, 3]
+    result = trim_to_turn_close(prompt, [], {99}, synthesize_close=99)
+    assert result == prompt
+
+
+def test_trim_to_turn_close_result_never_exceeds_input():
+    # The result is a prefix of ``prev_prompt_ids + prev_completion_ids``
+    # whenever nothing is synthesised. Synthesising legitimately extends by
+    # one token when a *truncated* turn is replaced by its canonical close —
+    # but never when the completion is empty, because then there is no
+    # truncated turn to replace.
+    for prompt, completion in [
+        ([1, 2], []),
+        ([1, 2, 99], []),
+        ([1, 2], [3, 4, 5]),
+        ([1, 2], [3, 99, 30]),
+        ([99, 1], [3, 4, 5]),
+    ]:
+        result = trim_to_turn_close(prompt, completion, {99}, synthesize_close=99)
+        assert result is not None
+        assert result[: len(prompt)] == prompt
+        if not completion or 99 in completion:
+            # no synthesis, or trimmed at a real completion boundary
+            assert len(result) <= len(prompt) + len(completion)
+
+
+def test_trim_to_turn_close_empty_completion_does_not_extend():
+    # The regression: an empty completion must never grow the input, even
+    # with synthesize_close supplied.
+    for prompt in ([1, 2, 99], [1, 2, 3], [], [99]):
+        result = trim_to_turn_close(prompt, [], {99}, synthesize_close=99)
+        assert result == prompt
+
+
 def test_trim_to_turn_close_accepts_multiple_close_tokens():
     # Multiple close tokens: pick the LAST one that appears in completion.
     result = trim_to_turn_close([1], [3, 50, 4, 99, 30], {50, 99})

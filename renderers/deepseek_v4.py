@@ -668,8 +668,18 @@ class DeepSeekV4Renderer:
                         content=True,
                     )
 
+                # Trailing whitespace is stripped when a tool-call block follows, or
+                # the separator below compounds across turns: the model emits
+                # "text\n\n", a client that re-renders from parsed messages stores that
+                # verbatim in content, and the next render appends another "\n\n" --
+                # +2 newlines per turn, unbounded over a long agentic episode.
+                # Training content never carries trailing whitespace, so this is a
+                # no-op here and keeps the training/serving paths identical.
+                content_text = message.content or ""
+                if message.tool_calls:
+                    content_text = content_text.rstrip()
                 emit_text(
-                    message.content,
+                    content_text,
                     msg_idx,
                     sampled=True,
                     content=True,
@@ -683,7 +693,7 @@ class DeepSeekV4Renderer:
                     # "\n\n" right after </think>, making it the first trainable token of the
                     # turn; on corpora where most tool-calling turns have empty content the
                     # model learns to emit runs of newlines there.
-                    separator = "\n\n" if (message.content or "") else ""
+                    separator = "\n\n" if content_text else ""
                     emit_text(
                         f"{separator}<{_DSML}tool_calls>\n{rendered_calls}\n"
                         f"</{_DSML}tool_calls>",

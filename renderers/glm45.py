@@ -331,9 +331,10 @@ class GLM45Renderer:
             tool_start_closes_reasoning=True,
             assistant_prefix="<|assistant|>",
         )
-        if boundary.is_open:
-            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
-                return None
+        # A sampled stop token already ended the turn: extend it as sampled.
+        if boundary.is_open and not any(
+            t in self.get_stop_token_ids() for t in previous_completion_ids
+        ):
             previous_completion_ids = [*previous_completion_ids, self._think_end]
 
         if should_rerender_for_thinking_retention(

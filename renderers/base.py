@@ -1308,7 +1308,7 @@ def _load_tokenizer_via_auto(model_name_or_path: str, **kwargs) -> Any:
         return tok
 
 
-def load_tokenizer(model_name_or_path: str):
+def load_tokenizer(model_name_or_path: str, *, revision: str | None = None):
     """Load a tokenizer with the renderers-package security policy.
 
     Default ``trust_remote_code=False``. Models listed in
@@ -1328,11 +1328,19 @@ def load_tokenizer(model_name_or_path: str):
     ``unsloth`` mirrors instead, then restore ``tokenizer.name_or_path`` to
     the requested Meta ID so auto-resolution still selects ``Llama3Renderer``.
     Requires the ``renderers[transformers]`` extra.
+
+    ``revision`` pins ordinary tokenizer assets for reproducible reference
+    comparisons. It cannot override a trusted remote-code revision.
     """
     try:
         _require_transformers("Loading a tokenizer")
         load_name_or_path = _tokenizer_source_for(model_name_or_path)
         kwargs = _tokenizer_load_kwargs(load_name_or_path)
+        if revision is not None:
+            trusted = kwargs.get("revision")
+            if trusted is not None and revision != trusted:
+                raise ValueError("Cannot override the reviewed remote-code revision")
+            kwargs["revision"] = revision
         tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
         return _preserve_requested_tokenizer_name(
             tok,

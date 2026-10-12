@@ -354,3 +354,8 @@ def test_bridge_keeps_thinking_when_history_kwarg_disables_truncation():
         assert bridged is not None, (
             f"{model}: bridge must keep verbatim when the template keeps all thinking"
         )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _load.cache_clear()

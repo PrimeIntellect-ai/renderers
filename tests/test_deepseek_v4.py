@@ -591,3 +591,8 @@ def test_dsml_reasoning_markers_in_arguments_remain_argument_text():
     assert len(parsed.tool_calls) == 1
     assert parsed.tool_calls[0].status == ToolCallParseStatus.OK
     assert parsed.tool_calls[0].arguments == {"city": "<think>example</think>"}
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tokenizer.cache_clear()

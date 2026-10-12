@@ -152,3 +152,8 @@ def test_raw_assistant_round_trip_parity():
         enable_thinking=True,
         render_assistant_messages_raw=True,
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tok.cache_clear()

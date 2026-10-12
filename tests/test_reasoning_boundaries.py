@@ -623,3 +623,8 @@ def test_harmony_later_unfinished_analysis_preserves_earlier_output():
         )
         is None
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _renderer.cache_clear()

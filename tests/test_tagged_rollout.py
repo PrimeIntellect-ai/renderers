@@ -16,7 +16,7 @@ from renderers.client import generate
 from renderers.configs import config_from_name
 
 
-@lru_cache(None)
+@lru_cache(maxsize=1)
 def _tokenizer(model):
     return load_tokenizer(model)
 
@@ -251,3 +251,8 @@ async def test_unfinished_reasoning_survives_client_and_controls_bridge(
         close = tok.encode("</think>", add_special_tokens=False)
         assert bridge.token_ids[len(prefix) : len(prefix) + len(close)] == close
         assert not any(bridge.sampled_mask[len(prefix) :])
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tokenizer.cache_clear()

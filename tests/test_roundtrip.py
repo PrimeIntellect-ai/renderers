@@ -19,7 +19,8 @@ from renderers.client import generate
 from renderers.configs import config_from_name
 
 
-_tokenizer = lru_cache(None)(load_tokenizer)
+# Both matrices visit checkpoints in groups; reuse within each group only.
+_tokenizer = lru_cache(maxsize=1)(load_tokenizer)
 # Default has no configured tool parser; Llama's template permits one call;
 # Harmony's handoff ends generation at the first call. Other formats can emit
 # multiple calls in one sampled continuation.
@@ -203,3 +204,8 @@ async def test_reference_continuation_after_tool_dispatch(case):
     assert result["reasoning_complete"] is True
     assert result["tool_calls"] == []
     assert result["finish_reason"] == "stop"
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tokenizer.cache_clear()

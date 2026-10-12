@@ -60,30 +60,6 @@ def _decode(renderer, messages, **kwargs):
     )
 
 
-def test_repeated_tool_sections_keep_both_calls_and_drop_trailing_text():
-    renderer = _renderer(enable_thinking=True)
-    section = (
-        '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="weather">\n\n'
-        "</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
-    )
-    sampled = _tokenizer().encode(
-        "Reasoning</think>" + section + section + "<think>Ignored",
-        add_special_tokens=False,
-    )
-    parsed = renderer.parse_response(sampled)
-    assert parsed.reasoning_content == "Reasoning"
-    assert parsed.content == ""
-    assert parsed.reasoning_complete is True
-    assert [call.name for call in parsed.tool_calls] == ["weather", "weather"]
-    for call in parsed.tool_calls:
-        assert call.status == ToolCallParseStatus.OK
-        # The closing tag and newline can share a BPE token.
-        assert (
-            _tokenizer().decode(sampled[slice(*call.token_span)]).rstrip("\n")
-            == call.raw
-        )
-
-
 def test_registration_and_native_defaults():
     tokenizer = _tokenizer()
     renderer = create_renderer(tokenizer)

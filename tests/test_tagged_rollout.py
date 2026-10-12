@@ -4,13 +4,11 @@ Only the inference HTTP boundary is replayed. Tokenization, request rendering,
 response parsing, tool dispatch, and continuation all use the production path.
 """
 
-import json
 from functools import lru_cache
 
-import httpx
 import pytest
-from openai import AsyncOpenAI
 from parity import TOOLS, models_for
+from replay import assert_evidence, replay_client
 
 from renderers import create_renderer
 from renderers.base import ToolCallParseStatus, load_tokenizer
@@ -41,48 +39,6 @@ def rollout(request):
         updates["enable_thinking"] = True
     config = config.model_copy(update=updates)
     return tok, create_renderer(tok, config), case.model
-
-
-def _client(completions, requests):
-    """Replay sampled IDs, logprobs, and masks without mocking renderer code."""
-    responses = iter(completions)
-
-    def respond(request):
-        assert request.url.path == "/inference/v1/generate"
-        body = json.loads(request.content)
-        requests.append(body)
-        ids, finish_reason = next(responses)
-        return httpx.Response(
-            200,
-            json={
-                "request_id": f"replay-{len(requests)}",
-                "choices": [
-                    {
-                        "token_ids": ids,
-                        "finish_reason": finish_reason,
-                        "logprobs": {
-                            "content": [
-                                {"token": f"token_id:{tid}", "logprob": -0.25}
-                                for tid in ids
-                            ]
-                        },
-                        "sampling_mask": [[tid] for tid in ids],
-                    }
-                ],
-            },
-        )
-
-    return AsyncOpenAI(
-        api_key="replay",
-        base_url="http://replay/v1",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
-    )
-
-
-def _assert_evidence(result, ids):
-    assert result["completion_ids"] == ids
-    assert result["completion_logprobs"] == [-0.25] * len(ids)
-    assert result["sampling_mask"] == [[tid] for tid in ids]
 
 
 def _tool_text(model, city):
@@ -133,7 +89,7 @@ async def test_literal_delimiters_survive_generate_and_tool_continuation(
     answer = encode("<think>Checked</think>Sunny.") + renderer.get_stop_token_ids()[:1]
     requests = []
     messages = [{"role": "user", "content": "Check the weather."}]
-    async with _client([(sampled, "stop"), (answer, "stop")], requests) as client:
+    async with replay_client([(sampled, "stop"), (answer, "stop")], requests) as client:
         result = await generate(
             client=client,
             renderer=renderer,
@@ -142,7 +98,7 @@ async def test_literal_delimiters_survive_generate_and_tool_continuation(
             tools=TOOLS,
             max_prompt_len=100000,
         )
-        _assert_evidence(result, sampled)
+        assert_evidence(result, sampled)
         assert result["content"] == expected_content
         assert result["reasoning_content"] == "\nReasoning"
         assert result["reasoning_complete"] is True
@@ -185,7 +141,7 @@ async def test_literal_delimiters_survive_generate_and_tool_continuation(
             prompt_attribution=bridge,
             max_prompt_len=100000,
         )
-        _assert_evidence(followup, answer)
+        assert_evidence(followup, answer)
         assert requests[1]["token_ids"] == bridge.token_ids
         assert followup["prompt_attribution"] is bridge
         assert followup["content"] == "Sunny."
@@ -216,7 +172,7 @@ async def test_repeated_calls_keep_argument_markup_and_model_specific_tail(
         text += "After<think>More"
     sampled = tok.encode(text, add_special_tokens=False)
     requests = []
-    async with _client([(sampled, "length")], requests) as client:
+    async with replay_client([(sampled, "length")], requests) as client:
         result = await generate(
             client=client,
             renderer=renderer,
@@ -225,7 +181,7 @@ async def test_repeated_calls_keep_argument_markup_and_model_specific_tail(
             tools=TOOLS,
             max_prompt_len=100000,
         )
-    _assert_evidence(result, sampled)
+    assert_evidence(result, sampled)
     calls = result["tool_calls"]
     assert len(calls) == 2
     assert calls[0].arguments == {"city": argument}
@@ -269,7 +225,7 @@ async def test_unfinished_reasoning_survives_client_and_controls_bridge(
     if stopped:
         sampled += renderer.get_stop_token_ids()[:1]
     finish_reason = "stop" if stopped else "length"
-    async with _client([(sampled, finish_reason)], []) as client:
+    async with replay_client([(sampled, finish_reason)], []) as client:
         result = await generate(
             client=client,
             renderer=renderer,
@@ -277,7 +233,7 @@ async def test_unfinished_reasoning_survives_client_and_controls_bridge(
             messages=[{"role": "user", "content": "Think carefully."}],
             max_prompt_len=100000,
         )
-    _assert_evidence(result, sampled)
+    assert_evidence(result, sampled)
     assert result["content"] == "Before"
     assert result["reasoning_content"] == "\nFirstUnfinished"
     assert result["reasoning_complete"] is False

@@ -25,7 +25,13 @@ from renderers.base import (
     ToolCallParseStatus,
     ToolSpec,
 )
-from renderers.reasoning import scan_reasoning, split_tagged_reasoning
+from renderers.reasoning import scan_reasoning
+from renderers.tagged import (
+    DEEPSEEK_V4_GRAMMAR,
+    GLM_GRAMMAR,
+    TaggedToolBlock,
+    scan_tagged_response,
+)
 
 # ── Schema-aware argument coercion ──────────────────────────────────
 #
@@ -504,176 +510,120 @@ def parse_glm(
     behaves the same when the request carries no tools).
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
-    split = split_tagged_reasoning(
-        _decode(tokenizer, ids),
+    atomic_markers = {tool_call_id: "tool_start", tool_call_end_id: "tool_end"}
+    if thinking_enabled is not False:
+        atomic_markers.update({think_id: "think_start", think_end_id: "think_end"})
+    parsed = scan_tagged_response(
+        tokenizer,
+        ids,
         thinking=prefilled_thinking if thinking_enabled is None else thinking_enabled,
-        enabled=thinking_enabled is not False,
-        tool_markers=("<tool_call>",),
+        atomic_markers=atomic_markers,
+        grammar=GLM_GRAMMAR,
     )
-    boundary = split.boundary
-    reasoning = boundary.text.rstrip() if boundary.text is not None else None
-    if boundary.is_open:
-        return ParsedResponse(
-            content=split.content,
-            reasoning_content=reasoning,
-            reasoning_complete=False,
-        )
-    tc_start = _find(ids, tool_call_id) if split.tool_start is not None else -1
-    tool_calls: list[ParsedToolCall] = []
-    if tc_start != -1:
-        tool_calls = _parse_glm_tool_calls(
+    param_index = _build_param_type_index(tools)
+    known_names = _extract_tool_names(tools)
+    tool_calls = [
+        _parse_glm_tool_call(
             tokenizer,
-            ids[tc_start:],
-            tool_call_id,
-            tool_call_end_id,
+            ids,
+            block,
             arg_key_id,
             arg_key_end_id,
             arg_value_id,
             arg_value_end_id,
-            section_offset=tc_start,
-            param_index=_build_param_type_index(tools),
-            known_names=_extract_tool_names(tools),
+            param_index=param_index,
+            known_names=known_names,
         )
-        # Continue the reasoning/content grammar between complete tool calls,
-        # without interpreting delimiter-looking text inside their arguments.
-        content_parts = [split.content]
-        reasoning_parts = [boundary.text or ""]
-        cursor = tc_start
-        for call in tool_calls:
-            assert call.token_span is not None
-            start, end = call.token_span
-            between = split_tagged_reasoning(
-                _decode(tokenizer, ids[cursor:start]),
-                thinking=False,
-                enabled=thinking_enabled is not False,
-            )
-            content_parts.append(between.content)
-            reasoning_parts.append(between.boundary.text or "")
-            cursor = end
-        # A truncated tool body still owns the remaining bytes.
-        tail = (
-            ""
-            if tool_calls
-            and tool_calls[-1].status == ToolCallParseStatus.UNCLOSED_BLOCK
-            else _decode(tokenizer, ids[cursor:])
-        )
-        after = split_tagged_reasoning(
-            tail,
-            thinking=False,
-            enabled=thinking_enabled is not False,
-        )
-        content_parts.append(after.content)
-        reasoning_parts.append(after.boundary.text or "")
-        return ParsedResponse(
-            content="".join(content_parts).strip(),
-            reasoning_content="".join(reasoning_parts).rstrip() or None,
-            tool_calls=tool_calls,
-            reasoning_complete=not after.boundary.is_open,
-        )
-    else:
-        content_text = split.content
-
+        for block in parsed.tools
+    ]
+    reasoning = parsed.boundary.text
     return ParsedResponse(
-        content=content_text,
-        reasoning_content=reasoning or None,
+        content=parsed.content.strip() if tool_calls else parsed.content,
+        reasoning_content=(
+            (reasoning or "").rstrip()
+            if parsed.boundary.is_open
+            else (reasoning or "").rstrip() or None
+        ),
         tool_calls=tool_calls,
+        reasoning_complete=not parsed.boundary.is_open,
     )
 
 
-def _parse_glm_tool_calls(
+def _parse_glm_tool_call(
     tokenizer,
-    ids,
-    tc_id,
-    tc_end_id,
-    ak_id,
-    ake_id,
-    av_id,
-    ave_id,
+    ids: list[int],
+    region: TaggedToolBlock,
+    ak_id: int,
+    ake_id: int,
+    av_id: int,
+    ave_id: int,
     *,
-    section_offset: int,
     param_index: dict[str, dict[str, dict[str, Any]]],
     known_names: set[str] | None = None,
-) -> list[ParsedToolCall]:
-    """Parse GLM-style tool calls: name + arg_key/arg_value pairs, all by token ID."""
-    tool_calls: list[ParsedToolCall] = []
-    i = 0
-    while i < len(ids):
-        if ids[i] == tc_id:
-            end = _find(ids, tc_end_id, i + 1)
-            if end == -1:
-                raw = _decode(tokenizer, ids[i + 1 :])
-                tool_calls.append(
-                    ParsedToolCall(
-                        raw=raw,
-                        token_span=(section_offset + i, section_offset + len(ids)),
-                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
-                    )
-                )
-                break
-            block = ids[i + 1 : end]
-            block_text = _decode(tokenizer, block)
-            span = (section_offset + i, section_offset + end + 1)
-            first_ak = _find(block, ak_id)
-            any_json_fallback = False
-            structure_broke = False
-            if first_ak == -1:
-                name = _decode(tokenizer, block).strip()
-                arguments: dict = {}
+) -> ParsedToolCall:
+    """Convert arguments inside one block delimited by the shared scanner."""
+    start, end = region.token_span
+    block = ids[start + 1 : end - 1 if region.closed else end]
+    block_text = _decode(tokenizer, block)
+    if not region.closed:
+        return ParsedToolCall(
+            raw=block_text,
+            token_span=region.token_span,
+            status=ToolCallParseStatus.UNCLOSED_BLOCK,
+        )
+    first_ak = _find(block, ak_id)
+    any_json_fallback = False
+    structure_broke = False
+    if first_ak == -1:
+        name = _decode(tokenizer, block).strip()
+        arguments: dict = {}
+    else:
+        name = _decode(tokenizer, block[:first_ak]).strip()
+        params = param_index.get(name, {})
+        arguments = {}
+        j = first_ak
+        while j < len(block):
+            if block[j] == ak_id:
+                ake = _find(block, ake_id, j + 1)
+                if ake == -1:
+                    structure_broke = True
+                    break
+                key = _decode(tokenizer, block[j + 1 : ake]).strip()
+                av = _find(block, av_id, ake + 1)
+                if av == -1:
+                    structure_broke = True
+                    break
+                ave = _find(block, ave_id, av + 1)
+                if ave == -1:
+                    structure_broke = True
+                    break
+                val_text = _decode(tokenizer, block[av + 1 : ave]).strip()
+                value, used_fallback = _coerce_arg_value(val_text, params.get(key))
+                arguments[key] = value
+                any_json_fallback = any_json_fallback or used_fallback
+                j = ave + 1
             else:
-                name = _decode(tokenizer, block[:first_ak]).strip()
-                params = param_index.get(name, {})
-                arguments = {}
-                j = first_ak
-                while j < len(block):
-                    if block[j] == ak_id:
-                        ake = _find(block, ake_id, j + 1)
-                        if ake == -1:
-                            structure_broke = True
-                            break
-                        key = _decode(tokenizer, block[j + 1 : ake]).strip()
-                        av = _find(block, av_id, ake + 1)
-                        if av == -1:
-                            structure_broke = True
-                            break
-                        ave = _find(block, ave_id, av + 1)
-                        if ave == -1:
-                            structure_broke = True
-                            break
-                        val_text = _decode(tokenizer, block[av + 1 : ave]).strip()
-                        value, used_fallback = _coerce_arg_value(
-                            val_text, params.get(key)
-                        )
-                        arguments[key] = value
-                        any_json_fallback = any_json_fallback or used_fallback
-                        j = ave + 1
-                    else:
-                        j += 1
-            if not name:
-                status = ToolCallParseStatus.MISSING_NAME
-            elif known_names is not None and name not in known_names:
-                # vLLM ≥ 0.24 drops the call entirely here; we keep the
-                # attempt visible but deny it OK so consumers agree with
-                # the engine on "no tool was called."
-                status = ToolCallParseStatus.UNKNOWN_TOOL
-            elif structure_broke:
-                status = ToolCallParseStatus.MALFORMED_STRUCTURE
-            elif any_json_fallback:
-                status = ToolCallParseStatus.INVALID_JSON
-            else:
-                status = ToolCallParseStatus.OK
-            tool_calls.append(
-                ParsedToolCall(
-                    raw=block_text,
-                    name=name or None,
-                    arguments=arguments,
-                    token_span=span,
-                    status=status,
-                )
-            )
-            i = end + 1
-        else:
-            i += 1
-    return tool_calls
+                j += 1
+    if not name:
+        status = ToolCallParseStatus.MISSING_NAME
+    elif known_names is not None and name not in known_names:
+        # vLLM ≥ 0.24 drops the call entirely here; we keep the
+        # attempt visible but deny it OK so consumers agree with
+        # the engine on "no tool was called."
+        status = ToolCallParseStatus.UNKNOWN_TOOL
+    elif structure_broke:
+        status = ToolCallParseStatus.MALFORMED_STRUCTURE
+    elif any_json_fallback:
+        status = ToolCallParseStatus.INVALID_JSON
+    else:
+        status = ToolCallParseStatus.OK
+    return ParsedToolCall(
+        raw=block_text,
+        name=name or None,
+        arguments=arguments,
+        token_span=region.token_span,
+        status=status,
+    )
 
 
 # ── Hy3: <think>…</think> content <tool_calls> <tool_call>name<tool_sep> …
@@ -1253,8 +1203,7 @@ def parse_deepseek_v4(
     stop_ids: set[int],
     thinking_enabled: bool,
     think_end_id: int,
-    dsml_id: int,
-    think_start_id: int | None = None,
+    think_start_id: int,
 ) -> ParsedResponse:
     """Parse a DeepSeek V4 completion.
 
@@ -1266,166 +1215,106 @@ def parse_deepseek_v4(
     reasoning opened in the completion is recognized independently.
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
-    split = split_tagged_reasoning(
-        _decode(tokenizer, ids),
-        thinking=thinking_enabled,
-        tool_markers=("<｜DSML｜tool_calls>", "<｜DSML｜toolcalls>", "<｜DSML｜tool>"),
-    )
-    boundary = split.boundary
-    reasoning = boundary.text.rstrip() if boundary.text is not None else None
-    if boundary.is_open:
-        return ParsedResponse(
-            content=split.content,
-            reasoning_content=reasoning,
-            reasoning_complete=False,
-        )
-    if split.tool_start is None:
-        return ParsedResponse(
-            content=split.content,
-            reasoning_content=reasoning or None,
-            tool_calls=[],
-        )
-    # Include a BPE token straddling the opener's character boundary so tool
-    # spans remain offsets into the original sampled completion.
-    section_token_offset = _decoded_char_to_token_index(
-        tokenizer, ids, split.tool_start
-    )
-    if len(_decode(tokenizer, ids[:section_token_offset])) > split.tool_start:
-        section_token_offset -= 1
-    section_text = _decode(tokenizer, ids[section_token_offset:])
-    tool_calls = _parse_deepseek_v4_tool_calls(
+    parsed = scan_tagged_response(
         tokenizer,
-        section_text,
-        ids[section_token_offset:],
-        section_offset=section_token_offset,
+        ids,
+        thinking=thinking_enabled,
+        atomic_markers={think_start_id: "think_start", think_end_id: "think_end"},
+        grammar=DEEPSEEK_V4_GRAMMAR,
     )
+    reasoning = parsed.boundary.text
     return ParsedResponse(
-        content=split.content if split.content.strip() else "",
-        reasoning_content=reasoning or None,
-        tool_calls=tool_calls,
+        content=parsed.content if parsed.content.strip() else "",
+        reasoning_content=(
+            (reasoning or "").rstrip()
+            if parsed.boundary.is_open
+            else (reasoning or "").rstrip() or None
+        ),
+        tool_calls=[_parse_deepseek_v4_tool_call(block) for block in parsed.tools],
+        reasoning_complete=not parsed.boundary.is_open,
     )
 
 
-def _decoded_char_to_token_index(tokenizer, ids: list[int], char_index: int) -> int:
-    """Return the first token boundary at or beyond a decoded char offset."""
-    if char_index <= 0:
-        return 0
-    for boundary in range(1, len(ids) + 1):
-        if len(_decode(tokenizer, ids[:boundary])) >= char_index:
-            return boundary
-    return len(ids)
-
-
-def _parse_deepseek_v4_tool_calls(
-    tokenizer,
-    section_text: str,
-    section_ids: list[int],
-    *,
-    section_offset: int,
-) -> list[ParsedToolCall]:
-    """Parse every DSML ``invoke`` attempt from one tool-calls section."""
+def _parse_deepseek_v4_tool_call(region: TaggedToolBlock) -> ParsedToolCall:
+    """Convert one DSML attempt; the shared grammar owns its boundaries."""
     import re
 
-    invoke_start = '<｜DSML｜invoke name="'
     invoke_end = "</｜DSML｜invoke>"
-    section_end = "</｜DSML｜tool_calls>"
     parameter_pattern = re.compile(
         r'<｜DSML｜parameter name="(.*?)" string="(true|false)">'
         r"(.*?)</｜DSML｜parameter>",
         re.DOTALL,
     )
-
-    tool_calls: list[ParsedToolCall] = []
-    for invoke_match in re.finditer(r"<｜DSML｜invoke", section_text):
-        start = invoke_match.start()
-        outer_end = section_text.find(section_end, start)
-
-        close = section_text.find(invoke_end, start + len(invoke_start))
-        unclosed = close == -1 or (outer_end != -1 and outer_end < close)
-        block_end = outer_end if unclosed and outer_end != -1 else len(section_text)
-        if not unclosed:
-            block_end = close + len(invoke_end)
-        raw = section_text[start:block_end]
-
-        token_start = _decoded_char_to_token_index(tokenizer, section_ids, start)
-        token_end = _decoded_char_to_token_index(tokenizer, section_ids, block_end)
-        span = (section_offset + token_start, section_offset + token_end)
-
-        header_end = section_text.find(">\n", start, block_end)
-        name: str | None = None
-        malformed = False
-        if header_end == -1:
-            malformed = True
-            body = ""
-        else:
-            header = section_text[start : header_end + 2]
-            name_match = re.fullmatch(
-                r'<｜DSML｜invoke name="(.*?)">\n',
-                header,
-                flags=re.DOTALL,
-            )
-            if name_match:
-                name = name_match.group(1)
-            else:
-                malformed = True
-            body_end = close if not unclosed else block_end
-            body = section_text[header_end + 2 : body_end]
-
-        arguments: dict[str, Any] = {}
-        invalid_json = False
-        matched_ranges: list[tuple[int, int]] = []
-        for match in parameter_pattern.finditer(body):
-            key, is_string, raw_value = match.groups()
-            matched_ranges.append(match.span())
-            if key in arguments:
-                malformed = True
-                continue
-            if is_string == "true":
-                arguments[key] = raw_value
-            else:
-                try:
-                    arguments[key] = json.loads(raw_value)
-                except (json.JSONDecodeError, ValueError):
-                    arguments[key] = raw_value
-                    invalid_json = True
-
-        remainder_parts: list[str] = []
-        previous_end = 0
-        for match_start, match_end in matched_ranges:
-            remainder_parts.append(body[previous_end:match_start])
-            previous_end = match_end
-        remainder_parts.append(body[previous_end:])
-        remainder = "".join(remainder_parts)
-        # The canonical form has one newline before ``</invoke>`` and newlines
-        # between parameters.  Anything else left after removing parameter
-        # blocks is structural debris.
-        if remainder.strip("\n"):
-            malformed = True
-
-        if unclosed:
-            status = ToolCallParseStatus.UNCLOSED_BLOCK
-        elif not name:
-            status = ToolCallParseStatus.MISSING_NAME
-        elif malformed:
-            status = ToolCallParseStatus.MALFORMED_STRUCTURE
-        elif invalid_json:
-            status = ToolCallParseStatus.INVALID_JSON
-        else:
-            status = ToolCallParseStatus.OK
-
-        tool_calls.append(
-            ParsedToolCall(
-                raw=raw,
-                name=name,
-                arguments=arguments,
-                token_span=span,
-                status=status,
-            )
+    raw = region.text
+    header_end = raw.find(">\n")
+    name: str | None = None
+    malformed = False
+    if header_end == -1:
+        malformed = True
+        body = ""
+    else:
+        header = raw[: header_end + 2]
+        name_match = re.fullmatch(
+            r'<｜DSML｜invoke name="(.*?)">\n',
+            header,
+            flags=re.DOTALL,
         )
-        if unclosed:
-            break
+        if name_match:
+            name = name_match.group(1)
+        else:
+            malformed = True
+        body_end = len(raw) - len(invoke_end) if region.closed else len(raw)
+        body = raw[header_end + 2 : body_end]
 
-    return tool_calls
+    arguments: dict[str, Any] = {}
+    invalid_json = False
+    matched_ranges: list[tuple[int, int]] = []
+    for match in parameter_pattern.finditer(body):
+        key, is_string, raw_value = match.groups()
+        matched_ranges.append(match.span())
+        if key in arguments:
+            malformed = True
+            continue
+        if is_string == "true":
+            arguments[key] = raw_value
+        else:
+            try:
+                arguments[key] = json.loads(raw_value)
+            except (json.JSONDecodeError, ValueError):
+                arguments[key] = raw_value
+                invalid_json = True
+
+    remainder_parts: list[str] = []
+    previous_end = 0
+    for match_start, match_end in matched_ranges:
+        remainder_parts.append(body[previous_end:match_start])
+        previous_end = match_end
+    remainder_parts.append(body[previous_end:])
+    remainder = "".join(remainder_parts)
+    # The canonical form has one newline before ``</invoke>`` and newlines
+    # between parameters.  Anything else left after removing parameter
+    # blocks is structural debris.
+    if remainder.strip("\n"):
+        malformed = True
+
+    if not region.closed:
+        status = ToolCallParseStatus.UNCLOSED_BLOCK
+    elif not name:
+        status = ToolCallParseStatus.MISSING_NAME
+    elif malformed:
+        status = ToolCallParseStatus.MALFORMED_STRUCTURE
+    elif invalid_json:
+        status = ToolCallParseStatus.INVALID_JSON
+    else:
+        status = ToolCallParseStatus.OK
+
+    return ParsedToolCall(
+        raw=raw,
+        name=name,
+        arguments=arguments,
+        token_span=region.token_span,
+        status=status,
+    )
 
 
 # ── MiniMax: <minimax:tool_call> ... </minimax:tool_call> ────────────

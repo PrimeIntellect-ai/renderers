@@ -1,6 +1,5 @@
 """Reasoning boundaries, independent of response parsing and renderer classes."""
 
-import re
 from dataclasses import dataclass
 
 
@@ -15,63 +14,6 @@ class ReasoningBoundary:
     is_open: bool
     text: str | None
     closed_by_tool: bool = False
-
-
-@dataclass(frozen=True)
-class TaggedReasoning:
-    """A decoded view of tagged reasoning; sampled tokens remain untouched."""
-
-    boundary: ReasoningBoundary
-    content: str
-    tool_start: int | None = None
-
-
-def split_tagged_reasoning(
-    text: str,
-    *,
-    thinking: bool,
-    enabled: bool = True,
-    tool_markers: tuple[str, ...] = (),
-) -> TaggedReasoning:
-    """Reasoning transitions from vLLM 0.31's glm47_moe/deepseek_v4 engines.
-
-    Both grammars absorb duplicate delimiters, can reopen reasoning from
-    content, and transition to tools at their opener even before a later
-    ``</think>``. Tool bodies are handed to the tool parser unchanged.
-    GLM disables reasoning terminals when thinking is disabled; V4 retains
-    them and changes only the initial state.
-    """
-    markers = (*(("<think>", "</think>") if enabled else ()), *tool_markers)
-    if not markers:
-        return TaggedReasoning(ReasoningBoundary(False, None), text)
-    pattern = "|".join(re.escape(marker) for marker in markers)
-    active = thinking and enabled
-    opened = active
-    reasoning: list[str] = []
-    content: list[str] = []
-    start = 0
-    for match in re.finditer(pattern, text):
-        (reasoning if active else content).append(text[start : match.start()])
-        marker = match.group()
-        if marker in tool_markers:
-            return TaggedReasoning(
-                ReasoningBoundary(
-                    False, "".join(reasoning) if opened else None, active
-                ),
-                "".join(content),
-                match.start(),
-            )
-        if marker == "<think>":
-            active = True
-            opened = True
-        else:
-            active = False
-        start = match.end()
-    (reasoning if active else content).append(text[start:])
-    return TaggedReasoning(
-        ReasoningBoundary(active, "".join(reasoning) if opened else None),
-        "".join(content),
-    )
 
 
 def _decode(tokenizer, ids: list[int]) -> str:

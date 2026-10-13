@@ -16,6 +16,7 @@ from typing import Any
 
 from renderers.base import (
     Message,
+    MultiModalData,
     ParsedResponse,
     RenderedTokens,
     Tokenizer,
@@ -30,6 +31,7 @@ from renderers.base import (
 from renderers.configs import (
     GLM5RendererConfig,
     GLM51RendererConfig,
+    GLM53FlashRendererConfig,
     GLM53RendererConfig,
 )
 from renderers.parsing import parse_glm
@@ -138,6 +140,15 @@ class GLM5Renderer:
             return "".join(parts)
         return str(content)
 
+    def _emit_body(
+        self, content: Any, msg_idx: int, *, emit_special, emit_text
+    ) -> None:
+        """Emit a system, user or tool message body. Renderers for models that
+        read images in the conversation override this to place the media."""
+        emit_text(
+            self._visible_text(content), msg_idx, is_sampled=False, is_content=True
+        )
+
     @staticmethod
     def _last_user_index(messages: list[Message]) -> int:
         for i in range(len(messages) - 1, -1, -1):
@@ -237,7 +248,12 @@ class GLM5Renderer:
 
             if role == "system":
                 emit_special(self._system, i, is_sampled=False, is_content=False)
-                emit_text(content, i, is_sampled=False, is_content=True)
+                self._emit_body(
+                    msg.get("content"),
+                    i,
+                    emit_special=emit_special,
+                    emit_text=emit_text,
+                )
 
             elif role == "user":
                 emit_special(
@@ -246,7 +262,12 @@ class GLM5Renderer:
                     is_sampled=closes_assistant_turn,
                     is_content=closes_assistant_turn,
                 )
-                emit_text(content, i, is_sampled=False, is_content=True)
+                self._emit_body(
+                    msg.get("content"),
+                    i,
+                    emit_special=emit_special,
+                    emit_text=emit_text,
+                )
 
             elif role == "assistant":
                 self._render_assistant(
@@ -267,7 +288,7 @@ class GLM5Renderer:
                         tool_message = messages[tool_idx]
                         self._render_tool(
                             tool_idx,
-                            self._visible_text(tool_message.get("content")),
+                            tool_message.get("content"),
                             emit_special=emit_special,
                             emit_text=emit_text,
                             emit_text_segments=emit_text_segments,
@@ -469,15 +490,24 @@ class GLM5Renderer:
         # *actually* produced this step.
         for i, msg in enumerate(new_messages):
             role = msg.get("role")
-            content = self._visible_text(msg.get("content"))
             if role == "user":
                 # Dedup: model already emitted <|user|> as its stop token.
                 if not (i == 0 and last_prev == self._user):
                     emit_special(self._user, i)
-                emit_text(content, i, is_content=True)
+                self._emit_body(
+                    msg.get("content"),
+                    i,
+                    emit_special=emit_special,
+                    emit_text=emit_text,
+                )
             elif role == "system":
                 emit_special(self._system, i)
-                emit_text(content, i, is_content=True)
+                self._emit_body(
+                    msg.get("content"),
+                    i,
+                    emit_special=emit_special,
+                    emit_text=emit_text,
+                )
             elif role == "tool":
                 prev_is_tool = i > 0 and new_messages[i - 1].get("role") == "tool"
                 if i == 0 and last_prev == self._observation:
@@ -486,7 +516,12 @@ class GLM5Renderer:
                 elif not prev_is_tool:
                     emit_special(self._observation, i)
                 emit_special(self._tool_response_tok, i)
-                emit_text(content, i, is_content=True)
+                self._emit_body(
+                    msg.get("content"),
+                    i,
+                    emit_special=emit_special,
+                    emit_text=emit_text,
+                )
                 emit_special(self._tool_response_end_tok, i)
             else:
                 return None
@@ -637,7 +672,7 @@ class GLM5Renderer:
     def _render_tool(
         self,
         msg_idx: int,
-        content: str,
+        content: Any,
         *,
         emit_special,
         emit_text,
@@ -664,7 +699,9 @@ class GLM5Renderer:
         emit_special(
             self._tool_response_tok, msg_idx, is_sampled=False, is_content=False
         )
-        emit_text(content, msg_idx, is_sampled=False, is_content=True)
+        self._emit_body(
+            content, msg_idx, emit_special=emit_special, emit_text=emit_text
+        )
         emit_special(
             self._tool_response_end_tok, msg_idx, is_sampled=False, is_content=False
         )
@@ -854,3 +891,119 @@ class GLM53Renderer(GLM5Renderer):
             emit_special(
                 self._tool_call_end_tok, msg_idx, is_sampled=True, is_content=True
             )
+
+
+_IMAGE_TYPES = ("image", "image_url")
+_UNSUPPORTED_MEDIA_TYPES = ("video", "video_url", "audio", "audio_url", "input_audio")
+
+
+def _has_images(messages: list[Message]) -> bool:
+    return any(
+        isinstance(item, dict) and item.get("type") in _IMAGE_TYPES
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for item in message["content"]
+    )
+
+
+class GLM53FlashRenderer(GLM53Renderer):
+    """Deterministic message → token renderer for GLM-5.3 Flash.
+
+    GLM-5.3 Flash shares GLM-5.3's text template and adds images: the template
+    renders each image part of a system, user or tool message as
+    ``<|begin_of_image|><|image|><|end_of_image|>``.
+
+    Renders the logical prompt (``process_multimodal=False``): one ``<|image|>``
+    per image, which the inference engine expands to the image's token count
+    from the raw image. Rendering with expanded placeholders and processed
+    pixels (``process_multimodal=True``) is not implemented yet. Video and
+    audio are not supported.
+    """
+
+    _config_cls = GLM53FlashRendererConfig
+    supports_process_multimodal = True
+
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        config: GLM53FlashRendererConfig | None = None,
+    ):
+        super().__init__(tokenizer, config)
+        self._begin_of_image = self._token_id("<|begin_of_image|>")
+        self._image = self._token_id("<|image|>")
+        self._end_of_image = self._token_id("<|end_of_image|>")
+
+    @property
+    def mm_token_type_id_map(self) -> dict[int, int]:
+        return {self._image: 1}
+
+    def _emit_body(
+        self, content: Any, msg_idx: int, *, emit_special, emit_text
+    ) -> None:
+        if not isinstance(content, list):
+            super()._emit_body(
+                content, msg_idx, emit_special=emit_special, emit_text=emit_text
+            )
+            return
+        # Consecutive text parts are joined before encoding, as the template does.
+        text = ""
+        for item in content:
+            if isinstance(item, str):
+                text += item
+            elif not isinstance(item, dict):
+                continue
+            elif item.get("type") == "text":
+                text += item.get("text", "")
+            elif item.get("type") in _IMAGE_TYPES:
+                emit_text(text, msg_idx, is_sampled=False, is_content=True)
+                text = ""
+                # The placeholder stands for caller-provided image data (body
+                # content); the markers around it are template scaffolding.
+                emit_special(
+                    self._begin_of_image, msg_idx, is_sampled=False, is_content=False
+                )
+                emit_special(self._image, msg_idx, is_sampled=False, is_content=True)
+                emit_special(
+                    self._end_of_image, msg_idx, is_sampled=False, is_content=False
+                )
+            elif item.get("type") in _UNSUPPORTED_MEDIA_TYPES:
+                raise NotImplementedError(
+                    f"GLM53FlashRenderer does not support {item['type']!r} content"
+                )
+        emit_text(text, msg_idx, is_sampled=False, is_content=True)
+
+    def render(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
+        process_multimodal: bool = True,
+    ) -> RenderedTokens:
+        if process_multimodal and _has_images(messages):
+            raise NotImplementedError(
+                "GLM53FlashRenderer renders images only with process_multimodal=False (one placeholder per image)"
+            )
+        return super().render(
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
+        )
+
+    def bridge_to_next_turn(
+        self,
+        previous_prompt_ids: list[int],
+        previous_completion_ids: list[int],
+        new_messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        previous_multi_modal_data: MultiModalData | None = None,
+        process_multimodal: bool = True,
+    ) -> RenderedTokens | None:
+        if process_multimodal and _has_images(new_messages):
+            raise NotImplementedError(
+                "GLM53FlashRenderer renders images only with process_multimodal=False (one placeholder per image)"
+            )
+        # Logical prompts carry no processed image data, so nothing from
+        # ``previous_multi_modal_data`` needs carrying forward.
+        return super().bridge_to_next_turn(
+            previous_prompt_ids, previous_completion_ids, new_messages, tools=tools
+        )

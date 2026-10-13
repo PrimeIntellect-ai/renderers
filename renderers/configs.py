@@ -434,6 +434,12 @@ class GLM53RendererConfig(BaseRendererConfig):
         return self
 
 
+class GLM53FlashRendererConfig(GLM53RendererConfig):
+    """GLM-5.3 Flash renderer config. GLM-5.3's template surface, plus images."""
+
+    name: Literal["glm-5.3-flash"] = "glm-5.3-flash"
+
+
 class GLM45RendererConfig(BaseRendererConfig):
     """GLM-4.5 Air renderer config."""
 
@@ -1042,6 +1048,7 @@ RendererConfig = Annotated[
         GLM5RendererConfig,
         GLM51RendererConfig,
         GLM53RendererConfig,
+        GLM53FlashRendererConfig,
         GLM45RendererConfig,
         GptOssRendererConfig,
         Hy3RendererConfig,
@@ -1091,6 +1098,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "glm-5": GLM5RendererConfig,
     "glm-5.1": GLM51RendererConfig,
     "glm-5.3": GLM53RendererConfig,
+    "glm-5.3-flash": GLM53FlashRendererConfig,
     "glm-4.5": GLM45RendererConfig,
     "gpt-oss": GptOssRendererConfig,
     "hy3": Hy3RendererConfig,
@@ -1144,6 +1152,7 @@ __all__ = [
     "DeepSeekV4RendererConfig",
     "GLM45RendererConfig",
     "GLM51RendererConfig",
+    "GLM53FlashRendererConfig",
     "GLM53RendererConfig",
     "GLM5RendererConfig",
     "Gemma4RendererConfig",

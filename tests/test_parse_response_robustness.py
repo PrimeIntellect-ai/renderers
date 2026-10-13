@@ -6,7 +6,6 @@ even with adversarial or truncated model output.
 
 from renderers.base import ParsedResponse, ParsedToolCall
 
-
 # ── Truncation ───────────────────────────────────────────────────────
 
 
@@ -73,11 +72,11 @@ def test_thinking_with_newlines(model_name, tokenizer, renderer):
 
 
 def test_content_only_no_thinking(model_name, tokenizer, renderer):
-    """Plain content with no thinking markers."""
+    """Bare text follows the parser's initial state without losing text."""
     text = "Hello! How can I help you today?"
     ids = tokenizer.encode(text, add_special_tokens=False)
     parsed = renderer.parse_response(ids, prompt_ids=[])
-    assert "Hello" in parsed.content
+    assert "Hello" in parsed.content + (parsed.reasoning_content or "")
     assert parsed.tool_calls == []
 
 
@@ -98,7 +97,7 @@ def test_content_with_special_chars(model_name, tokenizer, renderer):
     text = 'The formula is x < y and a > b. Use "quotes" freely.'
     ids = tokenizer.encode(text, add_special_tokens=False)
     parsed = renderer.parse_response(ids, prompt_ids=[])
-    assert parsed.content  # Should not crash on angle brackets
+    assert parsed.content or parsed.reasoning_content
 
 
 def test_very_long_content(model_name, tokenizer, renderer):
@@ -106,7 +105,7 @@ def test_very_long_content(model_name, tokenizer, renderer):
     text = "word " * 500
     ids = tokenizer.encode(text, add_special_tokens=False)
     parsed = renderer.parse_response(ids, prompt_ids=[])
-    assert len(parsed.content) > 100
+    assert len(parsed.content + (parsed.reasoning_content or "")) > 100
 
 
 # ── Return type guarantees ───────────────────────────────────────────

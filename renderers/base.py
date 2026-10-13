@@ -782,8 +782,9 @@ class Renderer(Protocol):
         Pass the exact ``prompt_ids`` used for sampling whenever available.
         This identifies reasoning prefilled by the prompt, including Gemma's
         post-tool thought channel and partial assistant prefixes. Omitting it,
-        passing None, and passing [] all parse a self-contained completion;
-        generation settings do not imply an initial reasoning channel.
+        passing None, and passing [] are equivalent: the format's completion
+        grammar applies without prompt context. GLM and DeepSeek V4 also use
+        the configured generation mode to determine the initial channel.
 
         ``tools`` is the same list passed to ``render`` for this turn.
         XML-style formats (Qwen3.5, GLM, MiniMax, Laguna) render argument

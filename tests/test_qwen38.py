@@ -250,3 +250,8 @@ def test_qwen38_structured_tool_response_keeps_current_reasoning():
     assert "Keep me" in tokenizer.decode(renderer.render_ids(messages))
     with pytest.raises(ValueError, match="No user query found"):
         renderer.render([messages[-1]])
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _qwen38.cache_clear()

@@ -521,3 +521,8 @@ def test_stop_tokens():
     assert r._content_model_end_sampling in stop
     # eos is <|content_model_end_sampling|> (config.json eos_token_id = 200006).
     assert stop[0] == r._content_model_end_sampling
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tok.cache_clear()

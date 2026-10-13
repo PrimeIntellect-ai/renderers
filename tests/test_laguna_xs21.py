@@ -406,3 +406,8 @@ def test_bridge_rejects_assistant_extension():
         )
         is None
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tok.cache_clear()

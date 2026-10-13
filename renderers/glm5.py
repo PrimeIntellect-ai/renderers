@@ -14,8 +14,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
-
 from renderers.base import (
     Message,
     ParsedResponse,
@@ -351,12 +349,7 @@ class GLM5Renderer:
             arg_value_id=self._arg_value,
             arg_value_end_id=self._arg_value_end,
             tools=tools,
-            prefilled_thinking=prompt_ends_in_reasoning(
-                self._tokenizer,
-                prompt_ids,
-                stop_ids=set(self.get_stop_token_ids()),
-                assistant_prefix="<|assistant|>",
-            ),
+            thinking_enabled=getattr(self.config, "enable_thinking", True),
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -377,17 +370,11 @@ class GLM5Renderer:
         ):
             return None
 
-        boundary = scan_reasoning(
-            self._tokenizer,
-            previous_completion_ids,
-            prompt_ids=previous_prompt_ids,
-            stop_ids=set(self.get_stop_token_ids()),
-            tool_start_id=self._tool_call_tok,
-            tool_start_closes_reasoning=True,
-            assistant_prefix="<|assistant|>",
+        boundary = self.parse_response(
+            previous_completion_ids, prompt_ids=previous_prompt_ids, tools=tools
         )
         # A sampled stop token already ended the turn: extend it as sampled.
-        if boundary.is_open and not any(
+        if boundary.reasoning_complete is False and not any(
             t in self.get_stop_token_ids() for t in previous_completion_ids
         ):
             previous_completion_ids = [*previous_completion_ids, self._think_end]

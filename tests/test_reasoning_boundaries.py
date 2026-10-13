@@ -13,7 +13,7 @@ _CASES = {}
 for _case in MODEL_CATALOG:
     _CASES.setdefault(_case.resolved_renderer, _case.model)
 
-_GLM = {"glm-4.5", "glm-5", "glm-5.1", "glm-5.3"}
+_GLM = {"glm-4.5", "glm-5", "glm-5.1", "glm-5.3", "glm-5.3-flash"}
 _REOPENING_TAGS = _GLM | {"deepseek-v4"}
 
 
@@ -177,6 +177,7 @@ _TOOL_CALLS = {
     "glm-5": _GLM_CALL,
     "glm-5.1": _GLM_CALL,
     "glm-5.3": _GLM_CALL,
+    "glm-5.3-flash": _GLM_CALL,
     "minimax-m2": '<minimax:tool_call>\n<invoke name="danger">\n</invoke>\n</minimax:tool_call>',
     "deepseek-v4": '\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name="danger">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
     "kimi-k2": _KIMI_CALL,

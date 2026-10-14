@@ -12,6 +12,7 @@ Key differences from Qwen family:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from renderers.base import (
@@ -52,6 +53,24 @@ _TOOLS_FOOTER = (
     "<arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>"
     "...</tool_call>"
 )
+
+
+def _is_list_of_outputs(content: Any) -> bool:
+    return (
+        isinstance(content, list)
+        and bool(content)
+        and isinstance(content[0], dict)
+        and "output" in content[0]
+    )
+
+
+def _tool_contents(content: Any) -> list[Any]:
+    if _is_list_of_outputs(content):
+        return [
+            entry.get("output") if isinstance(entry, dict) else None
+            for entry in content
+        ]
+    return [content]
 
 
 class GLM5Renderer:
@@ -149,6 +168,17 @@ class GLM5Renderer:
             self._visible_text(content), msg_idx, is_sampled=False, is_content=True
         )
 
+    def _emit_tool_body(
+        self, content: Any, msg_idx: int, *, tools, emit_special, emit_text
+    ) -> None:
+        self._emit_body(
+            content, msg_idx, emit_special=emit_special, emit_text=emit_text
+        )
+
+    @staticmethod
+    def _prompt_tools(tools: list[ToolSpec]) -> list[ToolSpec]:
+        return tools
+
     @staticmethod
     def _last_user_index(messages: list[Message]) -> int:
         for i in range(len(messages) - 1, -1, -1):
@@ -229,7 +259,7 @@ class GLM5Renderer:
         if tools:
             emit_special(self._system, -1, is_sampled=False, is_content=False)
             tool_text = _TOOLS_HEADER
-            for tool in tools:
+            for tool in self._prompt_tools(tools):
                 tool_text += self._format_tool_spec(tool) + "\n"
             tool_text += _TOOLS_FOOTER
             emit_text(tool_text, -1, is_sampled=False, is_content=False)
@@ -282,13 +312,13 @@ class GLM5Renderer:
 
             elif role == "tool":
                 if i == 0 or messages[i - 1]["role"] != "tool":
-                    for position, tool_idx in enumerate(
-                        self._ordered_tool_indices(messages, i)
+                    for position, (tool_idx, tool_content) in enumerate(
+                        self._tool_results(messages, i)
                     ):
-                        tool_message = messages[tool_idx]
                         self._render_tool(
                             tool_idx,
-                            tool_message.get("content"),
+                            tool_content,
+                            tools=tools,
                             emit_special=emit_special,
                             emit_text=emit_text,
                             emit_text_segments=emit_text_segments,
@@ -336,6 +366,14 @@ class GLM5Renderer:
         ):
             block_end += 1
         return list(range(block_start, block_end + 1))
+
+    def _tool_results(
+        self, messages: list[Message], block_start: int
+    ) -> list[tuple[int, Any]]:
+        return [
+            (i, messages[i].get("content"))
+            for i in self._ordered_tool_indices(messages, block_start)
+        ]
 
     def render_ids(
         self,
@@ -516,9 +554,10 @@ class GLM5Renderer:
                 elif not prev_is_tool:
                     emit_special(self._observation, i)
                 emit_special(self._tool_response_tok, i)
-                self._emit_body(
+                self._emit_tool_body(
                     msg.get("content"),
                     i,
+                    tools=tools,
                     emit_special=emit_special,
                     emit_text=emit_text,
                 )
@@ -674,6 +713,7 @@ class GLM5Renderer:
         msg_idx: int,
         content: Any,
         *,
+        tools: list[ToolSpec] | None = None,
         emit_special,
         emit_text,
         emit_text_segments,
@@ -699,8 +739,12 @@ class GLM5Renderer:
         emit_special(
             self._tool_response_tok, msg_idx, is_sampled=False, is_content=False
         )
-        self._emit_body(
-            content, msg_idx, emit_special=emit_special, emit_text=emit_text
+        self._emit_tool_body(
+            content,
+            msg_idx,
+            tools=tools,
+            emit_special=emit_special,
+            emit_text=emit_text,
         )
         emit_special(
             self._tool_response_end_tok, msg_idx, is_sampled=False, is_content=False
@@ -764,10 +808,45 @@ class GLM53Renderer(GLM5Renderer):
         spec = {k: v for k, v in spec.items() if k not in ("defer_loading", "strict")}
         return json.dumps(spec, ensure_ascii=False)
 
-    def _ordered_tool_indices(
+    @staticmethod
+    def _prompt_tools(tools: list[ToolSpec]) -> list[ToolSpec]:
+        return [
+            tool
+            for tool in tools
+            if not (tool.get("function") or tool).get("defer_loading")
+        ]
+
+    def _emit_tool_body(
+        self, content: Any, msg_idx: int, *, tools, emit_special, emit_text
+    ) -> None:
+        if (
+            isinstance(content, list)
+            and content
+            and isinstance(content[0], dict)
+            and content[0].get("type") == "tool_reference"
+        ):
+            if not tools:
+                raise ValueError("Tool references require tool specifications")
+            text = "<tools>\n"
+            for reference in content:
+                for tool in tools:
+                    spec = tool.get("function") or tool
+                    if spec.get("name") == reference.get("name"):
+                        text += self._format_tool_spec(tool) + "\n"
+            emit_text(text + "</tools>", msg_idx, is_sampled=False, is_content=False)
+        else:
+            super()._emit_tool_body(
+                content,
+                msg_idx,
+                tools=tools,
+                emit_special=emit_special,
+                emit_text=emit_text,
+            )
+
+    def _tool_results(
         self, messages: list[Message], block_start: int
-    ) -> list[int]:
-        """Match the template's safe tool-result reordering rule."""
+    ) -> list[tuple[int, Any]]:
+        """Unpack and order tool results, retaining each input message's owner."""
         block_end = block_start
         while (
             block_end + 1 < len(messages)
@@ -775,31 +854,55 @@ class GLM53Renderer(GLM5Renderer):
         ):
             block_end += 1
 
+        def identifier(obj: Mapping[str, Any]) -> str:
+            return str(obj.get("tool_call_id") or obj.get("id") or "")
+
+        results: list[tuple[int, str, Any]] = []
+        for i in range(block_start, block_end + 1):
+            content = messages[i].get("content")
+            if _is_list_of_outputs(content):
+                for entry in content:
+                    entry = entry if isinstance(entry, dict) else {}
+                    results.append((i, identifier(entry), entry.get("output")))
+            else:
+                results.append((i, identifier(messages[i]), content))
+
         previous = messages[block_start - 1] if block_start else {}
         calls = (
             previous.get("tool_calls") if previous.get("role") == "assistant" else None
         )
-        if not calls:
-            return list(range(block_start, block_end + 1))
+        if calls:
+            call_ids = [identifier(call) for call in calls]
+            result_ids = [result_id for _, result_id, _ in results]
+            if (
+                all(call_ids)
+                and all(result_ids)
+                and len(set(call_ids)) == len(call_ids)
+                and len(set(result_ids)) == len(result_ids)
+                and set(result_ids) <= set(call_ids)
+            ):
+                by_id = {result_id: (i, content) for i, result_id, content in results}
+                return [by_id[call_id] for call_id in call_ids if call_id in by_id]
+        return [(i, content) for i, _, content in results]
 
-        call_ids = [call.get("id") or call.get("tool_call_id") for call in calls]
-        result_ids = [
-            message.get("tool_call_id") or message.get("id")
-            for message in messages[block_start : block_end + 1]
-        ]
-        if (
-            any(identifier is None for identifier in call_ids + result_ids)
-            or len(set(call_ids)) != len(call_ids)
-            or len(set(result_ids)) != len(result_ids)
-            or set(call_ids) != set(result_ids)
+    def bridge_to_next_turn(
+        self,
+        previous_prompt_ids: list[int],
+        previous_completion_ids: list[int],
+        new_messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+    ) -> RenderedTokens | None:
+        tool_messages = [m for m in new_messages if m.get("role") == "tool"]
+        if len(tool_messages) > 1 or any(
+            _is_list_of_outputs(m.get("content")) for m in tool_messages
         ):
-            return list(range(block_start, block_end + 1))
-
-        by_id = {
-            identifier: index
-            for identifier, index in zip(result_ids, range(block_start, block_end + 1))
-        }
-        return [by_id[identifier] for identifier in call_ids]
+            # Sorting needs the original assistant's tool-call IDs. Those IDs
+            # cannot be recovered from the raw sampled completion tokens.
+            return None
+        return super().bridge_to_next_turn(
+            previous_prompt_ids, previous_completion_ids, new_messages, tools=tools
+        )
 
     def render(
         self,
@@ -897,15 +1000,6 @@ _IMAGE_TYPES = ("image", "image_url")
 _UNSUPPORTED_MEDIA_TYPES = ("video", "video_url", "audio", "audio_url", "input_audio")
 
 
-def _has_images(messages: list[Message]) -> bool:
-    return any(
-        isinstance(item, dict) and item.get("type") in _IMAGE_TYPES
-        for message in messages
-        if isinstance(message.get("content"), list)
-        for item in message["content"]
-    )
-
-
 class GLM53FlashRenderer(GLM53Renderer):
     """Deterministic message → token renderer for GLM-5.3 Flash.
 
@@ -940,28 +1034,42 @@ class GLM53FlashRenderer(GLM53Renderer):
     @staticmethod
     def _validate_media(messages: list[Message], *, process_multimodal: bool) -> None:
         for message in messages:
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for item in content:
-                if not isinstance(item, dict):
+            contents = (
+                _tool_contents(message.get("content"))
+                if message.get("role") == "tool"
+                else [message.get("content")]
+            )
+            for content in contents:
+                if not isinstance(content, list):
                     continue
-                kind = item.get("type")
-                if kind in _UNSUPPORTED_MEDIA_TYPES:
-                    raise NotImplementedError(
-                        f"GLM53FlashRenderer does not support {kind!r} content"
+                for item in content:
+                    GLM53FlashRenderer._validate_media_part(
+                        item,
+                        role=message.get("role"),
+                        process_multimodal=process_multimodal,
                     )
-                if kind in _IMAGE_TYPES:
-                    if message.get("role") not in ("system", "user", "tool"):
-                        raise NotImplementedError(
-                            "GLM53FlashRenderer does not support images in "
-                            f"{message.get('role')!r} messages"
-                        )
-                    if process_multimodal:
-                        raise NotImplementedError(
-                            "GLM53FlashRenderer renders images only with "
-                            "process_multimodal=False (one placeholder per image)"
-                        )
+
+    @staticmethod
+    def _validate_media_part(
+        item: Any, *, role: str | None, process_multimodal: bool
+    ) -> None:
+        if not isinstance(item, dict):
+            return
+        kind = item.get("type")
+        if kind in _UNSUPPORTED_MEDIA_TYPES:
+            raise NotImplementedError(
+                f"GLM53FlashRenderer does not support {kind!r} content"
+            )
+        if kind in _IMAGE_TYPES:
+            if role not in ("system", "user", "tool"):
+                raise NotImplementedError(
+                    f"GLM53FlashRenderer does not support images in {role!r} messages"
+                )
+            if process_multimodal:
+                raise NotImplementedError(
+                    "GLM53FlashRenderer renders images only with "
+                    "process_multimodal=False (one placeholder per image)"
+                )
 
     def messages_in_prompt_order(self, messages: list[Message]) -> list[Message]:
         """Order raw-media inputs like the full render's tool-result blocks."""
@@ -971,9 +1079,10 @@ class GLM53FlashRenderer(GLM53Renderer):
             if message.get("role") != "tool":
                 ordered.append(message)
             elif i == 0 or messages[i - 1].get("role") != "tool":
-                ordered.extend(
-                    messages[j] for j in self._ordered_tool_indices(messages, i)
-                )
+                for j, content in self._tool_results(messages, i):
+                    result = messages[j].copy()
+                    result["content"] = content
+                    ordered.append(result)
         return ordered
 
     def _emit_body(
@@ -1031,14 +1140,6 @@ class GLM53FlashRenderer(GLM53Renderer):
         process_multimodal: bool = True,
     ) -> RenderedTokens | None:
         self._validate_media(new_messages, process_multimodal=process_multimodal)
-        if (
-            _has_images(new_messages)
-            and sum(message.get("role") == "tool" for message in new_messages) > 1
-        ):
-            # Tool-call IDs live in the assistant history, not the raw sampled
-            # tokens. A full render can establish the placeholder order; this
-            # bridge cannot prove it agrees with the raw-media payload order.
-            return None
         # Logical prompts carry no processed image data, so nothing from
         # ``previous_multi_modal_data`` needs carrying forward.
         return super().bridge_to_next_turn(

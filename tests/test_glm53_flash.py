@@ -10,6 +10,7 @@ the template's untokenized output rather than the processor's expanded ids.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from functools import lru_cache
 
 import httpx
@@ -19,6 +20,7 @@ from openai import AsyncOpenAI
 from renderers.client import generate
 
 MODEL = "zai-org/GLM-5.3-Flash-BF16"
+GLM53_MODELS = ["zai-org/GLM-5.3", MODEL]
 
 IMAGE = {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}
 
@@ -41,16 +43,16 @@ _TOOL_CALL = {
 
 
 @lru_cache(maxsize=None)
-def _load():
+def _load(model=MODEL):
     from renderers import create_renderer
     from renderers.base import load_tokenizer
 
-    tok = load_tokenizer(MODEL)
+    tok = load_tokenizer(model)
     return tok, create_renderer(tok)
 
 
-def _reference(messages, *, tools=None) -> list[int]:
-    tok, _ = _load()
+def _reference(messages, *, tools=None, model=MODEL) -> list[int]:
+    tok, _ = _load(model)
     text = tok.apply_chat_template(
         messages, tools=tools, tokenize=False, add_generation_prompt=True
     )
@@ -272,9 +274,9 @@ def test_assistant_images_are_rejected(process_multimodal):
         )
 
 
-def _parallel_image_results():
+def _parallel_image_results(layout="separate"):
     image_b = {"type": "image_url", "image_url": {"url": "https://example.com/b.png"}}
-    return [
+    messages = [
         {"role": "user", "content": [IMAGE]},
         {
             "role": "assistant",
@@ -295,11 +297,28 @@ def _parallel_image_results():
             "content": [{"type": "text", "text": "A: "}, IMAGE, IMAGE],
         },
     ]
+    if layout == "bundled":
+        return messages[:2] + [
+            {
+                "role": "tool",
+                "content": [
+                    {"id": m["tool_call_id"], "output": m["content"]}
+                    for m in messages[2:]
+                ],
+            }
+        ]
+    if layout == "mixed":
+        messages[2] = {
+            "role": "tool",
+            "content": [{"id": "call_b", "output": messages[2]["content"]}],
+        }
+    return messages
 
 
-def test_bridge_declines_parallel_image_results():
+@pytest.mark.parametrize("layout", ["separate", "bundled", "mixed"])
+def test_bridge_declines_parallel_image_results(layout):
     _, renderer = _load()
-    messages = _parallel_image_results()
+    messages = _parallel_image_results(layout)
     prompt_ids = _render(messages[:1], tools=TOOLS).token_ids
     full_ids = _reference(messages, tools=TOOLS)
     observation = full_ids.index(_token("<|observation|>"), len(prompt_ids))
@@ -318,9 +337,11 @@ def test_bridge_declines_parallel_image_results():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prompt_source", ["render", "prebuilt", "bridge"])
-async def test_generate_keeps_parallel_images_in_prompt_order(prompt_source):
+@pytest.mark.parametrize("layout", ["separate", "bundled", "mixed"])
+async def test_generate_keeps_parallel_images_in_prompt_order(prompt_source, layout):
     tok, renderer = _load()
-    messages = _parallel_image_results()
+    messages = _parallel_image_results(layout)
+    original_messages = deepcopy(messages)
     prompt_ids = None
     if prompt_source == "prebuilt":
         prompt_ids = _reference(messages, tools=TOOLS)
@@ -385,7 +406,7 @@ async def test_generate_keeps_parallel_images_in_prompt_order(prompt_source):
         "https://example.com/b.png",
     ]
     assert len(result["mm_placeholders"]["image"]) == 4
-    assert messages[2]["tool_call_id"] == "call_b"
+    assert messages[: len(original_messages)] == original_messages
 
 
 @pytest.mark.asyncio
@@ -426,3 +447,178 @@ async def test_generate_rejects_assistant_media_before_http(part, prebuilt):
                 process_multimodal=False,
             )
     assert requests == []
+
+
+@pytest.mark.parametrize("model", GLM53_MODELS)
+@pytest.mark.parametrize("layout", ["bundled", "mixed"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "ordered",
+        "partial",
+        "missing-result-id",
+        "unknown-result-id",
+        "duplicate-result-id",
+        "missing-call-id",
+        "duplicate-call-id",
+        "tool-call-id-precedence",
+        "no-calls",
+    ],
+)
+def test_structured_tool_outputs_match_template(model, layout, case):
+    tok, renderer = _load(model)
+    calls = [dict(_TOOL_CALL, id=f"call_{i}") for i in range(3)]
+    entries = [
+        {"id": "call_2", "output": None},
+        {"id": "call_0", "output": "FIRST_SENTINEL λ"},
+        {"id": "call_1", "output": [{"type": "text", "text": "SECOND_SENTINEL"}]},
+    ]
+    if case == "partial":
+        calls.insert(0, dict(_TOOL_CALL, id="not_returned"))
+    elif case == "missing-result-id":
+        entries[0].pop("id")
+    elif case == "unknown-result-id":
+        entries[0]["id"] = "unknown"
+    elif case == "duplicate-result-id":
+        entries[0]["id"] = "call_0"
+    elif case == "missing-call-id":
+        calls[0].pop("id")
+    elif case == "duplicate-call-id":
+        calls[0]["id"] = "call_1"
+    elif case == "tool-call-id-precedence":
+        for call in calls:
+            call["tool_call_id"], call["id"] = call["id"], "ignored"
+        for entry in entries:
+            entry["tool_call_id"], entry["id"] = entry["id"], "ignored"
+    elif case == "no-calls":
+        calls = []
+    messages = [
+        {"role": "user", "content": "Run the tools."},
+        {"role": "assistant", "content": "", "tool_calls": calls},
+        {"role": "tool", "content": entries},
+    ]
+    second_owner = 2
+    if layout == "mixed":
+        messages[2]["content"] = entries[:2]
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": entries[2]["id"],
+                "content": entries[2]["output"],
+            }
+        )
+        if "tool_call_id" in entries[2]:
+            messages[3]["tool_call_id"] = entries[2]["tool_call_id"]
+        second_owner = 3
+    original = deepcopy(messages)
+    kwargs = {"process_multimodal": False} if model == MODEL else {}
+    rendered = renderer.render(
+        messages, tools=TOOLS, add_generation_prompt=True, **kwargs
+    )
+    assert rendered.token_ids == _reference(messages, tools=TOOLS, model=model)
+    assert rendered.token_ids.count(_token("<tool_response>")) == 3
+    for owner, text in [(2, "FIRST_SENTINEL λ"), (second_owner, "SECOND_SENTINEL")]:
+        body_ids = [
+            token_id
+            for token_id, index, content in zip(
+                rendered.token_ids, rendered.message_indices, rendered.is_content
+            )
+            if index == owner and content
+        ]
+        assert text in tok.decode(body_ids)
+    observation = rendered.token_ids.index(tok.convert_tokens_to_ids("<|observation|>"))
+    assert rendered.message_indices[observation] == 1
+    assert rendered.sampled_mask[observation]
+    assert messages == original
+    prompt_ids = renderer.render(
+        messages[:1], tools=TOOLS, add_generation_prompt=True, **kwargs
+    ).token_ids
+    completion_ids = rendered.token_ids[len(prompt_ids) : observation + 1]
+    assert (
+        renderer.bridge_to_next_turn(
+            prompt_ids, completion_ids, messages[2:], tools=TOOLS, **kwargs
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("model", GLM53_MODELS)
+@pytest.mark.parametrize("output", ["", None, 0, False, {"key": "value"}, ["a", "b"]])
+def test_structured_scalar_outputs_match_template(model, output):
+    _, renderer = _load(model)
+    messages = _tool_turn([{"id": "call_0", "output": output}])
+    kwargs = {"process_multimodal": False} if model == MODEL else {}
+    assert renderer.render(
+        messages, tools=TOOLS, add_generation_prompt=True, **kwargs
+    ).token_ids == _reference(messages, tools=TOOLS, model=model)
+
+
+@pytest.mark.parametrize("model", GLM53_MODELS)
+@pytest.mark.parametrize("bundled", [False, True])
+@pytest.mark.parametrize("enveloped", [False, True])
+def test_tool_reference_outputs_match_template(model, bundled, enveloped):
+    tok, renderer = _load(model)
+    specs = [
+        {
+            "name": "screenshot",
+            "description": "Capture λ",
+            "parameters": {},
+            "defer_loading": True,
+            "strict": True,
+        },
+        {"name": "other", "description": "Available", "parameters": {}},
+    ]
+    tools = (
+        [{"type": "function", "function": spec} for spec in specs]
+        if enveloped
+        else specs
+    )
+    refs = [{"type": "tool_reference", "name": "screenshot"}]
+    messages = _tool_turn([{"id": "call_0", "output": refs}] if bundled else refs)
+    kwargs = {"process_multimodal": False} if model == MODEL else {}
+    rendered = renderer.render(
+        messages, tools=tools, add_generation_prompt=True, **kwargs
+    )
+    assert rendered.token_ids == _reference(messages, tools=tools, model=model)
+    assert not any(
+        sampled or content
+        for index, sampled, content in zip(
+            rendered.message_indices, rendered.sampled_mask, rendered.is_content
+        )
+        if index == 2
+    )
+    if not bundled:
+        prompt = renderer.render(
+            messages[:1], tools=tools, add_generation_prompt=True, **kwargs
+        ).token_ids
+        stop = rendered.token_ids.index(tok.convert_tokens_to_ids("<|observation|>"))
+        bridged = renderer.bridge_to_next_turn(
+            prompt,
+            rendered.token_ids[len(prompt) : stop + 1],
+            messages[2:],
+            tools=tools,
+            **kwargs,
+        )
+        assert bridged is not None
+        assert bridged.token_ids == rendered.token_ids
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        IMAGE,
+        {"type": "video_url", "video_url": {"url": "https://example.com/a.mp4"}},
+        {"type": "input_audio", "input_audio": {"data": "", "format": "wav"}},
+    ],
+)
+def test_nested_media_validation(part):
+    _, renderer = _load()
+    messages = _tool_turn([{"id": "call_0", "output": [part]}])
+    if part == IMAGE:
+        with pytest.raises(NotImplementedError, match="process_multimodal=False"):
+            renderer.render(messages)
+    else:
+        with pytest.raises(NotImplementedError, match=part["type"]):
+            _render(messages)
+        with pytest.raises(NotImplementedError, match=part["type"]):
+            renderer.bridge_to_next_turn([], [], messages[2:], process_multimodal=False)

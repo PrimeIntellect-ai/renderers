@@ -92,7 +92,7 @@ def test_every_reasoning_renderer_preserves_unfinished_reasoning(name, stop):
 
 
 @pytest.mark.parametrize("name", sorted(set(_CASES) - {"llama-3", "default"}))
-def test_every_reasoning_bridge_preserves_prefix_or_refuses_sampled_stop(name):
+def test_every_reasoning_bridge_preserves_prefix_and_sampled_stop(name):
     tok, renderer = _renderer(name)
     prompt, incomplete, _ = _thinking_stream(name, tok, renderer)
     new_messages = [{"role": "user", "content": "Next question."}]
@@ -110,17 +110,34 @@ def test_every_reasoning_bridge_preserves_prefix_or_refuses_sampled_stop(name):
     assert bridge.token_ids[prefix_len : prefix_len + len(close_ids)] == close_ids
     assert not any(bridge.is_content[prefix_len : prefix_len + len(close_ids)])
     for stop in renderer.get_stop_token_ids():
-        stopped_bridge = renderer.bridge_to_next_turn(
-            prompt, incomplete + [stop], new_messages
-        )
-        # Harmony's handoff token closes analysis; its return token does not.
-        if name == "gpt-oss" and [stop] == _encode(tok, "<|call|>"):
-            assert stopped_bridge is not None
-            assert stopped_bridge.token_ids[: prefix_len + 1] == prompt + incomplete + [
-                stop
-            ]
-        else:
+        stopped = incomplete + [stop]
+        stopped_bridge = renderer.bridge_to_next_turn(prompt, stopped, new_messages)
+        if (name, tok.convert_ids_to_tokens(stop)) in _STOPS_THAT_REFUSE:
             assert stopped_bridge is None
+            continue
+        # A sampled stop already ended the turn, so the bridge extends it exactly
+        # as sampled, adds no reasoning close, and continues as after a turn
+        # whose reasoning was closed.
+        assert stopped_bridge is not None
+        assert stopped_bridge.token_ids[: prefix_len + 1] == prompt + stopped
+        assert not any(stopped_bridge.sampled_mask[prefix_len + 1 :])
+        closed = incomplete + close_ids + [stop]
+        closed_bridge = renderer.bridge_to_next_turn(prompt, closed, new_messages)
+        assert closed_bridge is not None
+        tail = closed_bridge.token_ids[len(prompt) + len(closed) :]
+        assert stopped_bridge.token_ids[prefix_len + 1 :] == tail
+
+
+# Stops these formats don't extend after open reasoning: Gemma's end of sequence
+# and tool-response opener aren't turn closes, and Harmony's return and
+# Inkling's stops are handled by their own grammar.
+_STOPS_THAT_REFUSE = {
+    ("gemma4", "<|tool_response>"),
+    ("gemma4", "<eos>"),
+    ("gpt-oss", "<|return|>"),
+    ("inkling", "<|content_model_end_sampling|>"),
+    ("inkling", "<|endoftext|>"),
+}
 
 
 def test_qwen35_prompt_context_overrides_renderer_mode():

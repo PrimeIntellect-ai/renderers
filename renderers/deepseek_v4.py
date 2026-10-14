@@ -831,9 +831,10 @@ class DeepSeekV4Renderer:
         boundary = self.parse_response(
             previous_completion_ids, prompt_ids=previous_prompt_ids, tools=tools
         )
-        if boundary.reasoning_complete is False:
-            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
-                return None
+        # A sampled stop token already ended the turn: extend it as sampled.
+        if boundary.reasoning_complete is False and not any(
+            t in self.get_stop_token_ids() for t in previous_completion_ids
+        ):
             previous_completion_ids = [*previous_completion_ids, self._think_end]
 
         if should_rerender_for_thinking_retention(

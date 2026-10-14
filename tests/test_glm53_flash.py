@@ -12,7 +12,11 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import httpx
 import pytest
+from openai import AsyncOpenAI
+
+from renderers.client import generate
 
 MODEL = "zai-org/GLM-5.3-Flash-BF16"
 
@@ -246,6 +250,179 @@ def test_images_require_logical_prompt():
     ],
     ids=["video", "audio"],
 )
-def test_video_and_audio_are_rejected(part):
+@pytest.mark.parametrize("role", ["system", "user", "assistant", "tool"])
+def test_video_and_audio_are_rejected(part, role):
+    _, renderer = _load()
+    messages = [{"role": role, "content": [part]}]
     with pytest.raises(NotImplementedError, match=part["type"]):
-        _render([{"role": "user", "content": [part]}])
+        _render(messages)
+    with pytest.raises(NotImplementedError, match=part["type"]):
+        renderer.bridge_to_next_turn([], [], messages, process_multimodal=False)
+
+
+@pytest.mark.parametrize("process_multimodal", [False, True])
+def test_assistant_images_are_rejected(process_multimodal):
+    _, renderer = _load()
+    messages = [{"role": "assistant", "content": [IMAGE]}]
+    with pytest.raises(NotImplementedError, match="images in 'assistant' messages"):
+        renderer.render(messages, process_multimodal=process_multimodal)
+    with pytest.raises(NotImplementedError, match="images in 'assistant' messages"):
+        renderer.bridge_to_next_turn(
+            [], [], messages, process_multimodal=process_multimodal
+        )
+
+
+def _parallel_image_results():
+    image_b = {"type": "image_url", "image_url": {"url": "https://example.com/b.png"}}
+    return [
+        {"role": "user", "content": [IMAGE]},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                dict(_TOOL_CALL, id="call_a"),
+                dict(_TOOL_CALL, id="call_b"),
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_b",
+            "content": [{"type": "text", "text": "B: "}, image_b],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_a",
+            "content": [{"type": "text", "text": "A: "}, IMAGE, IMAGE],
+        },
+    ]
+
+
+def test_bridge_declines_parallel_image_results():
+    _, renderer = _load()
+    messages = _parallel_image_results()
+    prompt_ids = _render(messages[:1], tools=TOOLS).token_ids
+    full_ids = _reference(messages, tools=TOOLS)
+    observation = full_ids.index(_token("<|observation|>"), len(prompt_ids))
+    completion_ids = full_ids[len(prompt_ids) : observation + 1]
+    assert (
+        renderer.bridge_to_next_turn(
+            prompt_ids,
+            completion_ids,
+            messages[2:],
+            tools=TOOLS,
+            process_multimodal=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt_source", ["render", "prebuilt", "bridge"])
+async def test_generate_keeps_parallel_images_in_prompt_order(prompt_source):
+    tok, renderer = _load()
+    messages = _parallel_image_results()
+    prompt_ids = None
+    if prompt_source == "prebuilt":
+        prompt_ids = _reference(messages, tools=TOOLS)
+    elif prompt_source == "bridge":
+        prior_prompt = _render(messages, tools=TOOLS).token_ids
+        completion = tok.encode("</think>Done.<|user|>", add_special_tokens=False)
+        new_messages = [{"role": "user", "content": "Continue."}]
+        bridged = renderer.bridge_to_next_turn(
+            prior_prompt,
+            completion,
+            new_messages,
+            tools=TOOLS,
+            process_multimodal=False,
+        )
+        assert bridged is not None
+        prompt_ids = bridged.token_ids
+        messages += [{"role": "assistant", "content": "Done."}, *new_messages]
+
+    requests = []
+
+    def respond(request):
+        import json
+
+        body = json.loads(request.content)
+        requests.append(body)
+        expanded = []
+        placeholders = []
+        for token_id in body["token_ids"]:
+            if token_id == _token("<|image|>"):
+                placeholders.append({"offset": len(expanded), "length": 2})
+                expanded.append(token_id)
+            expanded.append(token_id)
+        return httpx.Response(
+            200,
+            json={
+                "prompt_token_ids": expanded,
+                "mm_placeholders": {"image": placeholders},
+                "choices": [{"token_ids": [], "logprobs": {"content": []}}],
+            },
+        )
+
+    async with AsyncOpenAI(
+        api_key="replay",
+        base_url="http://replay/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    ) as client:
+        result = await generate(
+            client=client,
+            renderer=renderer,
+            model=MODEL,
+            messages=messages,
+            tools=TOOLS,
+            prompt_ids=prompt_ids,
+            process_multimodal=False,
+        )
+
+    assert requests[0]["token_ids"] == _reference(messages, tools=TOOLS)
+    assert [part["url"] for part in requests[0]["content_parts"]] == [
+        "https://example.com/a.png",
+        "https://example.com/a.png",
+        "https://example.com/a.png",
+        "https://example.com/b.png",
+    ]
+    assert len(result["mm_placeholders"]["image"]) == 4
+    assert messages[2]["tool_call_id"] == "call_b"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prebuilt", [False, True])
+@pytest.mark.parametrize(
+    "part",
+    [
+        IMAGE,
+        {"type": "video_url", "video_url": {"url": "https://example.com/a.mp4"}},
+        {"type": "input_audio", "input_audio": {"data": "", "format": "wav"}},
+    ],
+)
+async def test_generate_rejects_assistant_media_before_http(part, prebuilt):
+    _, renderer = _load()
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": [part]},
+        {"role": "user", "content": [IMAGE]},
+    ]
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        raise AssertionError("Unsupported media must be rejected before HTTP")
+
+    async with AsyncOpenAI(
+        api_key="replay",
+        base_url="http://replay/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    ) as client:
+        with pytest.raises(NotImplementedError, match="does not support"):
+            await generate(
+                client=client,
+                renderer=renderer,
+                model=MODEL,
+                messages=messages,
+                prompt_ids=[1, 2, 3] if prebuilt else None,
+                process_multimodal=False,
+            )
+    assert requests == []

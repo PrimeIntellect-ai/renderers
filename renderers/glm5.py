@@ -937,6 +937,45 @@ class GLM53FlashRenderer(GLM53Renderer):
     def mm_token_type_id_map(self) -> dict[int, int]:
         return {self._image: 1}
 
+    @staticmethod
+    def _validate_media(messages: list[Message], *, process_multimodal: bool) -> None:
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                kind = item.get("type")
+                if kind in _UNSUPPORTED_MEDIA_TYPES:
+                    raise NotImplementedError(
+                        f"GLM53FlashRenderer does not support {kind!r} content"
+                    )
+                if kind in _IMAGE_TYPES:
+                    if message.get("role") not in ("system", "user", "tool"):
+                        raise NotImplementedError(
+                            "GLM53FlashRenderer does not support images in "
+                            f"{message.get('role')!r} messages"
+                        )
+                    if process_multimodal:
+                        raise NotImplementedError(
+                            "GLM53FlashRenderer renders images only with "
+                            "process_multimodal=False (one placeholder per image)"
+                        )
+
+    def messages_in_prompt_order(self, messages: list[Message]) -> list[Message]:
+        """Order raw-media inputs like the full render's tool-result blocks."""
+        self._validate_media(messages, process_multimodal=False)
+        ordered: list[Message] = []
+        for i, message in enumerate(messages):
+            if message.get("role") != "tool":
+                ordered.append(message)
+            elif i == 0 or messages[i - 1].get("role") != "tool":
+                ordered.extend(
+                    messages[j] for j in self._ordered_tool_indices(messages, i)
+                )
+        return ordered
+
     def _emit_body(
         self, content: Any, msg_idx: int, *, emit_special, emit_text
     ) -> None:
@@ -966,10 +1005,6 @@ class GLM53FlashRenderer(GLM53Renderer):
                 emit_special(
                     self._end_of_image, msg_idx, is_sampled=False, is_content=False
                 )
-            elif item.get("type") in _UNSUPPORTED_MEDIA_TYPES:
-                raise NotImplementedError(
-                    f"GLM53FlashRenderer does not support {item['type']!r} content"
-                )
         emit_text(text, msg_idx, is_sampled=False, is_content=True)
 
     def render(
@@ -980,10 +1015,7 @@ class GLM53FlashRenderer(GLM53Renderer):
         add_generation_prompt: bool = False,
         process_multimodal: bool = True,
     ) -> RenderedTokens:
-        if process_multimodal and _has_images(messages):
-            raise NotImplementedError(
-                "GLM53FlashRenderer renders images only with process_multimodal=False (one placeholder per image)"
-            )
+        self._validate_media(messages, process_multimodal=process_multimodal)
         return super().render(
             messages, tools=tools, add_generation_prompt=add_generation_prompt
         )
@@ -998,10 +1030,15 @@ class GLM53FlashRenderer(GLM53Renderer):
         previous_multi_modal_data: MultiModalData | None = None,
         process_multimodal: bool = True,
     ) -> RenderedTokens | None:
-        if process_multimodal and _has_images(new_messages):
-            raise NotImplementedError(
-                "GLM53FlashRenderer renders images only with process_multimodal=False (one placeholder per image)"
-            )
+        self._validate_media(new_messages, process_multimodal=process_multimodal)
+        if (
+            _has_images(new_messages)
+            and sum(message.get("role") == "tool" for message in new_messages) > 1
+        ):
+            # Tool-call IDs live in the assistant history, not the raw sampled
+            # tokens. A full render can establish the placeholder order; this
+            # bridge cannot prove it agrees with the raw-media payload order.
+            return None
         # Logical prompts carry no processed image data, so nothing from
         # ``previous_multi_modal_data`` needs carrying forward.
         return super().bridge_to_next_turn(

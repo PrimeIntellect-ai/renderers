@@ -317,7 +317,9 @@ async def generate(
         "token_ids": prompt_ids,
         "sampling_params": sp,
     }
-    content_parts = _content_parts(messages) if not process_multimodal else None
+    content_parts = (
+        _content_parts(messages, renderer=renderer) if not process_multimodal else None
+    )
     features = (
         _build_mm_features(renderer, mm_data)
         if process_multimodal and mm_data and not mm_data.is_empty()
@@ -434,8 +436,15 @@ _MEDIA_URL_TYPES = {
 }
 
 
-def _content_parts(messages: list[Message]) -> list[dict[str, Any]]:
+def _content_parts(
+    messages: list[Message], *, renderer: Renderer
+) -> list[dict[str, Any]]:
     """Flatten raw media in prompt order for vLLM's token generate endpoint."""
+    # Some templates reorder tool results. Use the same order for raw media,
+    # including when the caller supplies a prebuilt prompt and skips rendering.
+    order_messages = getattr(renderer, "messages_in_prompt_order", None)
+    if order_messages is not None:
+        messages = order_messages(messages)
     parts: list[dict[str, Any]] = []
     for message in messages:
         content = message.get("content")

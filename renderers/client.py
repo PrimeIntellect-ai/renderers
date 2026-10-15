@@ -12,7 +12,7 @@ import json
 import logging
 import math
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import numpy as np
@@ -27,6 +27,9 @@ from renderers.base import (
     ToolSpec,
     _require_transformers,
 )
+
+if TYPE_CHECKING:
+    from vllm.multimodal.inputs import MultiModalKwargsItems
 
 _request_logger = logging.getLogger("renderers.client")
 ROUTED_EXPERTS_DATA_PREFIX = b'"routed_experts":{"data":"'
@@ -339,16 +342,29 @@ async def generate(
     content_parts = (
         _content_parts(messages, renderer=renderer) if not process_multimodal else None
     )
-    features = (
-        _build_mm_features(renderer, mm_data)
-        if process_multimodal and mm_data and not mm_data.is_empty()
-        else None
-    )
     if content_parts:
         body["content_parts"] = content_parts
         body["return_token_ids"] = True
-    if features is not None:
-        body["features"] = features
+    if process_multimodal and mm_data and not mm_data.is_empty():
+        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+            encode_mm_kwargs_item,
+        )
+
+        features = build_mm_features(renderer, mm_data)
+        body["features"] = {
+            "mm_hashes": features["mm_hashes"],
+            "mm_placeholders": {
+                modality: [
+                    {"offset": span.offset, "length": span.length} for span in spans
+                ]
+                for modality, spans in features["mm_placeholders"].items()
+            },
+            "kwargs_data": {
+                modality: [encode_mm_kwargs_item(item) for item in items]
+                for modality, items in features["mm_kwargs"].items()
+            }
+            or None,
+        }
     if cache_salt is not None:
         body["cache_salt"] = cache_salt
     if priority is not None:
@@ -490,31 +506,14 @@ def _content_parts(
     return parts
 
 
-def _build_mm_features(
-    renderer: Renderer,
-    mm_data: MultiModalData,
-) -> dict[str, Any] | None:
-    """Serialize ``MultiModalData`` to vLLM's ``/inference/v1/generate`` features payload.
+def build_mm_features(renderer: Renderer, mm_data: MultiModalData) -> dict[str, Any]:
+    """Build native vLLM ``mm_input`` arguments without serializing image features.
 
-    vLLM's ``MultiModalFeatures`` carries three things: hashes (for cache
-    lookup), placeholder positions (so the engine knows where in the
-    token stream each item lives), and per-item ``MultiModalKwargsItem``
-    base64-encoded. The encoding requires vLLM-side type info — what
-    fields belong to each modality, how they batch — and is currently
-    model-family specific. For now we dispatch on the renderer class;
-    extend the dispatch table as more multimodal renderers land.
-
-    NOTE — future engine pluggability: this encoder is vLLM-specific
-    (uses ``vllm.multimodal.inputs.MultiModalKwargsItems``,
-    ``vllm.entrypoints.scale_out.token_in_token_out.mm_serde.encode_mm_kwargs_item``, and
-    ``_create_qwen2vl_field_factory``). When a second inference engine
-    arrives (SGLang, MAX, ...) the renderer client should be parameterized
-    on engine: either (a) move the encoder onto the renderer as
-    ``encode_mm_for_<engine>(mm_data)`` methods, or (b) accept an
-    ``Encoder`` strategy at the ``generate(...)`` call site. The data type
-    (``MultiModalData``) is already framework-agnostic and does not need
-    to change. Don't pre-build the abstraction with one engine in tree.
+    Model-specific field factories describe how processor tensors batch. Keep their
+    native kwargs items here; only the HTTP client encodes them for the wire.
     """
+    from vllm.multimodal.inputs import PlaceholderRange
+
     from renderers.gemma4 import Gemma4Renderer
     from renderers.nemotron3 import Nemotron35Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
@@ -526,27 +525,34 @@ def _build_mm_features(
     # via the shared Qwen2-VL field factory. ``spatial_merge_size=2`` is
     # the family default and matches every Qwen-VL processor in tree.
     if issubclass(renderer_cls, (Qwen3VLRenderer, Qwen35Renderer)):
-        return _build_qwen_vl_features(mm_data, spatial_merge_size=2)
-    if issubclass(renderer_cls, Gemma4Renderer):
-        return _build_gemma4_features(mm_data)
-    if issubclass(renderer_cls, Nemotron35Renderer):
-        return _build_nemotron35_features(mm_data)
+        kwargs_items = _build_qwen_vl_kwargs(mm_data, spatial_merge_size=2)
+    elif issubclass(renderer_cls, Gemma4Renderer):
+        kwargs_items = _build_gemma4_kwargs(mm_data)
+    elif issubclass(renderer_cls, Nemotron35Renderer):
+        kwargs_items = _build_nemotron35_kwargs(mm_data)
+    else:
+        raise NotImplementedError(
+            f"vLLM multimodal features not implemented for {renderer_cls.__name__}."
+        )
+    return {
+        "mm_kwargs": kwargs_items,
+        "mm_hashes": mm_data.mm_hashes,
+        "mm_placeholders": {
+            modality: [
+                PlaceholderRange(offset=span.offset, length=span.length)
+                for span in spans
+            ]
+            for modality, spans in mm_data.mm_placeholders.items()
+        },
+    }
 
-    raise NotImplementedError(
-        f"Multimodal serialization not implemented for {renderer_cls.__name__}. "
-        "Add a dispatch branch in renderers.client._build_mm_features."
-    )
 
-
-def _build_nemotron35_features(mm_data: MultiModalData) -> dict[str, Any]:
-    """Encode dynamic-resolution Nemotron image inputs for vLLM."""
-    _require_transformers("Encoding Nemotron 3.5 multimodal features for vLLM")
+def _build_nemotron35_kwargs(mm_data: MultiModalData) -> MultiModalKwargsItems:
+    """Build native kwargs for dynamic-resolution Nemotron image inputs."""
+    _require_transformers("Building Nemotron 3.5 multimodal features for vLLM")
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature
-        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
-            encode_mm_kwargs_item,
-        )
         from vllm.multimodal.inputs import (
             MultiModalFieldConfig,
             MultiModalKwargsItems,
@@ -556,11 +562,6 @@ def _build_nemotron35_features(mm_data: MultiModalData) -> dict[str, Any]:
             "Nemotron 3.5 multimodal generate requires vLLM and torch."
         ) from exc
 
-    out: dict[str, Any] = {
-        "mm_hashes": {},
-        "mm_placeholders": {},
-        "kwargs_data": {},
-    }
     image_items = mm_data.mm_items.get("image") or []
     if image_items:
         pixel_values_flat = []
@@ -596,36 +597,22 @@ def _build_nemotron35_features(mm_data: MultiModalData) -> dict[str, Any]:
             ),
             "imgs_sizes": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         }
-        kwargs_items = MultiModalKwargsItems.from_hf_inputs(hf_inputs, field_config)
-        out["kwargs_data"]["image"] = [
-            encode_mm_kwargs_item(item) for item in kwargs_items["image"]
-        ]
-        out["mm_hashes"]["image"] = list(mm_data.mm_hashes.get("image") or [])
-        out["mm_placeholders"]["image"] = [
-            {"offset": placeholder.offset, "length": placeholder.length}
-            for placeholder in mm_data.mm_placeholders.get("image") or []
-        ]
-
-    if not any(out["kwargs_data"].values()):
-        out["kwargs_data"] = None
-    return out
+        return MultiModalKwargsItems.from_hf_inputs(hf_inputs, field_config)
+    return MultiModalKwargsItems({})
 
 
-def _build_gemma4_features(mm_data: MultiModalData) -> dict[str, Any]:
-    """vLLM features payload for Gemma 4 image inputs.
+def _build_gemma4_kwargs(mm_data: MultiModalData) -> MultiModalKwargsItems:
+    """Native vLLM kwargs for Gemma 4 image inputs.
 
     Hugging Face names the position field ``image_position_ids`` while
     vLLM's Gemma 4 processor schema calls it ``pixel_position_ids``. Keep
     renderer output faithful to the HF processor and translate at this
     engine-specific boundary.
     """
-    _require_transformers("Encoding Gemma 4 multimodal features for vLLM")
+    _require_transformers("Building Gemma 4 multimodal features for vLLM")
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature
-        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
-            encode_mm_kwargs_item,
-        )
         from vllm.multimodal.inputs import (
             MultiModalFieldConfig,
             MultiModalKwargsItems,
@@ -636,11 +623,6 @@ def _build_gemma4_features(mm_data: MultiModalData) -> dict[str, Any]:
             "a vLLM release with Gemma 4 support and `torch`."
         ) from exc
 
-    out: dict[str, Any] = {
-        "mm_hashes": {},
-        "mm_placeholders": {},
-        "kwargs_data": {},
-    }
     image_items = mm_data.mm_items.get("image") or []
     if image_items:
         pixel_values = torch.cat(
@@ -660,41 +642,18 @@ def _build_gemma4_features(mm_data: MultiModalData) -> dict[str, Any]:
             "pixel_values": MultiModalFieldConfig.batched("image"),
             "pixel_position_ids": MultiModalFieldConfig.batched("image"),
         }
-        kwargs_items = MultiModalKwargsItems.from_hf_inputs(hf_inputs, field_config)
-        out["kwargs_data"]["image"] = [
-            encode_mm_kwargs_item(item) for item in kwargs_items["image"]
-        ]
-        out["mm_hashes"]["image"] = list(mm_data.mm_hashes.get("image") or [])
-        out["mm_placeholders"]["image"] = [
-            {"offset": placeholder.offset, "length": placeholder.length}
-            for placeholder in mm_data.mm_placeholders.get("image") or []
-        ]
-
-    if not any(out["kwargs_data"].values()):
-        out["kwargs_data"] = None
-    return out
+        return MultiModalKwargsItems.from_hf_inputs(hf_inputs, field_config)
+    return MultiModalKwargsItems({})
 
 
-def _build_qwen_vl_features(
+def _build_qwen_vl_kwargs(
     mm_data: MultiModalData, *, spatial_merge_size: int
-) -> dict[str, Any]:
-    """vLLM features payload for the Qwen-VL family (Qwen2-VL / Qwen3-VL).
-
-    Stacks per-image processor outputs back into a batched ``BatchFeature``,
-    runs the Qwen2-VL field factory (shared across the family), wraps as
-    ``MultiModalKwargsItems``, base64-encodes each item, and assembles a
-    JSON-serializable dict matching vLLM's ``MultiModalFeatures`` schema.
-
-    Returns ``None`` semantics live one level up — this helper assumes
-    the caller already verified ``mm_data`` is non-empty.
-    """
-    _require_transformers("Encoding Qwen-VL multimodal features for vLLM")
+) -> MultiModalKwargsItems:
+    """Batch Qwen-VL processor tensors using vLLM's shared Qwen2-VL field factory."""
+    _require_transformers("Building Qwen-VL multimodal features for vLLM")
     try:
         import torch
         from transformers.feature_extraction_utils import BatchFeature
-        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
-            encode_mm_kwargs_item,
-        )
         from vllm.model_executor.models.qwen2_vl import _create_qwen2vl_field_factory
         from vllm.multimodal.inputs import MultiModalKwargsItems
     except ImportError as exc:
@@ -703,12 +662,6 @@ def _build_qwen_vl_features(
             "and `torch` to encode the features payload. Install vLLM in this "
             "environment, or pre-build features upstream."
         ) from exc
-
-    out: dict[str, Any] = {
-        "mm_hashes": {},
-        "mm_placeholders": {},
-        "kwargs_data": {},
-    }
 
     image_items = mm_data.mm_items.get("image") or []
     if image_items:
@@ -725,19 +678,5 @@ def _build_qwen_vl_features(
             data={"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}
         )
         config = _create_qwen2vl_field_factory(spatial_merge_size)(hf_inputs)
-        kwargs_items = MultiModalKwargsItems.from_hf_inputs(hf_inputs, config)
-        encoded = [encode_mm_kwargs_item(it) for it in kwargs_items["image"]]
-        out["kwargs_data"]["image"] = encoded
-        out["mm_hashes"]["image"] = list(mm_data.mm_hashes.get("image") or [])
-        out["mm_placeholders"]["image"] = [
-            {"offset": p.offset, "length": p.length}
-            for p in mm_data.mm_placeholders.get("image") or []
-        ]
-
-    # If kwargs_data is empty across all modalities, drop the key so vLLM
-    # falls back to the hash-only (cache-hit) path. Otherwise hand it the
-    # full payload.
-    if not any(out["kwargs_data"].values()):
-        out["kwargs_data"] = None
-
-    return out
+        return MultiModalKwargsItems.from_hf_inputs(hf_inputs, config)
+    return MultiModalKwargsItems({})

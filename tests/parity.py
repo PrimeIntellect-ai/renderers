@@ -265,6 +265,9 @@ MODEL_CATALOG = (
         excluded={"multi-step-tool-cycle"},
     ),
     _model("tencent/Hy3", bridge=True),
+    _model(
+        "meta-models/Muse-Glimmer-30B", bridge=True, extra_suites={"tool-arg-types"}
+    ),
     _model("thinkingmachines/Inkling", bridge=True),
     _model("thinkingmachines/Inkling-Small", bridge=True),
     _model(
@@ -710,6 +713,9 @@ KWARG_VALUES: Mapping[str, tuple[Any, ...]] = {
     "conversation_start_date": ("2025-01-15", None),
     "date_string": ("26 Jul 2024", "01 Jan 2030"),
     "tools_in_user_message": (True, False),
+    "reasoning_strength": ("low", "medium", "high", "xhigh"),
+    "knowledge_cutoff": ("2026-01-04", "2025-06-30"),
+    "current_date": ("2026-10-16", None),
 }
 
 

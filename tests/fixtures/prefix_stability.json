@@ -787,6 +787,16 @@
       "scenario": "later-user-with-reasoning",
       "stable": true,
       "reason": "Stable control: these tokens must remain a prefix."
+    },
+    {
+      "id": "muse-glimmer-default",
+      "model": "meta-models/Muse-Glimmer-30B",
+      "config": {
+        "name": "muse-glimmer"
+      },
+      "scenario": "reused-tool-call-id",
+      "stable": false,
+      "reason": "A reused tool-call ID changes a historical tool response name."
     }
   ]
 }

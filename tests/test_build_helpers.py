@@ -20,6 +20,10 @@ def test_build_mm_token_type_ids_marks_ranges():
     assert ids == [0, 0, 1, 1, 1, 0, 0, 2, 2, 0]
 
 
+# Chat templates that drop an assistant's text when the message has tool calls.
+_DROPS_TOOL_CALL_CONTENT = {"meta-models/Muse-Glimmer-30B"}
+
+
 def _expected(tokenizer, messages, **kwargs):
     return render_reference(tokenizer, messages, **kwargs)
 
@@ -167,6 +171,10 @@ def test_build_training_sample_message_loss_mask(
         (3, "New answer."),
         (5, "Final answer."),
     ]:
+        if tool_turn and index == 1 and model_name in _DROPS_TOOL_CALL_CONTENT:
+            # The template renders only the tool calls of this message.
+            assert text not in tokenizer.decode(sample.token_ids)
+            continue
         assert (text in trained) == bool(selection[index])
     # Closing tokens are assistant output, including markers emitted while
     # rendering the next user/tool message. Its body keeps its own owner.

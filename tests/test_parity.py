@@ -58,12 +58,14 @@ def _matrix():
                     )
 
 
-@lru_cache(maxsize=None)
+# The matrix groups all scenarios/settings for each checkpoint together.
+# Retain only the current checkpoint and configuration, not the whole catalog.
+@lru_cache(maxsize=1)
 def _tokenizer(model: str):
     return load_tokenizer(model)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1)
 def _renderer(model: str, renderer_name: str, items: tuple[tuple[str, Any], ...]):
     tokenizer = _tokenizer(model)
     resolved = (
@@ -220,3 +222,9 @@ def test_renderer_matches_reference(
         f"from {case.oracle} oracle (got {len(got)} tokens, expected "
         f"{len(expected)})"
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tokenizer.cache_clear()
+    _renderer.cache_clear()

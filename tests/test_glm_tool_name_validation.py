@@ -179,3 +179,8 @@ def test_openai_envelope_tools_are_recognized(model, renderer_name):
         wrapped,
     )
     assert _statuses(parsed) == [ToolCallParseStatus.OK]
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _load.cache_clear()

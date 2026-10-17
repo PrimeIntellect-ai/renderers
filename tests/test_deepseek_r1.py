@@ -83,3 +83,9 @@ def test_v3_emits_content_verbatim_ignoring_reasoning():
 
     assert got == expected
     assert "should be ignored" not in tok.decode(got)
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _r1.cache_clear()
+    _v3.cache_clear()

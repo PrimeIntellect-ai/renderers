@@ -163,6 +163,11 @@ MODEL_CATALOG = (
         bridge=True,
         extra_suites={"tool-arg-types", "glm-tool-names"},
     ),
+    _model(
+        "zai-org/GLM-5.3-Flash-BF16",
+        bridge=True,
+        extra_suites={"tool-arg-types", "glm-tool-names"},
+    ),
     _model("zai-org/GLM-4.7-Flash"),
     _model(
         "THUDM/GLM-4.5-Air",

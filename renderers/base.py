@@ -782,8 +782,9 @@ class Renderer(Protocol):
         Pass the exact ``prompt_ids`` used for sampling whenever available.
         This identifies reasoning prefilled by the prompt, including Gemma's
         post-tool thought channel and partial assistant prefixes. Omitting it,
-        passing None, and passing [] all parse a self-contained completion;
-        generation settings do not imply an initial reasoning channel.
+        passing None, and passing [] are equivalent: the format's completion
+        grammar applies without prompt context. GLM and DeepSeek V4 also use
+        the configured generation mode to determine the initial channel.
 
         ``tools`` is the same list passed to ``render`` for this turn.
         XML-style formats (Qwen3.5, GLM, MiniMax, Laguna) render argument
@@ -1011,6 +1012,8 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "zai-org/GLM-5.1": "glm-5.1",
     "zai-org/GLM-5.3": "glm-5.3",
     "zai-org/GLM-5.3-BF16": "glm-5.3",
+    "zai-org/GLM-5.3-Flash": "glm-5.3-flash",
+    "zai-org/GLM-5.3-Flash-BF16": "glm-5.3-flash",
     # GLM-4.5.
     "THUDM/GLM-4.5-Air": "glm-4.5",
     "zai-org/GLM-4.5-Air": "glm-4.5",
@@ -1352,7 +1355,12 @@ def _populate_registry():
     from renderers.deepseek_v4 import DeepSeekV4Renderer
     from renderers.default import DefaultRenderer
     from renderers.gemma4 import Gemma4Renderer
-    from renderers.glm5 import GLM5Renderer, GLM51Renderer, GLM53Renderer
+    from renderers.glm5 import (
+        GLM5Renderer,
+        GLM51Renderer,
+        GLM53FlashRenderer,
+        GLM53Renderer,
+    )
     from renderers.glm45 import GLM45Renderer
     from renderers.gpt_oss import GptOssRenderer
     from renderers.hy3 import Hy3Renderer
@@ -1392,6 +1400,7 @@ def _populate_registry():
             "glm-5": GLM5Renderer,
             "glm-5.1": GLM51Renderer,
             "glm-5.3": GLM53Renderer,
+            "glm-5.3-flash": GLM53FlashRenderer,
             "glm-4.5": GLM45Renderer,
             "minimax-m2": MiniMaxM2Renderer,
             "deepseek-v3": DeepSeekV3Renderer,

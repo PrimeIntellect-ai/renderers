@@ -6,7 +6,6 @@ from functools import lru_cache
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
-
 from renderers import (
     DeepSeekV4Renderer,
     DeepSeekV4RendererConfig,
@@ -16,7 +15,6 @@ from renderers import (
 )
 from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
 from tests.reference_rendering import render_reference
-
 
 MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
 BOS = "<｜begin▁of▁sentence｜>"
@@ -224,7 +222,7 @@ def test_dsml_roundtrip_preserves_string_and_json_argument_types(prefilled, enab
     )
 
     assert parsed.reasoning_content == "Use weather."
-    assert parsed.content == "checking"
+    assert parsed.content == "checking\n\n"
     assert len(parsed.tool_calls) == 1
     call = parsed.tool_calls[0]
     assert call.status == ToolCallParseStatus.OK
@@ -440,8 +438,8 @@ def test_merged_followup_task_is_dropped_like_reference_encoder():
     assert text.endswith(f"{ASSISTANT}<think>")
 
 
-@pytest.mark.parametrize("prefix", ["", "\n"])
-def test_dsml_parser_requires_reference_encoders_two_newlines(prefix):
+@pytest.mark.parametrize("prefix", ["", "\n", "\n\n"])
+def test_dsml_parser_accepts_vllm_tool_opener_without_template_newlines(prefix):
     text = (
         f"{prefix}<｜DSML｜tool_calls>\n"
         '<｜DSML｜invoke name="weather">\n\n</｜DSML｜invoke>\n'
@@ -452,8 +450,10 @@ def test_dsml_parser_requires_reference_encoders_two_newlines(prefix):
         _tokenizer().encode(text, add_special_tokens=False)
     )
 
-    assert parsed.content == text
-    assert parsed.tool_calls == []
+    assert parsed.content == ""
+    assert [(call.name, call.arguments, call.status) for call in parsed.tool_calls] == [
+        ("weather", {}, ToolCallParseStatus.OK)
+    ]
 
 
 def test_rendered_masks_keep_dsml_sampled_and_tool_wrappers_scaffolded():
@@ -591,3 +591,8 @@ def test_dsml_reasoning_markers_in_arguments_remain_argument_text():
     assert len(parsed.tool_calls) == 1
     assert parsed.tool_calls[0].status == ToolCallParseStatus.OK
     assert parsed.tool_calls[0].arguments == {"city": "<think>example</think>"}
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tokenizer.cache_clear()

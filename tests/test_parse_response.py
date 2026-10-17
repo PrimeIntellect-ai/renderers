@@ -7,7 +7,6 @@ Runs against every (model, renderer) pair.
 from functools import lru_cache
 
 import pytest
-
 from renderers import create_renderer
 from renderers.base import ToolCallParseStatus, load_tokenizer
 
@@ -20,11 +19,11 @@ def _qwen3_vl():
 
 
 def test_parse_simple_content(model_name, tokenizer, renderer):
-    """Plain content, no thinking."""
+    """Bare text survives in the format's initial channel."""
     text = "Hello there!"
     ids = tokenizer.encode(text, add_special_tokens=False)
     parsed = renderer.parse_response(ids, prompt_ids=[])
-    assert "Hello" in parsed.content
+    assert "Hello" in parsed.content + (parsed.reasoning_content or "")
 
 
 def test_parse_thinking_and_content(model_name, tokenizer, renderer):
@@ -350,3 +349,12 @@ def test_deepseek_v3_in_think_section_is_not_a_real_call():
     assert parsed.reasoning_content is not None
     assert "draft_tool" in parsed.reasoning_content
     assert parsed.content == "Go."
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _qwen3_vl.cache_clear()
+    _qwen3.cache_clear()
+    _prime_qwen3.cache_clear()
+    _kimi_k25.cache_clear()
+    _deepseek_v3.cache_clear()

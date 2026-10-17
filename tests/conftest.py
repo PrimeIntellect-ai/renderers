@@ -2,8 +2,12 @@
 
 Each (model_name, renderer_name) pair gets a tokenizer + renderer.
 The same barrage of tests runs against every pair.
+
+Modules with their own model caches release them in ``teardown_module``.
+The module-scoped fixture below releases shared models and cyclic references.
 """
 
+import gc
 from pathlib import Path
 
 import pytest
@@ -16,6 +20,14 @@ from renderers.configs import config_from_name
 RENDERER_MODELS = [(case.model, case.renderer) for case in models_for("shared")]
 
 _cache: dict[str, tuple] = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def release_shared_models():
+    """Keep model caches local to a test module, including cyclic HF objects."""
+    yield
+    _cache.clear()
+    gc.collect()
 
 
 def _load(model_name: str, renderer_name: str):

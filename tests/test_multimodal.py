@@ -1180,3 +1180,8 @@ def test_is_image_part_treats_type_field_as_authoritative():
     assert not _is_image_part({"image_url": None})
     assert not _is_image_part({"image": None})
     assert not _is_video_part({"video_url": None})
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _loaded.clear()

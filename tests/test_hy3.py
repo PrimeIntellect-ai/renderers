@@ -487,3 +487,8 @@ def test_bridge_declines_on_empty_completion():
         rf.bridge_to_next_turn(prompt, [], [{"role": "tool", "content": "more"}])
         is None
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tok.cache_clear()

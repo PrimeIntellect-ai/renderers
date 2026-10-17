@@ -100,7 +100,7 @@ def scan_reasoning(
 ) -> ReasoningBoundary:
     """Read the initial reasoning region without interpreting final content.
 
-    Tagged formats recognize an opener only at the beginning of the assistant
+    Tagged formats recognize an opener after leading whitespace in the assistant
     body, or continue reasoning opened in the prompt. A first close permanently
     switches to content. Atomic delimiters match token IDs, not lookalike text.
     Explicit channel formats can opt into channel transitions instead.
@@ -133,10 +133,11 @@ def scan_reasoning(
         # Reasoning-first grammars have one initial reasoning region. Once it
         # closes, later markers are content, not a new reasoning channel.
         if open_id is not None and close_id is not None:
-            explicit = bool(ids) and ids[0] == open_id
+            opening = next((i for i, token in enumerate(ids) if token == open_id), -1)
+            explicit = opening != -1 and not _decode(tokenizer, ids[:opening]).strip()
             if not prefilled and not explicit:
                 return ReasoningBoundary(False, None)
-            start = int(explicit)
+            start = opening + 1 if explicit else 0
             close = next((i for i in range(start, len(ids)) if ids[i] == close_id), -1)
             by_tool = False
             if close == -1 and tool_start_closes_reasoning:
@@ -146,14 +147,22 @@ def scan_reasoning(
                 by_tool = close != -1
             return ReasoningBoundary(
                 close == -1,
-                _decode(tokenizer, ids[start : close if close != -1 else len(ids)]),
+                _decode(
+                    tokenizer,
+                    [
+                        token
+                        for token in ids[start : close if close != -1 else len(ids)]
+                        if token != open_id
+                    ],
+                ),
                 by_tool,
             )
         text = _decode(tokenizer, ids)
-        explicit = text.startswith(open_marker)
+        opening = text.find(open_marker)
+        explicit = opening != -1 and not text[:opening].strip()
         if not prefilled and not explicit:
             return ReasoningBoundary(False, None)
-        start = len(open_marker) if explicit else 0
+        start = opening + len(open_marker) if explicit else 0
         close = text.find(close_marker, start)
         by_tool = False
         if close == -1 and tool_start_closes_reasoning:
@@ -162,7 +171,9 @@ def scan_reasoning(
             if tool_pos >= start:
                 close, by_tool = tool_pos, True
         return ReasoningBoundary(
-            close == -1, text[start : close if close != -1 else len(text)], by_tool
+            close == -1,
+            text[start : close if close != -1 else len(text)].replace(open_marker, ""),
+            by_tool,
         )
 
     events: list[tuple[int, int, bool | None]]

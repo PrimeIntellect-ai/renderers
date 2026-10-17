@@ -4,16 +4,17 @@ from functools import lru_cache
 
 import pytest
 from parity import MODEL_CATALOG
-
 from renderers import create_renderer
 from renderers.base import ToolCallParseStatus, load_tokenizer
 from renderers.configs import config_from_name
-
 
 # Exercise every registered renderer, including inherited family variants.
 _CASES = {}
 for _case in MODEL_CATALOG:
     _CASES.setdefault(_case.resolved_renderer, _case.model)
+
+_GLM = {"glm-4.5", "glm-5", "glm-5.1", "glm-5.3", "glm-5.3-flash"}
+_REOPENING_TAGS = _GLM | {"deepseek-v4"}
 
 
 @lru_cache(None)
@@ -176,6 +177,7 @@ _TOOL_CALLS = {
     "glm-5": _GLM_CALL,
     "glm-5.1": _GLM_CALL,
     "glm-5.3": _GLM_CALL,
+    "glm-5.3-flash": _GLM_CALL,
     "minimax-m2": '<minimax:tool_call>\n<invoke name="danger">\n</invoke>\n</minimax:tool_call>',
     "deepseek-v4": '\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name="danger">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
     "kimi-k2": _KIMI_CALL,
@@ -236,7 +238,9 @@ def test_tool_opener_ends_unclosed_reasoning(name, stop):
     assert "danger" in tok.decode(sampled[start:end], skip_special_tokens=False)
 
 
-@pytest.mark.parametrize("name", sorted(set(_TOOL_CALLS) - {"inkling"}))
+@pytest.mark.parametrize(
+    "name", sorted(set(_TOOL_CALLS) - {"inkling"} - _REOPENING_TAGS)
+)
 def test_explicit_reasoning_close_outranks_earlier_tool_opener(name):
     # Inkling closes thinking and tool segments with the same <|end_message|>.
     tok, renderer = _renderer(name)
@@ -376,7 +380,7 @@ def test_inkling_partial_reasoning_prefix_is_not_returned_as_content():
 
 
 @pytest.mark.parametrize(
-    "name", sorted((set(_CASES) - {"llama-3"}) | {"default-think"})
+    "name", sorted((set(_CASES) - {"llama-3"} - _GLM) | {"default-think"})
 )
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("origin", ["prompt", "completion", "closed_prompt", "both"])
@@ -442,7 +446,12 @@ def test_reasoning_markers_override_generation_mode(name, enabled, origin, endin
 
 
 @pytest.mark.parametrize(
-    "name", sorted(set(_CASES) - {"llama-3", "gpt-oss", "gemma4", "inkling", "default"})
+    "name",
+    sorted(
+        set(_CASES)
+        - {"llama-3", "gpt-oss", "gemma4", "inkling", "default"}
+        - _REOPENING_TAGS
+    ),
 )
 @pytest.mark.parametrize("closed", [False, True])
 def test_late_think_markers_stay_content(name, closed):
@@ -520,9 +529,14 @@ def test_missing_and_empty_prompt_are_self_contained(name):
         tok, renderer = _renderer(name)
     bare = _encode(tok, "Answer")
     expected = renderer.parse_response(bare, prompt_ids=[])
-    assert expected.content == "Answer"
-    assert expected.reasoning_content is None
-    assert expected.reasoning_complete is not False
+    if name in _REOPENING_TAGS:
+        assert expected.content == ""
+        assert expected.reasoning_content == "Answer"
+        assert expected.reasoning_complete is False
+    else:
+        assert expected.content == "Answer"
+        assert expected.reasoning_content is None
+        assert expected.reasoning_complete is not False
     assert renderer.parse_response(bare) == expected
     assert renderer.parse_response(bare, prompt_ids=None) == expected
 
@@ -610,3 +624,8 @@ def test_harmony_later_unfinished_analysis_preserves_earlier_output():
         )
         is None
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _renderer.cache_clear()

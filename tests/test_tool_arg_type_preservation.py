@@ -203,3 +203,8 @@ def test_union_with_string_emits_ok_status(
     assert got == args, (
         f"{model}: tool-arg drift — sent {args!r}, parser returned {got!r}"
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _load.cache_clear()

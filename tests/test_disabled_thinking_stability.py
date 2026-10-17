@@ -225,3 +225,8 @@ def test_historical_reasoning_stays_template_faithful(dt_model, dt_config):
         )
     )
     assert ours == theirs
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _load.cache_clear()

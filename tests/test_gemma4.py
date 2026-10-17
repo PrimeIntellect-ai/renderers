@@ -467,3 +467,8 @@ def test_legacy_assistant_tool_responses_preserve_mask_contract():
     for index, message_index in enumerate(rendered.message_indices):
         if message_index == 1:
             assert rendered.is_content[index] == rendered.sampled_mask[index]
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _gemma4.cache_clear()

@@ -19,6 +19,7 @@ from typing import Any, cast
 import httpx
 import numpy as np
 from openai import AsyncOpenAI
+
 from renderers.base import (
     Message,
     MultiModalData,
@@ -221,9 +222,26 @@ def _parse_compact_logprobs(
     )
 
 
+def _parse_packed_completion_logprobs(
+    packed: Mapping[str, Any], completion_ids: list[int]
+) -> list[float]:
+    """prime-rl's packed form: base64 float32 ``{data, shape, dtype}``, one per token."""
+    values = np.frombuffer(base64.b64decode(packed["data"]), dtype=packed["dtype"])
+    valid = np.isfinite(values) & (values > VLLM_LOGPROB_SENTINEL)
+    if len(values) != len(completion_ids) or not valid.all():
+        raise MalformedGenerateResponseError(
+            f"Engine response choice.completion_logprobs: {len(values)} values for "
+            f"{len(completion_ids)} completion tokens, or a non-finite or missing (-9999) logprob."
+        )
+    return values.astype(np.float64).tolist()
+
+
 def _parse_completion_logprobs(
     choice: Mapping[str, Any], completion_ids: list[int]
 ) -> list[float]:
+    packed = choice.get("completion_logprobs")
+    if packed is not None:
+        return _parse_packed_completion_logprobs(packed, completion_ids)
     raw_logprobs = choice.get("logprobs")
     if not isinstance(raw_logprobs, Mapping):
         raise MalformedGenerateResponseError(
@@ -281,6 +299,23 @@ def _parse_sampling_mask(
     sampling_mask = choice.get("sampling_mask")
     if sampling_mask is None:
         return None
+    if isinstance(sampling_mask, Mapping):
+        ids_payload, counts_payload = sampling_mask["ids"], sampling_mask["counts"]
+        ids = np.frombuffer(
+            base64.b64decode(ids_payload["data"]), dtype=ids_payload["dtype"]
+        )
+        counts = np.frombuffer(
+            base64.b64decode(counts_payload["data"]), dtype=counts_payload["dtype"]
+        )
+        if (
+            len(counts) != len(completion_ids)
+            or (counts < 0).any()
+            or int(counts.sum()) != len(ids)
+        ):
+            raise MalformedGenerateResponseError(
+                "Packed sampling mask token count mismatch"
+            )
+        sampling_mask = [row.tolist() for row in np.split(ids, np.cumsum(counts)[:-1])]
     if not isinstance(sampling_mask, list) or len(sampling_mask) != len(completion_ids):
         raise MalformedGenerateResponseError("Sampling mask token count mismatch")
     for sampled_id, support in zip(completion_ids, sampling_mask, strict=True):
@@ -547,7 +582,9 @@ async def generate(
         "token_ids": prompt_ids,
         "sampling_params": sp,
     }
-    content_parts = _content_parts(messages) if not process_multimodal else None
+    content_parts = (
+        _content_parts(messages, renderer=renderer) if not process_multimodal else None
+    )
     features = (
         _build_mm_features(renderer, mm_data)
         if process_multimodal and mm_data and not mm_data.is_empty()
@@ -623,7 +660,8 @@ async def generate(
 
     routed_experts = choice.get("routed_experts")
     # vLLM's native kept-set sampling masks (``--return-sampling-mask``):
-    # one list of surviving vocab ids per completion token.
+    # one list of surviving vocab ids per completion token, or (prime-rl's
+    # server) packed CSR ``{"ids", "counts"}`` base64 int32 arrays.
     sampling_mask = choice.get("sampling_mask")
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
@@ -683,8 +721,15 @@ _MEDIA_URL_TYPES = {
 }
 
 
-def _content_parts(messages: list[Message]) -> list[dict[str, Any]]:
+def _content_parts(
+    messages: list[Message], *, renderer: Renderer
+) -> list[dict[str, Any]]:
     """Flatten raw media in prompt order for vLLM's token generate endpoint."""
+    # Some templates reorder tool results. Use the same order for raw media,
+    # including when the caller supplies a prebuilt prompt and skips rendering.
+    order_messages = getattr(renderer, "messages_in_prompt_order", None)
+    if order_messages is not None:
+        messages = order_messages(messages)
     parts: list[dict[str, Any]] = []
     for message in messages:
         content = message.get("content")

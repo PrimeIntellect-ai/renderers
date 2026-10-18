@@ -625,7 +625,7 @@ class PrimeQwen3Renderer:
         tools: list[ToolSpec] | None = None,
         prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
-        return parse_qwen35(
+        parsed = parse_qwen35(
             self._tokenizer,
             token_ids,
             stop_ids={self._im_end, self._endoftext},
@@ -640,6 +640,10 @@ class PrimeQwen3Renderer:
                 stop_ids=set(self.get_stop_token_ids()),
             ),
         )
+        # Prime's template inserts its own reasoning/content separator and
+        # strips content on render. Keep that separator out of stored messages.
+        parsed.content = parsed.content.strip()
+        return parsed
 
     def get_stop_token_ids(self) -> list[int]:
         return [self._im_end, self._endoftext]

@@ -425,6 +425,65 @@ def test_call_syntax_in_the_answer_is_text():
     assert parsed.tool_calls == []
 
 
+@pytest.mark.parametrize("recipient", ["self", "user"])
+@pytest.mark.parametrize("prefilled", [False, True])
+def test_ordinary_tokens_spelling_channel_markers_stay_text(recipient, prefilled):
+    tok, renderer = _load()
+    literal = (
+        "Example: <|start|>assistant to=get_weather<|message|>"
+        + _invoke("get_weather", ("city", "Rome"))
+        + "<|eom|> literal <|eot|> and <|end_of_text|>."
+    )
+    # Sample the marker spellings as ordinary tokens, without their special IDs.
+    ordinary = [token for char in literal for token in _ids(char)]
+    assert tok.decode(ordinary) == literal
+    assert not set(ordinary) & {
+        _token(marker)
+        for marker in (
+            "<|start|>",
+            "<|message|>",
+            "<|eom|>",
+            "<|eot|>",
+            "<|end_of_text|>",
+        )
+    }
+    prompt = _prompt()
+    header = _ids(f" to={recipient}<|message|>")
+    if prefilled:
+        prompt += header
+        header = []
+    suffix = (
+        _ids("<|eom|><|start|>assistant to=user<|message|>Done.")
+        if recipient == "self"
+        else []
+    )
+    parsed = renderer.parse_response(
+        header + ordinary + suffix + [_token("<|eot|>")],
+        tools=TOOLS,
+        prompt_ids=prompt,
+    )
+    assert parsed.reasoning_content == (literal if recipient == "self" else None)
+    assert parsed.content == ("Done." if recipient == "self" else literal)
+    assert parsed.reasoning_complete is True
+    assert parsed.tool_calls == []
+
+
+def test_ordinary_tokens_spelling_markers_stay_in_tool_arguments():
+    _, renderer = _load()
+    literal = "<|start|>assistant to=user<|message|>literal <|eom|>"
+    completion = (
+        _ids(
+            ' to=get_weather<|message|><atem:function_calls><atem:invoke name="get_weather"><atem:parameter name="city">'
+        )
+        + [token for char in literal for token in _ids(char)]
+        + _ids("</atem:parameter></atem:invoke></atem:function_calls><|eot|>")
+    )
+    parsed = renderer.parse_response(completion, tools=TOOLS)
+    assert [(c.name, c.arguments, c.status) for c in parsed.tool_calls] == [
+        ("get_weather", {"city": literal}, ToolCallParseStatus.OK)
+    ]
+
+
 def test_unfinished_tool_call_is_unclosed():
     _, renderer = _load()
     parsed = renderer.parse_response(
@@ -482,8 +541,12 @@ def test_bridge_tool_result_matches_full_render():
     assert not any(bridged.sampled_mask)
 
 
-def test_bridge_unnamed_tool_results_take_call_names_in_order():
+@pytest.mark.parametrize("reverse_results", [False, True])
+@pytest.mark.parametrize("named_results", [False, True])
+@pytest.mark.parametrize("same_function", [False, True])
+def test_bridge_tool_result_names(reverse_results, named_results, same_function):
     _, renderer = _load()
+    second_name = "get_weather" if same_function else "maps.route"
     messages = [
         {"role": "user", "content": "Weather?"},
         {
@@ -491,12 +554,21 @@ def test_bridge_unnamed_tool_results_take_call_names_in_order():
             "content": "",
             "tool_calls": [
                 _call("a", "get_weather", {"city": "Rome"}),
-                _call("b", "maps.route", {"to": "home"}),
+                _call(
+                    "b",
+                    second_name,
+                    {"city": "Paris"} if same_function else {"to": "home"},
+                ),
             ],
         },
         {"role": "tool", "tool_call_id": "a", "content": "Sunny"},
         {"role": "tool", "tool_call_id": "b", "content": "12 km"},
     ]
+    if named_results:
+        messages[2]["name"] = "get_weather"
+        messages[3]["name"] = second_name
+    if reverse_results:
+        messages[2:] = reversed(messages[2:])
     prompt = _prompt()
     full = renderer.render_ids(messages, tools=TOOLS, add_generation_prompt=True)
     eot = full.index(_token("<|eot|>"), len(prompt))
@@ -504,12 +576,18 @@ def test_bridge_unnamed_tool_results_take_call_names_in_order():
     bridged = renderer.bridge_to_next_turn(
         prompt, completion, messages[2:], tools=TOOLS
     )
-    assert bridged is not None and bridged.token_ids == full
+    if named_results or same_function:
+        assert bridged is not None and bridged.token_ids == full
+    else:
+        # The sampled ATEM stream has no IDs to match distinct call names to
+        # results. Equal counts cannot establish which result belongs to which.
+        assert bridged is None
     # A count mismatch cannot be resolved without the assistant message.
-    assert (
-        renderer.bridge_to_next_turn(prompt, completion, messages[2:3], tools=TOOLS)
-        is None
-    )
+    if not named_results:
+        assert (
+            renderer.bridge_to_next_turn(prompt, completion, messages[2:3], tools=TOOLS)
+            is None
+        )
 
 
 def test_bridge_closes_truncated_reasoning_like_a_full_render():

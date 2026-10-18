@@ -95,7 +95,6 @@ _HEADER_RE = re.compile(
     r"(?P<start><\|start\|>[^\S\n]*(?:assistant)?)?(?P<ws>[^\S\n]*)"
     r"(?:to=(?P<rcpt>[A-Za-z0-9_.\-:/]+))?[^\S\n]*<\|message\|>"
 )
-_END_RE = re.compile(r"<\|eom\|>|<\|eot\|>")
 _INVOKE_OPEN_RE = re.compile(r"<atem:invoke\b")
 _INVOKE_RE = re.compile(
     r"<atem:invoke\b(?P<attrs>[^>]*)>(?P<body>.*?)</atem:invoke>", re.DOTALL
@@ -641,17 +640,49 @@ class MuseGlimmerRenderer:
             if tok in stops:
                 ids = ids[:k]
                 break
-        text = self._decode(ids)
+        # Decode between structural token IDs, recording their text offsets.
+        # Ordinary tokens can spell the same markers; those remain body text.
+        pieces: list[str] = []
+        positions: dict[int, set[int]] = {
+            self._start: set(),
+            self._message: set(),
+            self._eom: set(),
+        }
+        offset = begin = 0
+        for k, tok in enumerate(ids):
+            if tok not in positions:
+                continue
+            chunk = self._decode(ids[begin:k])
+            pieces.append(chunk)
+            offset += len(chunk)
+            positions[tok].add(offset)
+            marker = self._decode([tok])
+            pieces.append(marker)
+            offset += len(marker)
+            begin = k + 1
+        pieces.append(self._decode(ids[begin:]))
+        text = "".join(pieces)
         inside, open_recipient = self._open_recipient(prompt_ids)
         if inside:
-            text = (
-                (f"to={open_recipient}" if open_recipient else "")
-                + "<|message|>"
-                + text
-            )
+            prefill = (f"to={open_recipient}" if open_recipient else "") + "<|message|>"
+            positions = {
+                tok: {pos + len(prefill) for pos in offsets}
+                for tok, offsets in positions.items()
+            }
+            positions[self._message].add(len(prefill) - len("<|message|>"))
+            text = prefill + text
 
         messages: list[tuple[str | None, str, bool]] = []
-        headers = list(_HEADER_RE.finditer(text))
+        headers: list[re.Match] = []
+        for h in _HEADER_RE.finditer(text):
+            if h.end() - len("<|message|>") not in positions[self._message]:
+                continue
+            if h.group("start") and h.start() not in positions[self._start]:
+                # A literal opener cannot consume preceding body text. A real
+                # message token can still open a bare recipient header after it.
+                h = _HEADER_RE.search(text, h.end("start"), h.end())
+                assert h is not None
+            headers.append(h)
 
         def cut(h: re.Match) -> int:
             # A bare mid-message header (no ``<|eom|><|start|>``) leaves the
@@ -661,10 +692,16 @@ class MuseGlimmerRenderer:
         leading = text[: cut(headers[0])] if headers else text
         for n, h in enumerate(headers):
             stop = cut(headers[n + 1]) if n + 1 < len(headers) else len(text)
-            body = text[h.end() : stop]
-            end = _END_RE.search(body)
+            end = next(
+                (pos for pos in sorted(positions[self._eom]) if h.end() <= pos < stop),
+                None,
+            )
             messages.append(
-                (h.group("rcpt"), body[: end.start()] if end else body, end is not None)
+                (
+                    h.group("rcpt"),
+                    text[h.end() : end if end is not None else stop],
+                    end is not None,
+                )
             )
 
         reasoning_parts: list[str] = []
@@ -814,7 +851,8 @@ class MuseGlimmerRenderer:
                 ]
             completion.append(self._eot)
 
-        # Tool results without ``name`` take the prior turn's call names in order.
+        # ATEM carries no call IDs, so a bridge cannot associate unnamed results
+        # with distinct function names. Full rendering can use the history's IDs.
         unnamed = [
             m for m in new_messages if m.get("role") == "tool" and not m.get("name")
         ]
@@ -824,7 +862,7 @@ class MuseGlimmerRenderer:
                 previous_completion_ids, tools=tools, prompt_ids=previous_prompt_ids
             )
             names = [c.name for c in parsed.tool_calls if c.name]
-            if len(names) != len(unnamed):
+            if len(names) != len(unnamed) or len(set(names)) > 1:
                 return None
 
         previous = list(previous_prompt_ids) + completion

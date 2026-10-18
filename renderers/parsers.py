@@ -157,20 +157,7 @@ class Qwen3ToolParser:
 
 
 class Qwen35ToolParser:
-    """XML-style tool calls: ``<tool_call><function=N><parameter=K>V</parameter>...</function></tool_call>``.
-
-    Shares XML extraction with ``parse_qwen35``. This parser drives
-    ``DefaultRenderer`` when callers wire it up with
-    ``tool_parser="qwen3.5"``; ``Qwen35Renderer.parse_response``
-    routes through the same shared helpers via ``parse_qwen35``.
-
-    Schema-aware coercion is intentionally inert here: ``ToolParser``'s
-    ``extract`` API does not receive the tool list (callers consume
-    the parsed values as opaque dicts), so ``param_index`` is empty
-    and every parameter goes through the no-schema branch of
-    ``_coerce_arg_value`` — verbatim strings, matching vLLM 0.32's
-    schema-less Qwen parser.
-    """
+    """Parse Qwen XML tool calls. Without a schema, argument values stay strings."""
 
     def __init__(self, tokenizer):
         self._tokenizer = tokenizer

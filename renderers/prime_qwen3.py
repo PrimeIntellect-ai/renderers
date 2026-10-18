@@ -640,8 +640,7 @@ class PrimeQwen3Renderer:
                 stop_ids=set(self.get_stop_token_ids()),
             ),
         )
-        # Prime's template inserts its own reasoning/content separator and
-        # strips content on render. Keep that separator out of stored messages.
+        # Prime's template supplies the separator and strips content on render.
         parsed.content = parsed.content.strip()
         return parsed
 

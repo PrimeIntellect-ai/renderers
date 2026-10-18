@@ -177,6 +177,34 @@ def test_create_renderer_resolves_muse_glimmer():
         ),
         pytest.param(
             [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Reasoning "},
+                        {"type": "text", "text": "effort: low. "},
+                        IMAGE,
+                    ],
+                },
+                {"role": "user", "content": "Hi"},
+            ],
+            id="system-directive-across-text-parts",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Reasoning "},
+                        IMAGE,
+                        {"type": "text", "text": "strength: low."},
+                    ],
+                },
+                {"role": "user", "content": "Hi"},
+            ],
+            id="system-image-interrupts-directive",
+        ),
+        pytest.param(
+            [
                 {"role": "user", "content": [IMAGE, {"type": "text", "text": "Hi"}]},
                 {"role": "assistant", "content": "Hello."},
                 {"role": "user", "content": [{"type": "text", "text": "Again"}, IMAGE]},

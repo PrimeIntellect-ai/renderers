@@ -412,30 +412,28 @@ class MuseGlimmerRenderer:
         stream.text("system", i, sampled=False, content=False)
         stream.special(self._message, i, sampled=False, content=False)
         content = msg.get("content")
-        if isinstance(content, list) and any(
-            isinstance(item, dict) and item.get("type") in _IMAGE_TYPES
-            for item in content
-        ):
-            # Images split the body, so the text normalisation applies per part.
-            parts = [
-                {**item, "text": self._normalise_effort(item.get("text", ""))}
-                if isinstance(item, dict) and item.get("type") == "text"
-                else item
-                for item in content
-            ]
-            self._emit_body(stream, parts, i, sampled=False)
+        # The template normalises the rendered body, joining adjacent text
+        # parts but retaining image markers between otherwise adjacent words.
+        parts: list[str | None] = [""]
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") in _IMAGE_TYPES:
+                    parts.extend([None, ""])
+                else:
+                    parts[-1] = (parts[-1] or "") + self._text_of([item])
         else:
-            stream.text(
-                self._normalise_effort(self._text_of(content)),
-                i,
-                sampled=False,
-                content=True,
-            )
+            parts = [self._text_of(content)]
+        parts = [
+            self._normalise_effort(part) if part is not None else None for part in parts
+        ]
+        for part in parts:
+            if part is None:
+                stream.special(self._patch, i, sampled=False, content=True)
+            else:
+                stream.text(part, i, sampled=False, content=True)
+        system_text = "".join("<|patch|>" if part is None else part for part in parts)
         tail = ""
-        if (
-            "reasoning strength"
-            not in self._normalise_effort(self._text_of(content)).lower()
-        ):
+        if "reasoning strength" not in system_text.lower():
             tail = "\n\n" + self._reasoning_line()
         stream.text(tail + self._preamble_tail(tools), i, sampled=False, content=False)
         stream.special(self._eot, i, sampled=False, content=False)

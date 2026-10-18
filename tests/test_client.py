@@ -5,6 +5,7 @@ import json
 import httpx
 import numpy as np
 import pytest
+from renderers import MalformedGenerateResponseError
 from renderers.base import (
     ParsedResponse,
     ParsedToolCall,
@@ -40,7 +41,7 @@ class _FakeRenderer:
         return [99]
 
     def parse_response(
-        self, completion_ids: list[int], *, tools=None
+        self, completion_ids: list[int], *, tools=None, prompt_ids=None
     ) -> ParsedResponse:
         assert completion_ids == [7, 8]
         # Stores tools so tests can assert the client plumbed them through.
@@ -67,42 +68,71 @@ class _FakeClient:
     def __init__(self):
         self.calls = []
         self.base_url = "http://fake-host:8000/v1"
+        self.usage = None
+        routed_experts = np.array([[[1]], [[2]]], dtype=np.uint8)
+        self.choice = {
+            "index": 0,
+            "token_ids": [7, 8],
+            "logprobs": {
+                "content": [
+                    {"token": "token_id:7", "logprob": -0.1},
+                    {"token": "token_id:8", "logprob": -0.2},
+                ]
+            },
+            "finish_reason": "stop",
+            "routed_experts": {
+                "data": base64.b64encode(routed_experts.tobytes()).decode("ascii"),
+                "shape": list(routed_experts.shape),
+            },
+        }
 
     async def post(self, path, *, cast_to=dict, body=None, options=None):
         self.calls.append(
             {"path": path, "cast_to": cast_to, "body": body, "options": options}
         )
-        routed_experts = np.array([[[1]], [[2]]], dtype=np.uint8)
         payload = {
             "request_id": "gen-test",
-            "choices": [
-                {
-                    "index": 0,
-                    "token_ids": [7, 8],
-                    "logprobs": {
-                        "content": [
-                            {"token": "token_id:7", "logprob": -0.1},
-                            {"token": "token_id:8", "logprob": -0.2},
-                        ]
-                    },
-                    "finish_reason": "stop",
-                    "routed_experts": {
-                        "data": base64.b64encode(routed_experts.tobytes()).decode(
-                            "ascii"
-                        ),
-                        "shape": list(routed_experts.shape),
-                    },
-                }
-            ],
+            "choices": [self.choice],
         }
+        if self.usage is not None:
+            payload["usage"] = self.usage
+        if body and body.get("content_parts"):
+            payload["prompt_token_ids"] = [1, 2, 2, 3]
+            payload["mm_placeholders"] = {"image": [{"offset": 1, "length": 2}]}
         return httpx.Response(
             200,
             content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         )
 
 
-def test_generate_builds_request_body_and_parses_response():
+def _run_generate(client, renderer=None):
+    return asyncio.run(
+        generate(
+            client=client,
+            renderer=renderer or _FakeRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        None,
+        {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 2},
+            "completion_tokens_details": {"reasoning_tokens": 1},
+        },
+    ],
+)
+def test_generate_builds_request_body_and_parses_response(usage):
     client = _FakeClient()
+    client.usage = usage
     renderer = _FakeRenderer()
 
     result = asyncio.run(
@@ -154,6 +184,7 @@ def test_generate_builds_request_body_and_parses_response():
     assert result["routed_experts"]["data"].tobytes() == base64.b64encode(b"\x01\x02")
     assert result["multi_modal_data"] is None
     assert result["request_id"] == "gen-test"
+    assert result["usage"] == usage
     # Per-token attribution from the renderer surfaces on the result so
     # downstream consumers (verifiers RendererClient → prime-rl) can
     # build selective loss masks without a second render pass.
@@ -172,11 +203,171 @@ def test_generate_builds_request_body_and_parses_response():
     assert tc.status == ToolCallParseStatus.OK
 
 
+def test_generate_process_multimodal_false_sends_content_parts():
+    class DeferredMultimodalRenderer(_FakeRenderer):
+        supports_process_multimodal = True
+
+        def render(
+            self,
+            messages,
+            *,
+            tools=None,
+            add_generation_prompt=False,
+            process_multimodal=True,
+        ):
+            assert process_multimodal is False
+            return RenderedTokens(token_ids=[1, 2, 3])
+
+    client = _FakeClient()
+    image_url = "data:image/png;base64,aW1hZ2U="
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=DeferredMultimodalRenderer(),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look"},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ],
+            model="test-model",
+            process_multimodal=False,
+        )
+    )
+
+    body = client.calls[0]["body"]
+    assert body["content_parts"] == [{"type": "image_url", "url": image_url}]
+    assert body["return_token_ids"] is True
+    assert "features" not in body
+    assert result["renderer_prompt_ids"] == [1, 2, 3]
+    assert result["prompt_ids"] == [1, 2, 2, 3]
+    assert result["mm_placeholders"] == {"image": [{"offset": 1, "length": 2}]}
+
+
+def test_generate_rejects_missing_completion_logprobs_before_parsing():
+    client = _FakeClient()
+    client.choice.pop("logprobs")
+    renderer = _FakeRenderer()
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"choice\.logprobs must be an object",
+    ):
+        _run_generate(client, renderer)
+
+    assert not hasattr(renderer, "_last_parse_tools")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"token": "token_id:7"},
+        {"token": "token_id:7", "logprob": None},
+        {"token": "token_id:7", "logprob": "-0.1"},
+        {"token": "token_id:7", "logprob": True},
+    ],
+    ids=["missing", "null", "string", "boolean"],
+)
+def test_generate_rejects_non_numeric_completion_logprobs(entry):
+    client = _FakeClient()
+    client.choice["logprobs"]["content"][0] = entry
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"content\[0\]\.logprob must be a number",
+    ):
+        _run_generate(client)
+
+
+def test_generate_rejects_completion_logprob_count_mismatch():
+    client = _FakeClient()
+    client.choice["logprobs"]["content"] = [{"token": "token_id:7", "logprob": -0.1}]
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"completion token count \(2\) does not match logprob count \(1\)",
+    ):
+        _run_generate(client)
+
+
+@pytest.mark.parametrize("logprob", [float("nan"), float("inf"), float("-inf")])
+def test_generate_rejects_non_finite_completion_logprobs(logprob):
+    client = _FakeClient()
+    client.choice["logprobs"]["content"][0]["logprob"] = logprob
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"content\[0\]\.logprob must be finite",
+    ):
+        _run_generate(client)
+
+
+def test_generate_rejects_vllm_missing_logprob_sentinel():
+    client = _FakeClient()
+    client.choice["logprobs"]["content"][0]["logprob"] = -9999.0
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"does not contain sampling evidence",
+    ):
+        _run_generate(client)
+
+
+def test_generate_rejects_logprob_token_id_mismatch():
+    client = _FakeClient()
+    client.choice["logprobs"]["content"][0]["token"] = "token_id:8"
+
+    with pytest.raises(
+        MalformedGenerateResponseError,
+        match=r"content\[0\]\.token must be 'token_id:7'",
+    ):
+        _run_generate(client)
+
+
+def test_generate_preserves_zero_completion_logprob():
+    client = _FakeClient()
+    client.choice["logprobs"]["content"][0]["logprob"] = 0.0
+
+    result = _run_generate(client)
+
+    assert result["completion_logprobs"] == [0.0, -0.2]
+
+
+def test_generate_reads_packed_completion_logprobs():
+    client = _FakeClient()
+    client.choice.pop("logprobs")
+    values = np.array([-0.1, 0.0], dtype=np.float32)
+    client.choice["completion_logprobs"] = {
+        "data": base64.b64encode(values.tobytes()).decode(),
+        "shape": [2],
+        "dtype": "float32",
+    }
+
+    result = _run_generate(client)
+
+    assert result["completion_logprobs"] == values.tolist()
+
+    client.choice["completion_logprobs"]["data"] = base64.b64encode(
+        np.array([-0.1, -9999.0], dtype=np.float32).tobytes()
+    ).decode()
+    with pytest.raises(MalformedGenerateResponseError, match="missing"):
+        _run_generate(client)
+
+    client.choice["completion_logprobs"]["data"] = base64.b64encode(
+        np.array([-0.1, np.inf], dtype=np.float32).tobytes()
+    ).decode()
+    with pytest.raises(MalformedGenerateResponseError, match="non-finite"):
+        _run_generate(client)
+
+
 class _MalformedToolRenderer(_FakeRenderer):
     """Returns only a malformed tool-call attempt — finish_reason must stay "stop"."""
 
     def parse_response(
-        self, completion_ids: list[int], *, tools=None
+        self, completion_ids: list[int], *, tools=None, prompt_ids=None
     ) -> ParsedResponse:
         return ParsedResponse(
             content="",
@@ -285,8 +476,10 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
     [
         ("Qwen/Qwen3-VL-4B-Instruct", "renderers.qwen3_vl:Qwen3VLRenderer"),
         ("Qwen/Qwen3.5-2B", "renderers.qwen35:Qwen35Renderer"),
+        ("Qwen/Qwen3.8-27B", "renderers.qwen38:Qwen38Renderer"),
+        ("Qwen/Qwen3.8-Flash-Next", "renderers.qwen38:Qwen38Renderer"),
     ],
-    ids=["qwen3_vl", "qwen35"],
+    ids=["qwen3_vl", "qwen35", "qwen38", "qwen38_flash_next"],
 )
 def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     model_id, renderer_class_path
@@ -369,6 +562,164 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     # Items are base64 strings (encode_mm_kwargs_item output).
     for item in features["kwargs_data"]["image"]:
         assert isinstance(item, str) and len(item) > 0
+
+
+def test_generate_serializes_multimodal_features_for_gemma4():
+    """Gemma 4's HF image positions are translated to vLLM's field name."""
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm", reason="vllm needed for features serialization")
+
+    import torch as _torch
+    from renderers.base import MultiModalData, PlaceholderRange, load_tokenizer
+    from renderers.gemma4 import Gemma4Renderer
+
+    renderer = Gemma4Renderer(load_tokenizer("google/gemma-4-31B-it"))
+    mm_data = MultiModalData(
+        mm_hashes={"image": ["aaa", "bbb"]},
+        mm_placeholders={
+            "image": [
+                PlaceholderRange(offset=5, length=2),
+                PlaceholderRange(offset=12, length=2),
+            ]
+        },
+        mm_items={
+            "image": [
+                {
+                    "pixel_values": _torch.zeros(1, 4, 8),
+                    "image_position_ids": _torch.zeros(1, 4, 2, dtype=_torch.int64),
+                },
+                {
+                    "pixel_values": _torch.zeros(1, 4, 8),
+                    "image_position_ids": _torch.zeros(1, 4, 2, dtype=_torch.int64),
+                },
+            ]
+        },
+    )
+
+    client = _FakeClient()
+    asyncio.run(
+        generate(
+            client=client,
+            renderer=renderer,
+            messages=[],
+            model="gemma4",
+            prompt_ids=list(range(20)),
+            multi_modal_data=mm_data,
+            sampling_params={"max_tokens": 4},
+        )
+    )
+
+    features = client.calls[0]["body"]["features"]
+    assert features["mm_hashes"] == {"image": ["aaa", "bbb"]}
+    assert features["mm_placeholders"] == {
+        "image": [
+            {"offset": 5, "length": 2},
+            {"offset": 12, "length": 2},
+        ]
+    }
+    assert len(features["kwargs_data"]["image"]) == 2
+    assert all(
+        isinstance(item, str) and item for item in features["kwargs_data"]["image"]
+    )
+
+
+def test_generate_serializes_nemotron_dynamic_image_features():
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm", reason="vllm needed for features serialization")
+
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+        decode_mm_kwargs_item,
+    )
+    from vllm.model_executor.models.nano_nemotron_vl import NemotronH_Nano_VL_V2
+    from vllm.multimodal.inputs import MultiModalKwargsItems
+
+    from renderers.base import MultiModalData, PlaceholderRange
+    from renderers.nemotron3 import Nemotron35Renderer
+
+    class _FakeNemotronRenderer(Nemotron35Renderer):
+        def get_stop_token_ids(self):
+            return [99]
+
+        def parse_response(self, completion_ids, *, tools=None, prompt_ids=None):
+            return ParsedResponse(content="done")
+
+    renderer = object.__new__(_FakeNemotronRenderer)
+    mm_data = MultiModalData(
+        mm_hashes={"image": ["wide", "tall"]},
+        mm_placeholders={
+            "image": [
+                PlaceholderRange(offset=2, length=6),
+                PlaceholderRange(offset=10, length=6),
+            ]
+        },
+        mm_items={
+            "image": [
+                {
+                    "pixel_values": np.zeros((1, 3, 32, 48), dtype=np.float32),
+                    "imgs_sizes": np.array([[32, 48]], dtype=np.int64),
+                    "num_tokens": [6],
+                    "num_patches": [1],
+                },
+                {
+                    "pixel_values": np.ones((1, 3, 48, 32), dtype=np.float32),
+                    "imgs_sizes": np.array([[48, 32]], dtype=np.int64),
+                    "num_tokens": [6],
+                    "num_patches": [1],
+                },
+            ]
+        },
+    )
+    client = _FakeClient()
+
+    asyncio.run(
+        generate(
+            client=client,
+            renderer=renderer,
+            messages=[],
+            model="nemotron35-super",
+            prompt_ids=list(range(20)),
+            multi_modal_data=mm_data,
+            sampling_params={"max_tokens": 4},
+        )
+    )
+
+    features = client.calls[0]["body"]["features"]
+    assert features["mm_hashes"] == {"image": ["wide", "tall"]}
+    assert features["mm_placeholders"] == {
+        "image": [{"offset": 2, "length": 6}, {"offset": 10, "length": 6}]
+    }
+    decoded_items = [
+        decode_mm_kwargs_item(item) for item in features["kwargs_data"]["image"]
+    ]
+    decoded = [item.get_data() for item in decoded_items]
+    assert [tuple(item["pixel_values_flat"].shape) for item in decoded] == [
+        (3, 32, 48),
+        (3, 48, 32),
+    ]
+    assert [tuple(item["imgs_sizes"]) for item in decoded] == [
+        (32, 48),
+        (48, 32),
+    ]
+    assert [int(item["num_tokens_per_image"]) for item in decoded] == [6, 6]
+    assert all("image_num_patches" not in item for item in decoded)
+
+    kwargs = MultiModalKwargsItems({"image": decoded_items}).get_data()
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    model.dynamic_resolution = True
+    model.patch_size = 16
+    image_input = model._parse_and_validate_image_input(**kwargs)
+
+    assert image_input is not None
+    assert tuple(image_input["pixel_values_flat"].shape) == (
+        1,
+        12,
+        3 * 16 * 16,
+    )
+    assert [tuple(size) for size in image_input["imgs_sizes"]] == [
+        (32, 48),
+        (48, 32),
+    ]
+    assert image_input["num_tokens_per_image"] == [6, 6]
 
 
 # ---------------------------------------------------------------------------
@@ -502,3 +853,30 @@ def test_generate_caches_max_prompt_len_lookup_failure():
     assert len(client.calls) == 1
     assert result["prompt_ids"] == list(range(10))
     assert _max_prompt_len_cache[("http://no-models:8000/v1", "test-model")] is None
+
+
+@pytest.mark.parametrize(
+    "finish,reasoning_complete", [("stop", False), ("length", True), ("stop", None)]
+)
+def test_generate_forwards_reasoning_state_without_classifying_acceptance(
+    finish,
+    reasoning_complete,
+):
+    class ContextRenderer(_FakeRenderer):
+        def parse_response(self, completion_ids, *, tools=None, prompt_ids=None):
+            assert prompt_ids == [1, 2, 3]
+            assert completion_ids == [7, 8]
+            return ParsedResponse(
+                content="",
+                reasoning_content="reasoning",
+                reasoning_complete=reasoning_complete,
+            )
+
+    client = _FakeClient()
+    client.choice["finish_reason"] = finish
+    result = _run_generate(client, ContextRenderer())
+    assert result["reasoning_complete"] is reasoning_complete
+    assert result["finish_reason"] == finish
+    assert result["completion_ids"] == [7, 8]
+    assert result["completion_logprobs"] == [-0.1, -0.2]
+    assert result["content"] == ""

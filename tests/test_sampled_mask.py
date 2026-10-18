@@ -41,6 +41,8 @@ def test_sampled_mask_excludes_user_and_system(model_name, renderer):
         {"role": "system", "content": "You are helpful."},
         {"role": "user", "content": "Hi"},
         {"role": "assistant", "content": "Hello!"},
+        {"role": "user", "content": "Another question"},
+        {"role": "assistant", "content": "Another answer"},
     ]
     rendered = renderer.render(msgs)
     if not rendered.sampled_mask:

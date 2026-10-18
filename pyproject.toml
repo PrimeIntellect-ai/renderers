@@ -13,28 +13,47 @@ description = "Chat template renderers — deterministic message-to-token conver
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11,<3.15"
 dependencies = [
     "numpy",
     "openai>=1.108.1",
     "tiktoken",
     "jinja2",
-    "transformers>=4.50.0",
     # Used by GptOssRenderer to render and parse harmony tokens. Vendoring
     # OpenAI's reference implementation keeps us byte-identical with vLLM
     # (which also uses it) and saves us mirroring a 330-line Jinja template.
-    "openai-harmony>=0.0.8",
-    # Crusoe's Rust BPE tokenizer; ~10x faster encode vs HF's tokenizers.
-    # ``load_tokenizer`` patches it in by default for every supported model
-    # except a small denylist (DeepSeek-V3 family). The patch is bracketed
-    # around ``from_pretrained``, so subsequent ``AutoTokenizer`` calls
-    # outside the renderers package stay vanilla.
-    "fastokens>=0.2.0",
+    #
+    # Floor is ``>=0.0.4`` (not the latest 0.0.8) on purpose: every SGLang
+    # release through 0.5.12.post1 hard-pins ``openai-harmony==0.0.4``, so a
+    # higher floor makes ``renderers`` uninstallable alongside SGLang. The
+    # GptOssRenderer renders byte-identically on 0.0.4 (verified token-for-token
+    # against 0.0.8) and the Harmony cells in ``tests/test_parity.py`` pass,
+    # so the older harmony is safe.
+    "openai-harmony>=0.0.4",
     # ``BaseRendererConfig`` inherits from ``pydantic_config.BaseConfig`` so
     # the typed-config surface stays uniform with prime-rl / verifiers config
     # bases. Transitively brings pydantic, which ``renderers.configs`` also
     # imports directly.
     "prime-pydantic-config>=0.3.0.dev83",
+]
+
+[project.optional-dependencies]
+# Tokenizer loading uses Hugging Face. Text-only renderers can instead be
+# constructed with a compatible BYO tokenizer and do not import this
+# dependency. Character offsets are optional.
+transformers = [
+    # Keep this floor compatible with prime-rl's transformers pin. Inkling's
+    # tokenizer and text-only renderer work on older releases; image/audio
+    # processing fails lazily with an upgrade message when InklingProcessor is
+    # unavailable (native support starts in transformers 5.14).
+    "transformers>=4.50.0",
+]
+
+# Image/audio renderers also need Pillow to resolve media inputs. Keep this as
+# a separate convenience extra so tokenizer-only users do not pull it in.
+multimodal = [
+    "pillow>=12.2.0",
+    "transformers>=4.50.0",
 ]
 
 [tool.hatch.version]
@@ -49,6 +68,22 @@ tag-pattern = '^renderers-v(?P<version>.+)$'
 # builds from a checkout get the resolved version; this fallback
 # only fires when the resolver has nothing to go on.
 fallback-version = "0.0.0"
+
+[tool.hatch.version.raw-options]
+# Only stable ``renderers-v<MAJOR>.<MINOR>.<PATCH>`` tags participate in
+# version resolution; legacy per-commit ``.devN`` tags are excluded.
+# Untagged commits get a clean PEP 440 dev version derived from distance
+# to the latest stable tag (e.g. ``0.1.8.dev46``), with no ``+gHASH``
+# local segment so PyPI accepts the wheel directly. setuptools-scm
+# refuses to bump a pre-existing ``.devN`` tag, so matching only stable
+# tags also unblocks local ``uv lock`` / ``uv build`` on untagged
+# branches. Mirrors verifiers' setup.
+local_scheme = "no-local-version"
+git_describe_command = [
+    "git", "describe", "--tags", "--long",
+    "--match", "renderers-v[0-9]*.[0-9]*.[0-9]*",
+    "--exclude", "*dev*",
+]
 
 [tool.hatch.build.hooks.vcs]
 # Write the resolved version to a Python file so it can be inspected
@@ -69,16 +104,23 @@ dev = [
     "torch>=2.11.0",
     "torchvision>=0.26.0",
     "ty>=0.0.1a29,<0.0.22",
+    # Optional for consumers, but required by tokenizer/parity/VLM tests.
+    "transformers>=4.50.0",
 ]
 
 [tool.uv]
+# Enforce a uv version that supports the friendly-duration form
+# (`"7 days"`) in the static pyproject parser. Older uvs silently parse
+# the value as an RFC 3339 date, emit a TOML parse warning, and proceed
+# *without* the cooldown — bypassing this security policy.
+required-version = ">=0.11.1"
 exclude-newer = "7 days"
-# fastokens 0.2.0 was published on 2026-05-17 and contains the
-# ``unpatch_transformers`` fix (crusoecloud/fastokens#32) needed for
-# MiniMax-M2's slow→fast tokenizer conversion path. Exempting it from
-# the project-wide 7-day cutoff lets the lockfile pick it up immediately
-# while the rest of the dependency graph stays gated.
-exclude-newer-package = { fastokens = false, "prime-pydantic-config" = false }
+
+[tool.uv.exclude-newer-package]
+# PrimeIntellect-published packages in this project's dependency closure —
+# fast-track so first-party releases can land same-day. Only packages that
+# appear in `uv tree` are listed.
+prime-pydantic-config = false
 
 [tool.ty.environment]
 python-version = "3.13"

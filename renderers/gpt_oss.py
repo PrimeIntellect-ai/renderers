@@ -49,19 +49,21 @@ from openai_harmony import (
     ToolDescription,
     load_harmony_encoding,
 )
-from transformers.tokenization_utils import PreTrainedTokenizer
-
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
+    _content_mask_or_empty,
+    extract_message_tool_names,
     reject_assistant_in_extension,
-    should_preserve_past_thinking,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import GptOssRendererConfig
-from renderers.parsing import parse_gpt_oss
+from renderers.parsing import harmony_blocks, parse_gpt_oss
 
 
 def _reasoning_effort(effort: str | None) -> ReasoningEffort:
@@ -119,9 +121,15 @@ def _arguments_to_str(arguments: Any) -> str:
 class GptOssRenderer:
     """Deterministic message → token renderer for OpenAI gpt-oss (harmony)."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # The final assistant terminator changes even when auto_drop_analysis=False.
+        return False
+
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: GptOssRendererConfig | None = None,
     ):
         """Initialise the renderer.
@@ -133,6 +141,10 @@ class GptOssRenderer:
         """
         self._tokenizer = tokenizer
         self.config = config or GptOssRendererConfig()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            "tool_cycle" if self.config.auto_drop_analysis else "all",
+        )
         self._enc: HarmonyEncoding = load_harmony_encoding(
             HarmonyEncodingName.HARMONY_GPT_OSS
         )
@@ -420,14 +432,7 @@ class GptOssRenderer:
             if i == first_system_idx:
                 continue  # already emitted as developer
             is_assistant = msg.get("role") == "assistant"
-            preserve_thinking = is_assistant and (
-                should_preserve_past_thinking(
-                    messages,
-                    i,
-                    preserve_all_thinking=self.config.preserve_all_thinking,
-                    preserve_thinking_between_tool_calls=self.config.preserve_thinking_between_tool_calls,
-                )
-            )
+            preserve_thinking = is_assistant and self._should_emit_analysis(messages, i)
             for hm in self._to_harmony_messages(
                 msg, preserve_thinking=preserve_thinking
             ):
@@ -463,8 +468,9 @@ class GptOssRenderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
+            message_tool_names=extract_message_tool_names(messages),
         )
 
     def render_ids(
@@ -480,15 +486,39 @@ class GptOssRenderer:
             add_generation_prompt=add_generation_prompt,
         ).token_ids
 
+    def _response_prefix(
+        self, token_ids: list[int], prompt_ids: list[int] | None
+    ) -> list[int]:
+        """Recover the Harmony header supplied by the generation prompt."""
+        if prompt_ids and (not token_ids or token_ids[0] != self._start):
+            if self._start in prompt_ids:
+                start = len(prompt_ids) - 1 - prompt_ids[::-1].index(self._start)
+                tail = prompt_ids[start:]
+                if self._message in tail:
+                    return tail[: tail.index(self._message) + 1]
+        return []
+
     def parse_response(
         self,
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — harmony args land in a JSON object, schema not needed
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
-        return parse_gpt_oss(
+        prefix = self._response_prefix(token_ids, prompt_ids)
+        if not prefix and (not token_ids or token_ids[0] != self._start):
+            end = next(
+                (i for i, t in enumerate(token_ids) if t in self.get_stop_token_ids()),
+                len(token_ids),
+            )
+            return ParsedResponse(
+                content=self._tokenizer.decode(
+                    token_ids[:end], skip_special_tokens=False
+                )
+            )
+        parsed = parse_gpt_oss(
             self._tokenizer,
-            token_ids,
+            [*prefix, *token_ids],
             return_id=self._return,
             call_id=self._call,
             start_id=self._start,
@@ -497,6 +527,12 @@ class GptOssRenderer:
             message_id=self._message,
             constrain_id=self._constrain,
         )
+
+        for tc in parsed.tool_calls:
+            if tc.token_span is not None:
+                start, end = tc.token_span
+                tc.token_span = (max(0, start - len(prefix)), end - len(prefix))
+        return parsed
 
     def get_stop_token_ids(self) -> list[int]:
         return [self._return, self._call]
@@ -519,6 +555,40 @@ class GptOssRenderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+
+        # Harmony closes analysis with <|end|> or <|call|>, not <|return|>.
+        # Inspect framing only; the bridge never needs tool arguments.
+        if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+            end = (
+                previous_completion_ids.index(self._return)
+                if self._return in previous_completion_ids
+                else len(previous_completion_ids)
+            )
+            ids = [
+                *self._response_prefix(previous_completion_ids, previous_prompt_ids),
+                *previous_completion_ids[:end],
+            ]
+            for start, header_end, body_end, closed in harmony_blocks(
+                ids,
+                start_id=self._start,
+                message_id=self._message,
+                end_id=self._end,
+                call_id=self._call,
+            ):
+                header = ids[start + 1 : header_end]
+                if not closed and body_end == len(ids) and self._channel in header:
+                    channel = self._tokenizer.decode(
+                        header[header.index(self._channel) + 1 :],
+                        skip_special_tokens=False,
+                    ).split()
+                    if channel and channel[0] == "analysis":
+                        return None
+
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
+            new_messages,
         ):
             return None
 
@@ -592,11 +662,34 @@ class GptOssRenderer:
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=[False] * len(previous_ids) + ext_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer, [False] * len(previous_ids) + ext_content
+            ),
             message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
         )
 
     # ── message conversion ───────────────────────────────────────────────────
+
+    def _should_emit_analysis(self, messages: list[Message], msg_idx: int) -> bool:
+        """Whether to render ``reasoning_content`` as a harmony analysis message."""
+        if not self.config.auto_drop_analysis:
+            return True
+
+        msg = messages[msg_idx]
+        if not msg.get("tool_calls"):
+            return False
+
+        # Harmony keeps analysis for an unfinished tool-call cycle, but once a
+        # later final assistant answer is present it drops the stale analysis.
+        for later in messages[msg_idx + 1 :]:
+            if later.get("role") != "assistant":
+                continue
+            if later.get("tool_calls"):
+                continue
+            if _content_text(later.get("content")):
+                return False
+        return True
 
     def _to_harmony_messages(
         self, msg: Message, *, preserve_thinking: bool = False
@@ -667,8 +760,9 @@ class GptOssRenderer:
         its analysis block is dropped from context.
 
         ``preserve_thinking=True``: prepend an analysis-channel message
-        carrying ``reasoning_content`` so callers that want the trace in
-        history (e.g. tool-call-chain training) see it surface.
+        carrying ``reasoning_content``. The render path sets this from
+        harmony's own ``auto_drop_analysis`` behaviour, not from generic
+        ``thinking_retention``.
         """
         out: list[HarmonyMessage] = []
 

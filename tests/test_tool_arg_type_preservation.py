@@ -23,20 +23,13 @@ from functools import lru_cache
 from typing import Any
 
 import pytest
+from parity import models_for
 
 
 # (HuggingFace model name, renderer name). Two JSON-shaped controls
 # (string types already preserved by the wire format) + five XML-style
 # parsers that rely on the schema to preserve them.
-_MODELS = [
-    ("Qwen/Qwen3-8B", "auto"),  # hermes JSON  — control
-    ("moonshotai/Kimi-K2-Instruct", "auto"),  # section JSON — control
-    ("Qwen/Qwen3.5-9B", "auto"),  # XML
-    ("zai-org/GLM-5", "auto"),  # XML
-    ("MiniMaxAI/MiniMax-M2.5", "auto"),  # XML
-    ("poolside/Laguna-XS.2", "auto"),  # XML
-    ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),  # XML
-]
+_MODELS = [(case.model, case.renderer) for case in models_for("tool-arg-types")]
 
 
 @lru_cache(maxsize=None)
@@ -225,3 +218,8 @@ def test_union_with_string_emits_ok_status(
     assert got == args, (
         f"{model}: tool-arg drift — sent {args!r}, parser returned {got!r}"
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _load.cache_clear()

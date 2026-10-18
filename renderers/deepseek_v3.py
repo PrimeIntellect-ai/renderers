@@ -14,15 +14,20 @@ from __future__ import annotations
 
 import json
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
 
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
+    _content_mask_or_empty,
     attribute_text_segments,
+    extract_message_tool_names,
     reject_assistant_in_extension,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import DeepSeekV3RendererConfig
@@ -40,25 +45,40 @@ def _ds_token(name: str) -> str:
 
 
 class DeepSeekV3Renderer:
-    """Deterministic message → token renderer for DeepSeek V3 models.
+    """Deterministic message → token renderer for DeepSeek-V3 models.
 
-    DeepSeek-V3's chat template does not consult any thinking-related
-    variable; the ``enable_thinking`` field on the typed config controls
-    the renderer's ``<think>\\n`` prefill at the generation prompt
-    (R1-distill convention) and is intentionally not forwarded to
-    ``apply_chat_template`` upstream — that would be a no-op. The
-    template also always emits ``<think>{reasoning}</think>`` when
-    ``reasoning_content`` is provided, so ``preserve_*`` flags are
-    no-ops here too; stored for protocol uniformity.
+    DeepSeek-V3 is non-reasoning: its chat template has no ``<think>``
+    concept — the generation prompt is a bare ``<｜Assistant｜>`` and past
+    assistant content is emitted verbatim. The reasoning variant
+    (``<think>``-prefilled prompt, history reasoning stripped) lives in
+    :class:`renderers.deepseek_r1.DeepSeekR1Renderer`, which subclasses
+    this one. ``thinking_retention`` is a no-op here (no reasoning channel),
+    stored for protocol uniformity.
     """
+
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        return True
+
+    #: Default typed config; the R1 subclass overrides this.
+    _config_cls: type = DeepSeekV3RendererConfig
+    _implied_thinking_retention = "all"
+    #: Generation-prompt reasoning prefill. Empty for V3 (bare
+    #: ``<｜Assistant｜>``); the R1 subclass overrides to ``"<think>\n"``.
+    _GEN_THINK_PREFILL: str = ""
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: DeepSeekV3RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
-        self.config = config or DeepSeekV3RendererConfig()
+        self.config = config or type(self)._config_cls()
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self.config,
+            self._implied_thinking_retention,
+        )
 
         # ── BOS / EOS ────────────────────────────────────────────────
         self._bos = self._get_special_token(f"begin{_US}of{_US}sentence")
@@ -238,15 +258,18 @@ class DeepSeekV3Renderer:
                 emit_special(
                     self._assistant_token, -1, is_sampled=False, is_content=False
                 )
-            if self.config.enable_thinking:
-                emit_text("<think>\n", -1, is_sampled=False, is_content=False)
+            if self._GEN_THINK_PREFILL:
+                emit_text(
+                    self._GEN_THINK_PREFILL, -1, is_sampled=False, is_content=False
+                )
 
         return RenderedTokens(
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
+            message_tool_names=extract_message_tool_names(messages),
         )
 
     def render_ids(
@@ -267,6 +290,7 @@ class DeepSeekV3Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — args land in a ```json fence, schema not needed
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_deepseek_v3(
             self._tokenizer,
@@ -277,6 +301,12 @@ class DeepSeekV3Renderer:
             tool_call_begin_id=self._tool_call_begin,
             tool_call_end_id=self._tool_call_end,
             tool_sep_id=self._tool_sep,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=set(self.get_stop_token_ids()),
+                assistant_prefix="<｜Assistant｜>",
+            ),
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -294,6 +324,28 @@ class DeepSeekV3Renderer:
             not previous_prompt_ids
             or not new_messages
             or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_calls_begin,
+            assistant_prefix="<｜Assistant｜>",
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [
+                *previous_completion_ids,
+                *list(self._tokenizer.encode("</think>", add_special_tokens=False)),
+            ]
+
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention,
+            new_messages,
         ):
             return None
 
@@ -380,21 +432,41 @@ class DeepSeekV3Renderer:
         last_role = new_messages[-1].get("role") if new_messages else None
         if last_role != "tool":
             emit_special(self._assistant_token, -1)
-        if self.config.enable_thinking:
-            emit_text("<think>\n", -1)
+        if self._GEN_THINK_PREFILL:
+            emit_text(self._GEN_THINK_PREFILL, -1)
 
         total_len = len(previous_ids) + len(ext)
         return RenderedTokens(
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=[False] * len(previous_ids) + ext_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer, [False] * len(previous_ids) + ext_content
+            ),
             message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
         )
 
     # ------------------------------------------------------------------
     # Assistant rendering
     # ------------------------------------------------------------------
+
+    def _prepare_assistant_content(self, msg: Message) -> str:
+        """Assistant content as the V3 template would emit it: verbatim.
+
+        V3 is non-reasoning — its template emits ``message['content']`` as-is
+        and never reads ``reasoning_content``. A structured content list is
+        flattened to its ``text`` parts. The R1 subclass overrides this to
+        strip ``</think>`` from history.
+        """
+        content = msg.get("content") or ""
+        if isinstance(content, list):
+            content = "".join(
+                p.get("text", "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        return content
 
     def _render_assistant(
         self,
@@ -411,24 +483,7 @@ class DeepSeekV3Renderer:
         # without a new <｜Assistant｜> token in that case.
         prev_is_tool = msg_idx > 0 and messages[msg_idx - 1]["role"] == "tool"
 
-        content = msg.get("content") or ""
-        # Support structured content (ThinkingPart / TextPart list).
-        if isinstance(content, list):
-            parts_text: list[str] = []
-            for p in content:
-                if not isinstance(p, dict):
-                    continue
-                if p.get("type") == "thinking":
-                    thinking = p.get("thinking", "")
-                    parts_text.append(f"<think>{thinking}</think>")
-                elif p.get("type") == "text":
-                    parts_text.append(p.get("text", ""))
-            content = "".join(parts_text)
-        # Also accept reasoning_content stored separately (OpenAI-style).
-        elif isinstance(msg.get("reasoning_content"), str) and msg["reasoning_content"]:
-            reasoning = msg["reasoning_content"]
-            content = f"<think>{reasoning}</think>{content}"
-
+        content = self._prepare_assistant_content(msg)
         tool_calls = msg.get("tool_calls") or []
 
         # ``<｜Assistant｜>`` is template-injected scaffolding — at

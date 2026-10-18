@@ -11,16 +11,25 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
 
 from renderers.base import (
+    ChatTemplateTokenizer,
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    extract_message_tool_names,
+    resolve_thinking_retention,
 )
+from renderers.parsing import (
+    _reasoning_end_token_index,
+    _strip_stop_tokens,
+)
+
 from renderers.configs import DefaultRendererConfig
 from renderers.parsers import (
+    ThinkTextReasoningParser,
     get_reasoning_parser,
     get_tool_parser,
 )
@@ -88,18 +97,28 @@ class DefaultRenderer:
     :class:`renderers.DefaultRendererConfig`).
     """
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # An opaque Jinja template cannot promise prefix stability.
+        return False
+
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: ChatTemplateTokenizer,
         config: DefaultRendererConfig | None = None,
     ):
         cfg = config or DefaultRendererConfig()
-        if cfg.preserve_all_thinking or cfg.preserve_thinking_between_tool_calls:
-            raise NotImplementedError(
-                "DefaultRenderer falls back to apply_chat_template and can't "
-                "selectively re-emit dropped reasoning_content. Configure a "
-                "model-specific renderer if you need preserve_*_thinking."
+        if cfg.thinking_retention is not None:
+            raise ValueError(
+                "DefaultRenderer cannot implement explicit thinking_retention "
+                "bridge policy because its template close/turn structure is "
+                "opaque. Use a typed renderer for this model."
             )
+        self.effective_thinking_retention = resolve_thinking_retention(
+            cfg,
+            "template",
+        )
         self._tokenizer = tokenizer
         self.config = cfg
         self._tool_parser = _resolve_parser(cfg.tool_parser, tokenizer, get_tool_parser)
@@ -141,6 +160,7 @@ class DefaultRenderer:
             token_ids=token_ids,
             message_indices=message_indices,
             message_roles=message_roles,
+            message_tool_names=extract_message_tool_names(messages),
         )
 
     def _apply(self, messages, *, tools=None, add_generation_prompt=False) -> list[int]:
@@ -170,50 +190,66 @@ class DefaultRenderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — DefaultRenderer relies on configured tool_parser, schema not consulted here
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
+        ids = _strip_stop_tokens(token_ids, set(self.get_stop_token_ids()))
+        boundary = scan_reasoning(
+            self._tokenizer,
+            ids,
+            prefilled=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=set(self.get_stop_token_ids()),
+            ),
+        )
+        if boundary.is_open:
+            return ParsedResponse(
+                content="", reasoning_content=boundary.text, reasoning_complete=False
+            )
+        reasoning_end = (
+            _reasoning_end_token_index(self._tokenizer, ids)
+            if boundary.text is not None
+            else 0
+        )
         # 1. Extract tool calls while we still have token ids (most formats
         #    use special-token delimiters, so id-level matching is reliable).
         if self._tool_parser is not None:
-            content_ids, tool_calls = self._tool_parser.extract(list(token_ids))
+            content_ids, tool_calls = self._tool_parser.extract(ids[reasoning_end:])
+            content_ids = [*ids[:reasoning_end], *content_ids]
+            for tc in tool_calls:
+                if tc.token_span is not None:
+                    start, end = tc.token_span
+                    tc.token_span = (start + reasoning_end, end + reasoning_end)
         else:
-            content_ids = list(token_ids)
+            content_ids = ids
             tool_calls = []
 
         # 2. Decode (keep special tokens so a downstream reasoning parser can
         #    still see things like <think>/</think> when they're tokens).
         text = self._tokenizer.decode(content_ids, skip_special_tokens=False)
 
-        # 3. Extract reasoning from the decoded text. Falls back to a built-in
-        #    <think>...</think> sniff so unconfigured users get the same behavior
-        #    as before. Preserve whitespace at the <think>/</think> boundary —
-        #    the chat template round-trips it verbatim (e.g. GLM emits
-        #    `{{ '\\n<think>' + reasoning_content + '</think>' }}` then
-        #    `{{- content }}` with no separator), so a leading `\\n` on content
-        #    or trailing `\\n` on reasoning_content must stay in the parsed
-        #    fields for re-render to be byte-identical. Stripping here causes
-        #    the re-rendered assistant message to shift by one BPE token after
-        #    `</think>`, cascading through downstream tokenization and breaking
-        #    the "extension property" in trajectory step tokenization.
-        if self._reasoning_parser is not None:
-            reasoning_content, text = self._reasoning_parser.extract(text)
+        # Use the same initial boundary for extraction and tool scanning.
+        # Preserve whitespace inside reasoning and after its close: templates
+        # may emit these fields back-to-back, so stripping shifts token offsets.
+        if self._reasoning_parser is None or isinstance(
+            self._reasoning_parser, ThinkTextReasoningParser
+        ):
+            reasoning_content = boundary.text
+            if boundary.text is not None:
+                text = text.partition("</think>")[2]
         else:
-            reasoning_content = None
-            if "</think>" in text:
-                before, after = text.split("</think>", 1)
-                if "<think>" in before:
-                    reasoning_content = before.split("<think>", 1)[-1]
-                else:
-                    reasoning_content = before
-                text = after
+            reasoning_content, text = self._reasoning_parser.extract(text)
 
-        # Strip any remaining special tokens from the final content (we kept
-        # them around for the reasoning parser above).
         text = _strip_special_tokens(self._tokenizer, text)
 
         return ParsedResponse(
             content=text,
             reasoning_content=reasoning_content if reasoning_content else None,
             tool_calls=tool_calls,
+            reasoning_complete=True
+            if isinstance(self._reasoning_parser, ThinkTextReasoningParser)
+            or reasoning_content is not None
+            else None,
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -248,9 +284,9 @@ def _resolve_parser(value, tokenizer, factory):
 
 
 def _strip_special_tokens(tokenizer, text: str) -> str:
-    """Remove any special-token substrings that slipped into decoded text."""
+    """Remove framing tokens while preserving literal think markers in content."""
     specials = getattr(tokenizer, "all_special_tokens", None) or []
     for token in specials:
-        if token and token in text:
+        if token and token not in {"<think>", "</think>"} and token in text:
             text = text.replace(token, "")
     return text

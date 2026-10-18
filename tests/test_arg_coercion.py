@@ -501,3 +501,82 @@ def test_qwen35_parameter_value_preserves_internal_whitespace():
     assert tc.status == ToolCallParseStatus.OK
     # One leading + one trailing \n stripped — interior spaces preserved.
     assert tc.arguments == {"path": "  /etc  "}
+
+
+@pytest.mark.parametrize(
+    "schema,raw",
+    [
+        ({"type": "number"}, "NaN"),
+        ({"type": "number"}, "inf"),
+        ({"type": "number"}, "-Infinity"),
+        ({"type": "number"}, "1e999"),
+        ({"type": "array"}, "[1e999]"),
+        ({"type": "object"}, '{"nested": [NaN]}'),
+        ({"type": "integer"}, "Infinity"),
+        ({"type": "date"}, '{"nested": [1e999]}'),
+    ],
+)
+def test_qwen35_nonfinite_arguments_preserve_text_and_flag_invalid(schema, raw):
+    """vLLM 0.32 rejects non-finite values in typed and terminal JSON paths."""
+    tools = [{"name": "f", "parameters": {"properties": {"x": schema}}}]
+    tok = load_tokenizer("Qwen/Qwen3.5-9B")
+    parsed = _parse(
+        tok,
+        f"<tool_call><function=f><parameter=x>{raw}</parameter></function></tool_call>",
+        tools=tools,
+    )
+    assert len(parsed.tool_calls) == 1
+    call = parsed.tool_calls[0]
+    assert call.status == ToolCallParseStatus.INVALID_JSON
+    assert call.arguments == {"x": raw}
+
+
+@pytest.mark.parametrize(
+    "schema", [None, {"type": "string"}, {"type": ["number", "string"]}]
+)
+def test_qwen35_nonfinite_text_with_string_schema_is_ok(schema):
+    tools = [{"name": "f", "parameters": {"properties": {"x": schema}}}]
+    tok = load_tokenizer("Qwen/Qwen3.5-9B")
+    parsed = _parse(
+        tok,
+        "<tool_call><function=f><parameter=x>NaN</parameter></function></tool_call>",
+        tools=tools,
+    )
+    assert parsed.tool_calls[0].status == ToolCallParseStatus.OK
+    assert parsed.tool_calls[0].arguments == {"x": "NaN"}
+
+
+@pytest.mark.parametrize(
+    "body,status",
+    [
+        ("<function=></function>", ToolCallParseStatus.MISSING_NAME),
+        (
+            "<function=f\n<parameter=x>1</parameter></function>",
+            ToolCallParseStatus.MALFORMED_STRUCTURE,
+        ),
+    ],
+)
+def test_qwen35_malformed_function_is_not_ok(body, status):
+    tok = load_tokenizer("Qwen/Qwen3.5-9B")
+    parsed = _parse(tok, f"<tool_call>{body}</tool_call>")
+    assert len(parsed.tool_calls) == 1
+    assert parsed.tool_calls[0].status == status
+
+
+def test_qwen35_pluggable_parser_preserves_untyped_values():
+    from renderers.parsers import get_tool_parser
+
+    tok = load_tokenizer("Qwen/Qwen3.5-9B")
+    parser = get_tool_parser("qwen3.5", tok)
+    ids = tok.encode(
+        "prefix<tool_call><function=f>"
+        "<parameter=count>42</parameter><parameter=enabled>True</parameter>"
+        "<parameter=empty>null</parameter></function></tool_call>",
+        add_special_tokens=False,
+    )
+    content_ids, calls = parser.extract(list(ids))
+    assert tok.decode(content_ids, skip_special_tokens=False) == "prefix"
+    assert len(calls) == 1
+    assert calls[0].status == ToolCallParseStatus.OK
+    assert calls[0].arguments == {"count": "42", "enabled": "True", "empty": "null"}
+    assert calls[0].token_span == (len(content_ids), len(ids))

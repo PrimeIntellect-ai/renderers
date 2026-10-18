@@ -1,25 +1,25 @@
-from __future__ import annotations
-
-import contextlib
-import enum
-import io
 import logging
-import queue
-import threading
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Literal,
     Protocol,
+    Required,
     TypedDict,
+    cast,
     runtime_checkable,
 )
 
 if TYPE_CHECKING:
-    from renderers.configs import AutoRendererConfig, RendererConfig
+    from renderers.configs import (
+        AutoRendererConfig,
+        RendererConfig,
+        ResolvedThinkingRetention,
+    )
 
 logger = logging.getLogger("renderers.base")
 
@@ -109,12 +109,75 @@ class Message(TypedDict, total=False):
     Optional keys mirror the OpenAI chat format for tool calling.
     """
 
-    role: str
-    content: Content
+    role: Required[str]
+    content: Required[Content]
     tool_calls: list[ToolCall]
     tool_call_id: str
     name: str
+    reasoning: str
     reasoning_content: str
+
+
+def extract_message_tool_names(messages: list[Message]) -> list[str | None]:
+    """Per-message tool function names parallel to ``message_roles``.
+
+    Returns one entry per message: the function name for ``role="tool"``
+    messages, ``None`` for every other message. Length matches the
+    input list.
+
+    For tool messages the name is taken from ``msg["name"]`` when set
+    (caller-provided), otherwise recovered by joining
+    ``msg["tool_call_id"]`` against any prior assistant's
+    ``tool_calls[i].function.name`` in the same list. Tool messages
+    whose issuing assistant lives outside the provided list (e.g. on
+    a :meth:`Renderer.bridge_to_next_turn` call where ``new_messages``
+    covers only the new turn) resolve to ``None``.
+
+    Pure metadata: this never mutates the caller's messages and has
+    no effect on the rendered token stream. It runs independently of
+    the render path so the renderer can populate the field on
+    :class:`RenderedTokens` without breaking HF byte parity for tool
+    messages that carry no ``name``. Callers who *also* want the
+    function name to appear in the rendered scaffold (e.g. GPT-OSS
+    Harmony's ``functions.{name}`` prefix) must attach ``name`` to
+    their tool messages before calling :meth:`Renderer.render`
+    themselves — renderers don't synthesize ``name`` into the input,
+    only into this metadata field.
+
+    Trainers join this list with :attr:`RenderedTokens.message_indices`
+    to recover per-token tool attribution — the canonical use case is
+    SFT on tool response bodies while RL acts only on assistant tokens
+    (tool body tokens get a constant positive advantage so the model
+    learns to anticipate tool outputs without learning to emit
+    ``<|tool_response>`` itself).
+
+    Per-message rather than per-token because the data is naturally
+    per-message — storing it per-token would duplicate the same
+    string across every body token of the same tool message.
+    """
+    lookup: dict[str, str] = {}
+    for m in messages:
+        if not isinstance(m, Mapping) or m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            if not isinstance(tc, Mapping):
+                continue
+            tc_id = tc.get("id")
+            fn = tc.get("function")
+            tc_name = fn.get("name") if isinstance(fn, Mapping) else None
+            if isinstance(tc_id, str) and isinstance(tc_name, str):
+                lookup[tc_id] = tc_name
+    out: list[str | None] = []
+    for m in messages:
+        if not isinstance(m, Mapping) or m.get("role") != "tool":
+            out.append(None)
+            continue
+        name = m.get("name")
+        if not (isinstance(name, str) and name):
+            tc_id = m.get("tool_call_id")
+            name = lookup.get(tc_id) if isinstance(tc_id, str) else None
+        out.append(name if isinstance(name, str) and name else None)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +223,11 @@ class MultiModalData:
 class RenderedTokens:
     """Result of rendering messages to tokens.
 
-    Each token carries an index into the original message list so callers can
-    build per-token loss masks without re-rendering. Tokens from structural
+    Each token carries its owning message's index into the original message
+    list so callers can build per-token loss masks without re-rendering.
+    Sampled closing tokens belong to the assistant that generated them, even
+    when emitted while rendering the next message's role marker. User/tool
+    bodies retain their own message indices. Tokens from structural
     scaffolding the renderer adds outside any single message (e.g. the
     trailing generation prompt) carry index ``-1``.
 
@@ -180,7 +246,9 @@ class RenderedTokens:
     Empty ``sampled_mask`` (``[]``) means the renderer doesn't provide
     this signal — consumers should fall back to attribution-only
     masking. ``DefaultRenderer`` leaves it empty because the Jinja
-    template is opaque; hand-coded renderers populate it.
+    template is opaque. Hand-coded renderers normally populate it; a
+    renderer whose sampled/scaffold boundary depends on character
+    attribution may leave it empty for an offsetless tokenizer.
 
     ``is_content`` is a per-token signal generalizing the "scaffold vs
     body" distinction across all roles: ``True`` iff the token was
@@ -206,7 +274,34 @@ class RenderedTokens:
 
     Empty ``is_content`` (``[]``) — like ``sampled_mask`` — means the
     renderer doesn't provide the signal. ``DefaultRenderer`` leaves it
-    empty for the same reason.
+    empty because its Jinja template is opaque; all renderers leave it
+    empty when the supplied tokenizer cannot return character offsets.
+
+    ``message_tool_names`` is the per-message tool function name list,
+    parallel to ``message_roles`` (same length). For tool-role
+    messages it carries the function name — either taken from
+    ``msg["name"]`` (caller-provided) or recovered by joining
+    ``msg["tool_call_id"]`` against a prior assistant's
+    ``tool_calls[i].function.name`` in the rendered slice. Every
+    other message is ``None``, as are tool messages whose issuing
+    assistant lives outside the rendered slice (e.g. on a
+    :meth:`Renderer.bridge_to_next_turn` call where ``new_messages``
+    covers only the new turn).
+
+    This is pure metadata, computed by :func:`extract_message_tool_names`
+    independently of the render path: populating it never touches the
+    rendered token stream, so HF chat-template byte parity is
+    preserved for tool messages carrying no ``name``. Callers who
+    *also* want the function name to appear in the rendered scaffold
+    (e.g. GPT-OSS Harmony's ``functions.{name}`` prefix) must attach
+    ``name`` to their tool messages before calling
+    :meth:`Renderer.render` themselves.
+
+    Trainers join this with ``message_indices`` to build per-tool
+    selective loss masks (SFT on tool response bodies of a specific
+    tool while RL acts on assistant tokens). Empty
+    ``message_tool_names`` (``[]``) means the renderer doesn't
+    provide the signal.
 
     ``multi_modal_data`` is populated by multimodal renderers (e.g.
     ``Qwen3VLRenderer``) when image / video content parts are present;
@@ -218,6 +313,7 @@ class RenderedTokens:
     sampled_mask: list[bool] = field(default_factory=list)
     is_content: list[bool] = field(default_factory=list)
     message_roles: list[str] = field(default_factory=list)
+    message_tool_names: list[str | None] = field(default_factory=list)
     multi_modal_data: "MultiModalData | None" = None
 
     def tokens_per_message(
@@ -289,7 +385,10 @@ class RenderedTokens:
         is not represented.
 
         Hand-coded renderers emit each message's tokens contiguously,
-        so the span is well-defined. The implementation tolerates
+        so the span is well-defined. Spans follow input-message indices,
+        not necessarily token order: templates can reorder tool results.
+        Empty messages whose role marker closes the preceding assistant
+        may have no tokens of their own. The implementation tolerates
         non-contiguous attribution by returning the outer span
         ``(first_k, last_k + 1)``; if you suspect interleaving, slice
         ``message_indices`` yourself to verify.
@@ -386,7 +485,7 @@ class RenderedTokens:
 
         Returns an empty dict when :attr:`is_content` or
         :attr:`message_roles` is empty (renderer didn't populate the
-        signal — e.g. ``DefaultRenderer``).
+        signal — e.g. ``DefaultRenderer`` or an offsetless tokenizer).
 
         Intended for selective loss masking: SFT on tool response
         bodies while RL acts only on assistant turns is the canonical
@@ -462,12 +561,19 @@ class RenderedTokens:
         return mask
 
 
-class ToolCallParseStatus(str, enum.Enum):
+class ToolCallParseStatus(StrEnum):
     """Per-attempt outcome of parsing a single ``<tool_call>`` block.
 
     The renderer parser's job is JSON-syntax → ``dict`` (the parser-level
-    contract). Schema validation — required fields, argument types, tool
-    name lookup — is the *tool*'s job and is intentionally not done here.
+    contract). Schema validation — required fields, argument types — is
+    the *tool*'s job and is intentionally not done here. Tool-*name*
+    lookup is the one exception, and only where the reference inference
+    parser does it: vLLM ≥ 0.24 aliases ``glm45``/``glm47`` to a parser
+    with ``validate_tool_names=True`` that silently drops any call whose
+    name isn't in the request's tool list. ``parse_glm`` mirrors that as
+    ``UNKNOWN_TOOL`` (when ``tools`` is passed) so train-side parsing
+    agrees with what an eval client sees from the engine — but keeps the
+    attempt visible instead of swallowing it.
     See ``ParsedToolCall.status`` for what each value means.
 
     Diverges from vLLM/SGLang on purpose. Both engines collapse parse
@@ -484,6 +590,7 @@ class ToolCallParseStatus(str, enum.Enum):
     UNCLOSED_BLOCK = "unclosed_block"  # opening delim hit EOS / stop
     MISSING_NAME = "missing_name"  # parsed structurally, but no function name
     MALFORMED_STRUCTURE = "malformed_structure"  # format-specific shape error
+    UNKNOWN_TOOL = "unknown_tool"  # name not in the provided tools list
 
 
 @dataclass
@@ -530,6 +637,13 @@ class ParsedResponse:
     content: str
     reasoning_content: str | None = None
     tool_calls: list[ParsedToolCall] = field(default_factory=list)
+    reasoning_complete: bool | None = True
+    """Whether the reasoning channel is closed at the end of the completion.
+
+    False means generation ended inside reasoning; this is unrelated to the
+    engine finish reason, tool-call validity, or whether final text is useful.
+    None means the parser cannot determine the state for its reasoning format.
+    """
 
 
 @dataclass
@@ -563,8 +677,70 @@ class RenderedConversation:
 
 
 @runtime_checkable
+class Tokenizer(Protocol):
+    """Structural tokenizer surface used by hand-coded renderers.
+
+    Hugging Face tokenizers satisfy this protocol, as can lightweight BYO
+    adapters around ``tokenizers.Tokenizer`` or another tokenizer backend.
+    Keeping the renderer-facing contract here makes ``transformers`` optional
+    for text rendering. Character offsets are a separate optional capability;
+    see :class:`OffsetTokenizer`.
+    """
+
+    name_or_path: str
+    unk_token_id: int | None
+    eos_token_id: int | None
+
+    def encode(self, text: str, *args: Any, **kwargs: Any) -> list[int]: ...
+
+    def decode(self, token_ids: Any, *args: Any, **kwargs: Any) -> str: ...
+
+    def convert_tokens_to_ids(self, tokens: Any) -> Any: ...
+
+
+@runtime_checkable
+class OffsetTokenizer(Tokenizer, Protocol):
+    """Tokenizer that can return character offsets alongside token IDs.
+
+    Hand-coded renderers use this optional capability to distinguish caller
+    content from adjacent template scaffold without changing the underlying
+    BPE pass. A basic :class:`Tokenizer` remains sufficient for rendering token
+    IDs; when offsets are unavailable, renderers leave ``is_content`` empty.
+    """
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
+class ChatTemplateTokenizer(Tokenizer, Protocol):
+    """Tokenizer surface required by :class:`DefaultRenderer`."""
+
+    def apply_chat_template(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
 class Renderer(Protocol):
     """Owns message ↔ token conversion for a specific model family."""
+
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether extending a conversation preserves its rendered token prefix.
+
+        For valid conversations ending in an assistant message, ``True`` means
+        that appending user/tool/assistant messages leaves the existing token
+        IDs unchanged when both renders use ``add_generation_prompt=False``.
+        The system/developer preamble, tools, and renderer configuration must
+        stay fixed. This describes full renders, not sampled completions or
+        the ability to bridge them; keep using ``bridge_to_next_turn`` for that.
+
+        The declaration is conservative over message contents (including
+        supplied reasoning even when thinking generation is disabled) and
+        tools. ``False`` means stability is not guaranteed, including opaque
+        templates. It does not mean every conversation changes. Conversely,
+        ``True`` does not promise to emit fields the template always ignores.
+        Custom renderers should declare this property from their emit rules.
+        """
+        ...
 
     def render(
         self,
@@ -576,15 +752,11 @@ class Renderer(Protocol):
         """Render messages to token IDs with per-token message attribution.
 
         Behaviour around historical ``reasoning_content`` is owned by the
-        renderer instance — the ``preserve_all_thinking`` and
-        ``preserve_thinking_between_tool_calls`` flags are constructor
-        kwargs, not call-site kwargs. To render with a different
-        configuration, build a different renderer (or different pool).
-        Defaults preserve byte-identity with each model's chat template;
-        flipping a flag at construction restores ``reasoning_content``
-        the template would otherwise drop. See
-        ``should_preserve_past_thinking`` for the per-message
-        classification.
+        renderer instance — the ``thinking_retention`` level is resolved at
+        construction, not passed per call. To render with a different
+        configuration, build a different renderer. When ``thinking_retention``
+        is left unset, full renders follow the model's chat template and bridge
+        policy is derived from that template's own history-retention knobs.
         """
         ...
 
@@ -603,8 +775,16 @@ class Renderer(Protocol):
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         """Parse completion tokens back into a structured message.
+
+        Pass the exact ``prompt_ids`` used for sampling whenever available.
+        This identifies reasoning prefilled by the prompt, including Gemma's
+        post-tool thought channel and partial assistant prefixes. Omitting it,
+        passing None, and passing [] are equivalent: the format's completion
+        grammar applies without prompt context. GLM and DeepSeek V4 also use
+        the configured generation mode to determine the initial channel.
 
         ``tools`` is the same list passed to ``render`` for this turn.
         XML-style formats (Qwen3.5, GLM, MiniMax, Laguna) render argument
@@ -679,8 +859,12 @@ class Renderer(Protocol):
         Return ``None`` whenever the renderer can't prove that contract
         holds — the caller falls back to a full re-render. In particular,
         bridges refuse assistant messages in ``new_messages`` (those would
-        re-tokenize model-sampled content). Hand-coded renderers know their
-        canonical close and synthesise it on truncated priors;
+        re-tokenize model-sampled content). They also follow the renderer's
+        resolved thinking-retention bridge policy: ``"template"`` always
+        re-renders, ``"tool_cycle"`` re-renders at a new user-query boundary,
+        and ``"all"`` allows extension when the rest of the structural bridge
+        checks pass. Hand-coded renderers know their canonical close and
+        synthesise it on truncated priors;
         DefaultRenderer always returns ``None`` because the template's
         close is unknown.
         """
@@ -692,10 +876,10 @@ class MultimodalRenderer(Renderer, Protocol):
     """A :class:`Renderer` that supports multimodal inputs (images, video).
 
     Concrete classes (``Qwen3VLRenderer``, ``Qwen35Renderer``,
-    ``Qwen36Renderer``, ``KimiK25Renderer``) implement this Protocol
-    structurally — no explicit inheritance required. Callers that need
-    to drive vLLM's ``multi_modal_data`` features field or carry images
-    forward across turns should dispatch on ``isinstance(r,
+    ``Qwen36Renderer``, ``Qwen38Renderer``, ``KimiK25Renderer``) implement
+    this Protocol structurally — no explicit inheritance required.
+    Callers that need to drive vLLM's ``multi_modal_data`` features field or
+    carry images forward across turns should dispatch on ``isinstance(r,
     MultimodalRenderer)`` and use the extended ``bridge_to_next_turn``
     signature below.
     """
@@ -737,9 +921,7 @@ class MultimodalRenderer(Renderer, Protocol):
 # Per-type cache for ``is_multimodal``. The ``runtime_checkable`` Protocol
 # isinstance check walks every protocol member via ``hasattr`` on each
 # call; per-type caching collapses that to a single dict lookup on the
-# hot path (e.g. per-bridge dispatch). Pools expose ``is_multimodal``
-# directly as a snapshot attribute (different pools share a class but
-# wrap different renderer types), so we don't need to special-case them.
+# hot path (e.g. per-bridge dispatch).
 _IS_MULTIMODAL_BY_TYPE: dict[type, bool] = {}
 
 
@@ -759,127 +941,6 @@ def is_multimodal(r: object) -> bool:
         cached = isinstance(r, MultimodalRenderer)
         _IS_MULTIMODAL_BY_TYPE[cls] = cached
     return cached
-
-
-class RendererPool:
-    """Pool of Renderer instances that itself satisfies the Renderer protocol.
-
-    Callers treat a pool like a single renderer — ``pool.render_ids(...)``,
-    ``pool.bridge_to_next_turn(...)``, ``isinstance(pool, MultimodalRenderer)``
-    all work via structural delegation. The pool internally serializes
-    access to its inner renderers (each wraps its own tokenizer copy).
-
-    Concurrency model:
-    - ``size == 1``: a single inner renderer guarded by a ``threading.Lock``.
-      Avoids the queue's per-call overhead on the common default config.
-    - ``size > 1``: a ``queue.Queue`` of independent renderers, checked out
-      one at a time. HuggingFace fast tokenizers release the GIL during
-      Rust encoding, so threads achieve real parallelism.
-
-    Construction parallelism for ``size > 1``: ``AutoTokenizer.from_pretrained``
-    takes hundreds of ms per call (JSON parse + Rust tokenizer build + HF
-    cache lookup), so populating a 32-slot pool serially costs ~10-15s on
-    startup and shows up directly as a step-0 stall. We fan the factory out
-    across a short-lived thread pool; the GIL-bound Python portion stops
-    scaling past ~8 workers, so we clamp there.
-    """
-
-    def __init__(self, factory: Callable[[], Renderer], size: int):
-        from concurrent.futures import ThreadPoolExecutor
-
-        self._factory = factory
-        self._size = size
-
-        if size == 1:
-            renderer = factory()
-            self._sole: Renderer | None = renderer
-            self._lock: threading.Lock | None = threading.Lock()
-            self._pool: queue.Queue[Renderer] | None = None
-            sample: Renderer = renderer
-        else:
-            self._sole = None
-            self._lock = None
-            self._pool = queue.Queue(maxsize=size)
-            workers = min(size, 8)
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                for renderer in executor.map(lambda _: factory(), range(size)):
-                    self._pool.put(renderer)
-            # Peek without removing — safe at construction time before any
-            # checkout has been served.
-            sample = self._pool.queue[0]
-
-        # Snapshot the protocol-shaped attributes from a sample renderer.
-        # They are constant per renderer class, so resolving them once at
-        # construction (a) eliminates per-call ``getattr``/``isinstance``
-        # overhead and (b) lets a future out-of-process pool variant skip
-        # holding a live tokenizer in the parent process.
-        self._renderer_cls: type[Renderer] = type(sample)
-        self.supports_tools: bool = getattr(sample, "supports_tools", True)
-        self.is_multimodal: bool = is_multimodal(sample)
-        # ``mm_token_type_id_map`` is set ONLY on pools wrapping a
-        # ``MultimodalRenderer``. We deliberately don't expose this as a
-        # class-level property: ``runtime_checkable`` Protocol's
-        # isinstance check uses ``inspect.getattr_static``, which finds
-        # property descriptors on the class regardless of whether their
-        # fget raises. Conditional instance attributes (present in
-        # ``self.__dict__`` only when applicable) are the only way to
-        # make ``isinstance(pool, MultimodalRenderer)`` reflect the
-        # inner renderer's actual protocol conformance.
-        if isinstance(sample, MultimodalRenderer):
-            self.mm_token_type_id_map: dict[int, int] = sample.mm_token_type_id_map
-
-    @contextmanager
-    def checkout(self):
-        if self._sole is not None:
-            assert self._lock is not None
-            with self._lock:
-                yield self._sole
-            return
-        assert self._pool is not None
-        renderer = self._pool.get()
-        try:
-            yield renderer
-        finally:
-            self._pool.put(renderer)
-
-    @property
-    def size(self) -> int:
-        return self._size
-
-    @property
-    def renderer_cls(self) -> type[Renderer]:
-        """Class of the renderers in this pool (uniform across all slots)."""
-        return self._renderer_cls
-
-    # ── Renderer protocol delegation ────────────────────────────────────
-    # Pool structurally satisfies ``Renderer`` (and ``MultimodalRenderer``
-    # when its slots wrap multimodal renderers). Callers can call methods
-    # directly and dispatch with ``isinstance(pool, MultimodalRenderer)``
-    # without reaching into ``checkout()``.
-
-    def render(self, *args: Any, **kwargs: Any) -> "RenderedTokens":
-        with self.checkout() as r:
-            return r.render(*args, **kwargs)
-
-    def render_ids(self, *args: Any, **kwargs: Any) -> list[int]:
-        with self.checkout() as r:
-            return r.render_ids(*args, **kwargs)
-
-    def parse_response(self, *args: Any, **kwargs: Any) -> "ParsedResponse":
-        with self.checkout() as r:
-            return r.parse_response(*args, **kwargs)
-
-    def get_stop_token_ids(self) -> list[int]:
-        with self.checkout() as r:
-            return r.get_stop_token_ids()
-
-    def bridge_to_next_turn(self, *args: Any, **kwargs: Any) -> "RenderedTokens | None":
-        with self.checkout() as r:
-            return r.bridge_to_next_turn(*args, **kwargs)
-
-    # ``mm_token_type_id_map`` (the MultimodalRenderer protocol attribute)
-    # is set in ``__init__`` only for pools wrapping multimodal renderers;
-    # see the comment there for why this isn't a class-level property.
 
 
 RENDERER_REGISTRY: dict[str, type] = {}
@@ -906,13 +967,17 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3-30B-A3B-Instruct-2507": "qwen3",
     "Qwen/Qwen3-30B-A3B-Thinking-2507": "qwen3",
     "Qwen/Qwen3-235B-A22B": "qwen3",
+    # PrimeIntellect Qwen3 — both sizes share the same Qwen3-Coder-style
+    # template with XML tool definitions and calls.
+    "PrimeIntellect/Qwen3-0.6B": "prime-qwen3",
+    "PrimeIntellect/Qwen3-1.7B": "prime-qwen3",
     # Qwen3.5. All seven sizes share the same renderer. The 4B / 9B /
     # 35B-A3B / 122B-A10B / 397B-A17B chat template defaults
     # ``enable_thinking=true`` (open ``<think>\n`` at the gen prompt);
     # the smaller 0.8B / 2B variants flip the polarity (default
     # ``enable_thinking=false``, empty ``<think>\n\n</think>\n\n``).
-    # ``Qwen35Renderer`` auto-detects polarity from the tokenizer's
-    # chat_template at construction, so all seven sizes are
+    # ``Qwen35Renderer`` hard-codes this polarity per model
+    # (``_ENABLE_THINKING_DEFAULTS``), so all seven sizes are
     # token-for-token parity-tested against their own
     # ``apply_chat_template`` — including with
     # ``add_generation_prompt=True``.
@@ -925,36 +990,89 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3.5-397B-A17B": "qwen3.5",
     # Qwen3.6.
     "Qwen/Qwen3.6-35B-A3B": "qwen3.6",
+    # Qwen3.8.
+    "Qwen/Qwen3.8-27B": "qwen3.8",
+    "Qwen/Qwen3.8-Flash-Next": "qwen3.8",
     # Qwen3-VL.
     "Qwen/Qwen3-VL-4B-Instruct": "qwen3-vl",
     "Qwen/Qwen3-VL-8B-Instruct": "qwen3-vl",
     "Qwen/Qwen3-VL-30B-A3B-Instruct": "qwen3-vl",
+    # Gemma 4 instruction checkpoints share Google's canonical turn/tool
+    # grammar and dynamic Gemma4Processor image expansion. E2B/E4B omit the
+    # disabled-thinking empty-channel prefill used by the 26B/31B revision;
+    # Gemma4Renderer detects that small template variant per tokenizer.
+    "google/gemma-4-E2B-it": "gemma4",
+    "google/gemma-4-E4B-it": "gemma4",
+    "google/gemma-4-26B-A4B-it": "gemma4",
+    "google/gemma-4-31B-it": "gemma4",
     # GLM-5 family (GLM-4.7 reuses the GLM-5 template).
     "zai-org/GLM-5": "glm-5",
     "zai-org/GLM-5-FP8": "glm-5",
     "zai-org/GLM-4.7-Flash": "glm-5",
     "zai-org/GLM-5.1": "glm-5.1",
+    "zai-org/GLM-5.3": "glm-5.3",
+    "zai-org/GLM-5.3-BF16": "glm-5.3",
+    "zai-org/GLM-5.3-Flash": "glm-5.3-flash",
+    "zai-org/GLM-5.3-Flash-BF16": "glm-5.3-flash",
     # GLM-4.5.
     "THUDM/GLM-4.5-Air": "glm-4.5",
     "zai-org/GLM-4.5-Air": "glm-4.5",
     # MiniMax.
     "MiniMaxAI/MiniMax-M2": "minimax-m2",
     "MiniMaxAI/MiniMax-M2.5": "minimax-m2",
-    # DeepSeek V3.
+    # DeepSeek V3 (non-reasoning).
     "deepseek-ai/DeepSeek-V3": "deepseek-v3",
     "deepseek-ai/DeepSeek-V3-Base": "deepseek-v3",
+    # DeepSeek R1 (reasoning).
+    "deepseek-ai/DeepSeek-R1": "deepseek-r1",
+    "deepseek-ai/DeepSeek-R1-0528": "deepseek-r1",
+    # DeepSeek V4 Flash 0731 uses the repository's Python DSML encoder (the
+    # tokenizer intentionally ships no Jinja chat_template).
+    "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek-v4",
     # Kimi K2 (K2.5 and K2.6 share the K2.5 template, distinct from K2).
     "moonshotai/Kimi-K2-Instruct": "kimi-k2",
     "moonshotai/Kimi-K2.5": "kimi-k2.5",
     "moonshotai/Kimi-K2.6": "kimi-k2.5",
-    # Nemotron 3.
+    # Nemotron 3. Nano / Super share one chat-template variant (``nemotron-3``);
+    # the Ultra checkpoints use the Ultra variant (``nemotron-3-ultra``, distinct
+    # ``</think>`` glue). Both route to the same Nemotron3Renderer, which selects
+    # the variant from the resolved config's ``name``. BF16 and FP8 share the
+    # same tokenizer and template.
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nemotron-3",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nemotron-3",
-    # Poolside Laguna.
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nemotron-3-ultra",
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nemotron-3-ultra",
+    # Nemotron 3.5 (Lightning). Its template is the Ultra variant's minus the
+    # effort kwarg (``nemotron-3.5``).
+    "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16": "nemotron-3.5",
+    "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026": "nemotron-3.5",
+    # Llama 3.2 (Instruct). Tested against the gated meta-llama repos and
+    # the unrestricted unsloth/... mirror, which ships a byte-identical
+    # chat template. ``Llama3Renderer`` defaults ``date_string`` to
+    # "26 Jul 2024" — matching the chat template's strftime fallback —
+    # so the renderer is reproducible. Pass ``date_string=...`` at
+    # construction to pin a different date.
+    "meta-llama/Llama-3.2-1B-Instruct": "llama-3",
+    "meta-llama/Llama-3.2-3B-Instruct": "llama-3",
+    # Poolside Laguna. These checkpoints ship distinct chat templates, each
+    # mirrored by its own renderer class/config discriminator.
     "poolside/Laguna-XS.2": "laguna-xs.2",
+    "poolside/Laguna-M.1": "laguna-m.1",
+    "poolside/Laguna-XS-2.1": "laguna-xs-2.1",
+    "poolside/Laguna-S-2.1": "laguna-s-2.1",
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
+    # Thinking Machines Inkling checkpoints share byte-identical tokenizer,
+    # chat-template, and processor assets (vision + audio; transformers >= 5.14).
+    "thinkingmachines/Inkling": "inkling",
+    "thinkingmachines/Inkling-Small": "inkling",
+    # Tencent Hunyuan Hy3 (295B-A21B MoE). The FP8 checkpoint shares the same
+    # tokenizer and chat template. Hy3-preview is deliberately unmapped: it
+    # ships an older, incompatible template (un-suffixed special tokens,
+    # ``interleaved_thinking`` instead of ``preserved_thinking``).
+    "tencent/Hy3": "hy3",
+    "tencent/Hy3-FP8": "hy3",
 }
 
 
@@ -968,9 +1086,14 @@ MODEL_RENDERER_MAP: dict[str, str] = {
 # Modality values: ``"image"``, ``"video"``, ``"audio"``. Text is implicit
 # (every model supports it), so it doesn't appear in the set.
 MULTIMODAL_MODELS: dict[str, set[str]] = {
+    "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026": {"image"},
     "Qwen/Qwen3-VL-4B-Instruct": {"image"},
     "Qwen/Qwen3-VL-8B-Instruct": {"image"},
     "Qwen/Qwen3-VL-30B-A3B-Instruct": {"image"},
+    "google/gemma-4-E2B-it": {"image"},
+    "google/gemma-4-E4B-it": {"image"},
+    "google/gemma-4-26B-A4B-it": {"image"},
+    "google/gemma-4-31B-it": {"image"},
     # Qwen3.5 is itself a VLM family (HF tag ``image-text-to-text``,
     # processor class ``Qwen3VLProcessor``) — same vision tokens and
     # image-processor as Qwen3-VL, with a different tool-call format.
@@ -984,6 +1107,9 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     # Qwen3.6 extends Qwen3.5's chat template; same VL bits, only
     # tool-call argument serialization differs.
     "Qwen/Qwen3.6-35B-A3B": {"image"},
+    # Qwen3.8 adds reasoning-effort control and preserves thinking by default.
+    "Qwen/Qwen3.8-27B": {"image"},
+    "Qwen/Qwen3.8-Flash-Next": {"image"},
     # Kimi K2.5 / K2.6 are unified VLMs (HF tag ``image-text-to-text``)
     # with custom processor (``KimiK25Processor`` + ``KimiK25VisionProcessor``).
     # Vision wrap is different from Qwen-VL:
@@ -993,7 +1119,28 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     # ``grid_thws``.
     "moonshotai/Kimi-K2.5": {"image"},
     "moonshotai/Kimi-K2.6": {"image"},
+    "thinkingmachines/Inkling": {"image", "audio"},
+    "thinkingmachines/Inkling-Small": {"image", "audio"},
 }
+
+
+_TRANSFORMERS_INSTALL_HINT = (
+    "Install the optional dependency with "
+    "`pip install 'renderers[transformers]'` (or "
+    "`uv add 'renderers[transformers]'`). Text-only renderers work without "
+    "it when constructed with a compatible tokenizer object."
+)
+
+
+def _require_transformers(feature: str) -> Any:
+    """Return ``transformers`` or raise an actionable optional-extra error."""
+    try:
+        import transformers
+    except ImportError as exc:
+        raise ImportError(
+            f"{feature} requires Transformers. {_TRANSFORMERS_INSTALL_HINT}"
+        ) from exc
+    return transformers
 
 
 def _model_has_vision_config(model_name: str) -> bool:
@@ -1006,13 +1153,26 @@ def _model_has_vision_config(model_name: str) -> bool:
     match what the trainer reconstructs — a class of bug the renderer
     abstraction exists to prevent.
 
-    Returns False on any AutoConfig failure (offline, gated, missing) so
-    a flaky HF probe never blocks a legitimate text-only fine-tune.
+    Returns False on remote/config failures so a flaky HF probe never blocks a
+    legitimate text-only fine-tune. When Transformers itself is unavailable,
+    however, auto-resolution cannot safely distinguish an unknown text model
+    from an unknown VLM; callers must install the extra or choose an explicit
+    renderer config.
     """
     try:
-        from transformers import AutoConfig
-
-        cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=False)
+        transformers = _require_transformers("Auto-resolving an unregistered model")
+    except ImportError as exc:
+        raise ImportError(
+            f"Cannot auto-resolve unregistered model {model_name!r} without "
+            "checking whether it is multimodal. Install "
+            "`renderers[transformers]`, or pass an explicit typed renderer "
+            "config such as `DefaultRendererConfig()` for a known text-only "
+            "model."
+        ) from exc
+    try:
+        cfg = transformers.AutoConfig.from_pretrained(
+            model_name, trust_remote_code=False
+        )
     except Exception:
         return False
     # Most VLM configs nest a vision tower as ``vision_config`` (Qwen-VL,
@@ -1036,8 +1196,8 @@ def _model_has_vision_config(model_name: str) -> bool:
 # Pinning the revision keeps the trust narrow: even with
 # ``trust_remote_code=True``, transformers downloads / executes the
 # tokenizer Python from this exact commit only. A future malicious push
-# to the Moonshot HF repo doesn't auto-propagate to anyone using
-# ``create_renderer_pool``. Bump these SHAs deliberately, with review.
+# to the Moonshot HF repo doesn't auto-propagate to callers of
+# ``load_tokenizer``. Bump these SHAs deliberately, with review.
 TRUSTED_REVISIONS: dict[str, str] = {
     "moonshotai/Kimi-K2-Instruct": "fd1984e2b7a3350dbf7305fe73a4ede25c14de50",
     "moonshotai/Kimi-K2.5": "4d01dfe0332d63057c186e0b262165819efb6611",
@@ -1045,205 +1205,235 @@ TRUSTED_REVISIONS: dict[str, str] = {
 }
 
 
-# Models for which ``fastokens`` is known to diverge from vanilla
-# ``transformers.AutoTokenizer`` and therefore must NOT be patched.
-# Empirical audit ran each entry of ``MODEL_RENDERER_MAP`` through both
-# backends. The entries below fail to load under fastokens (DeepSeek-V3
-# family — Metaspace pretokenizer not yet implemented).
-FASTOKENS_INCOMPATIBLE: frozenset[str] = frozenset(
-    {
-        # fastokens: ``ValueError: pre-tokenizer error: unsupported
-        # pre-tokenizer type: Metaspace`` — DeepSeek's tokenizer uses
-        # SentencePiece-style Metaspace pretokenization which fastokens
-        # doesn't yet implement.
-        "deepseek-ai/DeepSeek-V3",
-        "deepseek-ai/DeepSeek-V3-Base",
-    }
-)
+# Tokenizer repos to use when a canonical model repo is gated but an
+# audited unrestricted mirror ships byte-identical tokenizer files and
+# chat_template. The returned tokenizer keeps the caller's original
+# ``name_or_path`` so exact-match renderer resolution still uses
+# ``MODEL_RENDERER_MAP``.
+TOKENIZER_SOURCE_OVERRIDES: dict[str, str] = {
+    "meta-llama/Llama-3.2-1B-Instruct": "unsloth/Llama-3.2-1B-Instruct",
+    "meta-llama/Llama-3.2-3B-Instruct": "unsloth/Llama-3.2-3B-Instruct",
+}
 
 
-_FASTOKENS_PATCH_LOCK = threading.Lock()
-_FASTOKENS_ANNOUNCED = False
+def _tokenizer_source_for(model_name_or_path: str) -> str:
+    return TOKENIZER_SOURCE_OVERRIDES.get(model_name_or_path, model_name_or_path)
 
 
-def _patched_load(model_name_or_path: str, **kwargs):
-    """Run ``AutoTokenizer.from_pretrained`` with fastokens patched in
-    process-locally — patch around the load, unpatch right after.
-
-    fastokens captures the loaded backend on a per-tokenizer basis, so
-    after we unpatch the returned tokenizer object continues to use
-    fastokens for ``encode``/``decode`` while subsequent
-    ``AutoTokenizer.from_pretrained`` calls (outside our control) go
-    back to vanilla. This keeps the global side effect minimal.
-
-    fastokens itself prints ``[fastokens] patch_transformers: ...`` to
-    stdout on every patch/unpatch call. Building a pool of size N would
-    therefore emit ~N lines (more under thread contention, where some
-    threads see ``already patched``). We swallow those prints under a
-    lock — ``contextlib.redirect_stdout`` swaps ``sys.stdout``
-    process-wide, so the lock keeps unrelated stdout writes from other
-    threads from disappearing into our buffer. The patch/unpatch calls
-    are cheap; only the brief patch+unpatch is serialized, the actual
-    ``from_pretrained`` still runs concurrently across pool slots. A
-    single ``logger.info`` is emitted on the first patch so the fast
-    path is still discoverable in logs.
-    """
-    import fastokens
-    from transformers import AutoTokenizer
-
-    global _FASTOKENS_ANNOUNCED
-
-    with _FASTOKENS_PATCH_LOCK:
-        with contextlib.redirect_stdout(io.StringIO()):
-            fastokens.patch_transformers()
-        if not _FASTOKENS_ANNOUNCED:
-            logger.info(
-                "fastokens enabled — tokenizers load through the Rust BPE "
-                "fast path (~10x encode speedup)."
-            )
-            _FASTOKENS_ANNOUNCED = True
-    try:
-        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
-    finally:
-        with _FASTOKENS_PATCH_LOCK:
-            with contextlib.redirect_stdout(io.StringIO()):
-                fastokens.unpatch_transformers()
-
-
-def load_tokenizer(
-    model_name_or_path: str,
-    *,
-    use_fastokens: bool = True,
-):
-    """Load a tokenizer with the renderers-package security + perf policy.
-
-    **Security** — default ``trust_remote_code=False``. Models listed in
-    ``TRUSTED_REVISIONS`` (Moonshot Kimi-K2 family) load with
-    ``trust_remote_code=True`` AND a pinned ``revision=<sha>`` so
-    transformers only executes the reviewed commit's tokenizer Python.
-
-    **Performance** — ``use_fastokens=True`` (default) routes the load
-    through ``fastokens.patch_transformers()`` so the resulting tokenizer
-    encodes ~10x faster than vanilla ``tokenizers``. The patch is
-    bracketed: it's applied before ``from_pretrained`` and removed
-    immediately after, so global ``AutoTokenizer.from_pretrained`` calls
-    elsewhere in the user's process are not affected.
-
-    Models in ``FASTOKENS_INCOMPATIBLE`` (DeepSeek-V3 family) skip the
-    patch — fastokens currently fails to load them. Pass
-    ``use_fastokens=False`` to force the vanilla backend for any other
-    model.
-
-    Unknown / fine-tuned model paths fall through to
-    ``trust_remote_code=False`` and the patched-load fast path. If
-    fastokens raises during the patched load (e.g. an unknown
-    pre-tokenizer type), we automatically retry with the vanilla
-    backend and emit an INFO log.
-    """
-    from transformers import AutoTokenizer
-
-    kwargs: dict[str, Any] = {}
+def _tokenizer_load_kwargs(model_name_or_path: str) -> dict[str, Any]:
     revision = TRUSTED_REVISIONS.get(model_name_or_path)
     if revision is not None:
-        kwargs = {"trust_remote_code": True, "revision": revision}
-    else:
-        kwargs = {"trust_remote_code": False}
+        return {"trust_remote_code": True, "revision": revision}
+    return {"trust_remote_code": False}
 
-    if not use_fastokens or model_name_or_path in FASTOKENS_INCOMPATIBLE:
-        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
+
+def _preserve_requested_tokenizer_name(
+    tokenizer,
+    *,
+    requested_name_or_path: str,
+    loaded_name_or_path: str,
+):
+    if requested_name_or_path == loaded_name_or_path:
+        return tokenizer
 
     try:
-        return _patched_load(model_name_or_path, **kwargs)
+        tokenizer.name_or_path = requested_name_or_path
+    except Exception:
+        init_kwargs = getattr(tokenizer, "init_kwargs", None)
+        if isinstance(init_kwargs, dict):
+            init_kwargs["name_or_path"] = requested_name_or_path
+
+    if getattr(tokenizer, "name_or_path", "") != requested_name_or_path:
+        raise RuntimeError(
+            f"Loaded tokenizer for {requested_name_or_path!r} from "
+            f"{loaded_name_or_path!r}, but could not preserve the requested "
+            "name_or_path for renderer auto-resolution."
+        )
+    return tokenizer
+
+
+def _load_fast_tokenizer_directly(
+    model_name_or_path: str, revision: str | None
+) -> Any | None:
+    """Load a self-contained fast tokenizer without building the model config.
+
+    ``AutoTokenizer.from_pretrained`` eagerly constructs the *model* config to
+    resolve the tokenizer class — even for a plain ``PreTrainedTokenizerFast``.
+    That construction can raise on modeling-only concerns the tokenizer never
+    needs (e.g. RoPE parameter validation for configs that carry nested
+    ``rope_parameters``). When the repo ships a complete ``tokenizer.json`` and
+    declares no custom tokenizer, the tokenizer is fully self-describing, so we
+    load it directly and skip the config detour.
+
+    Returns ``None`` when there's nothing safe to load this way — a custom
+    ``auto_map`` tokenizer (which must run through ``AutoTokenizer`` with
+    ``trust_remote_code``) or no fast tokenizer at all — so the caller can
+    surface its original error instead.
+    """
+    from transformers import PreTrainedTokenizerFast
+    from transformers.models.auto.tokenization_auto import get_tokenizer_config
+
+    try:
+        if "auto_map" in get_tokenizer_config(model_name_or_path, revision=revision):
+            return None
+        return PreTrainedTokenizerFast.from_pretrained(
+            model_name_or_path, revision=revision
+        )
+    except Exception:
+        return None
+
+
+def _load_tokenizer_via_auto(model_name_or_path: str, **kwargs) -> Any:
+    """``AutoTokenizer.from_pretrained`` with a config-free fallback.
+
+    renderers needs the tokenizer, not the model. If ``AutoTokenizer`` fails
+    while building the model config it loads to resolve the tokenizer class,
+    retry by loading the repo's self-contained ``tokenizer.json`` directly. The
+    original error is re-raised if the repo has no such tokenizer.
+    """
+    from transformers import AutoTokenizer
+
+    try:
+        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
     except Exception as exc:
-        logger.info(
-            "fastokens could not load %r (%s: %s); falling back to vanilla "
-            "AutoTokenizer. Add this model to FASTOKENS_INCOMPATIBLE in "
-            "renderers.base to suppress the retry.",
+        tok = _load_fast_tokenizer_directly(
+            model_name_or_path, revision=kwargs.get("revision")
+        )
+        if tok is None:
+            raise
+        logger.debug(
+            "AutoTokenizer.from_pretrained(%r) failed building the model config "
+            "(%s: %s); loaded the tokenizer directly from tokenizer.json.",
             model_name_or_path,
             type(exc).__name__,
             str(exc)[:160],
         )
-        return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
+        return tok
+
+
+def load_tokenizer(model_name_or_path: str):
+    """Load a tokenizer with the renderers-package security policy.
+
+    Default ``trust_remote_code=False``. Models listed in
+    ``TRUSTED_REVISIONS`` (Moonshot Kimi-K2 family) load with
+    ``trust_remote_code=True`` AND a pinned ``revision=<sha>`` so
+    transformers only executes the reviewed commit's tokenizer Python.
+
+    ``AutoTokenizer.from_pretrained`` eagerly builds the model config to
+    resolve the tokenizer class. If that construction raises on a
+    modeling-only concern the tokenizer doesn't need (e.g. RoPE
+    validation for configs with nested ``rope_parameters``), we fall
+    back to loading the repo's self-contained ``tokenizer.json``
+    directly — see ``_load_tokenizer_via_auto``.
+
+    Canonical Meta Llama-3.2 Instruct repos are gated on HuggingFace. For
+    those exact IDs we load tokenizer files from the audited unrestricted
+    ``unsloth`` mirrors instead, then restore ``tokenizer.name_or_path`` to
+    the requested Meta ID so auto-resolution still selects ``Llama3Renderer``.
+    Requires the ``renderers[transformers]`` extra.
+    """
+    try:
+        _require_transformers("Loading a tokenizer")
+        load_name_or_path = _tokenizer_source_for(model_name_or_path)
+        kwargs = _tokenizer_load_kwargs(load_name_or_path)
+        tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
+        return _preserve_requested_tokenizer_name(
+            tok,
+            requested_name_or_path=model_name_or_path,
+            loaded_name_or_path=load_name_or_path,
+        )
+    except Exception as exc:
+        exc.add_note(f"While loading tokenizer {model_name_or_path!r}.")
+        raise
 
 
 def _populate_registry():
     if RENDERER_REGISTRY:
         return
-    from renderers.default import DefaultRenderer
+    from renderers.deepseek_r1 import DeepSeekR1Renderer
     from renderers.deepseek_v3 import DeepSeekV3Renderer
-    from renderers.glm5 import GLM5Renderer, GLM51Renderer
+    from renderers.deepseek_v4 import DeepSeekV4Renderer
+    from renderers.default import DefaultRenderer
+    from renderers.gemma4 import Gemma4Renderer
+    from renderers.glm5 import (
+        GLM5Renderer,
+        GLM51Renderer,
+        GLM53FlashRenderer,
+        GLM53Renderer,
+    )
     from renderers.glm45 import GLM45Renderer
     from renderers.gpt_oss import GptOssRenderer
+    from renderers.hy3 import Hy3Renderer
+    from renderers.inkling import InklingRenderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
-    from renderers.laguna_xs2 import LagunaXS2Renderer
+    from renderers.laguna_s21 import LagunaS21Renderer
+    from renderers.laguna_xs2 import (
+        LagunaM1Renderer,
+        LagunaXS2Renderer,
+        LagunaXS21Renderer,
+    )
+    from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
-    from renderers.nemotron3 import Nemotron3Renderer
+    from renderers.nemotron3 import (
+        Nemotron3Renderer,
+        Nemotron3UltraRenderer,
+        Nemotron35Renderer,
+    )
+    from renderers.prime_qwen3 import PrimeQwen3Renderer
     from renderers.qwen3 import Qwen3Renderer
     from renderers.qwen3_vl import Qwen3VLRenderer
     from renderers.qwen35 import Qwen35Renderer
     from renderers.qwen36 import Qwen36Renderer
+    from renderers.qwen38 import Qwen38Renderer
 
     RENDERER_REGISTRY.update(
         {
             "default": DefaultRenderer,
             "qwen3": Qwen3Renderer,
+            "prime-qwen3": PrimeQwen3Renderer,
             "qwen3-vl": Qwen3VLRenderer,
+            "gemma4": Gemma4Renderer,
             "qwen3.5": Qwen35Renderer,
             "qwen3.6": Qwen36Renderer,
+            "qwen3.8": Qwen38Renderer,
             "glm-5": GLM5Renderer,
             "glm-5.1": GLM51Renderer,
+            "glm-5.3": GLM53Renderer,
+            "glm-5.3-flash": GLM53FlashRenderer,
             "glm-4.5": GLM45Renderer,
             "minimax-m2": MiniMaxM2Renderer,
             "deepseek-v3": DeepSeekV3Renderer,
+            "deepseek-r1": DeepSeekR1Renderer,
+            "deepseek-v4": DeepSeekV4Renderer,
+            "hy3": Hy3Renderer,
+            "inkling": InklingRenderer,
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
             "laguna-xs.2": LagunaXS2Renderer,
+            "laguna-m.1": LagunaM1Renderer,
+            "laguna-xs-2.1": LagunaXS21Renderer,
+            "laguna-s-2.1": LagunaS21Renderer,
+            "llama-3": Llama3Renderer,
             "nemotron-3": Nemotron3Renderer,
+            "nemotron-3-ultra": Nemotron3UltraRenderer,
+            "nemotron-3.5": Nemotron35Renderer,
             "gpt-oss": GptOssRenderer,
         }
     )
 
 
-def create_renderer_pool(
-    tokenizer_name_or_path: str,
-    config: RendererConfig | None = None,
-    *,
-    size: int = 16,
-) -> RendererPool:
-    """Create a RendererPool with *size* independent tokenizer copies.
-
-    Each slot loads its own tokenizer so threads never share mutable
-    state. HuggingFace fast tokenizers release the GIL during Rust
-    encoding, so threads achieve real parallelism.
-
-    ``config`` is the typed renderer config (one of the variants of
-    :data:`renderers.RendererConfig`). Defaults to
-    :class:`AutoRendererConfig`, which resolves to a concrete renderer
-    via ``MODEL_RENDERER_MAP`` at construction time using the loaded
-    tokenizer's name. Every slot in the pool shares the same config; to
-    run a different config, build a different pool.
-
-    Tokenizers load via ``load_tokenizer`` — see its docstring for the
-    ``trust_remote_code`` policy (default off; Moonshot Kimi-K2 family
-    opts in with a pinned ``revision``).
-    """
-
-    def factory() -> Renderer:
-        tokenizer = load_tokenizer(tokenizer_name_or_path)
-        return create_renderer(tokenizer, config)
-
-    return RendererPool(factory, size=size)
-
-
 def create_renderer(
     tokenizer,
-    config: RendererConfig | None = None,
+    config: "RendererConfig | None" = None,
+    *,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
 ) -> Renderer:
     """Create a Renderer from a typed config.
 
     Args:
-        tokenizer: HuggingFace tokenizer instance.
+        tokenizer: An object satisfying :class:`Tokenizer`; the generic
+            fallback additionally requires :class:`ChatTemplateTokenizer`.
         config: Typed renderer config — one of the variants of
             :data:`renderers.RendererConfig`. ``None`` defaults to
             :class:`AutoRendererConfig`, which resolves to a concrete
@@ -1254,34 +1444,134 @@ def create_renderer(
             template-control kwargs (e.g. ``enable_thinking``), pass
             the specific :class:`Qwen3RendererConfig`,
             :class:`GLM5RendererConfig` etc. and set those fields.
+        chat_template_kwargs: Optional per-run chat-template kwargs. When
+            ``config`` is auto/``None``, renderers first resolves the concrete
+            config from ``tokenizer.name_or_path`` and then validates these
+            kwargs against that config.
 
-    Selecting the auto-renderer for a model without a registered
-    renderer falls back to :class:`DefaultRenderer` for text-only models
-    and raises for VLMs (where ``apply_chat_template`` would silently
-    drop images).
+    Selecting the auto-renderer for a model without a registered renderer
+    probes Hugging Face ``AutoConfig`` before falling back to
+    :class:`DefaultRenderer`, so unknown VLMs fail instead of silently dropping
+    media. Without the ``transformers`` extra, pass an explicit renderer config
+    for unregistered model names.
     """
-    from renderers.configs import AutoRendererConfig
-
     _populate_registry()
+
+    try:
+        config = _resolve_renderer_config(
+            tokenizer,
+            config,
+            chat_template_kwargs=chat_template_kwargs,
+        )
+        from renderers.configs import CustomRendererConfig
+        from renderers.custom import custom_renderer_config, load_custom_renderer
+
+        if isinstance(config, CustomRendererConfig):
+            renderer_cls = load_custom_renderer(config.import_path)
+            return renderer_cls(tokenizer, custom_renderer_config(config))
+        cls = RENDERER_REGISTRY.get(config.name)
+        if cls is None:
+            raise ValueError(
+                f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
+            )
+        return cls(tokenizer, config)
+    except Exception as exc:
+        model_name = getattr(tokenizer, "name_or_path", "<unnamed tokenizer>")
+        renderer_name = config.name if config is not None else "auto"
+        exc.add_note(
+            f"While creating renderer {renderer_name!r} for tokenizer {model_name!r}."
+        )
+        raise
+
+
+def template_field_names(config: "RendererConfig") -> frozenset[str]:
+    """Chat-template kwargs that ``config``'s renderer accepts, custom renderers included."""
+    from renderers.configs import CustomRendererConfig
+    from renderers.custom import load_custom_renderer
+
+    if isinstance(config, CustomRendererConfig):
+        return load_custom_renderer(
+            config.import_path
+        ).config_class.template_field_names()
+    return type(config).template_field_names()
+
+
+def merge_chat_template_kwargs(
+    config: "RendererConfig",
+    chat_template_kwargs: Mapping[str, Any] | None,
+) -> "RendererConfig":
+    """Return ``config`` with the template kwargs applied, validated against its allowlist."""
+    if not chat_template_kwargs:
+        return config
+    if not isinstance(chat_template_kwargs, Mapping):
+        raise TypeError("chat_template_kwargs must be a mapping.")
+    from renderers.configs import CustomRendererConfig
+    from renderers.custom import load_custom_renderer
+
+    kwargs = dict(chat_template_kwargs)
+    config_cls = type(config)
+    # A custom config carries its renderer's fields as extras, so the renderer's
+    # own config class decides which kwargs are template controls.
+    fields_cls = (
+        load_custom_renderer(config.import_path).config_class
+        if isinstance(config, CustomRendererConfig)
+        else config_cls
+    )
+    allowed = fields_cls.template_field_names()
+    if fields_cls._allow_opaque_template_kwargs:
+        reserved = frozenset(fields_cls.model_fields) - allowed - {"name"}
+        unsupported = frozenset(kwargs) & reserved
+    else:
+        unsupported = frozenset(kwargs) - allowed
+    if unsupported:
+        allowed_text = (
+            "opaque Jinja kwargs"
+            if fields_cls._allow_opaque_template_kwargs
+            else ", ".join(sorted(allowed)) or "(none)"
+        )
+        raise ValueError(
+            f"Unsupported chat_template_kwargs for {config.name!r}: "
+            f"{sorted(unsupported)}. Allowed: {allowed_text}. Pass "
+            "renderer-internal options through the typed config instead."
+        )
+    data: dict[str, Any] = {"name": config.name}
+    for field_name in config.__pydantic_fields_set__:
+        data[field_name] = getattr(config, field_name)
+    data.update(getattr(config, "model_extra", None) or {})
+    data.update(kwargs)
+    return config_cls.model_validate(data)
+
+
+def _resolve_renderer_config(
+    tokenizer,
+    config: "RendererConfig | None",
+    *,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+) -> "RendererConfig":
+    """Resolve auto/default config and merge chat-template kwargs."""
+    from renderers.configs import AutoRendererConfig
 
     if config is None:
         config = AutoRendererConfig()
 
-    if not isinstance(config, AutoRendererConfig):
-        cls = RENDERER_REGISTRY.get(config.name)
-        if cls is None:
-            raise ValueError(
-                f"Unknown renderer {config.name!r}. "
-                f"Available: {', '.join(sorted(RENDERER_REGISTRY))}"
-            )
-        return cls(tokenizer, config)
+    if isinstance(config, AutoRendererConfig):
+        return _resolve_auto_config(
+            tokenizer,
+            config,
+            chat_template_kwargs=chat_template_kwargs,
+        )
 
-    return _resolve_auto(tokenizer, config)
+    return merge_chat_template_kwargs(config, chat_template_kwargs)
 
 
-def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
+def _resolve_auto_config(
+    tokenizer,
+    auto: "AutoRendererConfig",
+    *,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+) -> "RendererConfig":
     """Map ``AutoRendererConfig`` → concrete typed config via the
-    tokenizer's ``name_or_path``, then instantiate the matching renderer.
+    tokenizer's ``name_or_path``.
 
     Fine-tunes and renamed checkpoints miss on purpose — their chat
     template may differ from the original even when the architecture
@@ -1293,14 +1583,24 @@ def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
     model_name = getattr(tokenizer, "name_or_path", "")
     renderer_name = MODEL_RENDERER_MAP.get(model_name)
 
-    preserve_carry = {
-        "preserve_all_thinking": auto.preserve_all_thinking,
-        "preserve_thinking_between_tool_calls": auto.preserve_thinking_between_tool_calls,
-    }
+    preserve_carry = {}
+    if auto.thinking_retention is not None:
+        preserve_carry["thinking_retention"] = auto.thinking_retention
 
     if renderer_name is not None:
         cfg_cls = _config_class_for(renderer_name)
-        return RENDERER_REGISTRY[renderer_name](tokenizer, cfg_cls(**preserve_carry))
+        return merge_chat_template_kwargs(
+            cfg_cls(**preserve_carry),
+            chat_template_kwargs,
+        )
+
+    if chat_template_kwargs:
+        raise ValueError(
+            "AutoRendererConfig cannot apply chat_template_kwargs for unknown "
+            f"model {model_name!r}. Pass an explicit model-specific renderer "
+            "config, or use DefaultRendererConfig explicitly for opaque "
+            "apply_chat_template kwargs."
+        )
 
     # No match. For VLMs this must be fatal: DefaultRenderer only knows
     # ``apply_chat_template`` + text tokens, so it would silently drop
@@ -1321,11 +1621,12 @@ def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
     # Text-only fall back to default (apply_chat_template). For fine-tunes
     # with customized chat templates this is the *correct* choice, so we
     # don't warn. Note the pick at INFO and advertise the parser knobs.
-    if auto.preserve_all_thinking or auto.preserve_thinking_between_tool_calls:
+    if auto.thinking_retention is not None:
         raise NotImplementedError(
             "Auto-resolved DefaultRenderer can't selectively re-emit "
             "dropped reasoning_content. Pass an explicit typed renderer "
-            "config (model-specific) if you need preserve_*_thinking."
+            "config (model-specific) if you need thinking_retention != "
+            "'template'."
         )
     logger.info(
         "No model-specific renderer matched %r. Using DefaultRenderer "
@@ -1333,7 +1634,7 @@ def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
         "reasoning_parser=...) to enable structured output parsing.",
         model_name or "<unnamed tokenizer>",
     )
-    return RENDERER_REGISTRY["default"](tokenizer, DefaultRendererConfig())
+    return DefaultRendererConfig()
 
 
 # ---------------------------------------------------------------------------
@@ -1341,28 +1642,83 @@ def _resolve_auto(tokenizer, auto: AutoRendererConfig) -> Renderer:
 # ---------------------------------------------------------------------------
 
 
+# Match prime-rl's multimodal token type convention: 0=text, 1=image, 2=video.
+_MM_TYPE_ID: dict[str, int] = {"image": 1, "video": 2}
+
+
+@dataclass(frozen=True)
+class RenderedTrainingSample:
+    """Output of :func:`build_training_sample`.
+
+    ``token_ids`` and ``loss_mask`` are always populated. ``multi_modal_data``
+    and ``mm_token_type_ids`` are populated only when a multimodal renderer
+    actually emitted media (both ``None`` for text-only renderers and for
+    text-only samples through a VLM renderer), so the text path is unchanged.
+    """
+
+    token_ids: list[int]
+    loss_mask: list[bool]
+    multi_modal_data: "MultiModalData | None" = None
+    mm_token_type_ids: list[int] | None = None
+
+
+def _build_mm_token_type_ids(
+    mm_placeholders: dict[str, list[PlaceholderRange]], length: int
+) -> list[int]:
+    """Per-token modality flags (0=text, 1=image, 2=video) from placeholder ranges."""
+    ids = [0] * length
+    for modality, ranges in mm_placeholders.items():
+        type_id = _MM_TYPE_ID.get(modality, 0)
+        if type_id == 0:
+            continue
+        for r in ranges:
+            end = min(r.offset + r.length, length)
+            for i in range(r.offset, end):
+                ids[i] = type_id
+    return ids
+
+
 def build_training_sample(
     renderer: Renderer,
     messages: list[Message],
     *,
-    role_to_mask: Callable[[Message], bool],
+    role_to_mask: Callable[[Message], bool] | None = None,
     tools: list[ToolSpec] | None = None,
     content_sft_roles: "set[str] | frozenset[str] | None" = None,
-) -> tuple[list[int], list[bool]]:
-    """Build (token_ids, loss_mask) for supervised training.
+    ensure_final_stop: bool = False,
+    message_loss_mask: list[bool | int] | None = None,
+) -> RenderedTrainingSample:
+    """Build a :class:`RenderedTrainingSample` for supervised training.
+
+    Returns ``token_ids`` + ``loss_mask`` (always), plus ``multi_modal_data``
+    and ``mm_token_type_ids`` when the renderer emitted media (``None`` for
+    text — the text token_ids/loss_mask are byte-identical to before).
 
     Single render() call + message_indices → per-token mask.
     Replaces build_incremental_token_mask (O(N) renders → O(1)).
 
-    When the renderer populates ``rendered.sampled_mask``, the loss mask
-    is the AND of role-based attribution and the sampled signal: only
-    tokens the model would have produced at inference are trainable.
-    This keeps SFT byte-aligned with the RL trajectory mask (where the
-    prompt / completion split achieves the same effect structurally).
+    When ``role_to_mask`` is omitted, ``loss_mask`` is the renderer's
+    ``sampled_mask`` directly: every token the model would have
+    produced at inference is trainable, regardless of which message
+    it's attributed to. This is the recommended default for renderer
+    callers — the renderer owns the per-token "is this model output"
+    signal, so role-level filtering becomes a downstream constraint
+    rather than a precondition. Sampled closing markers, including GLM's
+    ``<|user|>`` / ``<|observation|>``, are attributed to their assistant.
+
+    When ``role_to_mask`` is provided, ``loss_mask`` is the AND of the
+    role-based attribution and the sampled signal: only tokens the
+    model would have produced at inference AND attributed to a
+    trainable role pass through. Useful when the caller needs to
+    restrict training to a specific role (e.g. assistant-only) even on
+    a renderer whose ``sampled_mask`` already covers other roles.
+
     Renderers that don't populate ``sampled_mask`` (empty list) fall
     back to attribution-only masking — every token attributed to a
     trainable role is trained on, including template-injected
-    ``<|im_start|>role\\n`` openers.
+    ``<|im_start|>role\\n`` openers. In this fallback mode
+    ``role_to_mask`` is required; calling without it raises
+    ``ValueError``.
 
     ``content_sft_roles`` opts in additional roles for "body-only"
     supervision: for every message whose role is in this set, tokens
@@ -1383,7 +1739,38 @@ def build_training_sample(
     or hand-coded renderers that haven't been wired up yet) ignore
     ``content_sft_roles`` silently — falling back to the original
     ``role_to_mask`` + ``sampled_mask`` behaviour.
+
+    ``ensure_final_stop`` appends the renderer's canonical stop token
+    when the sample ends with an assistant message that the template
+    leaves unterminated. Some templates close an assistant turn only
+    via the *next* message's role marker (e.g. GLM's ``<|user|>`` /
+    ``<|observation|>``), so a final assistant message renders with no
+    stop token at all. No-op when the template already closes the turn
+    in-message (ChatML ``<|im_end|>``, Llama ``<|eot_id|>``); where it
+    fires, the output intentionally diverges from ``apply_chat_template``.
+    Ignored for renderers without ``sampled_mask`` (``DefaultRenderer``) —
+    the close of an opaque template can't be located reliably.
+
+    ``message_loss_mask`` optionally selects messages for supervision with
+    one boolean or integer 0/1 per message. It only restricts the existing
+    mask: selecting a message never enables targets disabled by the role,
+    sampled, or content settings. Unselected messages remain context,
+    including prefilled assistant turns at arbitrary positions. Sampled
+    closing tokens follow their owning assistant, even when a template
+    emits them at the next message boundary. A synthesized final stop
+    follows the final message's selection. Token ids are unaffected.
+    ``None`` preserves the existing mask.
     """
+    if message_loss_mask is not None:
+        if len(message_loss_mask) != len(messages):
+            raise ValueError("message_loss_mask must have one entry per message")
+        if any(
+            not isinstance(value, (bool, int)) or value not in (0, 1)
+            for value in message_loss_mask
+        ):
+            raise ValueError(
+                "message_loss_mask entries must be booleans or integers 0/1"
+            )
     rendered = renderer.render(messages, tools=tools)
     has_sampled_info = len(rendered.sampled_mask) == len(rendered.token_ids)
     has_content_info = len(rendered.is_content) == len(rendered.token_ids)
@@ -1392,6 +1779,13 @@ def build_training_sample(
         body_roles = frozenset(content_sft_roles)
     else:
         body_roles = frozenset()
+
+    if role_to_mask is None and not has_sampled_info:
+        raise ValueError(
+            "role_to_mask is required when the renderer does not populate "
+            "sampled_mask. Pass an explicit role filter (e.g. "
+            "lambda m: m['role'] == 'assistant') for this renderer."
+        )
 
     loss_mask: list[bool] = []
     for k, msg_idx in enumerate(rendered.message_indices):
@@ -1408,9 +1802,63 @@ def build_training_sample(
             continue
         if has_sampled_info and not rendered.sampled_mask[k]:
             loss_mask.append(False)
+        elif role_to_mask is None:
+            # sampled_mask alone gates the loss when no role filter is
+            # supplied. ``sampled_mask[k]`` is True here (handled by the
+            # branch above), so this token is trainable.
+            loss_mask.append(True)
         else:
             loss_mask.append(role_to_mask(msg))
-    return rendered.token_ids, loss_mask
+
+    token_ids = list(rendered.token_ids)
+    # Requires sampled_mask (opaque templates hide the assistant close)
+    # and a final assistant message the role filter trains.
+    if (
+        ensure_final_stop
+        and has_sampled_info
+        and messages[-1].get("role") == "assistant"
+        and (role_to_mask is None or role_to_mask(messages[-1]))
+    ):
+        stop_ids = set(renderer.get_stop_token_ids())
+        last_trainable = next(
+            (k for k in range(len(loss_mask) - 1, -1, -1) if loss_mask[k]), None
+        )
+        if last_trainable is None or token_ids[last_trainable] not in stop_ids:
+            token_ids.append(renderer.get_stop_token_ids()[0])
+            # loss_mask=True marks the token as trainable — the appended
+            # stop is a training target, like any sampled token.
+            loss_mask.append(True)
+
+    if message_loss_mask is not None:
+        for k in range(len(loss_mask)):
+            # Any synthesized stop after the rendered sequence belongs to
+            # the final assistant, just like an in-message closing token.
+            msg_idx = (
+                rendered.message_indices[k]
+                if k < len(rendered.message_indices)
+                else len(messages) - 1
+            )
+            loss_mask[k] = (
+                loss_mask[k] and msg_idx >= 0 and bool(message_loss_mask[msg_idx])
+            )
+
+    # Surface the multimodal payload for VLM renderers. ``None`` for text
+    # renderers and for text-only samples (empty media) so downstream
+    # ``multi_modal_data is not None`` is a reliable "has media" check.
+    mm = rendered.multi_modal_data
+    if mm is not None and mm.is_empty():
+        mm = None
+    mm_token_type_ids = (
+        _build_mm_token_type_ids(mm.mm_placeholders, len(token_ids))
+        if mm is not None and mm.mm_placeholders
+        else None
+    )
+    return RenderedTrainingSample(
+        token_ids=token_ids,
+        loss_mask=loss_mask,
+        multi_modal_data=mm,
+        mm_token_type_ids=mm_token_type_ids,
+    )
 
 
 def _common_prefix_len(a: list[int], b: list[int]) -> int:
@@ -1456,77 +1904,122 @@ def trim_to_turn_close(
     return previous_ids
 
 
-# Per-model offset-aware tokenizer cache. ``attribute_text_segments``
-# uses the fast HuggingFace tokenizer's ``offset_mapping`` to attribute
-# each token to its source text segment under one BPE pass. Fastokens
-# (the Rust BPE we patch in by default for ~10x faster encode) does not
-# track character offsets — the patched tokenizer's
-# ``return_offsets_mapping=True`` raises ``NotImplementedError``. So we
-# keep a parallel vanilla tokenizer per model purely for offset queries.
-# Memory cost is one extra tokenizer per *unique* model name across all
-# pools / renderers (the cache is process-global), independent of pool
-# size.
-_offset_tokenizers: dict[str, Any] = {}
-_offset_tokenizers_lock = threading.Lock()
+class AttributedTextSegments(list[tuple[int, bool]]):
+    """Token/content pairs with an explicit attribution-availability flag."""
+
+    def __init__(
+        self,
+        values=(),
+        *,
+        has_content_attribution: bool,
+    ) -> None:
+        super().__init__(values)
+        self.has_content_attribution = has_content_attribution
 
 
-def _get_offset_tokenizer(tokenizer):
-    """Return a tokenizer that supports ``return_offsets_mapping=True``.
+def _get_offset_tokenizer(tokenizer: Tokenizer) -> OffsetTokenizer | None:
+    """Return ``tokenizer`` when it supports character offsets, else ``None``.
 
-    If ``tokenizer`` itself supports offsets, returns it unchanged.
-    Otherwise loads a vanilla (non-fastokens) tokenizer from
-    ``tokenizer.name_or_path`` and caches it. Raises if the tokenizer
-    has no usable ``name_or_path`` — hand-coded renderers always pass
-    a tokenizer loaded via ``load_tokenizer`` which does set it.
+    Hand-coded renderers concatenate scaffold + body in one BPE pass to
+    preserve cross-boundary merges, then attribute each resulting token
+    back to its source segment via the fast tokenizer's
+    ``offset_mapping`` (see :func:`attribute_text_segments`). Tokenizers
+    loaded via :func:`load_tokenizer` are ``PreTrainedTokenizerFast``
+    instances that satisfy this capability, but BYO tokenizers need not.
     """
-    # Cheap probe: does this tokenizer already provide offsets?
+    call = getattr(tokenizer, "__call__", None)
+    if not callable(call):
+        return None
     try:
-        tokenizer("a", add_special_tokens=False, return_offsets_mapping=True)
-        return tokenizer
-    except (NotImplementedError, ValueError, TypeError):
-        pass
+        encoding = call("a", add_special_tokens=False, return_offsets_mapping=True)
+        encoding["input_ids"]
+        encoding["offset_mapping"]
+    except (KeyError, NotImplementedError, TypeError, ValueError):
+        return None
+    return cast(OffsetTokenizer, tokenizer)
 
-    name_or_path = getattr(tokenizer, "name_or_path", "")
-    if not name_or_path:
-        raise RuntimeError(
-            "Cannot construct an offset-aware tokenizer: the supplied "
-            "tokenizer has no ``name_or_path`` to fall back on. Pass a "
-            "tokenizer loaded via ``renderers.base.load_tokenizer``."
+
+def _infer_offsets_from_decode(
+    tokenizer: Tokenizer,
+    token_ids: list[int],
+    text: str,
+) -> list[tuple[int, int]] | None:
+    """Recover token character spans from an exact decoder round-trip.
+
+    This is a narrow fallback for metadata that does not require exposing
+    content attribution. Some renderers join text from multiple messages in a
+    single BPE pass, so they still need to associate the resulting tokens with
+    the right message when a BYO tokenizer has no native offset mapping.
+
+    Decoding individual tokens is linear and exact for the common BPE/SentencePiece
+    backends. Byte-fallback tokenizers can require multiple tokens before text
+    becomes valid, so a validated cumulative-prefix pass handles that case.
+    If either strategy cannot reconstruct ``text`` exactly, callers must use a
+    conservative renderer-specific message-index fallback. This helper never
+    upgrades the tokenizer's content-attribution capability: ``is_content``
+    remains unavailable without native offsets.
+    """
+
+    def decode(ids: list[int]) -> str | None:
+        variants = (
+            {"skip_special_tokens": False, "clean_up_tokenization_spaces": False},
+            {"skip_special_tokens": False},
+            {},
         )
+        for kwargs in variants:
+            try:
+                decoded = tokenizer.decode(ids, **kwargs)
+            except TypeError:
+                continue
+            except (KeyError, NotImplementedError, UnicodeError, ValueError):
+                return None
+            return decoded if isinstance(decoded, str) else None
+        return None
 
-    with _offset_tokenizers_lock:
-        cached = _offset_tokenizers.get(name_or_path)
-        if cached is not None:
-            return cached
-        from transformers import AutoTokenizer
+    pieces: list[str] = []
+    for token_id in token_ids:
+        piece = decode([token_id])
+        if piece is None:
+            break
+        pieces.append(piece)
+    if len(pieces) == len(token_ids) and "".join(pieces) == text:
+        offsets: list[tuple[int, int]] = []
+        position = 0
+        for piece in pieces:
+            end = position + len(piece)
+            offsets.append((position, end))
+            position = end
+        return offsets
 
-        kwargs: dict[str, Any] = {}
-        revision = TRUSTED_REVISIONS.get(name_or_path)
-        if revision is not None:
-            kwargs = {"trust_remote_code": True, "revision": revision}
-        else:
-            kwargs = {"trust_remote_code": False}
-        # Explicitly vanilla — we want HF's Rust tokenizer with offset
-        # tracking, not the fastokens shim. ``load_tokenizer`` would
-        # patch fastokens in by default; calling
-        # ``AutoTokenizer.from_pretrained`` directly here keeps the
-        # fastokens patch out of this code path entirely.
-        offset_tok = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
-        if not getattr(offset_tok, "is_fast", False):
-            raise RuntimeError(
-                f"Vanilla tokenizer for {name_or_path!r} is not a fast "
-                "tokenizer; offset_mapping is unavailable. Hand-coded "
-                "renderers require a fast tokenizer for body/scaffold "
-                "attribution."
-            )
-        _offset_tokenizers[name_or_path] = offset_tok
-        return offset_tok
+    offsets = []
+    previous_end = 0
+    for end_index in range(1, len(token_ids) + 1):
+        prefix = decode(token_ids[:end_index])
+        if prefix is None or len(prefix) < previous_end or not text.startswith(prefix):
+            return None
+        current_end = len(prefix)
+        offsets.append((previous_end, current_end))
+        previous_end = current_end
+    if previous_end != len(text):
+        return None
+    return offsets
+
+
+def _content_mask_or_empty(
+    tokenizer: Tokenizer, content_mask: list[bool]
+) -> list[bool]:
+    """Return exact content attribution, or the empty-list unavailable sentinel."""
+    if _get_offset_tokenizer(tokenizer) is None:
+        return []
+    return content_mask
 
 
 def attribute_text_segments(
-    tokenizer,
+    tokenizer: Tokenizer,
     segments: "list[tuple[str, bool]]",
-) -> "list[tuple[int, bool]]":
+    *,
+    overlap_is_content: bool = False,
+) -> AttributedTextSegments:
     """Tokenize concatenated segments as a single BPE pass and return
     ``(token_id, is_content)`` pairs.
 
@@ -1544,24 +2037,39 @@ def attribute_text_segments(
     tokens (rare; usually pre-tokenizer artefacts) are attributed to
     the most recently entered segment.
 
-    Requires a HuggingFace fast tokenizer with offset tracking. The
-    ``fastokens`` patch ``load_tokenizer`` applies by default does
-    **not** track offsets — when that's the case we transparently load
-    a vanilla offset-capable tokenizer for the same model and cache it
-    (see :func:`_get_offset_tokenizer`). Hand-coded renderers are only
-    registered for model families that ship a fast tokenizer, so a
-    silent slow-tokenizer fallback isn't supported — BPE drift at the
-    wrap/body boundary would defeat the whole point.
+    ``overlap_is_content=True`` widens the content bit: a token counts
+    as content when *any* of its source characters fall in a content
+    segment, not just its first. Templates whose wrap glues directly
+    onto the body with no whitespace (e.g. ``<user>{content}</user>``)
+    can merge wrap and body bytes into one token; under the first-char
+    policy such a token would land on the wrap side and the body would
+    no longer be recoverable from the content run. Over-inclusion keeps
+    every body byte inside the ``is_content=True`` run at the cost of a
+    few adjacent wrap bytes.
+
+    When ``tokenizer`` implements :class:`OffsetTokenizer`, the result's
+    ``has_content_attribution`` flag is true and each bool is exact. For a
+    basic :class:`Tokenizer`, the joined text is still encoded in one pass so
+    token IDs remain identical, but the bools are placeholders and
+    ``has_content_attribution`` is false. Renderers propagate that state as an
+    empty ``RenderedTokens.is_content`` list rather than exposing a partial or
+    inaccurate mask.
 
     Empty input or empty joined text returns an empty list.
     """
     if not segments:
-        return []
+        return AttributedTextSegments([], has_content_attribution=True)
     full_text = "".join(text for text, _ in segments)
     if not full_text:
-        return []
+        return AttributedTextSegments([], has_content_attribution=True)
 
     offset_tokenizer = _get_offset_tokenizer(tokenizer)
+    if offset_tokenizer is None:
+        token_ids = tokenizer.encode(full_text, add_special_tokens=False)
+        return AttributedTextSegments(
+            ((token_id, False) for token_id in token_ids),
+            has_content_attribution=False,
+        )
     encoding = offset_tokenizer(
         full_text,
         add_special_tokens=False,
@@ -1581,12 +2089,24 @@ def attribute_text_segments(
 
     out: list[tuple[int, bool]] = []
     last_is_content = spans[-1][2] if spans else False
-    for tok_id, (start, _end) in zip(token_ids, offsets):
+    for tok_id, (start, end) in zip(token_ids, offsets):
         if start >= total_len:
             # Token's character offset is past every segment (shouldn't
             # normally happen for add_special_tokens=False, but defensive
             # against tokenizer-specific edge cases).
             out.append((tok_id, last_is_content))
+            continue
+        if overlap_is_content and end > start:
+            out.append(
+                (
+                    tok_id,
+                    any(
+                        seg_is_content
+                        for seg_start, seg_end, seg_is_content in spans
+                        if seg_start < end and start < seg_end
+                    ),
+                )
+            )
             continue
         # Find the segment that contains `start`. Segments are
         # contiguous and ordered, so a linear scan is fine — the inner
@@ -1604,7 +2124,7 @@ def attribute_text_segments(
             # the last non-empty segment's bit.
             pass
         out.append((tok_id, is_content))
-    return out
+    return AttributedTextSegments(out, has_content_attribution=True)
 
 
 def reject_assistant_in_extension(new_messages: list[Message]) -> bool:
@@ -1617,51 +2137,52 @@ def reject_assistant_in_extension(new_messages: list[Message]) -> bool:
     return any(m.get("role") == "assistant" for m in new_messages)
 
 
-def should_preserve_past_thinking(
-    messages: list[Message],
-    msg_idx: int,
+def _is_user_message(message: Message) -> bool:
+    return message.get("role") == "user"
+
+
+def introduces_user_query(
+    new_messages: list[Message],
     *,
-    preserve_all_thinking: bool,
-    preserve_thinking_between_tool_calls: bool,
+    is_user_query: Callable[[Message], bool] = _is_user_message,
 ) -> bool:
-    """Should ``messages[msg_idx]``'s ``reasoning_content`` be emitted as
-    thinking even when the chat template would drop it?
+    """Return True if ``new_messages`` opens a new user-query turn.
 
-    Returns ``True`` only as an override above the template default. Each
-    renderer ORs this into its own "render thinking?" condition; a result
-    of ``False`` means "follow the template" (drop or keep as the template
-    decides), not "force-drop".
-
-    Override rules:
-
-    - ``preserve_all_thinking`` — every past-asst's thinking is kept.
-    - ``preserve_thinking_between_tool_calls`` — keeps thinking only
-      inside the *current* tool cycle: the contiguous A-T-...-A block
-      after the most recent ``user`` message, and only if that block
-      contains at least one ``tool`` response. As soon as a new
-      ``user`` turn arrives, the previous block becomes "older" and
-      its thinking is dropped (template default), matching how most
-      chat templates already handle multi-turn contexts. Use
-      ``preserve_all_thinking`` if you need thinking on older blocks
-      to survive the user-turn boundary too.
+    The generic boundary is any ``role="user"`` message. Renderers whose
+    chat templates define a narrower notion of query boundary can pass their
+    own predicate, but the shared default stays role-based.
     """
-    if preserve_all_thinking:
+    return any(is_user_query(m) for m in new_messages)
+
+
+def resolve_thinking_retention(
+    config: Any,
+    implied: "ResolvedThinkingRetention",
+) -> "ResolvedThinkingRetention":
+    """Resolve the effective bridge policy for a renderer instance.
+
+    ``config.thinking_retention is None`` means "derive from template knobs";
+    otherwise the explicit generic bridge policy wins. Conflicting explicit
+    template/generic knobs are rejected by the typed config validators.
+    """
+    requested = getattr(config, "thinking_retention", None)
+    if requested is None:
+        return implied
+    return requested
+
+
+def should_rerender_for_thinking_retention(
+    thinking_retention: "ResolvedThinkingRetention",
+    new_messages: list[Message],
+    *,
+    is_user_query: Callable[[Message], bool] = _is_user_message,
+) -> bool:
+    """Return True when the resolved policy requires a full re-render."""
+    if thinking_retention == "template":
         return True
-    if not preserve_thinking_between_tool_calls:
+    if thinking_retention == "all":
         return False
-    # Most recent user message (or -1 if none).
-    last_user = -1
-    for j in range(len(messages) - 1, -1, -1):
-        if messages[j].get("role") == "user":
-            last_user = j
-            break
-    if msg_idx <= last_user:
-        return False
-    # The current segment must contain a tool response for it to count
-    # as an in-flight tool cycle.
-    return any(
-        messages[j].get("role") == "tool" for j in range(last_user + 1, len(messages))
-    )
+    return introduces_user_query(new_messages, is_user_query=is_user_query)
 
 
 def build_trajectory_step(
@@ -1699,6 +2220,7 @@ def build_trajectory_step(
         "completion_mask": [True] * len(completion_ids),
         "completion_logprobs": [0.0] * len(completion_ids),
         "routed_experts": None,
+        "sampling_mask": None,
     }
     if (
         full_rendered.multi_modal_data is not None

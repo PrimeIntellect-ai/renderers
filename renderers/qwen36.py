@@ -7,12 +7,9 @@ Delta vs Qwen3.5 (template line 122):
   ``None`` as ``null`` (not ``None``), fixing the single-turn extension-break
   mode where a boolean parameter's case drifted across a re-render.
 
-Historical-thinking retention follows Qwen3.5's default (drop past
-``<think>`` blocks). The upstream template carries a ``preserve_thinking``
-Jinja toggle for the opposite polarity; on the renderer side that intent
-maps to the renderer-agnostic ``preserve_all_thinking`` /
-``preserve_thinking_between_tool_calls`` flags on
-:class:`renderers.Qwen36RendererConfig`.
+Historical-thinking retention follows Qwen3.5's default unless
+``Qwen36RendererConfig.preserve_thinking`` is set, matching the upstream
+Qwen3.6 Jinja toggle.
 
 Everything else — tool system prompt, tool-call XML structure, thinking
 markers, bridge logic, parser — is identical to Qwen3.5.

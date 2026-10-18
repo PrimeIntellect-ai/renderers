@@ -353,12 +353,13 @@ def test_build_training_sample_content_sft_roles_picks_up_tool_body(
         {"role": "tool", "content": "done", "tool_call_id": "call_z"},
         {"role": "assistant", "content": "OK."},
     ]
-    ids, mask = build_training_sample(
+    sample = build_training_sample(
         renderer,
         msgs,
         role_to_mask=lambda m: m["role"] == "assistant",
         content_sft_roles={"tool"},
     )
+    ids, mask = sample.token_ids, sample.loss_mask
     assert len(mask) == len(ids)
 
     # We need at least one trainable tool-body token if the renderer

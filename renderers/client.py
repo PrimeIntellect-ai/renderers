@@ -261,9 +261,12 @@ async def generate(
     Returns a dict with: request_id, prompt_ids, renderer_prompt_ids,
     mm_placeholders, completion_ids, completion_logprobs, content,
     reasoning_content, tool_calls, finish_reason, routed_experts,
-    sampling_mask, sampling_mask_logprobs, payload, multi_modal_data,
-    prompt_attribution. ``renderer_prompt_ids`` is the unexpanded logical
-    prompt when ``process_multimodal=False`` and ``None`` otherwise.
+    sampling_mask, sampling_mask_logprobs, payload, weight_versions,
+    multi_modal_data, prompt_attribution. ``renderer_prompt_ids`` is the
+    unexpanded logical prompt when ``process_multimodal=False`` and ``None``
+    otherwise. ``weight_versions`` is vLLM's (>= 0.32) list of
+    ``{version, start, end}`` spans over completion-token indexes, or ``None``
+    when the engine labels none.
 
     ``prompt_attribution`` is the renderer's :class:`RenderedTokens` for
     the prompt — either the one this call computed via
@@ -438,6 +441,7 @@ async def generate(
         # By-handle side arrays: segments of a shared payload file the inference
         # server wrote instead of returning routed_experts / sampling_mask inline.
         "payload": choice.get("payload"),
+        "weight_versions": choice.get("weight_versions"),
         # The mm sidecar consumed on the request side, surfaced back so
         # callers can persist it on the trajectory step for downstream
         # multi-turn bridging and training-sample construction.

@@ -109,6 +109,7 @@ MODEL_CATALOG = (
     _model("Qwen/Qwen3.5-35B-A3B", shared=False, roundtrip=False),
     _model("Qwen/Qwen3.5-122B-A10B", shared=False, roundtrip=False),
     _model("Qwen/Qwen3.5-397B-A17B", shared=False, roundtrip=False),
+    _model("Qwen/Qwen3.6-27B", shared=False, roundtrip=False),
     _model(
         "Qwen/Qwen3.6-35B-A3B",
         bridge=True,

@@ -105,6 +105,7 @@ _ENABLE_THINKING_DEFAULTS: dict[str, bool] = {
     "Qwen/Qwen3.5-122B-A10B": True,
     "Qwen/Qwen3.5-397B-A17B": True,
     # Qwen3.6 extends the Qwen3.5 template; same big-size polarity.
+    "Qwen/Qwen3.6-27B": True,
     "Qwen/Qwen3.6-35B-A3B": True,
     # Qwen3.8 keeps thinking enabled by default.
     "Qwen/Qwen3.8-27B": True,

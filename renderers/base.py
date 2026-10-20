@@ -988,7 +988,8 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "Qwen/Qwen3.5-35B-A3B": "qwen3.5",
     "Qwen/Qwen3.5-122B-A10B": "qwen3.5",
     "Qwen/Qwen3.5-397B-A17B": "qwen3.5",
-    # Qwen3.6.
+    # Qwen3.6. Both sizes ship the same chat template.
+    "Qwen/Qwen3.6-27B": "qwen3.6",
     "Qwen/Qwen3.6-35B-A3B": "qwen3.6",
     # Qwen3.8.
     "Qwen/Qwen3.8-27B": "qwen3.8",
@@ -1108,6 +1109,7 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     "Qwen/Qwen3.5-397B-A17B": {"image"},
     # Qwen3.6 extends Qwen3.5's chat template; same VL bits, only
     # tool-call argument serialization differs.
+    "Qwen/Qwen3.6-27B": {"image"},
     "Qwen/Qwen3.6-35B-A3B": {"image"},
     # Qwen3.8 adds reasoning-effort control and preserves thinking by default.
     "Qwen/Qwen3.8-27B": {"image"},

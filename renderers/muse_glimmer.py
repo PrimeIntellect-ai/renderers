@@ -738,6 +738,17 @@ class MuseGlimmerRenderer:
             for c in self._parse_calls(body, registered)
         ]
         content = "".join(content_parts)
+        if (
+            messages
+            and messages[-1][0] == "user"
+            and not messages[-1][2]
+            and not any(call.name for call in calls)
+            and content.endswith("\n")
+            and "<atem:invoke" not in content
+            and "<atem:function_calls>" not in content
+        ):
+            # vLLM's non-streaming content regex ends at `$`, before one final LF.
+            content = content[:-1]
         if tool_bodies and not any(call.name for call in calls):
             # Stock vLLM preserves malformed tool markup as content when no
             # complete invocation can be dispatched; it does not invent a call.

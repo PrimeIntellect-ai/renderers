@@ -364,6 +364,22 @@ _PARSE_CASES = {
         ("Let me think.", "The answer is 4.", []),
     ),
     "answer-only": (" to=user<|message|>Hello there!", (None, "Hello there!", [])),
+    "answer-final-newline": (" to=user<|message|>Hello\n", (None, "Hello", [])),
+    "answer-final-two-newlines": (
+        " to=user<|message|>Hello\n\n",
+        (None, "Hello\n", []),
+    ),
+    "answer-final-space-newline": (" to=user<|message|>Hello \n", (None, "Hello ", [])),
+    "closed-answer-keeps-newline": (
+        " to=user<|message|>Hello\n<|eom|>",
+        (None, "Hello\n", []),
+    ),
+    "tool-and-answer-keeps-newline": (
+        " to=get_weather<|message|>"
+        + _invoke("get_weather", ("city", "Paris"))
+        + "<|eom|><|start|>assistant to=user<|message|>Hello\n",
+        (None, "Hello\n", [("get_weather", {"city": "Paris"})]),
+    ),
     "tool-call": (
         " to=self<|message|>Need weather.<|eom|><|start|>assistant to=get_weather<|message|>"
         + _invoke(

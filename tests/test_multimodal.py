@@ -105,8 +105,8 @@ _loaded: dict[str, tuple] = {}
 
 
 # Models whose processors need ``trust_remote_code=True`` (custom Python
-# in the repo) AND a pinned revision for security. Mirrors the
-# ``TRUSTED_REVISIONS`` policy in ``renderers.base`` for tokenizers.
+# in the repo) and still use a pinned revision. Nemotron 3.5 is handled
+# separately below so its selected model revision is not overridden.
 _PROCESSOR_TRUSTED_REVISIONS: dict[str, str] = {
     "moonshotai/Kimi-K2.5": "4d01dfe0332d63057c186e0b262165819efb6611",
     "moonshotai/Kimi-K2.6": "2755962d07cb42aa2d988a35bcb65cd4a9c2de82",
@@ -119,7 +119,12 @@ def _load_processor_and_renderer(model_name: str):
 
         tokenizer = load_tokenizer(model_name)
         revision = _PROCESSOR_TRUSTED_REVISIONS.get(model_name)
-        if revision is not None:
+        if model_name.startswith("nvidia/NVIDIA-Nemotron-3.5"):
+            processor = AutoProcessor.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+            )
+        elif revision is not None:
             processor = AutoProcessor.from_pretrained(
                 model_name,
                 trust_remote_code=True,
@@ -173,6 +178,8 @@ def _detect_family(model_name: str) -> str:
     - ``gemma4``: canonical Gemma turn grammar plus dynamic
       ``<|image>`` + N x ``<|image|>`` + ``<image|>`` expansion.
     """
+    if model_name.startswith("nvidia/NVIDIA-Nemotron-3.5"):
+        return "nemotron35"
     if model_name.startswith("moonshotai/Kimi-K2.5") or model_name.startswith(
         "moonshotai/Kimi-K2.6"
     ):
@@ -330,6 +337,12 @@ def _modality_kit(modality: str, model_name: str):
             return {
                 "make_part": _image_content_part,
                 "placeholder_token": "<|unused_200054|>",
+                "processor_input_ids": _qwen_vl_processor_input_ids,
+            }
+        if family == "nemotron35":
+            return {
+                "make_part": _image_content_part,
+                "placeholder_token": "<image>",
                 "processor_input_ids": _qwen_vl_processor_input_ids,
             }
         # Default: Qwen-VL family (Qwen3-VL, Qwen3.5, Qwen3.6).
@@ -594,9 +607,13 @@ def _supports_tool_message_images(renderer) -> bool:
     asserting against them."""
     from renderers.gemma4 import Gemma4Renderer
     from renderers.kimi_k25 import KimiK25Renderer
+    from renderers.nemotron3 import Nemotron35Renderer
     from renderers.qwen35 import Qwen35Renderer
 
-    return isinstance(renderer, (Qwen35Renderer, KimiK25Renderer, Gemma4Renderer))
+    return isinstance(
+        renderer,
+        (Qwen35Renderer, KimiK25Renderer, Gemma4Renderer, Nemotron35Renderer),
+    )
 
 
 @pytest.mark.parametrize(
@@ -715,6 +732,8 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
         tokenizer,
         _config_for_model(mm_model_name, thinking_retention="all"),
     )
+    if not getattr(renderer, "supports_multimodal_bridge", True):
+        pytest.skip(f"{type(renderer).__name__} uses full multimodal re-rendering")
     if hasattr(renderer, "_processor") and renderer._processor is None:
         renderer._processor = processor
     sample = _sample_for(modality, tiny_image)
@@ -749,7 +768,11 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
     # AFTER the prompt's assistant opener — response text then the renderer's
     # own turn-close token.
     close_id = renderer.get_stop_token_ids()[0]
-    completion_ids = tokenizer.encode("Saw it.", add_special_tokens=False) + [close_id]
+    # A thinking-prefilled prompt requires a sampled reasoning close before
+    # final content. Otherwise this fixture would be EOS inside reasoning.
+    prefix = tokenizer.decode(initial_rendered.token_ids, skip_special_tokens=False)
+    response = "</think>Saw it." if prefix.rstrip().endswith("<think>") else "Saw it."
+    completion_ids = tokenizer.encode(response, add_special_tokens=False) + [close_id]
 
     bridged_raw = renderer.bridge_to_next_turn(
         previous_prompt_ids=initial_rendered.token_ids,
@@ -1078,7 +1101,9 @@ def test_bridge_refuses_when_add_vision_id_loses_prior_count(
 
     initial_rendered = renderer.render(initial, add_generation_prompt=True)
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    completion_ids = tokenizer.encode("Saw it.", add_special_tokens=False) + [im_end_id]
+    prefix = tokenizer.decode(initial_rendered.token_ids, skip_special_tokens=False)
+    response = "</think>Saw it." if prefix.rstrip().endswith("<think>") else "Saw it."
+    completion_ids = tokenizer.encode(response, add_special_tokens=False) + [im_end_id]
 
     # No previous_multi_modal_data → bridge must refuse so the caller
     # falls back to a full re-render (where the counter restarts from
@@ -1155,3 +1180,8 @@ def test_is_image_part_treats_type_field_as_authoritative():
     assert not _is_image_part({"image_url": None})
     assert not _is_image_part({"image": None})
     assert not _is_video_part({"video_url": None})
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _loaded.clear()

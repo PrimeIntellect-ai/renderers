@@ -94,6 +94,13 @@ def _simulate_prior_turn(renderer, assistant=None):
     full_with_assistant = renderer.render_ids(
         prior + assistant, add_generation_prompt=False
     )
+    # Some templates render a content-only historical turn without the live
+    # prompt's reasoning prefill (Harmony also changes analysis to final).
+    # Slice only at an actual shared boundary; cutting by length alone silently
+    # removes content or a reasoning closer and manufactures a malformed turn.
+    if full_with_assistant[: len(prev_prompt)] != prev_prompt:
+        prev_prompt = renderer.render_ids(prior, add_generation_prompt=False)
+        assert full_with_assistant[: len(prev_prompt)] == prev_prompt
     prev_completion = list(full_with_assistant[len(prev_prompt) :])
 
     # Trim past any trailing scaffolding the template emits AFTER the
@@ -196,6 +203,24 @@ def test_bridge_extension_includes_new_message_text(
     assert "HELLO_SENTINEL_XYZ" in decoded, (
         f"{br_model}: new-message content missing from extension; got {decoded!r}"
     )
+
+
+def test_qwen3_renders_openai_text_content_parts(br_renderer, br_tokenizer, br_model):
+    """Text content lists must not become an empty user turn."""
+    if br_model not in {"Qwen/Qwen3-8B", "Qwen/Qwen3-4B"}:
+        pytest.skip(f"{br_model}: not a Qwen3 text renderer")
+
+    text = "CONTENT_LIST_SENTINEL_XYZ"
+    string_ids = br_renderer.render_ids(
+        [{"role": "user", "content": text}], add_generation_prompt=True
+    )
+    list_ids = br_renderer.render_ids(
+        [{"role": "user", "content": [{"type": "text", "text": text}]}],
+        add_generation_prompt=True,
+    )
+
+    assert list_ids == string_ids
+    assert text in br_tokenizer.decode(list_ids, skip_special_tokens=False)
 
 
 def test_bridge_declines_across_user_query_when_template_drops_thinking():
@@ -329,3 +354,8 @@ def test_bridge_keeps_thinking_when_history_kwarg_disables_truncation():
         assert bridged is not None, (
             f"{model}: bridge must keep verbatim when the template keeps all thinking"
         )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _load.cache_clear()

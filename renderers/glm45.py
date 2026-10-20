@@ -17,8 +17,8 @@ from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
-    ToolSpec,
     Tokenizer,
+    ToolSpec,
     _content_mask_or_empty,
     attribute_text_segments,
     extract_message_tool_names,
@@ -52,6 +52,12 @@ _TOOLS_FOOTER = (
 
 class GLM45Renderer:
     """Deterministic message → token renderer for GLM-4.5 Air models."""
+
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Historical reasoning is stripped regardless of bridge policy.
+        return False
 
     def __init__(
         self,
@@ -190,20 +196,8 @@ class GLM45Renderer:
             role = msg["role"]
             content = self._visible_text(msg.get("content"))
 
-            # When the previous message is an assistant, this message's
-            # role-opening token (``<|user|>`` / ``<|observation|>``) is
-            # the inference-time stop signal that closes the assistant's
-            # turn (see ``get_stop_token_ids``). Mark it
-            # ``is_sampled=True`` so the loss-mask pipeline trains the
-            # model to emit it after ``</tool_call>`` (instead of
-            # continuing with another ``<tool_call>`` block). The token
-            # stays attributed to this message (msg_idx=i) and remains
-            # ``is_content=False`` — it's a role-marker / scaffold, not
-            # body bytes, so ``content_mask_for_roles({"tool"})`` and
-            # ``content_token_spans_by_role()`` correctly exclude it
-            # from "tool body" views. Byte stream is unchanged.
-            # ``system`` only appears at the start of a GLM conversation,
-            # so its opener is never the closer of an assistant turn.
+            # A user/tool role marker that closes generation belongs to
+            # the preceding assistant's sampled output, not the next body.
             closes_assistant_turn = i > 0 and messages[i - 1]["role"] == "assistant"
 
             if role == "system":
@@ -217,9 +211,9 @@ class GLM45Renderer:
             elif role == "user":
                 emit_special(
                     self._user,
-                    i,
+                    i - 1 if closes_assistant_turn else i,
                     is_sampled=closes_assistant_turn,
-                    is_content=False,
+                    is_content=closes_assistant_turn,
                 )
                 # ``\n`` is scaffold; ``content`` is body; the optional
                 # ``/nothink`` suffix is scaffold the renderer injects
@@ -285,6 +279,7 @@ class GLM45Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_glm(
             self._tokenizer,
@@ -299,6 +294,7 @@ class GLM45Renderer:
             arg_value_id=self._arg_value,
             arg_value_end_id=self._arg_value_end,
             tools=tools,
+            thinking_enabled=self.config.enable_thinking,
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -318,6 +314,14 @@ class GLM45Renderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = self.parse_response(
+            previous_completion_ids, prompt_ids=previous_prompt_ids, tools=tools
+        )
+        if boundary.reasoning_complete is False:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._think_end]
 
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
@@ -485,15 +489,9 @@ class GLM45Renderer:
         # (think block + content + tool calls) is the model-sampled
         # portion.
         #
-        # GLM-4.5 does NOT emit an explicit per-turn close token inside
-        # the assistant message; the next message's role marker
-        # (``<|user|>`` / ``<|observation|>`` / ``<|endoftext|>``) acts
-        # as the stop signal at inference, and those tokens are
-        # attributed to the *next* message (or are absent on the final
-        # turn). So no sampled stop-signal token lives inside this
-        # assistant span — content / think / tool_calls carry the
-        # is_sampled=True signal.
-        #
+        # The next user/tool role marker closes this assistant turn and
+        # is attributed here when that later message is rendered.
+
         # Invariant on assistant tokens: ``is_content == sampled_mask``.
         # Every scaffold token here gets ``is_sampled=False/is_content=False``;
         # every model-sampled emit gets both True.
@@ -575,23 +573,17 @@ class GLM45Renderer:
         emit_text,
         emit_text_segments,
     ) -> None:
-        # Tool body bytes get ``is_content=True``; the wraps are
-        # scaffold. The ``<|observation|>`` role tag is scaffold too
-        # (``is_content=False`` so ``content_mask_for_roles({"tool"})``
-        # excludes it). When the previous message is an assistant it
-        # doubles as the inference stop signal for that assistant's
-        # turn — mark it ``is_sampled=True`` so SFT trains the model to
-        # emit it after ``</tool_call>``. The token stays attributed to
-        # this tool message; byte stream is unchanged.
+        # Tool bodies keep their own attribution; a sampled observation
+        # marker belongs to the assistant that generated it.
         prev_role = messages[msg_idx - 1]["role"] if msg_idx > 0 else None
         closes_assistant_turn = prev_role == "assistant"
 
         if prev_role != "tool":
             emit_special(
                 self._observation,
-                msg_idx,
+                msg_idx - 1 if closes_assistant_turn else msg_idx,
                 is_sampled=closes_assistant_turn,
-                is_content=False,
+                is_content=closes_assistant_turn,
             )
 
         emit_text_segments(

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from itertools import product
 from typing import Any, Iterable, Mapping
 
 from renderers.base import MODEL_RENDERER_MAP
 from renderers.configs import _config_class_for
 from tests.reference_rendering import reference_oracle_for_renderer
-
 
 TOOLS = [
     {
@@ -158,6 +158,16 @@ MODEL_CATALOG = (
         extra_suites={"tool-arg-types", "glm-tool-names"},
     ),
     _model("zai-org/GLM-5.1", bridge=True),
+    _model(
+        "zai-org/GLM-5.3",
+        bridge=True,
+        extra_suites={"tool-arg-types", "glm-tool-names"},
+    ),
+    _model(
+        "zai-org/GLM-5.3-Flash-BF16",
+        bridge=True,
+        extra_suites={"tool-arg-types", "glm-tool-names"},
+    ),
     _model("zai-org/GLM-4.7-Flash"),
     _model(
         "THUDM/GLM-4.5-Air",
@@ -255,6 +265,9 @@ MODEL_CATALOG = (
         excluded={"multi-step-tool-cycle"},
     ),
     _model("tencent/Hy3", bridge=True),
+    _model(
+        "meta-models/Muse-Glimmer-30B", bridge=True, extra_suites={"tool-arg-types"}
+    ),
     _model("thinkingmachines/Inkling", bridge=True),
     _model("thinkingmachines/Inkling-Small", bridge=True),
     _model(
@@ -700,6 +713,9 @@ KWARG_VALUES: Mapping[str, tuple[Any, ...]] = {
     "conversation_start_date": ("2025-01-15", None),
     "date_string": ("26 Jul 2024", "01 Jan 2030"),
     "tools_in_user_message": (True, False),
+    "reasoning_strength": ("low", "medium", "high", "xhigh"),
+    "knowledge_cutoff": ("2026-01-04", "2025-06-30"),
+    "current_date": ("2026-10-16", None),
 }
 
 
@@ -710,8 +726,7 @@ def kwarg_combinations(case: ModelCase) -> tuple[dict[str, Any], ...]:
     missing = set(fields) - KWARG_VALUES.keys()
     if missing:
         raise AssertionError(
-            f"{case.resolved_renderer} declares uncovered template fields: "
-            f"{sorted(missing)}"
+            f"{case.resolved_renderer} declares uncovered template fields: {sorted(missing)}"
         )
     if not fields:
         return ({},)

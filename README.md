@@ -43,9 +43,46 @@ prompt_ids = r.render_ids(
 # Feed prompt_ids to a Token-In, Token-Out endpoint.
 # It returns completion_ids sampled by the model.
 
-parsed = r.parse_response(completion_ids)
+parsed = r.parse_response(completion_ids, prompt_ids=prompt_ids)
 # ParsedResponse(content=..., reasoning_content=..., tool_calls=...)
 ```
+
+Pass the exact sampling `prompt_ids` into `parse_response` to identify reasoning
+opened by the generation prompt. Without its closing marker, the sampled text
+stays in `reasoning_content`, with empty `content` and no executable tool calls,
+even if the engine reports `stop`. This applies to every supported reasoning
+format, including Harmony analysis and Gemma's post-tool thought channel.
+Omitting `prompt_ids`, passing `None`, and passing `[]` all parse the completion
+as self-contained: reasoning needs its own initial opener or channel header.
+Generation settings never supply missing parsing context. If the prompt supplied
+the opener, pass that prompt; `generate` does this automatically.
+
+Where vLLM 0.26's parser does the same, the format's atomic tool-call opener
+also ends reasoning that has no closing marker: Qwen3 / Qwen3-VL / Qwen3.5+,
+Prime-Qwen3, Nemotron-3, GLM, MiniMax-M2, DeepSeek-V4, Kimi-K2 / K2.5, Gemma 4,
+and Inkling. The call parses normally, and `bridge_to_next_turn` extends it
+without inserting a close. A closing marker later in the completion still wins:
+tool markup before it stays reasoning. Inkling ends thinking and tool segments
+with the same `<|end_message|>`, so there the first opener decides.
+
+For reasoning-first formats, only an initial `<think>` (after any assistant
+header) or reasoning already opened in the prompt starts reasoning. After its
+first closing marker, the rest is content. Later think markers remain literal
+content: `Before<think>example</think>After` is entirely content. Harmony,
+Gemma, and Inkling follow their explicit channel or message-segment grammar.
+
+`ParsedResponse.reasoning_complete` is `False` while a reasoning channel is open,
+`True` when it is closed (or the format has no reasoning channel), and `None` when
+its state cannot be determined. It does not certify tool syntax, normal engine
+termination, nonempty final output, or task success. The generate client forwards
+this narrow signal and passes prompt context automatically. Custom renderers used
+with `generate` should accept `parse_response(..., tools=None, prompt_ids=None)`;
+formats that do not need prompt context can ignore it.
+
+Summary consumers should require normal termination (`finish_reason="stop"`),
+nonempty final content, and no tool calls. A length-limited final answer remains
+truncated even when its reasoning channel is closed. Keep rejected attempts in
+usage/training accounting, and replace conversation history only after acceptance.
 
 For the next turn, extend the previous sampled stream instead of re-rendering history:
 
@@ -57,12 +94,14 @@ next_prompt_ids = r.bridge_to_next_turn(
 )
 ```
 
-Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `glm-5`, `glm-5.1`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `deepseek-v4` (V4 Flash 0731), `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `laguna-s-2.1`, `laguna-m.1`, `nemotron-3`, `nemotron-3-ultra`, `nemotron-3.5`, `llama-3`, `gpt-oss`, `hy3`, `inkling` / `inkling-small`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper. `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `kimi-k2.5` / `kimi-k2.6`, and the Inkling checkpoints are multimodal (Inkling handles both image **and** audio).
+Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `glm-5`, `glm-5.1`, `glm-5.3`, `glm-5.3-flash`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `deepseek-v4` (V4 Flash 0731), `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `laguna-s-2.1`, `laguna-m.1`, `nemotron-3`, `nemotron-3-ultra`, `nemotron-3.5`, `llama-3`, `gpt-oss`, `muse-glimmer`, `hy3`, `inkling` / `inkling-small`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper. `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `glm-5.3-flash`, `muse-glimmer`, `kimi-k2.5` / `kimi-k2.6`, and the Inkling checkpoints are multimodal (Inkling handles both image **and** audio; `glm-5.3-flash` and `muse-glimmer` render images only with `process_multimodal=False`).
 
 ## API
 
 ```python
 class Renderer(Protocol):
+    @property
+    def is_prefix_stable(self) -> bool: ...
     def render(messages, *, tools=None, add_generation_prompt=False) -> RenderedTokens: ...
     def render_ids(messages, *, tools=None, add_generation_prompt=False) -> list[int]: ...
     def parse_response(token_ids) -> ParsedResponse: ...
@@ -70,18 +109,49 @@ class Renderer(Protocol):
     def bridge_to_next_turn(prev_prompt_ids, prev_completion_ids, new_messages, *, tools=None) -> list[int] | None: ...
 ```
 
-- `RenderedTokens` carries `token_ids` **and** `message_indices` — one entry per token attributing each to its source message (`-1` for structural scaffolding). Lets `build_training_sample` build a per-token loss mask in one render.
+- `RenderedTokens` carries `token_ids` **and** `message_indices` — one entry per token attributing each to its owning message (`-1` for structural scaffolding). Sampled closing markers belong to their assistant, including GLM markers emitted at the next user/tool boundary; user/tool bodies keep their own ownership.
+- `build_training_sample(..., message_loss_mask=[0, 0, 0, 1])` keeps all messages as context but restricts loss to selected messages. Supply one boolean or integer `0`/`1` per message, or `None` for the normal mask. Excluding an assistant also excludes its closing token. Selection never enables targets disabled by the existing role/content settings or changes token IDs.
 - `ParsedResponse` is `(content, reasoning_content, tool_calls)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
 - Round-trip: rendering `[user, assistant(content, reasoning, tool_calls)]`, slicing the assistant completion, and feeding it through `parse_response` returns an equivalent structured message. Tested per-renderer in `tests/test_roundtrip.py`.
+
+### Prefix stability
+
+`renderer.is_prefix_stable` describes the constructed renderer after config and
+`chat_template_kwargs` resolution. A `True` value guarantees that full renders
+of assistant-terminated conversations stay token prefixes when more
+user/tool/assistant messages are appended, with a fixed system/developer
+preamble, tools, and `add_generation_prompt=False`. `False` means this is not
+guaranteed; opaque `DefaultRenderer` templates report `False`.
+
+The flag follows the template's emit rules, independently of the
+`thinking_retention` bridge override. For example, GLM-5 with
+`clear_thinking=False` is stable, while the default strips earlier reasoning.
+Disabling thinking generation alone does not guarantee stability for datasets
+that already contain reasoning. Other causes include GPT-OSS's final-turn
+terminator and Nemotron's moving effort hint. DeepSeek V4 reports `False`
+because its task/continuation message controls can rewrite the prefix; Inkling
+reports `False` because reused tool-call IDs can change earlier tool-response
+names, even though it retains reasoning.
+
+SFT consumers can use this flag to warn that a single full-conversation render
+may omit earlier reasoning. `build_training_sample` still returns one sample
+per conversation, without expanding it into one sample per assistant turn.
+The guarantee assumes unchanged message contents and deterministic tokenization
+and media preprocessing. Stability does not guarantee that the template emits
+every input field (some always omit reasoning), or that rendering reproduces sampled tokens. Continue
+using `bridge_to_next_turn` for sampled trajectories. Custom renderers should
+expose the same property; consumers supporting older/custom implementations
+can conservatively use `getattr(renderer, "is_prefix_stable", False)`.
 
 ### `bridge_to_next_turn` (the core contract)
 
 Given `(prev_prompt_ids, prev_completion_ids)` and new environment messages, return ids for the next turn's prompt such that the result starts with `prev_prompt_ids + prev_completion_ids` byte-for-byte and continues with the new messages plus the next assistant opener. If that cannot be proven safe, return `None` and the caller falls back to a full render.
 
 Each hand-coded bridge:
-1. Anchors at the previous turn's canonical close token. On clean stops it's already in `prev_completion_ids`. On truncation, the renderer synthesizes the close as non-loss prompt context.
-2. Refuses assistant content in `new_messages` — re-rendering sampled tokens would replace them with canonical template bytes.
-3. Renders only the new messages in the framing the model family expects.
+1. Checks the previous turn's reasoning state. If reasoning is unfinished and no stop was sampled, append its closing marker as non-loss prompt context before the canonical turn close. If a stop was already sampled inside reasoning, return `None`: inserting a close before it would violate the exact-prefix contract. Parsing never repairs the sampled output.
+2. Anchors at the previous turn's canonical close token. On clean stops it's already in `prev_completion_ids`. On truncation, the renderer synthesizes the close as non-loss prompt context.
+3. Refuses assistant content in `new_messages` — re-rendering sampled tokens would replace them with canonical template bytes.
+4. Renders only the new messages in the framing the model family expects.
 
 `DefaultRenderer.bridge_to_next_turn` returns `None` unconditionally — the template's close is unknown, so the contract can't be proven.
 
@@ -163,6 +233,42 @@ One shared behaviour flag lives on typed renderer configs: `thinking_retention`,
 
 Generic `thinking_retention` does **not** change full `render()` output: a full re-render always follows the Python chat-template implementation. Only real template knobs can change full-render thinking behaviour. GLM-5 `clear_thinking=False`, Nemotron-3 `truncate_history_thinking=False`, Qwen3.6 `preserve_thinking=True`, and GPT-OSS `auto_drop_analysis=False` all imply bridge policy `"all"`; no-thinking generation knobs also imply `"all"` when `thinking_retention` is unset. Setting a direct keep/drop template knob and a contradictory `thinking_retention` raises at config-load. The full per-renderer mapping lives in [`docs/renderer-config.md`](docs/renderer-config.md).
 
+## Custom renderers
+
+A renderer can live outside this package. Point a `custom` config at the class with `import_path`, as `my_module.Class` or `path/to/file.py:Class`; relative file paths resolve against the working directory. The class sets `config_class` to its own `BaseRendererConfig` subclass, which validates every other field of the config and supplies its `chat_template_kwargs` allowlist. For example, a GLM-5.3 renderer whose generation prompt prefills an empty think block, so the model starts at the answer:
+
+```python
+from typing import Literal
+
+from renderers.configs import GLM53RendererConfig
+from renderers.glm5 import GLM53Renderer
+
+
+class NoThinkingGLM53Config(GLM53RendererConfig):
+    name: Literal["glm-5.3-no-thinking"] = "glm-5.3-no-thinking"
+
+
+class NoThinkingGLM53Renderer(GLM53Renderer):
+    config_class = NoThinkingGLM53Config
+
+    def _emit_generation_prompt(self, emit_special) -> None:
+        emit_special(self._assistant, -1, is_sampled=False, is_content=False)
+        emit_special(self._think, -1, is_sampled=False, is_content=False)
+        emit_special(self._think_end, -1, is_sampled=False, is_content=False)
+```
+
+```python
+from renderers import CustomRendererConfig, create_renderer
+
+config = CustomRendererConfig(
+    import_path="my_renderers.glm53_no_thinking.NoThinkingGLM53Renderer",
+    clear_thinking=True,
+)
+renderer = create_renderer(tokenizer, config)
+```
+
+Downstream TOML configs select it the same way, with `name = "custom"` and an `import_path`.
+
 ## `DefaultRenderer`
 
 Fallback for unsupported text-only models. Wraps `apply_chat_template` and accepts `tool_parser` / `reasoning_parser` (vLLM convention) plus arbitrary Jinja kwargs via `DefaultRendererConfig`'s `extra="allow"`. Explicit `thinking_retention` is rejected: `bridge_to_next_turn` returns `None` because the template's close is unknown, so multi-turn rollouts fall back to full re-render. Implementing a hand-coded renderer is a few hundred lines of Python (`render_ids` + `parse_response` + `bridge_to_next_turn`) and is the only path that closes the failure modes above by construction.
@@ -180,6 +286,30 @@ uv run pytest
 ```
 
 Round-trip parity (render → parse → original) and token-level parity against each model's independent reference encoder are tested per renderer. Most references use `apply_chat_template`; DeepSeek V4 uses its shipped Python encoder, and GPT-OSS uses Harmony.
+
+Prefix-stability audit witnesses live in
+[`tests/fixtures/prefix_stability.json`](tests/fixtures/prefix_stability.json).
+Each case records a renderer/config, a conversation ending in an assistant,
+messages to append, and the reason the original tokens stop being a prefix.
+Shared scenarios keep the corpus small; paired stable settings guard the
+configuration switches. `DefaultRenderer` is treated as unknown, without
+inventing a witness for its opaque template.
+
+This audit is opt-in and is not collected by the regular test suite or CI.
+Run it manually when changing renderer emission rules or the stability
+classification:
+
+```bash
+uv run pytest tests/audit_prefix_stability.py -q
+```
+
+The tests render both inputs and compare the original token IDs with the
+same-length prefix of the extended render. They print the first differing
+tokens and a decoded text diff on failure. These are executable witnesses,
+not snapshots of token IDs that could pass without exercising the renderer.
+Add a named case for each new instability mechanism or configuration branch.
+A witness disproves stability; finite positive controls do not prove stability
+for every possible conversation or third-party tokenizer/processor.
 
 ## License
 

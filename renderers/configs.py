@@ -21,7 +21,7 @@ keys its tokenizer's template will honour, so it can't enumerate them.
 
 from __future__ import annotations
 
-from typing import Annotated, ClassVar, Literal, Union
+from typing import Annotated, ClassVar, Literal, Self, Union
 
 from pydantic import ConfigDict, Field, model_validator
 from pydantic_config import BaseConfig
@@ -159,7 +159,7 @@ class DefaultRendererConfig(BaseRendererConfig):
     _allow_opaque_template_kwargs = True
 
     @model_validator(mode="after")
-    def _reject_legacy_preserve_flags(self):
+    def _reject_legacy_preserve_flags(self) -> Self:
         # ``extra="allow"`` would otherwise swallow the removed ``preserve_*``
         # bools into ``model_extra`` and forward them to apply_chat_template,
         # silently dropping the user's intent (DefaultRenderer can't
@@ -261,7 +261,7 @@ class Qwen36RendererConfig(BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "preserve_thinking",
@@ -307,7 +307,7 @@ class Qwen38RendererConfig(BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "preserve_thinking",
@@ -350,7 +350,7 @@ class Gemma4RendererConfig(BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max"})
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "preserve_thinking",
@@ -377,7 +377,7 @@ class GLM5RendererConfig(BaseRendererConfig):
     to ``"all"``."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "clear_thinking",
@@ -401,7 +401,7 @@ class GLM51RendererConfig(BaseRendererConfig):
     """See :class:`GLM5RendererConfig.clear_thinking`."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "clear_thinking",
@@ -409,6 +409,35 @@ class GLM51RendererConfig(BaseRendererConfig):
             false_implies="all",
         )
         return self
+
+
+class GLM53RendererConfig(BaseRendererConfig):
+    """GLM-5.3 renderer config."""
+
+    name: Literal["glm-5.3"] = "glm-5.3"
+    _template_fields = frozenset({"clear_thinking", "reasoning_effort"})
+
+    clear_thinking: bool = False
+    """Drop reasoning from historical assistant turns when ``True``."""
+
+    reasoning_effort: Literal["low", "high", "max"] = "max"
+    """Reasoning-effort system preamble emitted by the canonical template."""
+
+    @model_validator(mode="after")
+    def _check_thinking_retention(self) -> Self:
+        _reject_thinking_retention_conflict(
+            self,
+            "clear_thinking",
+            true_implies="tool_cycle",
+            false_implies="all",
+        )
+        return self
+
+
+class GLM53FlashRendererConfig(GLM53RendererConfig):
+    """GLM-5.3 Flash renderer config. GLM-5.3's template surface, plus images."""
+
+    name: Literal["glm-5.3-flash"] = "glm-5.3-flash"
 
 
 class GLM45RendererConfig(BaseRendererConfig):
@@ -483,7 +512,7 @@ class Hy3RendererConfig(BaseRendererConfig):
     and suppresses the generation prompt (``add_generation_prompt=False``)."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         if self.preserved_thinking is not None and self.thinking_retention is not None:
             implied = "all" if self.preserved_thinking else "tool_cycle"
             if self.thinking_retention != implied:
@@ -543,7 +572,7 @@ class InklingRendererConfig(BaseRendererConfig):
     _internal_fields = frozenset({"image_cache_max", "audio_cache_max"})
 
     @model_validator(mode="after")
-    def _check_reasoning_effort(self):
+    def _check_reasoning_effort(self) -> Self:
         eff = self.reasoning_effort
         if isinstance(eff, str):
             if eff.strip() not in INKLING_EFFORT_MAP:
@@ -608,7 +637,7 @@ class GptOssRendererConfig(BaseRendererConfig):
     )
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "auto_drop_analysis",
@@ -616,6 +645,34 @@ class GptOssRendererConfig(BaseRendererConfig):
             false_implies="all",
         )
         return self
+
+
+class MuseGlimmerRendererConfig(BaseRendererConfig):
+    """Muse Glimmer (ATEM) renderer config.
+
+    The chat template never drops historical reasoning, so bridges keep all
+    reasoning by default (``thinking_retention`` resolves to ``"all"``).
+    """
+
+    name: Literal["muse-glimmer"] = "muse-glimmer"
+    _template_fields = frozenset(
+        {"reasoning_strength", "knowledge_cutoff", "current_date"}
+    )
+
+    reasoning_strength: Literal["low", "medium", "high", "xhigh"] = "high"
+    """``Reasoning strength: <value>.`` line in the system preamble. Mirrors
+    the template's ``reasoning_strength`` kwarg (template default ``high``).
+    A system message that already states a reasoning strength (or effort)
+    keeps its own line instead."""
+
+    knowledge_cutoff: str = "2026-01-04"
+    """Knowledge-cutoff date in the default preamble (used only when the
+    conversation has no system message). Mirrors ``knowledge_cutoff``."""
+
+    current_date: str | None = None
+    """``Current date`` in the default preamble, as ``YYYY-MM-DD``. ``None``
+    uses today's date (the template's ``strftime_now`` fallback), fixed when
+    the renderer is constructed. Pin it for reproducible training renders."""
 
 
 class KimiK2RendererConfig(BaseRendererConfig):
@@ -813,7 +870,7 @@ class Nemotron3RendererConfig(BaseRendererConfig):
     policy to ``"all"``."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "truncate_history_thinking",
@@ -854,7 +911,7 @@ class Nemotron3UltraRendererConfig(BaseRendererConfig):
     """See :class:`Nemotron3RendererConfig.truncate_history_thinking`."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "truncate_history_thinking",
@@ -890,7 +947,7 @@ class Nemotron35RendererConfig(BaseRendererConfig):
     """See :class:`Nemotron3RendererConfig.truncate_history_thinking`."""
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "truncate_history_thinking",
@@ -961,13 +1018,47 @@ class DeepSeekV4RendererConfig(BaseRendererConfig):
     """
 
     @model_validator(mode="after")
-    def _check_thinking_retention(self):
+    def _check_thinking_retention(self) -> Self:
         _reject_thinking_retention_conflict(
             self,
             "drop_thinking",
             true_implies="tool_cycle",
             false_implies="all",
         )
+        return self
+
+
+class CustomRendererConfig(BaseRendererConfig):
+    """Config for a renderer that lives outside this package.
+
+    ``import_path`` names the renderer class as ``my_module.Class`` or
+    ``path/to/file.py:Class``; relative file paths resolve against the
+    working directory. The class sets ``config_class`` to its own
+    :class:`BaseRendererConfig` subclass, and that class validates every other
+    field of this config. A model-specific renderer can therefore ship without
+    a change to this package::
+
+        [renderer]
+        name = "custom"
+        import_path = "my_renderers.glm53_no_thinking.NoThinkingGLM53Renderer"
+        clear_thinking = true
+    """
+
+    model_config = ConfigDict(frozen=True, extra="allow")
+
+    name: Literal["custom"] = "custom"
+    import_path: str
+    """Renderer class as ``my_module.Class`` or ``path/to/file.py:Class``."""
+
+    _internal_fields = frozenset({"import_path"})
+
+    @model_validator(mode="after")
+    def _validate_renderer_fields(self) -> Self:
+        # Fail at config load, not at the first render: the import path must
+        # resolve and the renderer's config must accept the other fields.
+        from renderers.custom import custom_renderer_config
+
+        custom_renderer_config(self)
         return self
 
 
@@ -984,8 +1075,11 @@ RendererConfig = Annotated[
         Gemma4RendererConfig,
         GLM5RendererConfig,
         GLM51RendererConfig,
+        GLM53RendererConfig,
+        GLM53FlashRendererConfig,
         GLM45RendererConfig,
         GptOssRendererConfig,
+        MuseGlimmerRendererConfig,
         Hy3RendererConfig,
         InklingRendererConfig,
         KimiK2RendererConfig,
@@ -1002,6 +1096,7 @@ RendererConfig = Annotated[
         DeepSeekV3RendererConfig,
         DeepSeekR1RendererConfig,
         DeepSeekV4RendererConfig,
+        CustomRendererConfig,
     ],
     Field(discriminator="name"),
 ]
@@ -1031,8 +1126,11 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "gemma4": Gemma4RendererConfig,
     "glm-5": GLM5RendererConfig,
     "glm-5.1": GLM51RendererConfig,
+    "glm-5.3": GLM53RendererConfig,
+    "glm-5.3-flash": GLM53FlashRendererConfig,
     "glm-4.5": GLM45RendererConfig,
     "gpt-oss": GptOssRendererConfig,
+    "muse-glimmer": MuseGlimmerRendererConfig,
     "hy3": Hy3RendererConfig,
     "inkling": InklingRendererConfig,
     "kimi-k2": KimiK2RendererConfig,
@@ -1056,8 +1154,7 @@ def _config_class_for(name: str) -> type[BaseRendererConfig]:
     cls = _CONFIG_BY_NAME.get(name)
     if cls is None:
         raise ValueError(
-            f"No renderer config registered for name={name!r}. "
-            f"Known: {sorted(_CONFIG_BY_NAME)}"
+            f"No renderer config registered for name={name!r}. Known: {sorted(_CONFIG_BY_NAME)}"
         )
     return cls
 
@@ -1085,6 +1182,8 @@ __all__ = [
     "DeepSeekV4RendererConfig",
     "GLM45RendererConfig",
     "GLM51RendererConfig",
+    "GLM53FlashRendererConfig",
+    "GLM53RendererConfig",
     "GLM5RendererConfig",
     "Gemma4RendererConfig",
     "GptOssRendererConfig",
@@ -1099,6 +1198,7 @@ __all__ = [
     "LagunaXS21RendererConfig",
     "Llama3RendererConfig",
     "MiniMaxM2RendererConfig",
+    "MuseGlimmerRendererConfig",
     "Nemotron35RendererConfig",
     "Nemotron3RendererConfig",
     "Nemotron3UltraRendererConfig",

@@ -110,7 +110,10 @@ def test_parse_low_mode_inference_stream():
         "Let me work it out." + _THINK_END + "It is 4." + _EOS,
         add_special_tokens=False,
     )
-    parsed = r.parse_response(comp)
+    prompt = r.render_ids(
+        [{"role": "user", "content": "What is 2+2?"}], add_generation_prompt=True
+    )
+    parsed = r.parse_response(comp, prompt_ids=prompt)
     assert parsed.reasoning_content == "Let me work it out."
     assert parsed.content == "It is 4."
     assert not parsed.tool_calls
@@ -484,3 +487,8 @@ def test_bridge_declines_on_empty_completion():
         rf.bridge_to_next_turn(prompt, [], [{"role": "tool", "content": "more"}])
         is None
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tok.cache_clear()

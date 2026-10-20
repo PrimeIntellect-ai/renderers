@@ -27,6 +27,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
+
 from renderers.base import (
     Message,
     ParsedResponse,
@@ -73,6 +75,14 @@ _TOOL_RESPONSE_END = f"</tool_response{_HYTK}>"
 
 class Hy3Renderer:
     """Deterministic message → token renderer for Tencent Hy3 models."""
+
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Require retention regardless of whether tools are supplied.
+        return not self.config.raw_last_assistant and (
+            self.config.is_training or self.config.preserved_thinking is True
+        )
 
     def __init__(
         self,
@@ -589,6 +599,7 @@ class Hy3Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_hy3(
             self._tokenizer,
@@ -606,6 +617,14 @@ class Hy3Renderer:
             arg_value_id=self._arg_value,
             arg_value_end_id=self._arg_value_end,
             tools=tools,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                open_marker=_THINK,
+                close_marker=_THINK_END,
+                stop_ids=set(self.get_stop_token_ids()),
+                assistant_prefix="<｜hy_Assistant:opensource｜>",
+            ),
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -627,6 +646,23 @@ class Hy3Renderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_calls,
+            open_id=self._think,
+            close_id=self._think_end,
+            open_marker=_THINK,
+            close_marker=_THINK_END,
+            assistant_prefix="<｜hy_Assistant:opensource｜>",
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._think_end]
 
         if should_rerender_for_thinking_retention(
             self._thinking_retention_for(tools),

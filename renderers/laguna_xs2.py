@@ -50,6 +50,8 @@ from __future__ import annotations
 
 import json
 
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
+
 from renderers.base import (
     Content,
     Message,
@@ -118,6 +120,11 @@ _TOOLS_HEADER_XS21 = (
 
 
 class LagunaXS2Renderer:
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        return True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -352,6 +359,7 @@ class LagunaXS2Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_laguna_xs2(
             self._tokenizer,
@@ -362,6 +370,12 @@ class LagunaXS2Renderer:
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
             tools=tools,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=set(self.get_stop_token_ids()),
+                assistant_prefix="<assistant>",
+            ),
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -381,6 +395,20 @@ class LagunaXS2Renderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_call,
+            assistant_prefix="<assistant>",
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._think_end]
+
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
             new_messages,
@@ -894,6 +922,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         # The XS-2.1 template renders reasoning and content verbatim (no
         # newline wrapping), so the parse is verbatim too.
@@ -907,6 +936,12 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             tool_call_end_id=self._tool_call_end,
             tools=tools,
             strip_newlines=False,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=set(self.get_stop_token_ids()),
+                assistant_prefix="<assistant>",
+            ),
         )
 
     def bridge_to_next_turn(
@@ -923,6 +958,20 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_call,
+            assistant_prefix="<assistant>",
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._think_end]
+
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
             new_messages,

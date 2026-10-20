@@ -91,6 +91,11 @@ _TOOLS_IN_USER_INTRO = (
 class Llama3Renderer:
     """Deterministic message → token renderer for Llama-3.x Instruct models."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        return True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -412,6 +417,7 @@ class Llama3Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_llama_3(
             self._tokenizer,

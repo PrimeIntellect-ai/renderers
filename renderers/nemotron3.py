@@ -14,16 +14,23 @@ Nemotron 3 uses the same <|im_start|>/<|im_end|> format as Qwen3.5 but differs i
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
+from pathlib import Path
 from typing import Any
+
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
 
 from renderers.base import (
     Message,
+    MultiModalData,
     ParsedResponse,
+    PlaceholderRange,
     RenderedTokens,
     ToolSpec,
     Tokenizer,
     _content_mask_or_empty,
+    _require_transformers,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -37,6 +44,7 @@ from renderers.configs import (
     Nemotron35RendererConfig,
 )
 from renderers.parsing import parse_qwen35
+from renderers.qwen3_vl import _image_hash, _is_image_part, _load_pil_image
 
 # ---------------------------------------------------------------------------
 # Tool system prompt constants
@@ -109,6 +117,12 @@ class Nemotron3Renderer:
     :class:`Nemotron3UltraRenderer` subclass below; both are registered under
     their own discriminator and differ only by the class-level hooks here.
     """
+
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # An effort hint moves to the newest user, independently of thinking retention.
+        return not self.config.truncate_history_thinking and not self._effort_hint
 
     # Variant hooks (overridden by ``Nemotron3UltraRenderer``): the default
     # config to build when none is passed, and whether to use Ultra's
@@ -507,6 +521,7 @@ class Nemotron3Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         stop_ids = {self._im_end}
         if self._endoftext is not None:
@@ -520,6 +535,11 @@ class Nemotron3Renderer:
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
             tools=tools,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=set(self.get_stop_token_ids()),
+            ),
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -547,6 +567,20 @@ class Nemotron3Renderer:
             or self._effort_hint
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_call,
+            tool_start_closes_reasoning=True,
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            assert self._think_end is not None
+            previous_completion_ids = [*previous_completion_ids, self._think_end]
 
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
@@ -873,3 +907,249 @@ class Nemotron35Renderer(Nemotron3Renderer):
 
     _config_cls = Nemotron35RendererConfig
     _ultra = True
+    supports_process_multimodal = True
+    supports_multimodal_bridge = False
+
+    _processor_model_prefix = "nvidia/NVIDIA-Nemotron-3.5"
+
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        config: Nemotron35RendererConfig | None = None,
+        *,
+        processor: Any = None,
+    ):
+        super().__init__(tokenizer, config)
+        self._processor = processor
+        self._image = self._token_id("<image>", optional=True)
+
+    @property
+    def mm_token_type_id_map(self) -> dict[int, int]:
+        return {self._image: 1} if self._image is not None else {}
+
+    def _image_token_id(self) -> int:
+        if self._image is None:
+            raise RuntimeError("This Nemotron 3.5 tokenizer has no <image> token.")
+        return self._image
+
+    def _get_processor(self):
+        if self._processor is not None:
+            return self._processor
+        name = getattr(self._tokenizer, "name_or_path", None)
+        if not name:
+            raise RuntimeError(
+                "Nemotron35Renderer needs a processor for image content."
+            )
+        if Path(name).expanduser().is_dir():
+            raise RuntimeError(
+                "Local Nemotron remote-code processor paths require an explicitly "
+                "injected reviewed processor."
+            )
+        if not name.startswith(self._processor_model_prefix):
+            raise RuntimeError(
+                f"Nemotron processor {name!r} is not approved for remote-code "
+                "loading. Inject a reviewed processor."
+            )
+        transformers = _require_transformers("Auto-loading a Nemotron 3.5 processor")
+        self._processor = transformers.AutoProcessor.from_pretrained(
+            name, trust_remote_code=True
+        )
+        return self._processor
+
+    @staticmethod
+    def _is_image_part(item: Any) -> bool:
+        return _is_image_part(item) or (
+            isinstance(item, dict) and item.get("type") == "input_image"
+        )
+
+    @staticmethod
+    def _image_source(part: dict[str, Any]) -> dict[str, Any]:
+        if "input_image" not in part:
+            return part
+        return {**part, "image": part["input_image"]}
+
+    @classmethod
+    def _logical_multimodal_content(
+        cls, content: list[Any]
+    ) -> tuple[str, list[dict[str, Any]]]:
+        text = "".join(
+            item if isinstance(item, str) else str(item.get("text") or "")
+            for item in content
+            if isinstance(item, str)
+            or (isinstance(item, dict) and item.get("type") in ("text", "input_text"))
+        )
+        image_parts = [
+            item
+            for item in content
+            if isinstance(item, dict) and cls._is_image_part(item)
+        ]
+        emit_structured_images = "<image>" not in text
+        rendered: list[str] = []
+        image_index = 0
+        for item in content:
+            if isinstance(item, str):
+                rendered.append(item)
+            elif not isinstance(item, dict):
+                raise ValueError(f"Unexpected content item: {item}")
+            elif cls._is_image_part(item):
+                image_index += 1
+                if emit_structured_images:
+                    if len(image_parts) > 1:
+                        rendered.append(f"<image {image_index}><image>")
+                    else:
+                        rendered.append("<image>")
+            elif item.get("type") in ("video", "video_url", "input_video"):
+                raise NotImplementedError(
+                    "Video parts are not yet supported by Nemotron35Renderer."
+                )
+            elif item.get("type") in ("text", "input_text") or "text" in item:
+                rendered.append(str(item.get("text") or ""))
+        return "".join(rendered), image_parts
+
+    @staticmethod
+    def _load_image(part: dict[str, Any]):
+        source = Nemotron35Renderer._image_source(part)
+        if "image" in source:
+            raw = source["image"]
+        elif "image_url" in source:
+            image_url = source.get("image_url")
+            raw = image_url.get("url") if isinstance(image_url, dict) else image_url
+        else:
+            raw = source.get("url") or source.get("path")
+        if isinstance(raw, str) and not raw.startswith("data:image/"):
+            raise ValueError(
+                "Nemotron 3.5 accepts in-memory images or data:image URIs; "
+                "network and filesystem image sources are disabled."
+            )
+        return _load_pil_image(source)
+
+    def _process_image(self, part: dict[str, Any]) -> tuple[dict[str, Any], int, str]:
+        self._image_token_id()
+        image = self._load_image(part)
+        output = self._get_processor().image_processor(
+            images=[image], return_tensors="np"
+        )
+        return output, int(output["num_tokens"][0]), _image_hash(image)
+
+    @staticmethod
+    def _expand_image_tokens(content: str, token_counts: list[int]) -> str:
+        if content.count("<image>") != len(token_counts):
+            raise ValueError(
+                "Nemotron image content must contain one <image> placeholder per image."
+            )
+        segments = content.split("<image>")
+        expanded = [segments[0]]
+        for count, suffix in zip(token_counts, segments[1:]):
+            expanded.append("<img>" + "<image>" * count + "</img>" + suffix)
+        return "".join(expanded)
+
+    def _transform_multimodal_messages(
+        self,
+        messages: list[Message],
+        *,
+        process_multimodal: bool,
+    ) -> tuple[list[Message], list[tuple[dict[str, Any], int, str]]]:
+        transformed: list[Message] = []
+        processed_images: list[tuple[dict[str, Any], int, str]] = []
+        for message in messages:
+            copied = dict(message)
+            content = message.get("content")
+            if isinstance(content, list) and any(
+                self._is_image_part(item) for item in content
+            ):
+                logical_content, image_parts = self._logical_multimodal_content(content)
+                if process_multimodal:
+                    current_images = [self._process_image(part) for part in image_parts]
+                    logical_content = self._expand_image_tokens(
+                        logical_content, [item[1] for item in current_images]
+                    )
+                    processed_images.extend(current_images)
+                copied["content"] = logical_content
+            transformed.append(copied)
+        return transformed, processed_images
+
+    def render(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
+        process_multimodal: bool = True,
+    ) -> RenderedTokens:
+        transformed, processed_images = self._transform_multimodal_messages(
+            messages, process_multimodal=process_multimodal
+        )
+
+        rendered = super().render(
+            transformed,
+            tools=tools,
+            add_generation_prompt=add_generation_prompt,
+        )
+        if not processed_images:
+            return rendered
+
+        image_token_id = self._image_token_id()
+        placeholder_runs: list[PlaceholderRange] = []
+        cursor = 0
+        for _, length, _ in processed_images:
+            while (
+                cursor < len(rendered.token_ids)
+                and rendered.token_ids[cursor] != image_token_id
+            ):
+                cursor += 1
+            if (
+                rendered.token_ids[cursor : cursor + length]
+                != [image_token_id] * length
+            ):
+                raise ValueError(
+                    "Rendered Nemotron image placeholders are not contiguous."
+                )
+            placeholder_runs.append(PlaceholderRange(offset=cursor, length=length))
+            cursor += length
+
+        mm_data = MultiModalData(
+            mm_hashes={"image": [item[2] for item in processed_images]},
+            mm_placeholders={"image": placeholder_runs},
+            mm_items={
+                "image": [
+                    {
+                        key: processor_output[key]
+                        for key in (
+                            "pixel_values",
+                            "imgs_sizes",
+                            "num_tokens",
+                            "num_patches",
+                        )
+                    }
+                    for processor_output, _, _ in processed_images
+                ],
+            },
+        )
+        return replace(rendered, multi_modal_data=mm_data)
+
+    def bridge_to_next_turn(
+        self,
+        previous_prompt_ids: list[int],
+        previous_completion_ids: list[int],
+        new_messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        previous_multi_modal_data: MultiModalData | None = None,
+        process_multimodal: bool = True,
+    ) -> RenderedTokens | None:
+        has_new_images = any(
+            isinstance(message.get("content"), list)
+            and any(self._is_image_part(item) for item in message["content"])
+            for message in new_messages
+        )
+        if has_new_images or (
+            previous_multi_modal_data is not None
+            and not previous_multi_modal_data.is_empty()
+        ):
+            return None
+        return super().bridge_to_next_turn(
+            previous_prompt_ids,
+            previous_completion_ids,
+            new_messages,
+            tools=tools,
+        )

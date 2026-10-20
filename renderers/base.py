@@ -1,15 +1,14 @@
-from __future__ import annotations
-
-import enum
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Literal,
     Protocol,
+    Required,
     TypedDict,
     cast,
     runtime_checkable,
@@ -110,8 +109,8 @@ class Message(TypedDict, total=False):
     Optional keys mirror the OpenAI chat format for tool calling.
     """
 
-    role: str
-    content: Content
+    role: Required[str]
+    content: Required[Content]
     tool_calls: list[ToolCall]
     tool_call_id: str
     name: str
@@ -224,8 +223,11 @@ class MultiModalData:
 class RenderedTokens:
     """Result of rendering messages to tokens.
 
-    Each token carries an index into the original message list so callers can
-    build per-token loss masks without re-rendering. Tokens from structural
+    Each token carries its owning message's index into the original message
+    list so callers can build per-token loss masks without re-rendering.
+    Sampled closing tokens belong to the assistant that generated them, even
+    when emitted while rendering the next message's role marker. User/tool
+    bodies retain their own message indices. Tokens from structural
     scaffolding the renderer adds outside any single message (e.g. the
     trailing generation prompt) carry index ``-1``.
 
@@ -383,7 +385,10 @@ class RenderedTokens:
         is not represented.
 
         Hand-coded renderers emit each message's tokens contiguously,
-        so the span is well-defined. The implementation tolerates
+        so the span is well-defined. Spans follow input-message indices,
+        not necessarily token order: templates can reorder tool results.
+        Empty messages whose role marker closes the preceding assistant
+        may have no tokens of their own. The implementation tolerates
         non-contiguous attribution by returning the outer span
         ``(first_k, last_k + 1)``; if you suspect interleaving, slice
         ``message_indices`` yourself to verify.
@@ -556,7 +561,7 @@ class RenderedTokens:
         return mask
 
 
-class ToolCallParseStatus(str, enum.Enum):
+class ToolCallParseStatus(StrEnum):
     """Per-attempt outcome of parsing a single ``<tool_call>`` block.
 
     The renderer parser's job is JSON-syntax → ``dict`` (the parser-level
@@ -632,6 +637,13 @@ class ParsedResponse:
     content: str
     reasoning_content: str | None = None
     tool_calls: list[ParsedToolCall] = field(default_factory=list)
+    reasoning_complete: bool | None = True
+    """Whether the reasoning channel is closed at the end of the completion.
+
+    False means generation ended inside reasoning; this is unrelated to the
+    engine finish reason, tool-call validity, or whether final text is useful.
+    None means the parser cannot determine the state for its reasoning format.
+    """
 
 
 @dataclass
@@ -710,6 +722,26 @@ class ChatTemplateTokenizer(Tokenizer, Protocol):
 class Renderer(Protocol):
     """Owns message ↔ token conversion for a specific model family."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether extending a conversation preserves its rendered token prefix.
+
+        For valid conversations ending in an assistant message, ``True`` means
+        that appending user/tool/assistant messages leaves the existing token
+        IDs unchanged when both renders use ``add_generation_prompt=False``.
+        The system/developer preamble, tools, and renderer configuration must
+        stay fixed. This describes full renders, not sampled completions or
+        the ability to bridge them; keep using ``bridge_to_next_turn`` for that.
+
+        The declaration is conservative over message contents (including
+        supplied reasoning even when thinking generation is disabled) and
+        tools. ``False`` means stability is not guaranteed, including opaque
+        templates. It does not mean every conversation changes. Conversely,
+        ``True`` does not promise to emit fields the template always ignores.
+        Custom renderers should declare this property from their emit rules.
+        """
+        ...
+
     def render(
         self,
         messages: list[Message],
@@ -743,8 +775,16 @@ class Renderer(Protocol):
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         """Parse completion tokens back into a structured message.
+
+        Pass the exact ``prompt_ids`` used for sampling whenever available.
+        This identifies reasoning prefilled by the prompt, including Gemma's
+        post-tool thought channel and partial assistant prefixes. Omitting it,
+        passing None, and passing [] are equivalent: the format's completion
+        grammar applies without prompt context. GLM and DeepSeek V4 also use
+        the configured generation mode to determine the initial channel.
 
         ``tools`` is the same list passed to ``render`` for this turn.
         XML-style formats (Qwen3.5, GLM, MiniMax, Laguna) render argument
@@ -970,6 +1010,10 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "zai-org/GLM-5-FP8": "glm-5",
     "zai-org/GLM-4.7-Flash": "glm-5",
     "zai-org/GLM-5.1": "glm-5.1",
+    "zai-org/GLM-5.3": "glm-5.3",
+    "zai-org/GLM-5.3-BF16": "glm-5.3",
+    "zai-org/GLM-5.3-Flash": "glm-5.3-flash",
+    "zai-org/GLM-5.3-Flash-BF16": "glm-5.3-flash",
     # GLM-4.5.
     "THUDM/GLM-4.5-Air": "glm-4.5",
     "zai-org/GLM-4.5-Air": "glm-4.5",
@@ -1001,6 +1045,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # Nemotron 3.5 (Lightning). Its template is the Ultra variant's minus the
     # effort kwarg (``nemotron-3.5``).
     "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16": "nemotron-3.5",
+    "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026": "nemotron-3.5",
     # Llama 3.2 (Instruct). Tested against the gated meta-llama repos and
     # the unrestricted unsloth/... mirror, which ships a byte-identical
     # chat template. ``Llama3Renderer`` defaults ``date_string`` to
@@ -1018,6 +1063,8 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
+    # Muse Glimmer (ATEM channel format; images as one <|patch|> each).
+    "meta-models/Muse-Glimmer-30B": "muse-glimmer",
     # Thinking Machines Inkling checkpoints share byte-identical tokenizer,
     # chat-template, and processor assets (vision + audio; transformers >= 5.14).
     "thinkingmachines/Inkling": "inkling",
@@ -1041,6 +1088,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
 # Modality values: ``"image"``, ``"video"``, ``"audio"``. Text is implicit
 # (every model supports it), so it doesn't appear in the set.
 MULTIMODAL_MODELS: dict[str, set[str]] = {
+    "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026": {"image"},
     "Qwen/Qwen3-VL-4B-Instruct": {"image"},
     "Qwen/Qwen3-VL-8B-Instruct": {"image"},
     "Qwen/Qwen3-VL-30B-A3B-Instruct": {"image"},
@@ -1286,15 +1334,19 @@ def load_tokenizer(model_name_or_path: str):
     the requested Meta ID so auto-resolution still selects ``Llama3Renderer``.
     Requires the ``renderers[transformers]`` extra.
     """
-    _require_transformers("Loading a tokenizer")
-    load_name_or_path = _tokenizer_source_for(model_name_or_path)
-    kwargs = _tokenizer_load_kwargs(load_name_or_path)
-    tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
-    return _preserve_requested_tokenizer_name(
-        tok,
-        requested_name_or_path=model_name_or_path,
-        loaded_name_or_path=load_name_or_path,
-    )
+    try:
+        _require_transformers("Loading a tokenizer")
+        load_name_or_path = _tokenizer_source_for(model_name_or_path)
+        kwargs = _tokenizer_load_kwargs(load_name_or_path)
+        tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
+        return _preserve_requested_tokenizer_name(
+            tok,
+            requested_name_or_path=model_name_or_path,
+            loaded_name_or_path=load_name_or_path,
+        )
+    except Exception as exc:
+        exc.add_note(f"While loading tokenizer {model_name_or_path!r}.")
+        raise
 
 
 def _populate_registry():
@@ -1304,10 +1356,15 @@ def _populate_registry():
     from renderers.deepseek_v3 import DeepSeekV3Renderer
     from renderers.deepseek_v4 import DeepSeekV4Renderer
     from renderers.default import DefaultRenderer
-    from renderers.glm5 import GLM5Renderer, GLM51Renderer
+    from renderers.gemma4 import Gemma4Renderer
+    from renderers.glm5 import (
+        GLM5Renderer,
+        GLM51Renderer,
+        GLM53FlashRenderer,
+        GLM53Renderer,
+    )
     from renderers.glm45 import GLM45Renderer
     from renderers.gpt_oss import GptOssRenderer
-    from renderers.gemma4 import Gemma4Renderer
     from renderers.hy3 import Hy3Renderer
     from renderers.inkling import InklingRenderer
     from renderers.kimi_k2 import KimiK2Renderer
@@ -1320,6 +1377,7 @@ def _populate_registry():
     )
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
+    from renderers.muse_glimmer import MuseGlimmerRenderer
     from renderers.nemotron3 import (
         Nemotron3Renderer,
         Nemotron3UltraRenderer,
@@ -1344,6 +1402,8 @@ def _populate_registry():
             "qwen3.8": Qwen38Renderer,
             "glm-5": GLM5Renderer,
             "glm-5.1": GLM51Renderer,
+            "glm-5.3": GLM53Renderer,
+            "glm-5.3-flash": GLM53FlashRenderer,
             "glm-4.5": GLM45Renderer,
             "minimax-m2": MiniMaxM2Renderer,
             "deepseek-v3": DeepSeekV3Renderer,
@@ -1362,13 +1422,14 @@ def _populate_registry():
             "nemotron-3-ultra": Nemotron3UltraRenderer,
             "nemotron-3.5": Nemotron35Renderer,
             "gpt-oss": GptOssRenderer,
+            "muse-glimmer": MuseGlimmerRenderer,
         }
     )
 
 
 def create_renderer(
     tokenizer,
-    config: RendererConfig | None = None,
+    config: "RendererConfig | None" = None,
     *,
     chat_template_kwargs: Mapping[str, Any] | None = None,
 ) -> Renderer:
@@ -1400,39 +1461,76 @@ def create_renderer(
     """
     _populate_registry()
 
-    config = _resolve_renderer_config(
-        tokenizer,
-        config,
-        chat_template_kwargs=chat_template_kwargs,
-    )
-    cls = RENDERER_REGISTRY.get(config.name)
-    if cls is None:
-        raise ValueError(
-            f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
+    try:
+        config = _resolve_renderer_config(
+            tokenizer,
+            config,
+            chat_template_kwargs=chat_template_kwargs,
         )
-    return cls(tokenizer, config)
+        from renderers.configs import CustomRendererConfig
+        from renderers.custom import custom_renderer_config, load_custom_renderer
+
+        if isinstance(config, CustomRendererConfig):
+            renderer_cls = load_custom_renderer(config.import_path)
+            return renderer_cls(tokenizer, custom_renderer_config(config))
+        cls = RENDERER_REGISTRY.get(config.name)
+        if cls is None:
+            raise ValueError(
+                f"Unknown renderer {config.name!r}. Available: {', '.join(sorted(RENDERER_REGISTRY))}"
+            )
+        return cls(tokenizer, config)
+    except Exception as exc:
+        model_name = getattr(tokenizer, "name_or_path", "<unnamed tokenizer>")
+        renderer_name = config.name if config is not None else "auto"
+        exc.add_note(
+            f"While creating renderer {renderer_name!r} for tokenizer {model_name!r}."
+        )
+        raise
 
 
-def _merge_chat_template_kwargs(
-    config: RendererConfig,
+def template_field_names(config: "RendererConfig") -> frozenset[str]:
+    """Chat-template kwargs that ``config``'s renderer accepts, custom renderers included."""
+    from renderers.configs import CustomRendererConfig
+    from renderers.custom import load_custom_renderer
+
+    if isinstance(config, CustomRendererConfig):
+        return load_custom_renderer(
+            config.import_path
+        ).config_class.template_field_names()
+    return type(config).template_field_names()
+
+
+def merge_chat_template_kwargs(
+    config: "RendererConfig",
     chat_template_kwargs: Mapping[str, Any] | None,
-) -> RendererConfig:
+) -> "RendererConfig":
+    """Return ``config`` with the template kwargs applied, validated against its allowlist."""
     if not chat_template_kwargs:
         return config
     if not isinstance(chat_template_kwargs, Mapping):
         raise TypeError("chat_template_kwargs must be a mapping.")
+    from renderers.configs import CustomRendererConfig
+    from renderers.custom import load_custom_renderer
+
     kwargs = dict(chat_template_kwargs)
     config_cls = type(config)
-    allowed = config_cls.template_field_names()
-    if config_cls._allow_opaque_template_kwargs:
-        reserved = frozenset(config_cls.model_fields) - allowed - {"name"}
+    # A custom config carries its renderer's fields as extras, so the renderer's
+    # own config class decides which kwargs are template controls.
+    fields_cls = (
+        load_custom_renderer(config.import_path).config_class
+        if isinstance(config, CustomRendererConfig)
+        else config_cls
+    )
+    allowed = fields_cls.template_field_names()
+    if fields_cls._allow_opaque_template_kwargs:
+        reserved = frozenset(fields_cls.model_fields) - allowed - {"name"}
         unsupported = frozenset(kwargs) & reserved
     else:
         unsupported = frozenset(kwargs) - allowed
     if unsupported:
         allowed_text = (
             "opaque Jinja kwargs"
-            if config_cls._allow_opaque_template_kwargs
+            if fields_cls._allow_opaque_template_kwargs
             else ", ".join(sorted(allowed)) or "(none)"
         )
         raise ValueError(
@@ -1450,10 +1548,10 @@ def _merge_chat_template_kwargs(
 
 def _resolve_renderer_config(
     tokenizer,
-    config: RendererConfig | None,
+    config: "RendererConfig | None",
     *,
     chat_template_kwargs: Mapping[str, Any] | None = None,
-) -> RendererConfig:
+) -> "RendererConfig":
     """Resolve auto/default config and merge chat-template kwargs."""
     from renderers.configs import AutoRendererConfig
 
@@ -1467,15 +1565,15 @@ def _resolve_renderer_config(
             chat_template_kwargs=chat_template_kwargs,
         )
 
-    return _merge_chat_template_kwargs(config, chat_template_kwargs)
+    return merge_chat_template_kwargs(config, chat_template_kwargs)
 
 
 def _resolve_auto_config(
     tokenizer,
-    auto: AutoRendererConfig,
+    auto: "AutoRendererConfig",
     *,
     chat_template_kwargs: Mapping[str, Any] | None = None,
-) -> RendererConfig:
+) -> "RendererConfig":
     """Map ``AutoRendererConfig`` → concrete typed config via the
     tokenizer's ``name_or_path``.
 
@@ -1495,7 +1593,7 @@ def _resolve_auto_config(
 
     if renderer_name is not None:
         cfg_cls = _config_class_for(renderer_name)
-        return _merge_chat_template_kwargs(
+        return merge_chat_template_kwargs(
             cfg_cls(**preserve_carry),
             chat_template_kwargs,
         )
@@ -1592,6 +1690,7 @@ def build_training_sample(
     tools: list[ToolSpec] | None = None,
     content_sft_roles: "set[str] | frozenset[str] | None" = None,
     ensure_final_stop: bool = False,
+    message_loss_mask: list[bool | int] | None = None,
 ) -> RenderedTrainingSample:
     """Build a :class:`RenderedTrainingSample` for supervised training.
 
@@ -1608,11 +1707,8 @@ def build_training_sample(
     it's attributed to. This is the recommended default for renderer
     callers — the renderer owns the per-token "is this model output"
     signal, so role-level filtering becomes a downstream constraint
-    rather than a precondition. (Some role markers — e.g. GLM
-    ``<|user|>`` / ``<|observation|>`` after a tool-calling assistant
-    turn — *are* sampled by the model at inference and live inside the
-    next message's span; ``sampled_mask`` captures that, but a
-    naive role filter would mask them out.)
+    rather than a precondition. Sampled closing markers, including GLM's
+    ``<|user|>`` / ``<|observation|>``, are attributed to their assistant.
 
     When ``role_to_mask`` is provided, ``loss_mask`` is the AND of the
     role-based attribution and the sampled signal: only tokens the
@@ -1658,7 +1754,27 @@ def build_training_sample(
     fires, the output intentionally diverges from ``apply_chat_template``.
     Ignored for renderers without ``sampled_mask`` (``DefaultRenderer``) —
     the close of an opaque template can't be located reliably.
+
+    ``message_loss_mask`` optionally selects messages for supervision with
+    one boolean or integer 0/1 per message. It only restricts the existing
+    mask: selecting a message never enables targets disabled by the role,
+    sampled, or content settings. Unselected messages remain context,
+    including prefilled assistant turns at arbitrary positions. Sampled
+    closing tokens follow their owning assistant, even when a template
+    emits them at the next message boundary. A synthesized final stop
+    follows the final message's selection. Token ids are unaffected.
+    ``None`` preserves the existing mask.
     """
+    if message_loss_mask is not None:
+        if len(message_loss_mask) != len(messages):
+            raise ValueError("message_loss_mask must have one entry per message")
+        if any(
+            not isinstance(value, (bool, int)) or value not in (0, 1)
+            for value in message_loss_mask
+        ):
+            raise ValueError(
+                "message_loss_mask entries must be booleans or integers 0/1"
+            )
     rendered = renderer.render(messages, tools=tools)
     has_sampled_info = len(rendered.sampled_mask) == len(rendered.token_ids)
     has_content_info = len(rendered.is_content) == len(rendered.token_ids)
@@ -1716,6 +1832,19 @@ def build_training_sample(
             # loss_mask=True marks the token as trainable — the appended
             # stop is a training target, like any sampled token.
             loss_mask.append(True)
+
+    if message_loss_mask is not None:
+        for k in range(len(loss_mask)):
+            # Any synthesized stop after the rendered sequence belongs to
+            # the final assistant, just like an in-message closing token.
+            msg_idx = (
+                rendered.message_indices[k]
+                if k < len(rendered.message_indices)
+                else len(messages) - 1
+            )
+            loss_mask[k] = (
+                loss_mask[k] and msg_idx >= 0 and bool(message_loss_mask[msg_idx])
+            )
 
     # Surface the multimodal payload for VLM renderers. ``None`` for text
     # renderers and for text-only samples (empty media) so downstream
@@ -2032,8 +2161,8 @@ def introduces_user_query(
 
 def resolve_thinking_retention(
     config: Any,
-    implied: ResolvedThinkingRetention,
-) -> ResolvedThinkingRetention:
+    implied: "ResolvedThinkingRetention",
+) -> "ResolvedThinkingRetention":
     """Resolve the effective bridge policy for a renderer instance.
 
     ``config.thinking_retention is None`` means "derive from template knobs";
@@ -2047,7 +2176,7 @@ def resolve_thinking_retention(
 
 
 def should_rerender_for_thinking_retention(
-    thinking_retention: ResolvedThinkingRetention,
+    thinking_retention: "ResolvedThinkingRetention",
     new_messages: list[Message],
     *,
     is_user_query: Callable[[Message], bool] = _is_user_message,

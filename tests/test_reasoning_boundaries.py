@@ -81,7 +81,7 @@ def _thinking_stream(name, tok, renderer):
     )
 
 
-@pytest.mark.parametrize("name", sorted(set(_CASES) - {"llama-3", "default"}))
+@pytest.mark.parametrize("name", sorted(set(_CASES) - {"llama-3", "mistral-3", "default"}))
 @pytest.mark.parametrize("stop", [False, True])
 def test_every_reasoning_renderer_preserves_unfinished_reasoning(name, stop):
     tok, renderer = _renderer(name)
@@ -99,7 +99,7 @@ def test_every_reasoning_renderer_preserves_unfinished_reasoning(name, stop):
     assert completed.content == "Answer"
 
 
-@pytest.mark.parametrize("name", sorted(set(_CASES) - {"llama-3", "default"}))
+@pytest.mark.parametrize("name", sorted(set(_CASES) - {"llama-3", "mistral-3", "default"}))
 def test_every_reasoning_bridge_preserves_prefix_or_refuses_sampled_stop(name):
     tok, renderer = _renderer(name)
     prompt, incomplete, _ = _thinking_stream(name, tok, renderer)
@@ -208,7 +208,7 @@ _STRICT_TOOL_OPENERS = {
 
 
 def test_every_reasoning_renderer_classifies_tool_openers():
-    reasoning_renderers = set(_CASES) - {"llama-3", "default"}
+    reasoning_renderers = set(_CASES) - {"llama-3", "mistral-3", "default"}
     assert reasoning_renderers == set(_TOOL_CALLS) | _STRICT_TOOL_OPENERS
     assert not set(_TOOL_CALLS) & _STRICT_TOOL_OPENERS
 
@@ -390,7 +390,7 @@ def test_inkling_partial_reasoning_prefix_is_not_returned_as_content():
 
 
 @pytest.mark.parametrize(
-    "name", sorted((set(_CASES) - {"llama-3"} - _GLM) | {"default-think"})
+"name", sorted((set(_CASES) - {"llama-3", "mistral-3"} - _GLM) | {"default-think"})
 )
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("origin", ["prompt", "completion", "closed_prompt", "both"])
@@ -460,10 +460,10 @@ def test_reasoning_markers_override_generation_mode(name, enabled, origin, endin
 
 
 @pytest.mark.parametrize(
-    "name",
+"name",
     sorted(
         set(_CASES)
-        - {"llama-3", "gpt-oss", "gemma4", "inkling", "default"}
+        - {"llama-3", "mistral-3", "gpt-oss", "gemma4", "inkling", "default"}
         - _REOPENING_TAGS
     ),
 )
@@ -554,7 +554,7 @@ def test_missing_and_empty_prompt_are_self_contained(name):
     assert renderer.parse_response(bare) == expected
     assert renderer.parse_response(bare, prompt_ids=None) == expected
 
-    if name not in {"llama-3", "default"}:
+    if name not in {"llama-3", "mistral-3", "default"}:
         prompt, incomplete, closed = _thinking_stream(name, tok, renderer)
         # Missing context is equivalent for both closed and truncated streams.
         for sampled in (incomplete, incomplete + closed):

@@ -64,6 +64,14 @@ def _thinking_stream(name, tok, renderer):
             _encode(tok, "unfinished reasoning"),
             [renderer._think_end, *_encode(tok, "Answer")],
         )
+    if name == "muse-glimmer":
+        # The generation prompt is ``<|start|>assistant``; the model samples
+        # its recipient, ``to=self`` for reasoning and ``to=user`` to answer.
+        return (
+            prompt,
+            _encode(tok, " to=self<|message|>unfinished reasoning"),
+            _encode(tok, "<|eom|><|start|>assistant to=user<|message|>Answer"),
+        )
     prefix = tok.decode(prompt, skip_special_tokens=False).rstrip()
     opener = "" if prefix.endswith("<think>") else "<think>"
     return (
@@ -106,6 +114,7 @@ def test_every_reasoning_bridge_preserves_prefix_or_refuses_sampled_stop(name):
         "gemma4": lambda: [renderer._channel_end],
         "inkling": lambda: [renderer._end_message],
         "hy3": lambda: [renderer._think_end],
+        "muse-glimmer": lambda: [renderer._eom],
     }.get(name, lambda: _encode(tok, "</think>"))()
     assert bridge.token_ids[prefix_len : prefix_len + len(close_ids)] == close_ids
     assert not any(bridge.is_content[prefix_len : prefix_len + len(close_ids)])
@@ -194,6 +203,7 @@ _STRICT_TOOL_OPENERS = {
     "laguna-s-2.1",
     "laguna-xs-2.1",
     "laguna-xs.2",
+    "muse-glimmer",
 }
 
 
@@ -418,6 +428,10 @@ def test_reasoning_markers_override_generation_mode(name, enabled, origin, endin
             "<|end_message|><|message_model|><|content_text|>",
         ),
         "hy3": ("<think:opensource>", "</think:opensource>"),
+        "muse-glimmer": (
+            "<|start|>assistant to=self<|message|>",
+            "<|eom|><|start|>assistant to=user<|message|>",
+        ),
     }.get(name, ("<think>", "</think>"))
     prompt_text = {
         "prompt": opening + "Earlier reasoning ",

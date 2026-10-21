@@ -1063,6 +1063,8 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # GPT-OSS.
     "openai/gpt-oss-20b": "gpt-oss",
     "openai/gpt-oss-120b": "gpt-oss",
+    # Muse Glimmer (ATEM channel format; images as one <|patch|> each).
+    "meta-models/Muse-Glimmer-30B": "muse-glimmer",
     # Thinking Machines Inkling checkpoints share byte-identical tokenizer,
     # chat-template, and processor assets (vision + audio; transformers >= 5.14).
     "thinkingmachines/Inkling": "inkling",
@@ -1376,6 +1378,7 @@ def _populate_registry():
     )
     from renderers.llama_3 import Llama3Renderer
     from renderers.minimax_m2 import MiniMaxM2Renderer
+    from renderers.muse_glimmer import MuseGlimmerRenderer
     from renderers.nemotron3 import (
         Nemotron3Renderer,
         Nemotron3UltraRenderer,
@@ -1421,6 +1424,7 @@ def _populate_registry():
             "nemotron-3-ultra": Nemotron3UltraRenderer,
             "nemotron-3.5": Nemotron35Renderer,
             "gpt-oss": GptOssRenderer,
+            "muse-glimmer": MuseGlimmerRenderer,
         }
     )
 

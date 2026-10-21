@@ -647,6 +647,34 @@ class GptOssRendererConfig(BaseRendererConfig):
         return self
 
 
+class MuseGlimmerRendererConfig(BaseRendererConfig):
+    """Muse Glimmer (ATEM) renderer config.
+
+    The chat template never drops historical reasoning, so bridges keep all
+    reasoning by default (``thinking_retention`` resolves to ``"all"``).
+    """
+
+    name: Literal["muse-glimmer"] = "muse-glimmer"
+    _template_fields = frozenset(
+        {"reasoning_strength", "knowledge_cutoff", "current_date"}
+    )
+
+    reasoning_strength: Literal["low", "medium", "high", "xhigh"] = "high"
+    """``Reasoning strength: <value>.`` line in the system preamble. Mirrors
+    the template's ``reasoning_strength`` kwarg (template default ``high``).
+    A system message that already states a reasoning strength (or effort)
+    keeps its own line instead."""
+
+    knowledge_cutoff: str = "2026-01-04"
+    """Knowledge-cutoff date in the default preamble (used only when the
+    conversation has no system message). Mirrors ``knowledge_cutoff``."""
+
+    current_date: str | None = None
+    """``Current date`` in the default preamble, as ``YYYY-MM-DD``. ``None``
+    uses today's date (the template's ``strftime_now`` fallback), fixed when
+    the renderer is constructed. Pin it for reproducible training renders."""
+
+
 class KimiK2RendererConfig(BaseRendererConfig):
     """Kimi K2 renderer config.
 
@@ -1079,6 +1107,7 @@ RendererConfig = Annotated[
         GLM53FlashRendererConfig,
         GLM45RendererConfig,
         GptOssRendererConfig,
+        MuseGlimmerRendererConfig,
         Hy3RendererConfig,
         InklingRendererConfig,
         KimiK2RendererConfig,
@@ -1130,6 +1159,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "glm-5.3-flash": GLM53FlashRendererConfig,
     "glm-4.5": GLM45RendererConfig,
     "gpt-oss": GptOssRendererConfig,
+    "muse-glimmer": MuseGlimmerRendererConfig,
     "hy3": Hy3RendererConfig,
     "inkling": InklingRendererConfig,
     "kimi-k2": KimiK2RendererConfig,
@@ -1199,6 +1229,7 @@ __all__ = [
     "LagunaXS21RendererConfig",
     "Llama3RendererConfig",
     "MiniMaxM2RendererConfig",
+    "MuseGlimmerRendererConfig",
     "Nemotron35RendererConfig",
     "Nemotron3RendererConfig",
     "Nemotron3UltraRendererConfig",

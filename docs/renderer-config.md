@@ -37,6 +37,7 @@ product in `tests/test_parity.py`.
 | GLM-5.3 / 5.3 Flash | `GLM53RendererConfig` / `GLM53FlashRendererConfig` | `clear_thinking`, `reasoning_effort` | - |
 | GLM-4.5 | `GLM45RendererConfig` | `enable_thinking` | - |
 | gpt-oss | `GptOssRendererConfig` | `reasoning_effort`, `conversation_start_date` | `use_system_prompt`, `knowledge_cutoff`, `model_identity`, `auto_drop_analysis` |
+| Muse Glimmer | `MuseGlimmerRendererConfig` | `reasoning_strength`, `knowledge_cutoff`, `current_date` | - |
 | Hy3 | `Hy3RendererConfig` | `reasoning_effort`, `preserved_thinking`, `is_training`, `raw_last_assistant`, `fallback_strategy` | - |
 | Kimi K2 | `KimiK2RendererConfig` | - | `enable_thinking` |
 | Kimi K2.5 / 2.6 | `KimiK25RendererConfig` | `thinking` | `image_cache_max` |
@@ -144,6 +145,7 @@ the knobs its template actually exposes:
 | GLM-5.3 / 5.3 Flash | `clear_thinking=False -> all`, else `tool_cycle` |
 | GLM-4.5 | `enable_thinking=False -> all`, else `tool_cycle` |
 | gpt-oss | `auto_drop_analysis=False -> all`, else `tool_cycle` |
+| Muse Glimmer | `all` (the template keeps every assistant's reasoning) |
 | Hy3 | `preserved_thinking=True -> all`, else `tool_cycle` |
 | Kimi K2.5 / 2.6 | `thinking=False -> all`, else `tool_cycle` |
 | Nemotron-3 / 3.5 | `truncate_history_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |

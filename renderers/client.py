@@ -500,11 +500,12 @@ async def generate(
     Returns a dict with: request_id, prompt_ids, renderer_prompt_ids,
     mm_placeholders, completion_ids, completion_logprobs, content,
     reasoning_content, tool_calls, finish_reason, routed_experts,
-    weight_versions, multi_modal_data, prompt_attribution.
-    ``renderer_prompt_ids`` is the unexpanded logical prompt when
-    ``process_multimodal=False`` and ``None`` otherwise. ``weight_versions``
-    is vLLM's (>= 0.32) list of ``{version, start, end}`` spans over
-    completion-token indexes, or ``None`` when the engine labels none.
+    sampling_mask, sampling_mask_logprobs, payload, weight_versions,
+    multi_modal_data, prompt_attribution. ``renderer_prompt_ids`` is the
+    unexpanded logical prompt when ``process_multimodal=False`` and ``None``
+    otherwise. ``weight_versions`` is vLLM's (>= 0.32) list of
+    ``{version, start, end}`` spans over completion-token indexes, or ``None``
+    when the engine labels none.
 
     When ``sampling_params["logprobs"]`` is a positive int, also
     ``completion_top_ids`` / ``completion_top_logprobs``
@@ -665,8 +666,11 @@ async def generate(
     routed_experts = choice.get("routed_experts")
     # vLLM's native kept-set sampling masks (``--return-sampling-mask``):
     # one list of surviving vocab ids per completion token, or (prime-rl's
-    # server) packed CSR ``{"ids", "counts"}`` base64 int32 arrays.
+    # server) packed CSR ``{"ids", "counts"}`` base64 int32 arrays. With score
+    # centering on, prime-rl's server also returns the sampler's renormalized
+    # logprob of each of those ids (packed float32, parallel to the ids).
     sampling_mask = choice.get("sampling_mask")
+    sampling_mask_logprobs = choice.get("sampling_mask_logprobs")
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
@@ -700,6 +704,10 @@ async def generate(
         "reasoning_complete": parsed.reasoning_complete,
         "routed_experts": routed_experts,
         "sampling_mask": sampling_mask,
+        "sampling_mask_logprobs": sampling_mask_logprobs,
+        # By-handle side arrays: segments of a shared payload file the inference
+        # server wrote instead of returning routed_experts / sampling_mask inline.
+        "payload": choice.get("payload"),
         "weight_versions": choice.get("weight_versions"),
         # The mm sidecar consumed on the request side, surfaced back so
         # callers can persist it on the trajectory step for downstream

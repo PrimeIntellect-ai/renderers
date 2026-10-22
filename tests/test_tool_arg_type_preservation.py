@@ -13,6 +13,9 @@ reference parsers (e.g. ``vllm/glm45_tool_parser.py``). The hermes-JSON
 (Qwen3) and section-JSON (Kimi K2) parsers sidestep the bug because
 their wire format quotes strings; both serve as controls.
 
+Muse Glimmer follows vLLM's schema-independent JSON decoding instead, so
+its cases assert decoded values even when the schema declares a string.
+
 Originally raised by Robin (Poolside) on PR #21.
 """
 
@@ -24,6 +27,8 @@ from typing import Any
 
 import pytest
 from parity import models_for
+
+from renderers.muse_glimmer import MuseGlimmerRenderer
 
 
 # (HuggingFace model name, renderer name). Two JSON-shaped controls
@@ -110,9 +115,8 @@ def _extract_assistant_tokens(renderer, prompt, assistant_msg, *, tools=None):
 
 
 @pytest.mark.parametrize("args", JSON_LOOKING_STRING_ARGS)
-def test_string_arg_preserves_type(model, renderer_name, renderer, args):
-    """Tool-call args of declared type ``str`` must round-trip as ``str``,
-    not get re-parsed as bool/int/null/list/dict by the parser."""
+def test_string_arg_follows_parser_contract(model, renderer_name, renderer, args):
+    """Preserve declared strings unless the reference parser decodes JSON."""
     msg = {
         "role": "assistant",
         "content": "",
@@ -128,8 +132,13 @@ def test_string_arg_preserves_type(model, renderer_name, renderer, args):
 
     assert parsed.tool_calls, f"{model}: parser returned no tool_calls"
     got = _normalize_args(parsed.tool_calls[0].arguments)
-    assert got == args, (
-        f"{model}: tool-arg type drift — sent {args!r}, parser returned {got!r}"
+    expected = (
+        {key: json.loads(value) for key, value in args.items()}
+        if isinstance(renderer, MuseGlimmerRenderer)
+        else args
+    )
+    assert got == expected, (
+        f"{model}: tool-arg type drift — expected {expected!r}, parser returned {got!r}"
     )
 
 

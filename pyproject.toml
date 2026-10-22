@@ -121,6 +121,8 @@ exclude-newer = "7 days"
 # fast-track so first-party releases can land same-day. Only packages that
 # appear in `uv tree` are listed.
 prime-pydantic-config = false
+# CA bundle: security fixes (e.g. 2026.10.19 for the eMudhra compromise) must not wait out the cooldown
+certifi = false
 
 [tool.ty.environment]
 python-version = "3.13"

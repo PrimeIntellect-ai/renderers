@@ -1,25 +1,36 @@
-"""DeepSeek-V4.1-Flash renderer, for text conversations without tools.
+"""DeepSeek-V4.1-Flash renderer.
 
 The checkpoint's source of truth is ``encoding/encoding.py`` in the model
-repository.  For plain chats it is V4's encoder with three changes, applied
-here on top of :class:`DeepSeekV4Renderer`:
+repository.  It is V4's encoder with these changes, applied here on top of
+:class:`DeepSeekV4Renderer`:
 
 * a ``<｜System｜>`` token leads the conversation whenever it opens with a
-  reasoning-effort prefix or a system message;
+  reasoning-effort prefix or a system message (including the empty one that
+  carries tools when the conversation has no leading system message);
 * the reasoning effort is a numeric budget,
   ``Reasoning Effort: {budget} (range 1-100, ...)``, rendered in thinking mode
   only and defaulting to ``high`` (75);
-* thinking mode is the default.
+* thinking mode is the default;
+* DSML tags have space-prefixed names: ``<｜DSML｜ calls>``,
+  ``<｜DSML｜ invoke>`` and ``<｜DSML｜ parameter>``;
+* tools attach only to a leading system message;
+* a user turn holding only tool results does not start a new turn, so
+  dropped historical reasoning stops at the last real user message;
+* JSON-string tool arguments may be double-encoded, and arguments that do not
+  decode to an object render as a single ``arguments`` parameter.
 
-Tool calls (V4.1 renamed the DSML tags) and mid-conversation system messages
-are not supported yet.
+Mid-conversation system messages are not supported yet.
 """
 
 from __future__ import annotations
 
+import json
+from typing import Any, Mapping
+
 from renderers.base import Message, RenderedTokens, ToolSpec
 from renderers.configs import DeepSeekV41RendererConfig
-from renderers.deepseek_v4 import DeepSeekV4Renderer
+from renderers.deepseek_v4 import _DSML, DeepSeekV4Renderer, _LogicalMessage
+from renderers.tagged import DEEPSEEK_V41_GRAMMAR
 
 _SYSTEM = "<｜System｜>"
 _THINK_START = "<think>"
@@ -52,16 +63,46 @@ def _split_inline_reasoning(message: Message) -> Message:
 class DeepSeekV41Renderer(DeepSeekV4Renderer):
     """Renderer for ``deepseek-ai/DeepSeek-V4.1-Flash``."""
 
+    _calls_tag = f"{_DSML} calls"
+    _invoke_tag = f"{_DSML} invoke"
+    _parameter_tag = f"{_DSML} parameter"
+    _grammar = DEEPSEEK_V41_GRAMMAR
+
     def __init__(self, tokenizer, config: DeepSeekV41RendererConfig | None = None):
         super().__init__(tokenizer, config or DeepSeekV41RendererConfig())
 
-    def _reasoning_effort_prompt(self) -> str:
+    def _preamble(self, *, opens_with_system: bool) -> str:
+        if not self.config.enable_thinking:
+            return _SYSTEM if opens_with_system else ""
         effort = self.config.reasoning_effort
         budget = _EFFORT_BUDGETS[effort] if isinstance(effort, str) else effort
         return (
             f"{_SYSTEM}Reasoning Effort: {budget} (range 1-100, "
             "the higher the value, the more thorough the reasoning)\n\n"
         )
+
+    def _is_turn_start(self, message: _LogicalMessage) -> bool:
+        if message.role == "user":
+            return any(block.kind != "tool_result" for block in message.blocks)
+        return super()._is_turn_start(message)
+
+    def _tool_target(self, messages: list[_LogicalMessage]) -> int | None:
+        return 0 if messages[0].role == "system" else None
+
+    @staticmethod
+    def _tool_call_arguments(raw_arguments: Any) -> Any:
+        arguments = raw_arguments
+        # A JSON string, possibly double-encoded.
+        for _ in range(2):
+            if not isinstance(arguments, str):
+                break
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                break
+        if isinstance(arguments, Mapping):
+            return dict(arguments)
+        return {"arguments": raw_arguments}
 
     def render(
         self,
@@ -70,28 +111,11 @@ class DeepSeekV41Renderer(DeepSeekV4Renderer):
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
-        if tools:
-            raise NotImplementedError(
-                "the DeepSeek-V4.1 renderer does not render tools"
-            )
         if any(message["role"] == "system" for message in messages[1:]):
             raise NotImplementedError(
                 "the DeepSeek-V4.1 renderer does not render mid-conversation system messages"
             )
         messages = [_split_inline_reasoning(message) for message in messages]
-        if (
-            messages
-            and messages[0]["role"] == "system"
-            and not self.config.enable_thinking
-        ):
-            # Without an effort prefix, the system message itself opens with the System token.
-            first = messages[0].copy()
-            if not isinstance(first["content"], str):
-                raise NotImplementedError(
-                    "the DeepSeek-V4.1 renderer renders text-only system messages"
-                )
-            first["content"] = _SYSTEM + first["content"]
-            messages = [first, *messages[1:]]
         return super().render(
             messages, tools=tools, add_generation_prompt=add_generation_prompt
         )
@@ -104,8 +128,14 @@ class DeepSeekV41Renderer(DeepSeekV4Renderer):
         *,
         tools: list[ToolSpec] | None = None,
     ) -> RenderedTokens | None:
-        # V4's extension path renders the new turn with V4's tags; fall back to a full render.
-        return None
+        if any(message["role"] == "system" for message in new_messages):
+            return None
+        return super().bridge_to_next_turn(
+            previous_prompt_ids,
+            previous_completion_ids,
+            new_messages,
+            tools=tools,
+        )
 
 
 __all__ = ["DeepSeekV41Renderer"]

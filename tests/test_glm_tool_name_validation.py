@@ -111,9 +111,10 @@ def test_unknown_name_is_flagged(model, renderer_name):
     )
     assert _statuses(parsed) == [ToolCallParseStatus.UNKNOWN_TOOL]
     # The attempt stays visible (unlike vLLM's silent drop): name and
-    # parsed arguments are preserved for verifier / RL-loss consumers.
+    # arguments are preserved for verifier / RL-loss consumers. An unknown
+    # tool has no schema, so its XML parameter values remain strings.
     assert parsed.tool_calls[0].name == "read"
-    assert parsed.tool_calls[0].arguments == {"lines": 10}
+    assert parsed.tool_calls[0].arguments == {"lines": "10"}
 
 
 def test_unknown_name_without_args_is_flagged(model, renderer_name):

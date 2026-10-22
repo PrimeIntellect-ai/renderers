@@ -12,6 +12,7 @@ import binascii
 import json
 import logging
 import math
+import re
 from collections.abc import Mapping
 from itertools import islice, pairwise
 from typing import Any, cast
@@ -32,6 +33,13 @@ from renderers.base import (
 
 _request_logger = logging.getLogger("renderers.client")
 ROUTED_EXPERTS_DATA_PREFIX = b'"routed_experts":{"data":"'
+ROUTED_EXPERT_WEIGHTS_DATA_PREFIX = b'"weights":{"data":"'
+STREAM_DATA_PREFIXES = (
+    ROUTED_EXPERTS_DATA_PREFIX,
+    ROUTED_EXPERT_WEIGHTS_DATA_PREFIX,
+    b'"compact_logprobs":{"data":"',
+)
+_BASE64_CHARACTERS = re.compile(rb"[A-Za-z0-9+/=]*")
 # vLLM uses this value both when sampled-token evidence is missing and as a
 # lower-bound clamp, so receiving it cannot prove the real logprob was returned.
 VLLM_LOGPROB_SENTINEL = -9999.0
@@ -113,45 +121,86 @@ async def _resolve_max_prompt_len(client: AsyncOpenAI, model: str) -> int | None
         return value
 
 
-def _strip_base64_fields(raw: bytes, prefix: bytes) -> tuple[bytes, list[memoryview]]:
-    """Splice a large base64 string field out of raw JSON bytes.
-
-    Avoids json-decoding megabytes of base64; the returned memoryview
-    references ``raw`` and is re-inserted into the parsed payload.
-    """
-    chunks = []
-    fields = []
+def _base64_field_spans(raw: bytes, prefix: bytes) -> list[tuple[int, int]] | None:
+    """Find every compact JSON base64 value after `prefix`, excluding the quotes."""
+    spans = []
     cursor = 0
-    while (start := raw.find(prefix, cursor)) >= 0:
-        start += len(prefix)
-        end = raw.index(b'"', start)
-        chunks.append(raw[cursor:start])
-        fields.append(memoryview(raw)[start:end])
-        cursor = end
-    if not fields:
-        return raw, fields
-    chunks.append(raw[cursor:])
-    return b"".join(chunks), fields
+    while (data_start := raw.find(prefix, cursor)) >= 0:
+        data_start += len(prefix)
+        data_end = raw.find(b'"', data_start)
+        if (
+            data_end < 0
+            or _BASE64_CHARACTERS.fullmatch(raw, data_start, data_end) is None
+        ):
+            # Do not hide invalid JSON, or strip escaped strings before JSON has
+            # unescaped them. Actual base64/shape/dtype validation is downstream.
+            return None
+        spans.append((data_start, data_end))
+        cursor = data_end
+    return spans
+
+
+def _stream_slots(payload: Any) -> list[tuple[dict, str]]:
+    """The `(object, "data")` slots where the compact encoding puts a base64 stream."""
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    slots = []
+    for choice in choices if isinstance(choices, list) else []:
+        if not isinstance(choice, dict):
+            continue
+        routed = choice.get("routed_experts")
+        if isinstance(routed, dict):
+            slots.append((routed, "data"))
+            if isinstance(routed.get("weights"), dict):
+                slots.append((routed["weights"], "data"))
+        if isinstance(choice.get("compact_logprobs"), dict):
+            slots.append((choice["compact_logprobs"], "data"))
+    return slots
 
 
 def parse_generate_response(raw: bytes) -> dict[str, Any]:
-    stripped, routed_data = _strip_base64_fields(raw, ROUTED_EXPERTS_DATA_PREFIX)
-    stripped, compact_data = _strip_base64_fields(
-        stripped, b'"compact_logprobs":{"data":"'
-    )
-    payload: dict[str, Any] = json.loads(stripped)
-    for field, buffers in (
-        ("routed_experts", routed_data),
-        ("compact_logprobs", compact_data),
-    ):
-        if buffers:
-            pending = iter(buffers)
-            for choice in payload["choices"]:
-                if (
-                    isinstance(choice.get(field), dict)
-                    and choice[field].get("data") == ""
-                ):
-                    choice[field]["data"] = next(pending)
+    """Parse a generate response without JSON-decoding large base64 strings.
+
+    The compact server encoding uses raw-backed memoryviews for routing ID data,
+    optional FP32 routing weight data, and compact logprob data. All metadata is
+    passed through unchanged. Other JSON layouts use the normal decoder and retain
+    base64 strings.
+    """
+    spans = []
+    for prefix in STREAM_DATA_PREFIXES:
+        found = _base64_field_spans(raw, prefix)
+        if found is None:
+            return json.loads(raw)
+        spans.extend(found)
+    # Numeric placeholders bind each view to its exact JSON value through
+    # parse_float, rather than blindly reattaching substrings by position.
+    # Reserve spellings absent from the input, including unrelated metadata.
+    # JSON numbers cannot use escaped spellings, unlike string sentinels.
+    if not spans or b"0.0e+" in raw:
+        return json.loads(raw)
+
+    raw_view = memoryview(raw)
+    buffers: dict[str, memoryview] = {}
+    chunks: list[bytes | memoryview] = []
+    cursor = 0
+    for index, (start, end) in enumerate(sorted(spans)):
+        marker = f"0.0e+{index}"
+        buffers[marker] = raw_view[start:end]
+        chunks.extend((raw_view[cursor : start - 1], marker.encode("ascii")))
+        cursor = end + 1
+    chunks.append(raw_view[cursor:])
+
+    def parse_float(value: str) -> float | memoryview:
+        data = buffers.get(value)
+        return float(value) if data is None else data
+
+    payload = json.loads(b"".join(chunks), parse_float=parse_float)
+    placed = {id(obj[key]) for obj, key in _stream_slots(payload)}
+    if any(id(data) not in placed for data in buffers.values()):
+        # A prefix can occur in an unrelated object, or in a duplicate key that
+        # the JSON decoder overwrites. Do not misattribute its buffer, or change
+        # any non-stream metadata in these cases.
+        return json.loads(raw)
+    return payload
     return payload
 
 

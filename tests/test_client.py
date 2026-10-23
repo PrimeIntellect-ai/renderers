@@ -122,9 +122,14 @@ def test_parse_generate_response_preserves_multiple_compact_choices(separators):
         json.dumps({"choices": choices}, separators=separators).encode(),
     )
     for i, choice in zip((7, 8), payload["choices"]):
-        assert _parse_compact_logprobs(choice, [i], None) == ([-0.5], None, None)
+        sampled, top_ids, top_logprobs = _parse_compact_logprobs(choice, [i], None)
+        assert sampled.dtype == np.float32 and sampled.tolist() == [-0.5]
+        assert top_ids is None and top_logprobs is None
         assert base64.b64decode(choice["routed_experts"]["data"]) == bytes([i])
-    assert _parse_compact_logprobs(payload["choices"][2], [], 2) == ([], [], [])
+    sampled, top_ids, top_logprobs = _parse_compact_logprobs(
+        payload["choices"][2], [], 2
+    )
+    assert sampled.tolist() == [] and top_ids == [] and top_logprobs == []
 
 
 @pytest.mark.parametrize("sampled", [1, 3, 5])
@@ -594,7 +599,7 @@ def test_generate_preserves_zero_completion_logprob():
 
     result = _run_generate(client)
 
-    assert result["completion_logprobs"] == [0.0, -0.2]
+    assert result["completion_logprobs"] == pytest.approx([0.0, -0.2])
 
 
 def test_generate_reads_packed_completion_logprobs():
@@ -609,7 +614,8 @@ def test_generate_reads_packed_completion_logprobs():
 
     result = _run_generate(client)
 
-    assert result["completion_logprobs"] == values.tolist()
+    assert result["completion_logprobs"].dtype == np.float32
+    assert result["completion_logprobs"].tolist() == values.tolist()
 
     client.choice["completion_logprobs"]["data"] = base64.b64encode(
         np.array([-0.1, -9999.0], dtype=np.float32).tobytes()
@@ -1141,5 +1147,5 @@ def test_generate_forwards_reasoning_state_without_classifying_acceptance(
     assert result["reasoning_complete"] is reasoning_complete
     assert result["finish_reason"] == finish
     assert result["completion_ids"] == [7, 8]
-    assert result["completion_logprobs"] == [-0.1, -0.2]
+    assert result["completion_logprobs"] == pytest.approx([-0.1, -0.2])
     assert result["content"] == ""

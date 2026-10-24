@@ -17,7 +17,6 @@ from datetime import datetime
 from functools import lru_cache
 
 import pytest
-
 from renderers.base import ToolCallParseStatus
 
 MODEL = "meta-models/Muse-Glimmer-30B"
@@ -365,6 +364,22 @@ _PARSE_CASES = {
         ("Let me think.", "The answer is 4.", []),
     ),
     "answer-only": (" to=user<|message|>Hello there!", (None, "Hello there!", [])),
+    "answer-final-newline": (" to=user<|message|>Hello\n", (None, "Hello", [])),
+    "answer-final-two-newlines": (
+        " to=user<|message|>Hello\n\n",
+        (None, "Hello\n", []),
+    ),
+    "answer-final-space-newline": (" to=user<|message|>Hello \n", (None, "Hello ", [])),
+    "closed-answer-keeps-newline": (
+        " to=user<|message|>Hello\n<|eom|>",
+        (None, "Hello\n", []),
+    ),
+    "tool-and-answer-keeps-newline": (
+        " to=get_weather<|message|>"
+        + _invoke("get_weather", ("city", "Paris"))
+        + "<|eom|><|start|>assistant to=user<|message|>Hello\n",
+        (None, "Hello\n", [("get_weather", {"city": "Paris"})]),
+    ),
     "tool-call": (
         " to=self<|message|>Need weather.<|eom|><|start|>assistant to=get_weather<|message|>"
         + _invoke(
@@ -412,6 +427,16 @@ _PARSE_CASES = {
         " to=self<|message|>First.<|eom|><|start|>assistant to=self<|message|>Second.<|eom|>"
         "<|start|>assistant to=user<|message|>Done.",
         ("First.\nSecond.", "Done.", []),
+    ),
+    "doubled-bare-name": (
+        " to=get_weather<|message|>"
+        + _invoke("get_weather.get_weather", ("city", "Paris")),
+        (None, "", [("get_weather", {"city": "Paris"})]),
+    ),
+    "string-schema-does-not-override-scalar-decoding": (
+        " to=get_weather<|message|>"
+        + _invoke("get_weather", ("city", "123"), ("code", "false")),
+        (None, "", [("get_weather", {"city": 123, "code": False})]),
     ),
 }
 
@@ -520,14 +545,17 @@ def test_unfinished_tool_call_is_unclosed():
         )
     )
     assert [c.status for c in parsed.tool_calls] == [ToolCallParseStatus.UNCLOSED_BLOCK]
+    assert parsed.tool_calls[0].name is None
+    assert '<atem:invoke name="get_weather">' in parsed.content
 
 
 def test_tool_channel_without_invoke_is_malformed():
     _, renderer = _load()
     parsed = renderer.parse_response(_ids(" to=get_weather<|message|>Paris please"))
     assert [(c.name, c.status) for c in parsed.tool_calls] == [
-        ("get_weather", ToolCallParseStatus.MALFORMED_STRUCTURE)
+        (None, ToolCallParseStatus.MALFORMED_STRUCTURE)
     ]
+    assert parsed.content == " to=get_weather<|message|>Paris please"
 
 
 def test_prefilled_reasoning_prompt_continues_reasoning():

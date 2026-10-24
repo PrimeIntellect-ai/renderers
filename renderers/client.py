@@ -206,7 +206,7 @@ def parse_generate_response(raw: bytes) -> dict[str, Any]:
 
 def _parse_packed_completion_logprobs(
     packed: Mapping[str, Any], completion_ids: list[int]
-) -> list[float]:
+) -> np.ndarray:
     """prime-rl's packed form: base64 float32 ``{data, shape, dtype}``, one per token."""
     values = np.frombuffer(base64.b64decode(packed["data"]), dtype=packed["dtype"])
     valid = np.isfinite(values) & (values > VLLM_LOGPROB_SENTINEL)
@@ -215,12 +215,12 @@ def _parse_packed_completion_logprobs(
             f"Engine response choice.completion_logprobs: {len(values)} values for "
             f"{len(completion_ids)} completion tokens, or a non-finite or missing (-9999) logprob."
         )
-    return values.astype(np.float64).tolist()
+    return values.astype(np.float32, copy=False)
 
 
 def _parse_compact_logprobs(
     choice: Mapping[str, Any], completion_ids: list[int], k: int | None
-) -> tuple[list[float], list[list[int]] | None, list[list[float]] | None]:
+) -> tuple[np.ndarray, list[list[int]] | None, list[list[float]] | None]:
     packed = choice.get("compact_logprobs")
     if not isinstance(packed, Mapping) or packed.get("format") != "u32-f32-le-v1":
         raise MalformedGenerateResponseError("Unsupported compact logprob format")
@@ -276,7 +276,7 @@ def _parse_compact_logprobs(
             top_ids.append(selected_ids)
             top_logprobs.append(selected_logprobs)
     return (
-        sampled,
+        np.asarray(sampled, dtype=np.float32),
         top_ids if k is not None else None,
         top_logprobs if k is not None else None,
     )
@@ -294,7 +294,7 @@ def _logprob_token_id(entry: Mapping[str, Any]) -> int | None:
 
 def _parse_completion_logprobs(
     choice: Mapping[str, Any], completion_ids: list[int]
-) -> list[float]:
+) -> np.ndarray:
     packed = choice.get("completion_logprobs")
     if packed is not None:
         return _parse_packed_completion_logprobs(packed, completion_ids)
@@ -346,7 +346,7 @@ def _parse_completion_logprobs(
                 f"Engine response choice.logprobs.content[{index}].logprob does not contain sampling evidence."
             )
         completion_logprobs.append(logprob)
-    return completion_logprobs
+    return np.asarray(completion_logprobs, dtype=np.float32)
 
 
 def _parse_sampling_mask(
@@ -550,6 +550,9 @@ async def generate(
     mm_placeholders, completion_ids, completion_logprobs, content,
     reasoning_content, tool_calls, finish_reason, routed_experts,
     weight_versions, multi_modal_data, prompt_attribution.
+    ``completion_logprobs`` is a float32 numpy array, one value per completion
+    token: vLLM samples in float32, so the packed form decodes without a copy
+    and the JSON forms narrow losslessly.
     ``renderer_prompt_ids`` is the unexpanded logical prompt when
     ``process_multimodal=False`` and ``None`` otherwise. ``weight_versions``
     is vLLM's (>= 0.32) list of ``{version, start, end}`` spans over

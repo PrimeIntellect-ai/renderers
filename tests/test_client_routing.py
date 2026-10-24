@@ -147,6 +147,8 @@ def test_json_layout_fallback_preserves_exact_streams(dtype, with_weights, layou
         b'{"choices":[{"routed_experts":{"data":"SUQ="},"weights":{"data":"T1RIRVI="}}]}',
         b'{"choices":[],"routed_experts":{"data":"SUQ="}}',
         b'[{"routed_experts":{"data":"SUQ="}}]',
+        b'{"choices":[{"routed_experts":{"shape":[1]},"compact_logprobs":{"data":"SUQ="}}]}',
+        b'{"choices":[{"routed_experts":{"data":"SUQ=","weights":{"dtype":"float32"}}}]}',
     ],
     ids=[
         "unrelated-routing",
@@ -157,6 +159,8 @@ def test_json_layout_fallback_preserves_exact_streams(dtype, with_weights, layou
         "weights-outside-routing",
         "empty-choices",
         "non-object-payload",
+        "routing-without-data",
+        "weights-without-data",
     ],
 )
 def test_does_not_attach_buffers_to_the_wrong_field(raw):

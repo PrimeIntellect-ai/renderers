@@ -194,13 +194,12 @@ def parse_generate_response(raw: bytes) -> dict[str, Any]:
         return float(value) if data is None else data
 
     payload = json.loads(b"".join(chunks), parse_float=parse_float)
-    placed = {id(obj[key]) for obj, key in _stream_slots(payload)}
+    placed = {id(obj.get(key)) for obj, key in _stream_slots(payload)}
     if any(id(data) not in placed for data in buffers.values()):
         # A prefix can occur in an unrelated object, or in a duplicate key that
         # the JSON decoder overwrites. Do not misattribute its buffer, or change
         # any non-stream metadata in these cases.
         return json.loads(raw)
-    return payload
     return payload
 
 

@@ -202,6 +202,7 @@ MODEL_CATALOG = (
             "tool-call-content",
             "tool-call-none",
             "multiple-tool-calls",
+            "multiple-tool-calls-content",
             "tool-response",
             "named-tool-response",
             "consecutive-tool-responses",
@@ -217,6 +218,7 @@ MODEL_CATALOG = (
             "tool-call-content",
             "tool-call-none",
             "multiple-tool-calls",
+            "multiple-tool-calls-content",
             "tool-response",
             "named-tool-response",
             "consecutive-tool-responses",
@@ -246,7 +248,11 @@ MODEL_CATALOG = (
     _model(
         "meta-llama/Llama-3.2-1B-Instruct",
         bridge=True,
-        excluded={"multiple-tool-calls", "consecutive-tool-responses"},
+        excluded={
+            "multiple-tool-calls",
+            "multiple-tool-calls-content",
+            "consecutive-tool-responses",
+        },
         oracle_defaults={"date_string": "26 Jul 2024"},
         extra_suites={"llama-checkpoints"},
     ),
@@ -254,7 +260,11 @@ MODEL_CATALOG = (
         "meta-llama/Llama-3.2-3B-Instruct",
         shared=False,
         roundtrip=False,
-        excluded={"multiple-tool-calls", "consecutive-tool-responses"},
+        excluded={
+            "multiple-tool-calls",
+            "multiple-tool-calls-content",
+            "consecutive-tool-responses",
+        },
         oracle_defaults={"date_string": "26 Jul 2024"},
         extra_suites={"llama-checkpoints"},
     ),
@@ -478,6 +488,21 @@ SCENARIOS = (
             {
                 "role": "assistant",
                 "content": "",
+                "tool_calls": [
+                    _call("Paris", id="call_1"),
+                    _call("London", id="call_2"),
+                ],
+            },
+        ],
+        tools=TOOLS,
+    ),
+    _scenario(
+        "multiple-tool-calls-content",
+        [
+            {"role": "user", "content": "Weather in Paris and London?"},
+            {
+                "role": "assistant",
+                "content": "Let me check both.",
                 "tool_calls": [
                     _call("Paris", id="call_1"),
                     _call("London", id="call_2"),

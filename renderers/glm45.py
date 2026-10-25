@@ -517,12 +517,14 @@ class GLM45Renderer:
         elif content.strip():
             emit_text("\n" + content.strip(), msg_idx, is_sampled=True, is_content=True)
 
-        for tc in tool_calls:
+        for tc_idx, tc in enumerate(tool_calls):
             func = tc.get("function") or tc
             name = func.get("name", "")
             arguments = func.get("arguments", {})
 
-            if not content.strip():
+            # The template opens every call with "\n<tool_call>"; only the
+            # first call's "\n" is already carried by the content text above.
+            if tc_idx > 0 or not content.strip():
                 emit_text("\n", msg_idx, is_sampled=True, is_content=True)
             emit_special(self._tool_call_tok, msg_idx, is_sampled=True, is_content=True)
             emit_text(name + "\n", msg_idx, is_sampled=True, is_content=True)

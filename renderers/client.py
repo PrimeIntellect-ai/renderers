@@ -198,10 +198,15 @@ def _parse_compact_logprobs(
     values = np.frombuffer(raw, dtype="<f4", count=count, offset=count * 4)
     if not np.isfinite(values).all() or (values > 1e-6).any():
         raise MalformedGenerateResponseError("Invalid compact logprob values")
+    samples = packed.get("samples") is True
     sampled = []
     top_ids: list[list[int]] = []
     top_logprobs: list[list[float]] = []
-    supports = _parse_sampling_mask(choice, completion_ids) if k is not None else None
+    supports = (
+        _parse_sampling_mask(choice, completion_ids)
+        if k is not None and not samples
+        else None
+    )
     for index, (token_id, start, end) in enumerate(
         zip(completion_ids, offsets, offsets[1:])
     ):
@@ -215,7 +220,13 @@ def _parse_compact_logprobs(
                 "Missing compact sampled-token evidence"
             )
         sampled.append(row[token_id])
-        if k is not None:
+        if k is not None and samples:
+            # Rows of i.i.d. sampler draws: the sampled token, then the draws with repeats kept.
+            if ids[start] != token_id or end - start < 2:
+                raise MalformedGenerateResponseError("Invalid compact sampler draws")
+            top_ids.append(ids[start + 1 : end].tolist())
+            top_logprobs.append(values[start + 1 : end].tolist())
+        elif k is not None:
             head = dict(islice(row.items(), max(num_top, 1)))
             selected_ids, selected_logprobs = _select_sampler_head(
                 head,

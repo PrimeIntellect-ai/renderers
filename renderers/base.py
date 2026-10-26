@@ -1355,6 +1355,7 @@ def _populate_registry():
     from renderers.deepseek_r1 import DeepSeekR1Renderer
     from renderers.deepseek_v3 import DeepSeekV3Renderer
     from renderers.deepseek_v4 import DeepSeekV4Renderer
+    from renderers.deepseek_v41 import DeepSeekV41Renderer
     from renderers.default import DefaultRenderer
     from renderers.gemma4 import Gemma4Renderer
     from renderers.glm5 import (
@@ -1409,6 +1410,7 @@ def _populate_registry():
             "deepseek-v3": DeepSeekV3Renderer,
             "deepseek-r1": DeepSeekR1Renderer,
             "deepseek-v4": DeepSeekV4Renderer,
+            "deepseek-v4.1": DeepSeekV41Renderer,
             "hy3": Hy3Renderer,
             "inkling": InklingRenderer,
             "kimi-k2": KimiK2Renderer,

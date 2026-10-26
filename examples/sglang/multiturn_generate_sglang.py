@@ -6,7 +6,6 @@
 #   "sglang==0.5.10.post1",
 #   "flash-attn-4>=4.0.0b4",
 #   "transformers>=5.3.0",
-#   "openai-harmony==0.0.4",
 #   "openai>=1.108.1",
 #   "tiktoken",
 #   "jinja2",

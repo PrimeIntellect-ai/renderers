@@ -1,9 +1,8 @@
-"""GptOssRenderer — adapter over OpenAI's harmony reference encoder.
+"""GptOssRenderer — adapter over the harmony encoder.
 
-Wire format: harmony (channel-based, no BOS). The official renderer ships
-in the ``openai-harmony`` package — vLLM uses it directly, so matching
-its output guarantees byte-identical tokens with vLLM's serving path
-(and with what the model was trained on).
+Wire format: harmony (channel-based, no BOS). The encoder ships in the
+``oss-harmony`` package, the fork of OpenAI's ``openai-harmony`` that vLLM
+depends on.
 
 This renderer is a thin adapter that:
 
@@ -18,7 +17,8 @@ This renderer is a thin adapter that:
   - renders one harmony message at a time via ``enc.render(m)`` so each
     token can be attributed to its source caller index. ``enc.render``
     is byte-identical to ``enc.render_conversation`` when concatenated;
-    verified empirically.
+    verified empirically. Tool calls and tool results keep the
+    recipient-first header (``to=functions.x<|channel|>commentary``).
 
 Special tokens
 --------------
@@ -179,6 +179,29 @@ class GptOssRenderer:
         if not text:
             return []
         return self._tokenizer.encode(text, add_special_tokens=False)
+
+    def _render_message(self, hm: HarmonyMessage) -> list[int]:
+        """Render one harmony message with its recipient ahead of its channel.
+
+        oss-harmony renders commentary headers channel-first
+        (``<|channel|>commentary to=functions.x``). openai-harmony and the
+        gpt-oss chat template put the recipient first, and which order gpt-oss
+        handles best in conversation history is unsettled, so tool calls and
+        tool results keep the recipient-first header.
+        """
+        ids = self._enc.render(hm)
+        if hm.channel != "commentary" or hm.recipient is None:
+            return ids
+        author = hm.author.name if hm.author.role == Role.TOOL else hm.author.role.value
+        header = [
+            self._start,
+            *self._enc.encode(author, disallowed_special=()),
+            *self._enc.encode(f" to={hm.recipient}", disallowed_special=()),
+            self._channel,
+            *self._enc.encode(hm.channel, disallowed_special=()),
+            self._message,
+        ]
+        return header + ids[ids.index(self._message) + 1 :]
 
     def _prefix_content_mask(
         self,
@@ -436,7 +459,9 @@ class GptOssRenderer:
             for hm in self._to_harmony_messages(
                 msg, preserve_thinking=preserve_thinking
             ):
-                emit_harmony_message(self._enc.render(hm), i, is_assistant=is_assistant)
+                emit_harmony_message(
+                    self._render_message(hm), i, is_assistant=is_assistant
+                )
 
         # When the conversation ends on an assistant final-channel turn,
         # ``apply_chat_template`` (and ``render_conversation_for_training``)
@@ -547,7 +572,7 @@ class GptOssRenderer:
     ) -> RenderedTokens | None:
         """Per-message harmony bridge.
 
-        Each new message is rendered in isolation via ``enc.render(m)`` —
+        Each new message is rendered in isolation via ``_render_message`` —
         same primitive ``render()`` uses — so the bridge can never drift
         from the full re-render.
         """
@@ -619,7 +644,7 @@ class GptOssRenderer:
             if role not in ("tool", "user", "system", "developer"):
                 return None
             for hm in self._to_harmony_messages(msg):
-                ids = self._enc.render(hm)
+                ids = self._render_message(hm)
                 try:
                     msg_marker = ids.index(self._message)
                 except ValueError:

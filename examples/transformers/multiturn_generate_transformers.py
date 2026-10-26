@@ -7,7 +7,6 @@
 #   "accelerate",
 #   "torch",
 #   "kernels>=0.12.0",
-#   "openai-harmony>=0.0.8",
 #   "openai>=1.108.1",
 #   "tiktoken",
 #   "jinja2",

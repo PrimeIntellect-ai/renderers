@@ -10,7 +10,11 @@ to supply the expected output.
 import json
 import re
 
-from reference_rendering import _harmony_messages, render_reference
+from reference_rendering import (
+    _harmony_messages,
+    harmony_recipient_first,
+    render_reference,
+)
 
 REASONING = "Check the weather carefully."
 ANSWER = "It is sunny in Tokyo."
@@ -96,9 +100,12 @@ def reference_continuation(tok, case, kwargs, messages, tools, *, calls=0):
             ),
             Message.from_role_and_content(Role.ASSISTANT, ANSWER).with_channel("final"),
         ]
-        full = encoder.render_conversation_for_training(
-            Conversation.from_messages(history),
-            RenderConversationConfig(auto_drop_analysis=False),
+        full = harmony_recipient_first(
+            encoder,
+            encoder.render_conversation_for_training(
+                Conversation.from_messages(history),
+                RenderConversationConfig(auto_drop_analysis=False),
+            ),
         )
     elif case.resolved_renderer == "deepseek-r1" and prompt_text.endswith("<think>\n"):
         # R1's generation prompt opens thinking, but its history branch removes

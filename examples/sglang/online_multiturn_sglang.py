@@ -5,7 +5,6 @@
 #   "renderers>=0.1.6",
 #   "transformers>=5.3.0",
 #   "httpx>=0.27",
-#   "openai-harmony==0.0.4",
 #   "tiktoken",
 #   "jinja2",
 #   "numpy",

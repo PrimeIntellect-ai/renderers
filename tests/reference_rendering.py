@@ -562,6 +562,42 @@ def _harmony_messages(
     return out
 
 
+def harmony_recipient_first(encoder: Any, ids: list[int]) -> list[int]:
+    """Move each header's `` to=recipient`` ahead of its ``<|channel|>``.
+
+    The gpt-oss renderer keeps openai-harmony's recipient-first header for tool
+    calls and tool results; oss-harmony renders commentary headers channel-first.
+    """
+    start, channel, message = (
+        encoder.encode(token, allowed_special="all")[0]
+        for token in ("<|start|>", "<|channel|>", "<|message|>")
+    )
+    out: list[int] = []
+    i = 0
+    while i < len(ids):
+        if ids[i] != start or message not in ids[i:]:
+            out.append(ids[i])
+            i += 1
+            continue
+        end = ids.index(message, i)
+        header = ids[i + 1 : end]
+        if channel in header:
+            pos = header.index(channel)
+            channel_name, to, recipient = encoder.decode(header[pos + 1 :]).partition(
+                " to="
+            )
+            if to:
+                header = [
+                    *header[:pos],
+                    *encoder.encode(f" to={recipient}"),
+                    channel,
+                    *encoder.encode(channel_name),
+                ]
+        out += [start, *header, message]
+        i = end + 1
+    return out
+
+
 def _render_harmony(
     tokenizer: Any,
     messages: list[dict[str, Any]],
@@ -596,10 +632,12 @@ def _render_harmony(
         prompt = encoder.render_conversation_for_completion(
             conversation, next_turn_role=Role.ASSISTANT
         )
-        return prompt + encoder.encode(
+        return harmony_recipient_first(encoder, prompt) + encoder.encode(
             "<|channel|>analysis<|message|>", allowed_special="all"
         )
-    return encoder.render_conversation_for_training(conversation)
+    return harmony_recipient_first(
+        encoder, encoder.render_conversation_for_training(conversation)
+    )
 
 
 REFERENCE_ORACLES: Mapping[str, ReferenceOracle] = MappingProxyType(

@@ -5,7 +5,6 @@
 #   "renderers>=0.1.6",
 #   "vllm>=0.20",
 #   "transformers>=4.50.0",
-#   "openai-harmony>=0.0.8",
 #   "openai>=1.108.1",
 #   "tiktoken",
 #   "jinja2",

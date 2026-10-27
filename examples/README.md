@@ -29,7 +29,9 @@ CUDA_VISIBLE_DEVICES=1 uv run --script examples/sglang/multiturn_generate_sglang
 ```
 
 The SGLang script uses `input_ids`, so SGLang does not apply a chat template.
-It leaves `openai-harmony` at SGLang's pinned version for dependency resolution.
+SGLang pins `openai-harmony`, which installs the same `openai_harmony` module
+as the `oss-harmony` package renderers depends on, so whichever installs last
+wins. The gpt-oss renderer produces the same tokens on either build.
 
 ### SGLang HTTP Recipe (online)
 

@@ -614,9 +614,11 @@ class ParsedToolCall:
     attempts it's the only way to see what actually went wrong.
 
     ``arguments_text`` is the argument string exactly as the model wrote
-    it, for formats that write arguments as one span of text (gpt-oss).
-    Passing it back as the call's ``arguments`` re-renders the call with
-    the model's own spacing; ``json.dumps(arguments)`` generally doesn't.
+    it. Parsers set it for formats whose renderer writes a string
+    ``arguments`` into the prompt verbatim (currently gpt-oss), so passing
+    it back as the call's ``arguments`` re-renders the call with the
+    model's own spacing, which ``json.dumps(arguments)`` generally
+    doesn't. It's ``None`` for other formats.
     """
 
     raw: str

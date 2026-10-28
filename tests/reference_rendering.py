@@ -550,10 +550,17 @@ def _harmony_messages(
             name = fn.get("name", "")
             if not name.startswith("functions."):
                 name = f"functions.{name}"
+            try:
+                content_type = (
+                    "json" if isinstance(json.loads(arguments), dict) else "code"
+                )
+            except ValueError:
+                content_type = "code"
             out.append(
                 Message.from_role_and_content(Role.ASSISTANT, arguments)
                 .with_channel("commentary")
                 .with_recipient(name)
+                .with_content_type(content_type)
             )
         if not content and not tool_calls and not reasoning:
             out.append(
@@ -562,16 +569,19 @@ def _harmony_messages(
     return out
 
 
-def harmony_recipient_first(encoder: Any, ids: list[int]) -> list[int]:
-    """Move each header's `` to=recipient`` ahead of its ``<|channel|>``.
+def harmony_renderer_headers(encoder: Any, ids: list[int]) -> list[int]:
+    """Rewrite oss-harmony's headers into the gpt-oss renderer's.
 
-    The gpt-oss renderer keeps openai-harmony's recipient-first header for tool
-    calls and tool results; oss-harmony renders commentary headers channel-first.
+    oss-harmony renders commentary headers channel-first. The renderer keeps
+    tool calls that way, as gpt-oss samples them, but writes a ``code`` content
+    type as a plain `` code`` rather than ``<|constrain|>code``, and moves a
+    tool result's `` to=assistant`` ahead of its ``<|channel|>``.
     """
-    start, channel, message = (
+    start, channel, message, constrain = (
         encoder.encode(token, allowed_special="all")[0]
-        for token in ("<|start|>", "<|channel|>", "<|message|>")
+        for token in ("<|start|>", "<|channel|>", "<|message|>", "<|constrain|>")
     )
+    assistant = encoder.encode("assistant")
     out: list[int] = []
     i = 0
     while i < len(ids):
@@ -581,7 +591,16 @@ def harmony_recipient_first(encoder: Any, ids: list[int]) -> list[int]:
             continue
         end = ids.index(message, i)
         header = ids[i + 1 : end]
-        if channel in header:
+        if header[: len(assistant) + 1] == [*assistant, channel]:
+            if constrain in header and encoder.decode(header).endswith(
+                " <|constrain|>code"
+            ):
+                pos = header.index(channel)
+                text = encoder.decode(header[pos + 1 :]).replace(
+                    " <|constrain|>code", " code"
+                )
+                header = [*header[:pos], channel, *encoder.encode(text)]
+        elif channel in header:
             pos = header.index(channel)
             channel_name, to, recipient = encoder.decode(header[pos + 1 :]).partition(
                 " to="
@@ -632,10 +651,10 @@ def _render_harmony(
         prompt = encoder.render_conversation_for_completion(
             conversation, next_turn_role=Role.ASSISTANT
         )
-        return harmony_recipient_first(encoder, prompt) + encoder.encode(
+        return harmony_renderer_headers(encoder, prompt) + encoder.encode(
             "<|channel|>analysis<|message|>", allowed_special="all"
         )
-    return harmony_recipient_first(
+    return harmony_renderer_headers(
         encoder, encoder.render_conversation_for_training(conversation)
     )
 

@@ -575,14 +575,17 @@ def test_harmony_later_channels_end_unterminated_analysis(
     tok, renderer = _renderer("gpt-oss")
     prompt, _, _ = _thinking_stream("gpt-oss", tok, renderer)
     opening = "<|start|>assistant<|channel|>analysis<|message|>"
-    header = "assistant to=functions.weather" if channel == "tool" else "assistant"
-    channel_name = "commentary" if channel == "tool" else channel
+    channel_name = (
+        "commentary to=functions.weather <|constrain|>json"
+        if channel == "tool"
+        else channel
+    )
     body = '{"city":"Berlin"}' if channel == "tool" else "Answer"
     stop = "<|call|>" if channel == "tool" else "<|return|>"
     text = (
         ("" if prefilled else opening)
         + "Reasoning"
-        + f"<|start|>{header}<|channel|>{channel_name}<|message|>{body}"
+        + f"<|start|>assistant<|channel|>{channel_name}<|message|>{body}"
         + (stop if terminated else "")
     )
     sampled = _encode(tok, text)
@@ -603,7 +606,7 @@ def test_harmony_later_channels_end_unterminated_analysis(
         assert (
             _encode(
                 tok,
-                f"<|start|>{header}<|channel|>{channel_name}<|message|>{body}"
+                f"<|start|>assistant<|channel|>{channel_name}<|message|>{body}"
                 + (stop if terminated else ""),
             )
             == sampled[slice(*call.token_span)]

@@ -685,7 +685,13 @@ SCENARIOS = (
             {"role": "system", "content": "Late instruction"},
             {"role": "user", "content": "B"},
         ],
-        only_renderers={"laguna-xs-2.1", "laguna-s-2.1"},
+        only_renderers={
+            "laguna-xs-2.1",
+            "laguna-s-2.1",
+            "nemotron-3",
+            "nemotron-3-ultra",
+            "nemotron-3.5",
+        },
     ),
     _scenario(
         "tool-declare-message",

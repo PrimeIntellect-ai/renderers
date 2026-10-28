@@ -17,8 +17,11 @@ This renderer is a thin adapter that:
   - renders one harmony message at a time via ``enc.render(m)`` so each
     token can be attributed to its source caller index. ``enc.render``
     is byte-identical to ``enc.render_conversation`` when concatenated;
-    verified empirically. Tool calls and tool results keep the
-    recipient-first header (``to=functions.x<|channel|>commentary``).
+    verified empirically. Tool calls render as gpt-oss samples them,
+    channel-first with a content type
+    (``<|channel|>commentary to=functions.x <|constrain|>json``, or ``code``
+    for arguments that aren't a JSON object); tool results keep the
+    recipient-first header (``to=assistant<|channel|>commentary``).
 
 Special tokens
 --------------
@@ -118,6 +121,13 @@ def _arguments_to_str(arguments: Any) -> str:
     return json.dumps(arguments, ensure_ascii=False)
 
 
+def _is_json_object(text: str) -> bool:
+    try:
+        return isinstance(json.loads(text), dict)
+    except ValueError:
+        return False
+
+
 class GptOssRenderer:
     """Deterministic message → token renderer for OpenAI gpt-oss (harmony)."""
 
@@ -181,17 +191,30 @@ class GptOssRenderer:
         return self._tokenizer.encode(text, add_special_tokens=False)
 
     def _render_message(self, hm: HarmonyMessage) -> list[int]:
-        """Render one harmony message with its recipient ahead of its channel.
+        """Render one harmony message.
 
-        oss-harmony renders commentary headers channel-first
-        (``<|channel|>commentary to=functions.x``). openai-harmony and the
-        gpt-oss chat template put the recipient first, and which order gpt-oss
-        handles best in conversation history is unsettled, so tool calls and
-        tool results keep the recipient-first header.
+        Tool calls take the header gpt-oss samples: oss-harmony's channel-first
+        ``<|channel|>commentary to=functions.x <|constrain|>json``, and for a
+        ``code`` content type a plain `` code``, which oss-harmony would render
+        as ``<|constrain|>code``. Tool results keep the recipient-first header
+        of openai-harmony and the gpt-oss chat template.
         """
         ids = self._enc.render(hm)
         if hm.channel != "commentary" or hm.recipient is None:
             return ids
+        if hm.author.role == Role.ASSISTANT:
+            if hm.content_type != "code":
+                return ids
+            header = [
+                self._start,
+                *self._enc.encode("assistant", disallowed_special=()),
+                self._channel,
+                *self._enc.encode(
+                    f"{hm.channel} to={hm.recipient} code", disallowed_special=()
+                ),
+                self._message,
+            ]
+            return header + ids[ids.index(self._message) + 1 :]
         author = hm.author.name if hm.author.role == Role.TOOL else hm.author.role.value
         header = [
             self._start,
@@ -320,6 +343,8 @@ class GptOssRenderer:
 
             Harmony per-message layout:
                 <|start|> role [' to=' recipient] [<|channel|> name] <|message|>
+                (tool calls: <|start|>assistant <|channel|> name ' to=' recipient
+                 (' ' <|constrain|> 'json' | ' code') <|message|>)
                 <body...>
                 <|end|> | <|return|> | <|call|>
 
@@ -825,7 +850,7 @@ class GptOssRenderer:
             recipient = name if name.startswith("functions.") else f"functions.{name}"
             m = HarmonyMessage.from_role_and_content(Role.ASSISTANT, args)
             m = m.with_channel("commentary").with_recipient(recipient)
-            out.append(m)
+            out.append(m.with_content_type("json" if _is_json_object(args) else "code"))
 
         # Empty assistant (no text and no tool_calls) — emit an empty
         # final-channel message so message_indices stays non-empty.

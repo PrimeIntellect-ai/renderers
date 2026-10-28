@@ -12,7 +12,7 @@ import re
 
 from reference_rendering import (
     _harmony_messages,
-    harmony_recipient_first,
+    harmony_renderer_headers,
     render_reference,
 )
 
@@ -100,7 +100,7 @@ def reference_continuation(tok, case, kwargs, messages, tools, *, calls=0):
             ),
             Message.from_role_and_content(Role.ASSISTANT, ANSWER).with_channel("final"),
         ]
-        full = harmony_recipient_first(
+        full = harmony_renderer_headers(
             encoder,
             encoder.render_conversation_for_training(
                 Conversation.from_messages(history),

@@ -71,8 +71,9 @@ def test_tool_call_headers_match_sampling_and_results_put_recipient_first():
 
 def test_rerendered_tool_calls_equal_sampled_tokens():
     """Real multi-turn Prime Agent rollouts of gpt-oss-20b, with each tool call's
-    arguments as the model wrote them: re-rendering the conversation reproduces
-    every sampled tool-call turn token for token, both ``json`` and ``code``."""
+    arguments taken from the parsed sample's ``arguments_text``: re-rendering the
+    conversation reproduces every sampled tool-call turn token for token, both
+    ``json`` and ``code``."""
     fixture = json.loads(
         (Path(__file__).parent / "fixtures" / "gpt_oss_rollouts.json").read_text()
     )
@@ -80,7 +81,14 @@ def test_rerendered_tool_calls_equal_sampled_tokens():
     renderer = create_renderer(tok, GptOssRendererConfig(**fixture["renderer"]))
     content_types = set()
     for rollout in fixture["rollouts"]:
-        rendered = renderer.render(rollout["messages"], tools=rollout["tools"])
+        messages = rollout["messages"]
+        for turn in rollout["sampled_turns"]:
+            parsed = renderer.parse_response(turn["token_ids"]).tool_calls
+            calls = messages[turn["message_index"]]["tool_calls"]
+            assert len(parsed) == len(calls)
+            for call, tc in zip(calls, parsed):
+                call["function"]["arguments"] = tc.arguments_text
+        rendered = renderer.render(messages, tools=rollout["tools"])
         for turn in rollout["sampled_turns"]:
             ids = [
                 token

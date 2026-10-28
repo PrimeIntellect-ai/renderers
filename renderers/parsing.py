@@ -1757,6 +1757,7 @@ def parse_gpt_oss(
                         raw=body_text,
                         name=tool_name or None,
                         arguments=body_text,
+                        arguments_text=body_text,
                         token_span=span,
                         status=ToolCallParseStatus.INVALID_JSON,
                     )
@@ -1773,6 +1774,7 @@ def parse_gpt_oss(
                         raw=body_text,
                         name=tool_name or None,
                         arguments=arguments,
+                        arguments_text=body_text,
                         token_span=span,
                         status=status,
                     )

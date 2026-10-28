@@ -612,11 +612,17 @@ class ParsedToolCall:
     ``raw`` is the decoded text of the block as the model emitted it
     (before any JSON normalization). Always populated — for failed
     attempts it's the only way to see what actually went wrong.
+
+    ``arguments_text`` is the argument string exactly as the model wrote
+    it, for formats that write arguments as one span of text (gpt-oss).
+    Passing it back as the call's ``arguments`` re-renders the call with
+    the model's own spacing; ``json.dumps(arguments)`` generally doesn't.
     """
 
     raw: str
     name: str | None = None
     arguments: dict[str, Any] | str | None = None
+    arguments_text: str | None = None
     token_span: tuple[int, int] | None = None
     status: ToolCallParseStatus = ToolCallParseStatus.OK
     id: str | None = None  # native tool-call id when the format carries one (Kimi K2)

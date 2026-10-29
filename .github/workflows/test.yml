@@ -61,6 +61,6 @@ jobs:
           path: |
             ~/.cache/huggingface/hub
             ~/.cache/huggingface/modules
-          key: hf-renderers-${{ runner.os }}-${{ hashFiles('tests/model_assets.py') }}
+          key: hf-renderers-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('tests/model_assets.py') }}
       - run: uv sync --locked
       - run: uv run --no-sync pytest tests/ -m "${{ matrix.selection }}" -v

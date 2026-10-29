@@ -4,9 +4,13 @@ from functools import lru_cache
 
 import pytest
 from parity import MODEL_CATALOG
+
 from renderers import create_renderer
-from renderers.base import ToolCallParseStatus, load_tokenizer
+from renderers.base import ToolCallParseStatus
 from renderers.configs import config_from_name
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 # Exercise every registered renderer, including inherited family variants.
 _CASES = {}

@@ -139,3 +139,9 @@ invalid-key = "warn"
 unsupported-operator = "warn"
 invalid-return-type = "warn"
 invalid-assignment = "warn"
+
+[tool.pytest.ini_options]
+markers = [
+    "model: requires real tokenizer or processor assets at pinned revisions",
+    "multimodal: exercises real image/audio/video processors or model sidecars",
+]

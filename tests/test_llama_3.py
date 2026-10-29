@@ -15,11 +15,13 @@ from parity import models_for
 from renderers import Llama3Renderer, Llama3RendererConfig, create_renderer
 from renderers.base import (
     MODEL_RENDERER_MAP,
-    ParsedResponse,
     TOKENIZER_SOURCE_OVERRIDES,
+    ParsedResponse,
     ToolCallParseStatus,
-    load_tokenizer,
 )
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 # Pinned date for byte-parity tests. Matches the chat template's
 # strftime fallback so we don't have to override on the apply side.

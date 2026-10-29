@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from renderers.base import ToolCallParseStatus, load_tokenizer
+from renderers.base import ToolCallParseStatus
 from renderers.parsers import (
     REASONING_PARSERS,
     TOOL_PARSERS,
@@ -15,6 +15,9 @@ from renderers.parsers import (
     get_reasoning_parser,
     get_tool_parser,
 )
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 
 def test_registries_nonempty():

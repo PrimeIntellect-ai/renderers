@@ -19,6 +19,8 @@ from openai import AsyncOpenAI
 
 from renderers.client import generate
 
+pytestmark = pytest.mark.model
+
 MODEL = "zai-org/GLM-5.3-Flash-BF16"
 GLM53_MODELS = ["zai-org/GLM-5.3", MODEL]
 
@@ -45,7 +47,7 @@ _TOOL_CALL = {
 @lru_cache(maxsize=None)
 def _load(model=MODEL):
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     tok = load_tokenizer(model)
     return tok, create_renderer(tok)

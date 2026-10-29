@@ -24,10 +24,14 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import pytest
 from parity import models_for
+
 from renderers import create_renderer
-from renderers.base import load_tokenizer
 from renderers.configs import _config_class_for
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 # One representative model per affected renderer family, each with
 # thinking explicitly disabled.

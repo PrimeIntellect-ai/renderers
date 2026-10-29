@@ -738,6 +738,8 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.model
+@pytest.mark.multimodal
 @pytest.mark.parametrize(
     "model_id,renderer_class_path",
     [
@@ -762,11 +764,8 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
 
     import torch as _torch
 
-    from renderers.base import (
-        MultiModalData,
-        PlaceholderRange,
-        load_tokenizer,
-    )
+    from renderers.base import MultiModalData, PlaceholderRange
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     mod_name, cls_name = renderer_class_path.split(":")
     renderer_cls = getattr(importlib.import_module(mod_name), cls_name)
@@ -832,6 +831,8 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
         assert isinstance(item, str) and len(item) > 0
 
 
+@pytest.mark.model
+@pytest.mark.multimodal
 def test_generate_serializes_multimodal_features_for_gemma4():
     """Gemma 4's HF image positions are translated to vLLM's field name."""
     pytest.importorskip("torch")
@@ -839,8 +840,9 @@ def test_generate_serializes_multimodal_features_for_gemma4():
 
     import torch as _torch
 
-    from renderers.base import MultiModalData, PlaceholderRange, load_tokenizer
+    from renderers.base import MultiModalData, PlaceholderRange
     from renderers.gemma4 import Gemma4Renderer
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     renderer = Gemma4Renderer(load_tokenizer("google/gemma-4-31B-it"))
     mm_data = MultiModalData(

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from renderers import create_renderer
-from renderers.base import load_tokenizer
+from tests.model_assets import load_test_tokenizer as load_tokenizer
 
 
 class OffsetlessTokenizer:
@@ -181,6 +181,7 @@ def test_offsetless_contract_across_renderer_bridges(
         _assert_offsetless_contract(expected, actual, renderer)
 
 
+@pytest.mark.model
 def test_hy3_offsetless_preserves_multiple_system_message_indices() -> None:
     """Hy3's joined system header must not erase either caller message."""
 
@@ -199,6 +200,7 @@ def test_hy3_offsetless_preserves_multiple_system_message_indices() -> None:
     assert {0, 1}.issubset(actual.message_indices)
 
 
+@pytest.mark.model
 @pytest.mark.parametrize(
     "deepseek_model",
     ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1"],

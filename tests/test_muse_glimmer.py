@@ -17,7 +17,10 @@ from datetime import datetime
 from functools import lru_cache
 
 import pytest
+
 from renderers.base import ToolCallParseStatus
+
+pytestmark = pytest.mark.model
 
 MODEL = "meta-models/Muse-Glimmer-30B"
 DATE = "2026-10-16"
@@ -70,8 +73,8 @@ def _invoke(name: str, *params: tuple[str, str]) -> str:
 @lru_cache(maxsize=None)
 def _load(**config):
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
     from renderers.configs import MuseGlimmerRendererConfig
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     tok = load_tokenizer(MODEL)
     return tok, create_renderer(
@@ -132,7 +135,7 @@ def _token(text: str) -> int:
 
 def test_create_renderer_resolves_muse_glimmer():
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     renderer = create_renderer(load_tokenizer(MODEL))
     assert type(renderer).__name__ == "MuseGlimmerRenderer"

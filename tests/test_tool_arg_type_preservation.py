@@ -30,6 +30,8 @@ from parity import models_for
 
 from renderers.muse_glimmer import MuseGlimmerRenderer
 
+pytestmark = pytest.mark.model
+
 
 # (HuggingFace model name, renderer name). Two JSON-shaped controls
 # (string types already preserved by the wire format) + five XML-style
@@ -40,7 +42,7 @@ _MODELS = [(case.model, case.renderer) for case in models_for("tool-arg-types")]
 @lru_cache(maxsize=None)
 def _load(model: str, renderer_name: str):
     from renderers import config_from_name, create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     tok = load_tokenizer(model)
     return tok, create_renderer(tok, config_from_name(renderer_name))

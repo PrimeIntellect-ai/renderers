@@ -43,8 +43,8 @@ from __future__ import annotations
 import pytest
 
 from renderers import build_training_sample
-from renderers.glm45 import GLM45Renderer
 from renderers.glm5 import GLM5Renderer
+from renderers.glm45 import GLM45Renderer
 from tests.reference_rendering import render_reference
 
 
@@ -140,6 +140,7 @@ def test_message_indices_in_range(model_name, renderer):
     )
 
 
+@pytest.mark.model
 def test_kimi_k2_unknown_role_message_indices():
     """Regression for the ``i`` vs ``oi`` mistake in
     ``KimiK2Renderer.render``'s unknown-role fallback. To surface, we
@@ -159,7 +160,7 @@ def test_kimi_k2_unknown_role_message_indices():
     caller list of length 2.
     """
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     tok = load_tokenizer("moonshotai/Kimi-K2-Instruct")
     renderer = create_renderer(tok)

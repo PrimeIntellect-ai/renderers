@@ -169,8 +169,9 @@ GLM53_NO_THINKING_SOURCE = textwrap.dedent(
 )
 
 
+@pytest.mark.model
 def test_readme_example_prefills_the_think_block(tmp_path):
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     path = tmp_path / "glm53_no_thinking.py"
     path.write_text(GLM53_NO_THINKING_SOURCE)

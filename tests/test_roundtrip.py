@@ -14,9 +14,12 @@ from reference_continuations import ANSWER, REASONING, reference_continuation
 from replay import assert_evidence, replay_client
 
 from renderers import create_renderer
-from renderers.base import MODEL_RENDERER_MAP, ToolCallParseStatus, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP, ToolCallParseStatus
 from renderers.client import generate
 from renderers.configs import config_from_name
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 
 # Both matrices visit checkpoints in groups; reuse within each group only.

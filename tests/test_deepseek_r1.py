@@ -7,12 +7,16 @@ stripping of ``</think>`` from historical assistant turns.
 
 from functools import lru_cache
 
+import pytest
+
 from renderers import (
     DeepSeekR1Renderer,
     DeepSeekV3Renderer,
     create_renderer,
 )
-from renderers.base import load_tokenizer
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 
 @lru_cache

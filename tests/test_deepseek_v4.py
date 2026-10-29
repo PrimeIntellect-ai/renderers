@@ -6,6 +6,7 @@ from functools import lru_cache
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
+
 from renderers import (
     DeepSeekV4Renderer,
     DeepSeekV4RendererConfig,
@@ -13,8 +14,11 @@ from renderers import (
     ToolCallParseStatus,
     create_renderer,
 )
-from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP
+from tests.model_assets import load_test_tokenizer as load_tokenizer
 from tests.reference_rendering import render_reference
+
+pytestmark = pytest.mark.model
 
 MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
 BOS = "<｜begin▁of▁sentence｜>"

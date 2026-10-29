@@ -16,7 +16,6 @@ from types import UnionType
 from typing import Annotated, Any, Literal, Mapping, Union, cast, get_args, get_origin
 
 import pytest
-
 from parity import (
     KWARG_VALUES,
     MODEL_CATALOG,
@@ -26,9 +25,11 @@ from parity import (
     kwarg_combinations,
     scenario_is_valid,
 )
+
 from renderers import create_renderer
-from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP
 from renderers.configs import RendererConfig, _config_class_for
+from tests.model_assets import load_test_tokenizer as load_tokenizer
 from tests.reference_rendering import (
     DEFAULT_REFERENCE_ORACLE,
     REFERENCE_ORACLES,
@@ -37,6 +38,8 @@ from tests.reference_rendering import (
     reference_oracle_for_renderer,
     render_reference,
 )
+
+pytestmark = pytest.mark.model
 
 
 def _id(case: ModelCase, scenario: Scenario, kwargs: Mapping[str, Any]) -> str:

@@ -421,6 +421,7 @@ class LagunaXS2Renderer:
         # ``</assistant>\n`` — the same scaffold the template emits.
         previous_ids = list(previous_prompt_ids) + list(previous_completion_ids)
         stop_ids = {self._assistant_end, self._eos}
+        needs_separator = previous_ids[-1] in stop_ids
         if (
             not previous_ids[len(previous_prompt_ids) :]
             or previous_ids[-1] not in stop_ids
@@ -477,6 +478,9 @@ class LagunaXS2Renderer:
                 ext_indices.append(msg_idx)
                 ext_sampled.append(is_sampled)
                 ext_content.append(is_content)
+
+        if needs_separator:
+            emit_text("\n", -1)
 
         for i, msg in enumerate(new_messages):
             role = msg.get("role")

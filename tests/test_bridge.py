@@ -140,6 +140,32 @@ def test_bridge_extends_prev_verbatim_on_clean_stop(br_renderer_all, br_model):
     )
 
 
+@pytest.mark.model
+@pytest.mark.parametrize("model", ["poolside/Laguna-XS.2", "poolside/Laguna-M.1"])
+@pytest.mark.parametrize("stop", ["</assistant>", "〈|EOS|〉", ""])
+@pytest.mark.parametrize(
+    "role,opening", [("user", "<user>"), ("tool", "<tool_response>")]
+)
+def test_laguna_bridge_separates_turns(model, stop, role, opening):
+    from renderers import create_renderer
+
+    tok, _ = _load(model, "auto")
+    native = create_renderer(tok, chat_template_kwargs={"enable_thinking": False})
+    prompt = native.render_ids(
+        [{"role": "user", "content": "Hi."}], add_generation_prompt=True
+    )
+    completion = tok.encode("\nFour." + stop, add_special_tokens=False)
+    bridge = native.bridge_to_next_turn(
+        prompt, completion, [{"role": role, "content": "Next."}]
+    )
+    assert bridge is not None
+    previous = prompt + completion
+    assert bridge.token_ids[: len(previous)] == previous
+    extension = tok.decode(bridge.token_ids[len(previous) :], skip_special_tokens=False)
+    close = "" if stop else "</assistant>"
+    assert extension.startswith(close + "\n" + opening + "\n")
+
+
 def test_bridge_rejects_assistant_in_extension(br_renderer):
     prev_prompt, prev_completion = _simulate_prior_turn(br_renderer)
     assert (

@@ -76,6 +76,9 @@ def _parse_test_head(choice, sampled, k, compact):
         {"data": "?"},
         {"data": None},
         {"data": ""},
+        {"partial_rows": "0"},
+        {"partial_rows": [1]},
+        {"partial_rows": [True]},
     ],
 )
 def test_compact_logprobs_reject_malformed_payload(update):
@@ -194,12 +197,12 @@ def test_top_logprobs_head_is_independent_of_sampled_action(
 
 @pytest.mark.parametrize("compact", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("error", [None, "missing", "mass", "mask"])
+@pytest.mark.parametrize("error", [None, "missing", "mass", "mask", "partial"])
 def test_top_logprobs_preserve_complete_replay_support(compact, packed, error):
     import math
 
     probabilities = {1: 0.6, 2: 0.2, 3: 0.2}
-    if error == "mass":
+    if error in ("mass", "partial"):
         probabilities[1] = 0.5
     entry = {
         "token": "token_id:3",
@@ -222,7 +225,14 @@ def test_top_logprobs_preserve_complete_replay_support(compact, packed, error):
             for name, values in (("ids", support), ("counts", [len(support)]))
         }
     choice = {"logprobs": {"content": [entry]}, "sampling_mask": mask}
-    if error is not None:
+    if error == "partial" and compact:
+        # Only the server declares a support partial: its mass may then fall short of one.
+        choice = _compact_choice(choice)
+        choice["compact_logprobs"]["partial_rows"] = [0]
+        _, ids, logprobs = _parse_compact_logprobs(choice, [3], 2)
+        assert ids == [[1, 2, 3]]
+        np.testing.assert_allclose(np.exp(logprobs), [[0.5, 0.2, 0.2]])
+    elif error is not None:
         with pytest.raises(MalformedGenerateResponseError):
             _parse_test_head(choice, [3], 2, compact)
     else:

@@ -199,6 +199,14 @@ def _parse_compact_logprobs(
     if not np.isfinite(values).all() or (values > 1e-6).any():
         raise MalformedGenerateResponseError("Invalid compact logprob values")
     samples = packed.get("samples") is True
+    # Replayed supports wider than the server's width return only part of their ids, with
+    # probabilities still normalized over the whole support.
+    partial_rows = packed.get("partial_rows", [])
+    if not isinstance(partial_rows, list) or any(
+        type(row) is not int or not 0 <= row < len(completion_ids) for row in partial_rows
+    ):
+        raise MalformedGenerateResponseError("Invalid compact logprob partial rows")
+    partial_rows = set(partial_rows)
     sampled = []
     top_ids: list[list[int]] = []
     top_logprobs: list[list[float]] = []
@@ -234,6 +242,7 @@ def _parse_compact_logprobs(
                 row[token_id],
                 k,
                 supports[index] if supports is not None else None,
+                partial=index in partial_rows,
             )
             top_ids.append(selected_ids)
             top_logprobs.append(selected_logprobs)
@@ -360,8 +369,10 @@ def _select_sampler_head(
     sampled_logprob: float,
     k: int,
     support: list[int] | None = None,
+    partial: bool = False,
 ) -> tuple[list[int], list[float]]:
-    """Keep an action-independent head, or the complete recorded replay support."""
+    """Keep an action-independent head, or the recorded replay support. A ``partial``
+    support holds part of the ids, so its probabilities may sum to less than one."""
     if sampled_id in head and not math.isclose(
         head[sampled_id], sampled_logprob, rel_tol=1e-6, abs_tol=1e-5
     ):
@@ -380,7 +391,7 @@ def _select_sampler_head(
                 "Missing sampling-support probabilities"
             )
         ranked = [(i, p) for i, p in ranked if i in support_set]
-        if not math.isclose(
+        if not partial and not math.isclose(
             math.fsum(math.exp(p) for _, p in ranked), 1.0, rel_tol=0, abs_tol=1e-4
         ):
             raise MalformedGenerateResponseError(

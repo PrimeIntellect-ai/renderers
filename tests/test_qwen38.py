@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from copy import deepcopy
+from functools import lru_cache
 
 import pytest
 from pydantic import TypeAdapter
@@ -14,7 +14,10 @@ from renderers import (
     RendererConfig,
     create_renderer,
 )
-from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 
 TOOLS = [
@@ -250,3 +253,8 @@ def test_qwen38_structured_tool_response_keeps_current_reasoning():
     assert "Keep me" in tokenizer.decode(renderer.render_ids(messages))
     with pytest.raises(ValueError, match="No user query found"):
         renderer.render([messages[-1]])
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _qwen38.cache_clear()

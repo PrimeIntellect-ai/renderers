@@ -6,36 +6,64 @@ on:
     paths:
       - "**.py"
       - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/test.yml"
   pull_request:
-    branches: [main]
+    branches: [main, "codex/**"]
     paths:
       - "**.py"
       - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/test.yml"
 
+permissions:
+  contents: read
+
 jobs:
-  test:
-    name: Renderers
+  unit:
+    name: Offline (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    env:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --locked
+      - run: uv run --no-sync pytest tests/ -m "not model" -v
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-
-      - name: Install dependencies
-        run: uv sync
-
-      - name: Run tests
-        run: uv run pytest tests/ -v
+  model:
+    name: Pinned ${{ matrix.suite }} parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: text
+            selection: "model and not multimodal"
+          - suite: multimodal
+            selection: "model and multimodal"
+    env:
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface/hub
+            ~/.cache/huggingface/modules
+          key: hf-renderers-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('tests/model_assets.py') }}
+      - run: uv sync --locked
+      - run: uv run --no-sync pytest tests/ -m "${{ matrix.selection }}" -v

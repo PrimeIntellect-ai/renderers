@@ -808,7 +808,6 @@ class DeepSeekV4Renderer:
             ),
             think_end_id=self._think_end,
             think_start_id=self._think_start,
-            dsml_id=self._dsml,
         )
 
     def get_stop_token_ids(self) -> list[int]:

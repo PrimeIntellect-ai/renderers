@@ -16,7 +16,6 @@ from types import UnionType
 from typing import Annotated, Any, Literal, Mapping, Union, cast, get_args, get_origin
 
 import pytest
-
 from parity import (
     KWARG_VALUES,
     MODEL_CATALOG,
@@ -26,17 +25,22 @@ from parity import (
     kwarg_combinations,
     scenario_is_valid,
 )
+
 from renderers import create_renderer
-from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP
 from renderers.configs import RendererConfig, _config_class_for
+from tests.conformance.harness import assert_attribution, reference
+from tests.conformance.harness import tokenizer as reference_tokenizer
+from tests.model_assets import load_test_tokenizer as load_tokenizer
 from tests.reference_rendering import (
     DEFAULT_REFERENCE_ORACLE,
     REFERENCE_ORACLES,
     RENDERER_ORACLE_ROUTES,
     reference_oracle_for_model,
     reference_oracle_for_renderer,
-    render_reference,
 )
+
+pytestmark = pytest.mark.model
 
 
 def _id(case: ModelCase, scenario: Scenario, kwargs: Mapping[str, Any]) -> str:
@@ -58,12 +62,14 @@ def _matrix():
                     )
 
 
-@lru_cache(maxsize=None)
+# The matrix groups all scenarios/settings for each checkpoint together.
+# Retain only the current checkpoint and configuration, not the whole catalog.
+@lru_cache(maxsize=1)
 def _tokenizer(model: str):
     return load_tokenizer(model)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1)
 def _renderer(model: str, renderer_name: str, items: tuple[tuple[str, Any], ...]):
     tokenizer = _tokenizer(model)
     resolved = (
@@ -194,29 +200,26 @@ def test_renderer_matches_reference(
     scenario: Scenario,
     kwargs: Mapping[str, Any],
 ):
-    tokenizer = _tokenizer(case.model)
     renderer = _renderer(case.model, case.renderer, tuple(kwargs.items()))
     for key, value in kwargs.items():
         if value is not None:
             assert getattr(renderer.config, key) == value
 
-    oracle_kwargs = dict(case.oracle_defaults)
-    oracle_kwargs.update(kwargs)
-    # Config ``None`` values mean "defer to the oracle default"; omission
-    # expresses the same state for every registered adapter.
-    oracle_kwargs = {
-        key: value for key, value in oracle_kwargs.items() if value is not None
-    }
-    expected = render_reference(
-        tokenizer,
-        [dict(message) for message in scenario.messages],
-        oracle=case.oracle,
-        **oracle_kwargs,
-        **scenario.render_kwargs,
-    )
+    messages = [dict(message) for message in scenario.messages]
+    expected = reference(case, messages, dict(kwargs), **scenario.render_kwargs)
+    rendered = renderer.render(messages, **scenario.render_kwargs)
+    assert rendered.token_ids == expected
+    assert_attribution(rendered)
     got = renderer.render_ids(list(scenario.messages), **scenario.render_kwargs)
     assert got == expected, (
         f"{case.model} / {scenario.id} / {dict(kwargs)!r}: renderer diverged "
         f"from {case.oracle} oracle (got {len(got)} tokens, expected "
         f"{len(expected)})"
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tokenizer.cache_clear()
+    _renderer.cache_clear()
+    reference_tokenizer.cache_clear()

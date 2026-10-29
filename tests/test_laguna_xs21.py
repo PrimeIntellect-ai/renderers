@@ -22,9 +22,11 @@ from functools import lru_cache
 import pytest
 
 from renderers import create_renderer
-from renderers.base import load_tokenizer
 from renderers.configs import LagunaXS21RendererConfig, config_from_name
 from renderers.laguna_xs2 import LagunaXS21Renderer
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 _MODEL = "poolside/Laguna-XS-2.1"
 
@@ -406,3 +408,8 @@ def test_bridge_rejects_assistant_extension():
         )
         is None
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tok.cache_clear()

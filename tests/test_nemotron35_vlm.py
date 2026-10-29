@@ -12,7 +12,6 @@ import pytest
 from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS, PlaceholderRange
 from renderers.nemotron3 import Nemotron35Renderer
 
-
 MODEL = "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026"
 
 
@@ -277,6 +276,8 @@ def test_nemotron35_loads_approved_remote_processor_without_revision(monkeypatch
     ]
 
 
+@pytest.mark.model
+@pytest.mark.multimodal
 def test_real_processor_token_parity_when_metadata_is_available():
     metadata = os.environ.get("NEMOTRON35_VLM_METADATA")
     if metadata is None:

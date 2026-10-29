@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import pytest
 from pydantic import TypeAdapter
 
 from renderers import (
@@ -12,7 +13,9 @@ from renderers import (
     RendererConfig,
     create_renderer,
 )
-from renderers.base import load_tokenizer
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 _MODEL = "poolside/Laguna-M.1"
 
@@ -152,3 +155,8 @@ def test_raw_assistant_round_trip_parity():
         enable_thinking=True,
         render_assistant_messages_raw=True,
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tok.cache_clear()

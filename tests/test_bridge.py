@@ -27,8 +27,8 @@ _BRIDGE_MODELS = [(case.model, case.renderer) for case in models_for("bridge")]
 @lru_cache(maxsize=None)
 def _load(model_name: str, renderer_name: str):
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
     from renderers.configs import config_from_name
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     tok = load_tokenizer(model_name)
     return tok, create_renderer(tok, config_from_name(renderer_name))
@@ -38,7 +38,10 @@ def pytest_generate_tests(metafunc):
     if "br_model" in metafunc.fixturenames:
         metafunc.parametrize(
             "br_model,br_renderer_name",
-            _BRIDGE_MODELS,
+            [
+                pytest.param(model, renderer, marks=pytest.mark.model)
+                for model, renderer in _BRIDGE_MODELS
+            ],
             ids=[m for m, _ in _BRIDGE_MODELS],
         )
 
@@ -137,6 +140,32 @@ def test_bridge_extends_prev_verbatim_on_clean_stop(br_renderer_all, br_model):
     )
 
 
+@pytest.mark.model
+@pytest.mark.parametrize("model", ["poolside/Laguna-XS.2", "poolside/Laguna-M.1"])
+@pytest.mark.parametrize("stop", ["</assistant>", "〈|EOS|〉", ""])
+@pytest.mark.parametrize(
+    "role,opening", [("user", "<user>"), ("tool", "<tool_response>")]
+)
+def test_laguna_bridge_separates_turns(model, stop, role, opening):
+    from renderers import create_renderer
+
+    tok, _ = _load(model, "auto")
+    native = create_renderer(tok, chat_template_kwargs={"enable_thinking": False})
+    prompt = native.render_ids(
+        [{"role": "user", "content": "Hi."}], add_generation_prompt=True
+    )
+    completion = tok.encode("\nFour." + stop, add_special_tokens=False)
+    bridge = native.bridge_to_next_turn(
+        prompt, completion, [{"role": role, "content": "Next."}]
+    )
+    assert bridge is not None
+    previous = prompt + completion
+    assert bridge.token_ids[: len(previous)] == previous
+    extension = tok.decode(bridge.token_ids[len(previous) :], skip_special_tokens=False)
+    close = "" if stop else "</assistant>"
+    assert extension.startswith(close + "\n" + opening + "\n")
+
+
 def test_bridge_rejects_assistant_in_extension(br_renderer):
     prev_prompt, prev_completion = _simulate_prior_turn(br_renderer)
     assert (
@@ -223,6 +252,7 @@ def test_qwen3_renders_openai_text_content_parts(br_renderer, br_tokenizer, br_m
     assert text in br_tokenizer.decode(list_ids, skip_special_tokens=False)
 
 
+@pytest.mark.model
 def test_bridge_declines_across_user_query_when_template_drops_thinking():
     """Qwen3's template drops a past block's thinking once a new user turn
     arrives. The resolved ``tool_cycle`` bridge policy therefore treats a
@@ -237,8 +267,8 @@ def test_bridge_declines_across_user_query_when_template_drops_thinking():
       - no prior thinking + new user query -> decline; no marker lookback.
     """
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
     from renderers.configs import Qwen3RendererConfig
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     tok = load_tokenizer("Qwen/Qwen3-8B")
     im_end = tok.convert_tokens_to_ids("<|im_end|>")
@@ -326,14 +356,15 @@ def test_bridge_declines_across_user_turn_when_thinking_present(br_renderer, br_
     assert extended is not None, f"{br_model}: should still bridge within a tool cycle"
 
 
+@pytest.mark.model
 def test_bridge_keeps_thinking_when_history_kwarg_disables_truncation():
     """GLM ``clear_thinking=False`` / Nemotron ``truncate_history_thinking=
     False`` keep all past thinking (the template doesn't strip it), so the
     bridge must NOT decline across a user turn — declining would re-render and
     re-tokenize model-sampled thinking bytes."""
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
     from renderers.configs import GLM5RendererConfig, Nemotron3RendererConfig
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     asst = [
         {"role": "assistant", "reasoning_content": "Let me think.", "content": "Hi"}
@@ -354,3 +385,8 @@ def test_bridge_keeps_thinking_when_history_kwarg_disables_truncation():
         assert bridged is not None, (
             f"{model}: bridge must keep verbatim when the template keeps all thinking"
         )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _load.cache_clear()

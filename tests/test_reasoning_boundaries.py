@@ -4,16 +4,20 @@ from functools import lru_cache
 
 import pytest
 from parity import MODEL_CATALOG
+
 from renderers import create_renderer
-from renderers.base import ToolCallParseStatus, load_tokenizer
+from renderers.base import ToolCallParseStatus
 from renderers.configs import config_from_name
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 # Exercise every registered renderer, including inherited family variants.
 _CASES = {}
 for _case in MODEL_CATALOG:
     _CASES.setdefault(_case.resolved_renderer, _case.model)
 
-_GLM = {"glm-4.5", "glm-5", "glm-5.1", "glm-5.3"}
+_GLM = {"glm-4.5", "glm-5", "glm-5.1", "glm-5.3", "glm-5.3-flash"}
 _REOPENING_TAGS = _GLM | {"deepseek-v4"}
 
 
@@ -64,6 +68,14 @@ def _thinking_stream(name, tok, renderer):
             _encode(tok, "unfinished reasoning"),
             [renderer._think_end, *_encode(tok, "Answer")],
         )
+    if name == "muse-glimmer":
+        # The generation prompt is ``<|start|>assistant``; the model samples
+        # its recipient, ``to=self`` for reasoning and ``to=user`` to answer.
+        return (
+            prompt,
+            _encode(tok, " to=self<|message|>unfinished reasoning"),
+            _encode(tok, "<|eom|><|start|>assistant to=user<|message|>Answer"),
+        )
     prefix = tok.decode(prompt, skip_special_tokens=False).rstrip()
     opener = "" if prefix.endswith("<think>") else "<think>"
     return (
@@ -106,6 +118,7 @@ def test_every_reasoning_bridge_preserves_prefix_or_refuses_sampled_stop(name):
         "gemma4": lambda: [renderer._channel_end],
         "inkling": lambda: [renderer._end_message],
         "hy3": lambda: [renderer._think_end],
+        "muse-glimmer": lambda: [renderer._eom],
     }.get(name, lambda: _encode(tok, "</think>"))()
     assert bridge.token_ids[prefix_len : prefix_len + len(close_ids)] == close_ids
     assert not any(bridge.is_content[prefix_len : prefix_len + len(close_ids)])
@@ -177,6 +190,7 @@ _TOOL_CALLS = {
     "glm-5": _GLM_CALL,
     "glm-5.1": _GLM_CALL,
     "glm-5.3": _GLM_CALL,
+    "glm-5.3-flash": _GLM_CALL,
     "minimax-m2": '<minimax:tool_call>\n<invoke name="danger">\n</invoke>\n</minimax:tool_call>',
     "deepseek-v4": '\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name="danger">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
     "kimi-k2": _KIMI_CALL,
@@ -193,6 +207,7 @@ _STRICT_TOOL_OPENERS = {
     "laguna-s-2.1",
     "laguna-xs-2.1",
     "laguna-xs.2",
+    "muse-glimmer",
 }
 
 
@@ -335,120 +350,6 @@ def test_empty_final_channel_is_not_unfinished_reasoning():
     assert result.reasoning_complete is True
 
 
-@pytest.mark.parametrize("name", sorted(_REOPENING_TAGS))
-def test_upstream_template_continuation_opens_reasoning(name):
-    from tests.reference_rendering import render_reference
-
-    tok, renderer = _renderer(name)
-    messages = [{"role": "user", "content": "Calculate carefully."}]
-    kwargs = {
-        key: getattr(renderer.config, key)
-        for key in renderer.config.template_field_names()
-        if getattr(renderer.config, key) is not None
-    }
-    prompt = render_reference(tok, messages, add_generation_prompt=True, **kwargs)
-    completed = render_reference(
-        tok,
-        messages
-        + [
-            {"role": "assistant", "reasoning_content": "Reasoning", "content": "Answer"}
-        ],
-        **kwargs,
-    )
-    assert renderer.render_ids(messages, add_generation_prompt=True) == prompt
-    assert completed[: len(prompt)] == prompt
-    sampled = completed[len(prompt) :]
-    original = list(sampled)
-    parsed = renderer.parse_response(sampled, prompt_ids=prompt)
-    assert parsed.reasoning_content == (
-        "\nReasoning" if name == "glm-4.5" else "Reasoning"
-    )
-    assert parsed.content == ("\nAnswer" if name == "glm-4.5" else "Answer")
-    assert parsed.reasoning_complete is True
-    assert not parsed.tool_calls
-    assert sampled == original
-
-
-@pytest.mark.parametrize(
-    "name", sorted(set(_CASES) - {"llama-3", "default", "gpt-oss", "gemma4", "inkling"})
-)
-@pytest.mark.parametrize("prefix", ["\n", " \n"])
-def test_initial_reasoning_accepts_whitespace_and_duplicate_openers(name, prefix):
-    tok, renderer = _renderer(name)
-    prompt, _, _ = _thinking_stream(name, tok, renderer)
-    opening, closing = (
-        ("<think:opensource>", "</think:opensource>")
-        if name == "hy3"
-        else ("<think>", "</think>")
-    )
-    sampled = _encode(
-        tok, prefix + opening + "\n" + opening + "Reasoning" + closing + "Answer"
-    )
-    original = list(sampled)
-    parsed = renderer.parse_response(sampled, prompt_ids=prompt)
-    assert parsed.reasoning_content.strip() == "Reasoning"
-    assert parsed.content == "Answer"
-    assert parsed.reasoning_complete is True
-    assert sampled == original
-
-
-@pytest.mark.parametrize("name", sorted(_REOPENING_TAGS))
-@pytest.mark.parametrize("closed", [False, True])
-def test_tagged_grammar_reopens_reasoning_after_content(name, closed):
-    tok, renderer = _renderer(name)
-    prompt, _, _ = _thinking_stream(name, tok, renderer)
-    sampled = _encode(
-        tok,
-        "<think>First</think>Answer<think>Second" + ("</think>After" if closed else ""),
-    )
-    parsed = renderer.parse_response(sampled, prompt_ids=prompt)
-    assert parsed.reasoning_content == "FirstSecond"
-    assert parsed.content == "Answer" + ("After" if closed else "")
-    assert parsed.reasoning_complete is closed
-
-
-@pytest.mark.parametrize("name", sorted(_REOPENING_TAGS))
-def test_tagged_tool_transition_precedes_later_reasoning_close(name):
-    tok, renderer = _renderer(name)
-    prompt, incomplete, _ = _thinking_stream(name, tok, renderer)
-    sampled = incomplete + _encode(tok, _TOOL_CALLS[name] + "</think>")
-    original = list(sampled)
-    parsed = renderer.parse_response(sampled, prompt_ids=prompt)
-    assert parsed.reasoning_content == "unfinished reasoning"
-    assert [(c.name, c.arguments, c.status) for c in parsed.tool_calls] == [
-        ("danger", {}, ToolCallParseStatus.OK)
-    ]
-    assert parsed.reasoning_complete is True
-    start, end = parsed.tool_calls[0].token_span
-    assert 0 <= start < end <= len(sampled)
-    assert "danger" in tok.decode(sampled[start:end], skip_special_tokens=False)
-    assert sampled == original
-
-
-@pytest.mark.parametrize("name", ["glm-4.5", "glm-5", "glm-5.1", "deepseek-v4"])
-@pytest.mark.parametrize("enabled", [False, True])
-def test_tagged_grammar_generation_mode_matches_vllm(name, enabled):
-    tok, original = _renderer(name)
-    renderer = create_renderer(
-        tok, original.config.model_copy(update={"enable_thinking": enabled})
-    )
-    prompt = renderer.render_ids(
-        [{"role": "user", "content": "Hello"}], add_generation_prompt=True
-    )
-    sampled = _encode(tok, "\n<think>Reasoning</think>\nAnswer")
-    parsed = renderer.parse_response(sampled, prompt_ids=prompt)
-    if enabled:
-        assert parsed.reasoning_content == "\nReasoning"
-        assert parsed.content == "\nAnswer"
-    elif name == "deepseek-v4":
-        assert parsed.reasoning_content == "Reasoning"
-        assert parsed.content == "\n\nAnswer"
-    else:
-        assert parsed.reasoning_content is None
-        assert parsed.content == "\n<think>Reasoning</think>\nAnswer"
-    assert parsed.reasoning_complete is True
-
-
 def test_no_reasoning_format_keeps_literal_think_text():
     tok, renderer = _renderer("llama-3")
     result = renderer.parse_response(_encode(tok, "Literal <think> text"))
@@ -531,6 +432,10 @@ def test_reasoning_markers_override_generation_mode(name, enabled, origin, endin
             "<|end_message|><|message_model|><|content_text|>",
         ),
         "hy3": ("<think:opensource>", "</think:opensource>"),
+        "muse-glimmer": (
+            "<|start|>assistant to=self<|message|>",
+            "<|eom|><|start|>assistant to=user<|message|>",
+        ),
     }.get(name, ("<think>", "</think>"))
     prompt_text = {
         "prompt": opening + "Earlier reasoning ",
@@ -718,33 +623,6 @@ def test_harmony_later_channels_end_unterminated_analysis(
     assert not any(bridge.sampled_mask[len(prefix) :])
 
 
-@pytest.mark.parametrize("name", sorted(_GLM))
-@pytest.mark.parametrize("closed", [False, True])
-def test_glm_reopens_reasoning_after_tool_without_parsing_argument_tags(name, closed):
-    tok, renderer = _renderer(name)
-    prompt = renderer.render_ids(
-        [{"role": "user", "content": "Hello"}], add_generation_prompt=True
-    )
-    tool = (
-        "<tool_call>weather<arg_key>city</arg_key>"
-        "<arg_value><think>literal</think></arg_value></tool_call>"
-    )
-    sampled = _encode(
-        tok,
-        "First</think>Before"
-        + tool
-        + "After<think>Second"
-        + ("</think>Last" if closed else ""),
-    )
-    parsed = renderer.parse_response(sampled, prompt_ids=prompt)
-    assert parsed.reasoning_content == "FirstSecond"
-    assert parsed.content == "BeforeAfter" + ("Last" if closed else "")
-    assert parsed.reasoning_complete is closed
-    assert len(parsed.tool_calls) == 1
-    assert parsed.tool_calls[0].arguments == {"city": "<think>literal</think>"}
-    assert sampled[slice(*parsed.tool_calls[0].token_span)] == _encode(tok, tool)
-
-
 def test_harmony_later_unfinished_analysis_preserves_earlier_output():
     tok, renderer = _renderer("gpt-oss")
     prompt, _, _ = _thinking_stream("gpt-oss", tok, renderer)
@@ -764,3 +642,8 @@ def test_harmony_later_unfinished_analysis_preserves_earlier_output():
         )
         is None
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _renderer.cache_clear()

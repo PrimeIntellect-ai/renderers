@@ -163,6 +163,11 @@ MODEL_CATALOG = (
         bridge=True,
         extra_suites={"tool-arg-types", "glm-tool-names"},
     ),
+    _model(
+        "zai-org/GLM-5.3-Flash-BF16",
+        bridge=True,
+        extra_suites={"tool-arg-types", "glm-tool-names"},
+    ),
     _model("zai-org/GLM-4.7-Flash"),
     _model(
         "THUDM/GLM-4.5-Air",
@@ -197,6 +202,7 @@ MODEL_CATALOG = (
             "tool-call-content",
             "tool-call-none",
             "multiple-tool-calls",
+            "multiple-tool-calls-content",
             "tool-response",
             "named-tool-response",
             "consecutive-tool-responses",
@@ -212,6 +218,7 @@ MODEL_CATALOG = (
             "tool-call-content",
             "tool-call-none",
             "multiple-tool-calls",
+            "multiple-tool-calls-content",
             "tool-response",
             "named-tool-response",
             "consecutive-tool-responses",
@@ -241,7 +248,11 @@ MODEL_CATALOG = (
     _model(
         "meta-llama/Llama-3.2-1B-Instruct",
         bridge=True,
-        excluded={"multiple-tool-calls", "consecutive-tool-responses"},
+        excluded={
+            "multiple-tool-calls",
+            "multiple-tool-calls-content",
+            "consecutive-tool-responses",
+        },
         oracle_defaults={"date_string": "26 Jul 2024"},
         extra_suites={"llama-checkpoints"},
     ),
@@ -249,7 +260,11 @@ MODEL_CATALOG = (
         "meta-llama/Llama-3.2-3B-Instruct",
         shared=False,
         roundtrip=False,
-        excluded={"multiple-tool-calls", "consecutive-tool-responses"},
+        excluded={
+            "multiple-tool-calls",
+            "multiple-tool-calls-content",
+            "consecutive-tool-responses",
+        },
         oracle_defaults={"date_string": "26 Jul 2024"},
         extra_suites={"llama-checkpoints"},
     ),
@@ -260,6 +275,9 @@ MODEL_CATALOG = (
         excluded={"multi-step-tool-cycle"},
     ),
     _model("tencent/Hy3", bridge=True),
+    _model(
+        "meta-models/Muse-Glimmer-30B", bridge=True, extra_suites={"tool-arg-types"}
+    ),
     _model("thinkingmachines/Inkling", bridge=True),
     _model("thinkingmachines/Inkling-Small", bridge=True),
     _model(
@@ -479,6 +497,21 @@ SCENARIOS = (
         tools=TOOLS,
     ),
     _scenario(
+        "multiple-tool-calls-content",
+        [
+            {"role": "user", "content": "Weather in Paris and London?"},
+            {
+                "role": "assistant",
+                "content": "Let me check both.",
+                "tool_calls": [
+                    _call("Paris", id="call_1"),
+                    _call("London", id="call_2"),
+                ],
+            },
+        ],
+        tools=TOOLS,
+    ),
+    _scenario(
         "tool-response",
         [
             {"role": "user", "content": "Weather?"},
@@ -652,7 +685,13 @@ SCENARIOS = (
             {"role": "system", "content": "Late instruction"},
             {"role": "user", "content": "B"},
         ],
-        only_renderers={"laguna-xs-2.1", "laguna-s-2.1"},
+        only_renderers={
+            "laguna-xs-2.1",
+            "laguna-s-2.1",
+            "nemotron-3",
+            "nemotron-3-ultra",
+            "nemotron-3.5",
+        },
     ),
     _scenario(
         "tool-declare-message",
@@ -705,6 +744,9 @@ KWARG_VALUES: Mapping[str, tuple[Any, ...]] = {
     "conversation_start_date": ("2025-01-15", None),
     "date_string": ("26 Jul 2024", "01 Jan 2030"),
     "tools_in_user_message": (True, False),
+    "reasoning_strength": ("low", "medium", "high", "xhigh"),
+    "knowledge_cutoff": ("2026-01-04", "2025-06-30"),
+    "current_date": ("2026-10-16", None),
 }
 
 

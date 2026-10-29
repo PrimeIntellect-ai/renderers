@@ -5,6 +5,7 @@ import json
 import httpx
 import numpy as np
 import pytest
+
 from renderers import MalformedGenerateResponseError
 from renderers.base import (
     ParsedResponse,
@@ -12,7 +13,215 @@ from renderers.base import (
     RenderedTokens,
     ToolCallParseStatus,
 )
-from renderers.client import generate
+from renderers.client import (
+    _parse_compact_logprobs,
+    _parse_completion_top_logprobs,
+    generate,
+    parse_generate_response,
+)
+
+
+def _compact_choice(choice):
+    entries = choice["logprobs"]["content"]
+    ids, values, offsets = [], [], [0]
+    for entry in entries:
+        # Flat vLLM storage retains the sampled token even when it repeats in top-k.
+        for candidate in [entry, *entry.get("top_logprobs", [])]:
+            ids.append(
+                candidate["token_id"]
+                if "token_id" in candidate
+                else int(candidate["token"].removeprefix("token_id:"))
+            )
+            values.append(candidate["logprob"])
+        offsets.append(len(ids))
+    raw = (
+        np.asarray(ids, dtype="<u4").tobytes()
+        + np.asarray(values, dtype="<f4").tobytes()
+    )
+    return {
+        **choice,
+        "logprobs": None,
+        "compact_logprobs": {
+            "data": base64.b64encode(raw).decode("ascii"),
+            "format": "u32-f32-le-v1",
+            "offsets": offsets,
+            "num_top_logprobs": max(
+                (len(e.get("top_logprobs", [])) for e in entries), default=0
+            ),
+        },
+    }
+
+
+def _parse_test_head(choice, sampled, k, compact):
+    if compact:
+        _, ids, logprobs = _parse_compact_logprobs(_compact_choice(choice), sampled, k)
+        return ids, logprobs
+    return _parse_completion_top_logprobs(choice, sampled, k)
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"format": "unknown"},
+        {"offsets": None},
+        {"offsets": []},
+        {"offsets": [1, 2]},
+        {"offsets": [0, 0]},
+        {"offsets": [0, -1]},
+        {"offsets": [False, 1]},
+        {"offsets": [0, 1.5]},
+        {"offsets": [0, 100]},
+        {"num_top_logprobs": True},
+        {"num_top_logprobs": -2},
+        {"data": "?"},
+        {"data": None},
+        {"data": ""},
+    ],
+)
+def test_compact_logprobs_reject_malformed_payload(update):
+    choice = _compact_choice(
+        {"logprobs": {"content": [{"token": "token_id:7", "logprob": -0.1}]}}
+    )
+    choice["compact_logprobs"].update(update)
+    with pytest.raises(MalformedGenerateResponseError):
+        _parse_compact_logprobs(choice, [7], None)
+
+
+@pytest.mark.parametrize(
+    "logprob", [float("nan"), float("inf"), float("-inf"), 0.1, -9999.0]
+)
+def test_compact_logprobs_require_valid_sampled_evidence(logprob):
+    choice = _compact_choice(
+        {"logprobs": {"content": [{"token": "token_id:7", "logprob": logprob}]}}
+    )
+    with pytest.raises(MalformedGenerateResponseError):
+        _parse_compact_logprobs(choice, [7], None)
+    choice = _compact_choice(
+        {"logprobs": {"content": [{"token": "token_id:7", "logprob": -0.1}]}}
+    )
+    with pytest.raises(MalformedGenerateResponseError, match="Missing compact sampled"):
+        _parse_compact_logprobs(choice, [8], None)
+
+
+@pytest.mark.parametrize("separators", [(",", ":"), (", ", ": ")])
+def test_parse_generate_response_preserves_multiple_compact_choices(separators):
+    choices = [
+        _compact_choice(
+            {
+                "logprobs": {"content": [{"token": f"token_id:{i}", "logprob": -0.5}]},
+                "routed_experts": {
+                    "data": base64.b64encode(bytes([i])).decode("ascii"),
+                    "shape": [1, 1, 1],
+                },
+            }
+        )
+        for i in (7, 8)
+    ]
+    choices.append(_compact_choice({"logprobs": {"content": []}}))
+    payload = parse_generate_response(
+        json.dumps({"choices": choices}, separators=separators).encode(),
+    )
+    for i, choice in zip((7, 8), payload["choices"]):
+        sampled, top_ids, top_logprobs = _parse_compact_logprobs(choice, [i], None)
+        assert sampled.dtype == np.float32 and sampled.tolist() == [-0.5]
+        assert top_ids is None and top_logprobs is None
+        assert base64.b64decode(choice["routed_experts"]["data"]) == bytes([i])
+    sampled, top_ids, top_logprobs = _parse_compact_logprobs(
+        payload["choices"][2], [], 2
+    )
+    assert sampled.tolist() == [] and top_ids == [] and top_logprobs == []
+
+
+@pytest.mark.parametrize("sampled", [1, 3, 5])
+@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize(
+    "probabilities, expected_ids",
+    [
+        ({1: 0.6, 2: 0.25, 3: 0.1, 4: 0.04, 5: 0.01}, [1, 2]),
+        ({1: 0.4, 2: 0.2, 3: 0.2, 4: 0.1, 5: 0.1}, [1]),
+    ],
+)
+def test_top_logprobs_head_is_independent_of_sampled_action(
+    sampled, probabilities, expected_ids, compact
+):
+    import math
+
+    order = [sampled, *[i for i in probabilities if i != sampled]][:4]
+    entry = {
+        "token": f"token_id:{sampled}",
+        "logprob": math.log(probabilities[sampled]),
+        "top_logprobs": [
+            {"token": f"token_id:{i}", "logprob": math.log(probabilities[i])}
+            for i in order
+        ],
+    }
+    ids, logprobs = _parse_test_head(
+        {"logprobs": {"content": [entry]}}, [sampled], 2, compact
+    )
+    assert ids == [expected_ids]
+    np.testing.assert_allclose(
+        np.exp(logprobs), [[probabilities[i] for i in expected_ids]]
+    )
+
+    entry["top_logprobs"] = entry["top_logprobs"][:2]
+    with pytest.raises(MalformedGenerateResponseError, match="fewer top logprobs"):
+        _parse_test_head({"logprobs": {"content": [entry]}}, [sampled], 2, compact)
+
+
+@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("error", [None, "missing", "mass", "mask"])
+def test_top_logprobs_preserve_complete_replay_support(compact, packed, error):
+    import math
+
+    probabilities = {1: 0.6, 2: 0.2, 3: 0.2}
+    if error == "mass":
+        probabilities[1] = 0.5
+    entry = {
+        "token": "token_id:3",
+        "logprob": math.log(probabilities[3]),
+        "top_logprobs": [
+            {"token": f"token_id:{i}", "logprob": math.log(p)}
+            for i, p in probabilities.items()
+            if error != "missing" or i != 2
+        ],
+    }
+    support = [1, 2] if error == "mask" else [3, 1, 2]
+    mask = [support]
+    if packed:
+        mask = {
+            name: {
+                "data": base64.b64encode(np.asarray(values, dtype=np.int32)).decode(),
+                "shape": [len(values)],
+                "dtype": "int32",
+            }
+            for name, values in (("ids", support), ("counts", [len(support)]))
+        }
+    choice = {"logprobs": {"content": [entry]}, "sampling_mask": mask}
+    if error is not None:
+        with pytest.raises(MalformedGenerateResponseError):
+            _parse_test_head(choice, [3], 2, compact)
+    else:
+        ids, logprobs = _parse_test_head(choice, [3], 2, compact)
+        assert ids == [[1, 2, 3]]
+        np.testing.assert_allclose(np.exp(logprobs), [[0.6, 0.2, 0.2]])
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_top_logprobs_preserve_filtered_candidates(compact):
+    entry = {
+        "token": "token_id:1",
+        "logprob": -0.5,
+        "top_logprobs": [
+            {"token": f"token_id:{i}", "logprob": p}
+            for i, p in [(1, -0.5), (2, -2.0), (3, -9999.0)]
+        ],
+    }
+    choice = {"logprobs": {"content": [entry]}}
+    assert _parse_test_head(choice, [1], 1, compact) == ([[1]], [[-0.5]])
+    entry["top_logprobs"][0]["logprob"] = -0.6
+    with pytest.raises(MalformedGenerateResponseError, match="disagree"):
+        _parse_test_head(choice, [1], 1, compact)
 
 
 class _FakeRenderer:
@@ -130,10 +339,38 @@ def _run_generate(client, renderer=None):
         },
     ],
 )
-def test_generate_builds_request_body_and_parses_response(usage):
+@pytest.mark.parametrize("head_size", [None, 2])
+@pytest.mark.parametrize("transport", ["native", "compact", "opt_out"])
+@pytest.mark.parametrize("numeric_ids", [False, True])
+def test_generate_builds_request_body_and_parses_response(
+    usage, head_size, transport, numeric_ids
+):
     client = _FakeClient()
     client.usage = usage
     renderer = _FakeRenderer()
+    sampling_params = {"temperature": 0.3, "max_tokens": 7, "min_tokens": 2}
+    if head_size is not None:
+        sampling_params["logprobs"] = head_size
+        for entry in client.choice["logprobs"]["content"]:
+            entry["top_logprobs"] = [
+                {"token": entry["token"], "logprob": entry["logprob"]},
+                {"token": "token_id:20", "logprob": -4.0},
+                {"token": "token_id:21", "logprob": -5.0},
+                {"token": "token_id:22", "logprob": -6.0},
+            ]
+    if numeric_ids:
+        for entry in client.choice["logprobs"]["content"]:
+            for candidate in [entry, *entry.get("top_logprobs", [])]:
+                candidate["token_id"] = int(candidate.pop("token")[9:])
+    extra_args = (
+        {"prl_compact_logprobs": False, "custom_arg": 7}
+        if transport == "opt_out"
+        else None
+    )
+    if extra_args is not None:
+        sampling_params["extra_args"] = extra_args
+    if head_size is not None and transport == "compact":
+        client.choice = _compact_choice(client.choice)
 
     result = asyncio.run(
         generate(
@@ -142,7 +379,7 @@ def test_generate_builds_request_body_and_parses_response(usage):
             messages=[{"role": "user", "content": "hi"}],
             model="test-model",
             tools=[{"type": "function", "function": {"name": "echo"}}],
-            sampling_params={"temperature": 0.3, "max_tokens": 7, "min_tokens": 2},
+            sampling_params=sampling_params,
             cache_salt="ckpt-42",
         )
     )
@@ -167,7 +404,15 @@ def test_generate_builds_request_body_and_parses_response(usage):
             "max_tokens": 7,
             "min_tokens": 2,
             "stop_token_ids": [99],
-            "logprobs": 1,
+            "logprobs": head_size + 2 if head_size is not None else 1,
+            **(
+                {
+                    "extra_args": {"prl_compact_logprobs": True},
+                }
+                if head_size
+                else {}
+            ),
+            **({"extra_args": extra_args} if extra_args is not None else {}),
             "skip_special_tokens": False,
         },
     }
@@ -178,7 +423,17 @@ def test_generate_builds_request_body_and_parses_response(usage):
     assert result["reasoning_content"] == "think"
     assert result["prompt_ids"] == [1, 2, 3]
     assert result["completion_ids"] == [7, 8]
-    assert result["completion_logprobs"] == [-0.1, -0.2]
+    np.testing.assert_allclose(result["completion_logprobs"], [-0.1, -0.2])
+    if head_size is not None:
+        assert result["completion_top_ids"] == [[7, 20], [8, 20]]
+        np.testing.assert_allclose(
+            result["completion_top_logprobs"], [[-0.1, -4.0], [-0.2, -4.0]]
+        )
+    else:
+        assert result["completion_top_ids"] is None
+        assert result["completion_top_logprobs"] is None
+    if extra_args is not None:
+        assert extra_args == {"prl_compact_logprobs": False, "custom_arg": 7}
     assert result["routed_experts"]["shape"] == [2, 1, 1]
     assert isinstance(result["routed_experts"]["data"], memoryview)
     assert result["routed_experts"]["data"].tobytes() == base64.b64encode(b"\x01\x02")
@@ -316,9 +571,20 @@ def test_generate_rejects_vllm_missing_logprob_sentinel():
         _run_generate(client)
 
 
-def test_generate_rejects_logprob_token_id_mismatch():
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"token": "token_id:8"},
+        {"token_id": 8},
+        {"token_id": True},
+        {"token_id": -1},
+        {"token_id": "7"},
+        {"token_id": None},
+    ],
+)
+def test_generate_rejects_logprob_token_id_mismatch(identity):
     client = _FakeClient()
-    client.choice["logprobs"]["content"][0]["token"] = "token_id:8"
+    client.choice["logprobs"]["content"][0].update(identity)
 
     with pytest.raises(
         MalformedGenerateResponseError,
@@ -333,7 +599,35 @@ def test_generate_preserves_zero_completion_logprob():
 
     result = _run_generate(client)
 
-    assert result["completion_logprobs"] == [0.0, -0.2]
+    assert result["completion_logprobs"] == pytest.approx([0.0, -0.2])
+
+
+def test_generate_reads_packed_completion_logprobs():
+    client = _FakeClient()
+    client.choice.pop("logprobs")
+    values = np.array([-0.1, 0.0], dtype=np.float32)
+    client.choice["completion_logprobs"] = {
+        "data": base64.b64encode(values.tobytes()).decode(),
+        "shape": [2],
+        "dtype": "float32",
+    }
+
+    result = _run_generate(client)
+
+    assert result["completion_logprobs"].dtype == np.float32
+    assert result["completion_logprobs"].tolist() == values.tolist()
+
+    client.choice["completion_logprobs"]["data"] = base64.b64encode(
+        np.array([-0.1, -9999.0], dtype=np.float32).tobytes()
+    ).decode()
+    with pytest.raises(MalformedGenerateResponseError, match="missing"):
+        _run_generate(client)
+
+    client.choice["completion_logprobs"]["data"] = base64.b64encode(
+        np.array([-0.1, np.inf], dtype=np.float32).tobytes()
+    ).decode()
+    with pytest.raises(MalformedGenerateResponseError, match="non-finite"):
+        _run_generate(client)
 
 
 class _MalformedToolRenderer(_FakeRenderer):
@@ -444,6 +738,8 @@ def test_generate_threads_prompt_attribution_through_prebuilt_prompt_path():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.model
+@pytest.mark.multimodal
 @pytest.mark.parametrize(
     "model_id,renderer_class_path",
     [
@@ -467,11 +763,9 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
     pytest.importorskip("vllm", reason="vllm needed for features serialization")
 
     import torch as _torch
-    from renderers.base import (
-        MultiModalData,
-        PlaceholderRange,
-        load_tokenizer,
-    )
+
+    from renderers.base import MultiModalData, PlaceholderRange
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     mod_name, cls_name = renderer_class_path.split(":")
     renderer_cls = getattr(importlib.import_module(mod_name), cls_name)
@@ -537,14 +831,18 @@ def test_generate_serializes_multimodal_features_for_qwen_vl_family(
         assert isinstance(item, str) and len(item) > 0
 
 
+@pytest.mark.model
+@pytest.mark.multimodal
 def test_generate_serializes_multimodal_features_for_gemma4():
     """Gemma 4's HF image positions are translated to vLLM's field name."""
     pytest.importorskip("torch")
     pytest.importorskip("vllm", reason="vllm needed for features serialization")
 
     import torch as _torch
-    from renderers.base import MultiModalData, PlaceholderRange, load_tokenizer
+
+    from renderers.base import MultiModalData, PlaceholderRange
     from renderers.gemma4 import Gemma4Renderer
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     renderer = Gemma4Renderer(load_tokenizer("google/gemma-4-31B-it"))
     mm_data = MultiModalData(
@@ -851,5 +1149,5 @@ def test_generate_forwards_reasoning_state_without_classifying_acceptance(
     assert result["reasoning_complete"] is reasoning_complete
     assert result["finish_reason"] == finish
     assert result["completion_ids"] == [7, 8]
-    assert result["completion_logprobs"] == [-0.1, -0.2]
+    assert result["completion_logprobs"] == pytest.approx([-0.1, -0.2])
     assert result["content"] == ""

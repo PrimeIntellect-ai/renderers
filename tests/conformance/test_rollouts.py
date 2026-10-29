@@ -2,6 +2,7 @@
 
 import asyncio
 
+import numpy as np
 import pytest
 
 from renderers.client import generate
@@ -14,6 +15,8 @@ from tests.conformance.harness import (
     tokenizer,
 )
 from tests.parity import MODEL_CATALOG, kwarg_combinations
+
+pytestmark = pytest.mark.model
 
 
 def matrix():
@@ -194,7 +197,9 @@ def test_three_turn_client_rollout(case, kwargs):
         )
         assert result["prompt_ids"] == prompt
         assert result["completion_ids"] == completion
-        assert result["completion_logprobs"] == [-0.5] * len(completion)
+        np.testing.assert_array_equal(
+            result["completion_logprobs"], [-0.5] * len(completion)
+        )
         assert result["content"] == content
         # Empty channel versus absent channel has the same OpenAI projection;
         # do not normalize ANY nonempty reasoning or content whitespace.
@@ -251,7 +256,7 @@ def test_budget_stop_preserves_sampled_prefix(case, kwargs):
     )
     assert result["prompt_ids"] == prompt
     assert result["completion_ids"] == sampled
-    assert result["completion_logprobs"] == [-0.5] * len(sampled)
+    np.testing.assert_array_equal(result["completion_logprobs"], [-0.5] * len(sampled))
     assert result["finish_reason"] == "length"
     bridge = native.bridge_to_next_turn(
         prompt, sampled, [{"role": "user", "content": "Continue."}]

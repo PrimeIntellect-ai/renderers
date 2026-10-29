@@ -7,8 +7,12 @@ Runs against every (model, renderer) pair.
 from functools import lru_cache
 
 import pytest
+
 from renderers import create_renderer
-from renderers.base import ToolCallParseStatus, load_tokenizer
+from renderers.base import ToolCallParseStatus
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 
 @lru_cache
@@ -349,3 +353,12 @@ def test_deepseek_v3_in_think_section_is_not_a_real_call():
     assert parsed.reasoning_content is not None
     assert "draft_tool" in parsed.reasoning_content
     assert parsed.content == "Go."
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _qwen3_vl.cache_clear()
+    _qwen3.cache_clear()
+    _prime_qwen3.cache_clear()
+    _kimi_k25.cache_clear()
+    _deepseek_v3.cache_clear()

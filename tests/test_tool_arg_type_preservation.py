@@ -13,6 +13,9 @@ reference parsers (e.g. ``vllm/glm45_tool_parser.py``). The hermes-JSON
 (Qwen3) and section-JSON (Kimi K2) parsers sidestep the bug because
 their wire format quotes strings; both serve as controls.
 
+Muse Glimmer follows vLLM's schema-independent JSON decoding instead, so
+its cases assert decoded values even when the schema declares a string.
+
 Originally raised by Robin (Poolside) on PR #21.
 """
 
@@ -25,6 +28,10 @@ from typing import Any
 import pytest
 from parity import models_for
 
+from renderers.muse_glimmer import MuseGlimmerRenderer
+
+pytestmark = pytest.mark.model
+
 
 # (HuggingFace model name, renderer name). Two JSON-shaped controls
 # (string types already preserved by the wire format) + five XML-style
@@ -35,7 +42,7 @@ _MODELS = [(case.model, case.renderer) for case in models_for("tool-arg-types")]
 @lru_cache(maxsize=None)
 def _load(model: str, renderer_name: str):
     from renderers import config_from_name, create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     tok = load_tokenizer(model)
     return tok, create_renderer(tok, config_from_name(renderer_name))
@@ -61,15 +68,17 @@ PROMPT = [
 ]
 
 
-# Each case: a single ``x`` argument whose value is a STRING that
-# happens to be valid JSON of another type. With a schema declaring
-# ``x: string``, the parser must return the string verbatim.
-JSON_LOOKING_STRING_ARGS = [
+# String values retain their type and whitespace when the schema declares
+# ``x: string``, including values that happen to be valid JSON of another type.
+STRING_ARG_CASES = [
     pytest.param({"x": "true"}, id="string-bool"),
     pytest.param({"x": "42"}, id="string-int"),
     pytest.param({"x": "null"}, id="string-null"),
     pytest.param({"x": "[1,2,3]"}, id="string-array"),
     pytest.param({"x": '{"k": 1}'}, id="string-object"),
+    pytest.param({"x": "  Paris\nMünchen ☁  "}, id="string-whitespace"),
+    pytest.param({"x": "\n leading and trailing newline\n"}, id="string-newline"),
+    pytest.param({"x": ""}, id="string-empty"),
 ]
 
 
@@ -109,10 +118,9 @@ def _extract_assistant_tokens(renderer, prompt, assistant_msg, *, tools=None):
     return full_ids[len(prompt_ids) :]
 
 
-@pytest.mark.parametrize("args", JSON_LOOKING_STRING_ARGS)
-def test_string_arg_preserves_type(model, renderer_name, renderer, args):
-    """Tool-call args of declared type ``str`` must round-trip as ``str``,
-    not get re-parsed as bool/int/null/list/dict by the parser."""
+@pytest.mark.parametrize("args", STRING_ARG_CASES)
+def test_string_arg_follows_parser_contract(model, renderer_name, renderer, args):
+    """Preserve declared strings unless the reference parser decodes JSON."""
     msg = {
         "role": "assistant",
         "content": "",
@@ -128,8 +136,13 @@ def test_string_arg_preserves_type(model, renderer_name, renderer, args):
 
     assert parsed.tool_calls, f"{model}: parser returned no tool_calls"
     got = _normalize_args(parsed.tool_calls[0].arguments)
-    assert got == args, (
-        f"{model}: tool-arg type drift — sent {args!r}, parser returned {got!r}"
+    expected = (
+        {key: _normalize_args(value) for key, value in args.items()}
+        if isinstance(renderer, MuseGlimmerRenderer)
+        else args
+    )
+    assert got == expected, (
+        f"{model}: tool-arg type drift — expected {expected!r}, parser returned {got!r}"
     )
 
 
@@ -203,3 +216,8 @@ def test_union_with_string_emits_ok_status(
     assert got == args, (
         f"{model}: tool-arg drift — sent {args!r}, parser returned {got!r}"
     )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _load.cache_clear()

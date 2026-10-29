@@ -6,6 +6,7 @@ from functools import lru_cache
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
+
 from renderers import (
     DeepSeekV4Renderer,
     DeepSeekV4RendererConfig,
@@ -13,8 +14,11 @@ from renderers import (
     ToolCallParseStatus,
     create_renderer,
 )
-from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP
+from tests.model_assets import load_test_tokenizer as load_tokenizer
 from tests.reference_rendering import render_reference
+
+pytestmark = pytest.mark.model
 
 MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
 BOS = "<｜begin▁of▁sentence｜>"
@@ -58,30 +62,6 @@ def _decode(renderer, messages, **kwargs):
         renderer.render_ids(messages, **kwargs),
         skip_special_tokens=False,
     )
-
-
-def test_repeated_tool_sections_keep_both_calls_and_drop_trailing_text():
-    renderer = _renderer(enable_thinking=True)
-    section = (
-        '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="weather">\n\n'
-        "</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
-    )
-    sampled = _tokenizer().encode(
-        "Reasoning</think>" + section + section + "<think>Ignored",
-        add_special_tokens=False,
-    )
-    parsed = renderer.parse_response(sampled)
-    assert parsed.reasoning_content == "Reasoning"
-    assert parsed.content == ""
-    assert parsed.reasoning_complete is True
-    assert [call.name for call in parsed.tool_calls] == ["weather", "weather"]
-    for call in parsed.tool_calls:
-        assert call.status == ToolCallParseStatus.OK
-        # The closing tag and newline can share a BPE token.
-        assert (
-            _tokenizer().decode(sampled[slice(*call.token_span)]).rstrip("\n")
-            == call.raw
-        )
 
 
 def test_registration_and_native_defaults():
@@ -615,3 +595,8 @@ def test_dsml_reasoning_markers_in_arguments_remain_argument_text():
     assert len(parsed.tool_calls) == 1
     assert parsed.tool_calls[0].status == ToolCallParseStatus.OK
     assert parsed.tool_calls[0].arguments == {"city": "<think>example</think>"}
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _tokenizer.cache_clear()

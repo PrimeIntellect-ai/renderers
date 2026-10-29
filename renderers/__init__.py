@@ -6,6 +6,8 @@ except ImportError:
     # installs always have it.
     __version__ = "0+unknown"
 
+from typing import TYPE_CHECKING
+
 from renderers.base import (
     MULTIMODAL_MODELS,
     ChatTemplateTokenizer,
@@ -42,7 +44,6 @@ from renderers.base import (
     template_field_names,
     trim_to_turn_close,
 )
-from renderers.client import MalformedGenerateResponseError, OverlongPromptError
 from renderers.configs import (
     AutoRendererConfig,
     BaseRendererConfig,
@@ -55,6 +56,7 @@ from renderers.configs import (
     GLM5RendererConfig,
     GLM45RendererConfig,
     GLM51RendererConfig,
+    GLM53FlashRendererConfig,
     GLM53RendererConfig,
     GptOssRendererConfig,
     Hy3RendererConfig,
@@ -67,6 +69,7 @@ from renderers.configs import (
     LagunaXS21RendererConfig,
     Llama3RendererConfig,
     MiniMaxM2RendererConfig,
+    MuseGlimmerRendererConfig,
     Nemotron3RendererConfig,
     Nemotron3UltraRendererConfig,
     Nemotron35RendererConfig,
@@ -81,20 +84,25 @@ from renderers.configs import (
 )
 from renderers.custom import custom_renderer_config, load_custom_renderer, load_target
 
-# Concrete renderer classes are lazy-loaded so that consumers needing only the
-# config layer (``RendererConfig`` discriminated union) don't import every
-# renderer module. Renderer tokenizer annotations use the local ``Tokenizer``
-# protocols, so resolving a text renderer remains safe when the optional
+if TYPE_CHECKING:
+    from renderers.client import MalformedGenerateResponseError, OverlongPromptError
+
+# Concrete renderer classes and the HTTP client's errors are lazy-loaded so that
+# consumers needing only the config layer (``RendererConfig`` discriminated union)
+# import neither every renderer module nor the OpenAI client. Renderer tokenizer
+# annotations use the local ``Tokenizer`` protocols, so resolving a text renderer
+# remains safe when the optional
 # ``transformers`` dependency is absent. ``__getattr__`` (PEP 562) resolves the
 # names on first attribute access, while ``renderers.base._populate_registry``
 # handles lazy registration for ``create_renderer``.
-_LAZY_RENDERERS: dict[str, str] = {
+_LAZY_EXPORTS: dict[str, str] = {
     "DeepSeekR1Renderer": "renderers.deepseek_r1",
     "DeepSeekV3Renderer": "renderers.deepseek_v3",
     "DeepSeekV4Renderer": "renderers.deepseek_v4",
     "DefaultRenderer": "renderers.default",
     "GLM45Renderer": "renderers.glm45",
     "GLM51Renderer": "renderers.glm5",
+    "GLM53FlashRenderer": "renderers.glm5",
     "GLM53Renderer": "renderers.glm5",
     "GLM5Renderer": "renderers.glm5",
     "GptOssRenderer": "renderers.gpt_oss",
@@ -108,10 +116,13 @@ _LAZY_RENDERERS: dict[str, str] = {
     "LagunaXS21Renderer": "renderers.laguna_xs2",
     "LagunaXS2Renderer": "renderers.laguna_xs2",
     "Llama3Renderer": "renderers.llama_3",
+    "MalformedGenerateResponseError": "renderers.client",
     "MiniMaxM2Renderer": "renderers.minimax_m2",
+    "MuseGlimmerRenderer": "renderers.muse_glimmer",
     "Nemotron35Renderer": "renderers.nemotron3",
     "Nemotron3Renderer": "renderers.nemotron3",
     "Nemotron3UltraRenderer": "renderers.nemotron3",
+    "OverlongPromptError": "renderers.client",
     "PrimeQwen3Renderer": "renderers.prime_qwen3",
     "Qwen35Renderer": "renderers.qwen35",
     "Qwen36Renderer": "renderers.qwen36",
@@ -122,10 +133,10 @@ _LAZY_RENDERERS: dict[str, str] = {
 
 
 def __getattr__(name: str):
-    if name in _LAZY_RENDERERS:
+    if name in _LAZY_EXPORTS:
         import importlib
 
-        module = importlib.import_module(_LAZY_RENDERERS[name])
+        module = importlib.import_module(_LAZY_EXPORTS[name])
         value = getattr(module, name)
         globals()[name] = value  # cache for subsequent lookups
         return value
@@ -133,7 +144,7 @@ def __getattr__(name: str):
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals().keys()) | set(_LAZY_RENDERERS))
+    return sorted(set(globals().keys()) | set(_LAZY_EXPORTS))
 
 
 __all__ = [
@@ -155,6 +166,8 @@ __all__ = [
     "GLM45RendererConfig",
     "GLM51Renderer",
     "GLM51RendererConfig",
+    "GLM53FlashRenderer",
+    "GLM53FlashRendererConfig",
     "GLM53Renderer",
     "GLM53RendererConfig",
     "GLM5Renderer",
@@ -189,6 +202,8 @@ __all__ = [
     "MiniMaxM2RendererConfig",
     "MultiModalData",
     "MultimodalRenderer",
+    "MuseGlimmerRenderer",
+    "MuseGlimmerRendererConfig",
     "Nemotron35Renderer",
     "Nemotron35RendererConfig",
     "Nemotron3Renderer",

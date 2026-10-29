@@ -3,24 +3,21 @@
 from __future__ import annotations
 
 import json
-import os
-from functools import cache
-from pathlib import Path
+from functools import lru_cache
 from typing import Any
 
 import httpx
 
 from renderers import config_from_name, create_renderer
-from renderers.base import load_tokenizer
 from tests.conformance.encoder import deepseek_reference
+from tests.model_assets import load_test_tokenizer
 from tests.parity import ModelCase
-from tests.reference_rendering import _harmony_messages, render_reference
+from tests.reference_rendering import render_reference
 
 
-@cache
+@lru_cache(maxsize=1)
 def tokenizer(model: str):
-    pins = json.loads(Path(__file__).with_name("tokenizers.json").read_text())
-    return load_tokenizer(model, revision=pins[model]["revision"])
+    return load_test_tokenizer(model)
 
 
 def renderer(case: ModelCase, kwargs: dict[str, Any]):
@@ -34,42 +31,13 @@ def renderer(case: ModelCase, kwargs: dict[str, Any]):
 def reference(case: ModelCase, messages: list, kwargs: dict, **render_kwargs):
     options = dict(case.oracle_defaults) | kwargs
     options = {key: value for key, value in options.items() if value is not None}
-    if (
-        case.oracle == "deepseek-v4"
-        and os.environ.get("RENDERERS_UPSTREAM_ENCODER") == "1"
-    ):
+    if case.oracle == "deepseek-v4":
         return deepseek_reference(
             tokenizer(case.model), messages, **options, **render_kwargs
         )
     return render_reference(
         tokenizer(case.model), messages, oracle=case.oracle, **options, **render_kwargs
     )
-
-
-def unmodified_generation_reference(case: ModelCase, messages: list, kwargs: dict):
-    if case.oracle != "harmony":
-        return reference(case, messages, kwargs, add_generation_prompt=True)
-    # Check the official encoder's default separately from the existing
-    # forced-analysis profile; a shared oracle/renderer assumption can hide drift.
-    from openai_harmony import (
-        Conversation,
-        HarmonyEncodingName,
-        Role,
-        load_harmony_encoding,
-    )
-
-    options = {key: value for key, value in kwargs.items() if value is not None}
-    conversation = Conversation.from_messages(
-        _harmony_messages(
-            messages,
-            tools=None,
-            reasoning_effort=options.get("reasoning_effort", "medium"),
-            conversation_start_date=options.get("conversation_start_date"),
-        )
-    )
-    return load_harmony_encoding(
-        HarmonyEncodingName.HARMONY_GPT_OSS
-    ).render_conversation_for_completion(conversation, next_turn_role=Role.ASSISTANT)
 
 
 def assert_tokens(actual: list[int], expected: list[int], case: ModelCase):

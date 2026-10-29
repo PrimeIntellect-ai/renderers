@@ -2,6 +2,7 @@
 
 import asyncio
 
+import numpy as np
 import pytest
 
 from renderers import config_from_name, create_renderer
@@ -16,6 +17,8 @@ from tests.conformance.harness import (
     tokenizer,
 )
 from tests.parity import MODEL_CATALOG, TOOLS
+
+pytestmark = pytest.mark.model
 
 
 def cases():
@@ -163,7 +166,9 @@ def test_two_tool_cycles(case, city):
         )
         assert result["prompt_ids"] == prompt
         assert result["completion_ids"] == completion
-        assert result["completion_logprobs"] == [-0.5] * len(completion)
+        np.testing.assert_array_equal(
+            result["completion_logprobs"], [-0.5] * len(completion)
+        )
         assert len(result["tool_calls"]) == 1
         call = result["tool_calls"][0]
         assert call.status == ToolCallParseStatus.OK

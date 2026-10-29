@@ -14,13 +14,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
 
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
+    _content_mask_or_empty,
+    _get_offset_tokenizer,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -55,9 +58,15 @@ _TOOLS_INSTRUCTIONS = (
 class MiniMaxM2Renderer:
     """Deterministic message → token renderer for MiniMax M2 / M2.5 models."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Only assistants after the last user retain reasoning.
+        return False
+
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: MiniMaxM2RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
@@ -165,9 +174,14 @@ class MiniMaxM2Renderer:
             BPE merges it with the wrap's trailing byte (``>The`` →
             single token).
             """
-            from renderers.base import _get_offset_tokenizer
-
             offset_tok = _get_offset_tokenizer(self._tokenizer)
+            if offset_tok is None:
+                ids = self._encode(full_text)
+                tokens.extend(ids)
+                indices.extend([msg_idx] * len(ids))
+                sampled.extend([is_sampled] * len(ids))
+                content_mask.extend([False] * len(ids))
+                return
             encoding = offset_tok(
                 full_text, add_special_tokens=False, return_offsets_mapping=True
             )
@@ -275,7 +289,7 @@ class MiniMaxM2Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
@@ -298,6 +312,7 @@ class MiniMaxM2Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_minimax(
             self._tokenizer,
@@ -308,6 +323,12 @@ class MiniMaxM2Renderer:
             tool_call_id=self._tool_call_tok,
             tool_call_end_id=self._tool_call_end_tok,
             tools=tools,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=set(self.get_stop_token_ids()),
+                assistant_prefix="]~b]ai\n",
+            ),
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -327,6 +348,20 @@ class MiniMaxM2Renderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_call_tok,
+            tool_start_closes_reasoning=True,
+            assistant_prefix="]~b]ai\n",
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._think_end]
 
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
@@ -401,9 +436,14 @@ class MiniMaxM2Renderer:
             *,
             is_sampled: bool,
         ) -> None:
-            from renderers.base import _get_offset_tokenizer
-
             offset_tok = _get_offset_tokenizer(self._tokenizer)
+            if offset_tok is None:
+                ids = self._encode(full_text)
+                ext.extend(ids)
+                ext_indices.extend([msg_idx] * len(ids))
+                ext_sampled.extend([is_sampled] * len(ids))
+                ext_content.extend([False] * len(ids))
+                return
             encoding = offset_tok(
                 full_text, add_special_tokens=False, return_offsets_mapping=True
             )
@@ -463,7 +503,9 @@ class MiniMaxM2Renderer:
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=[False] * len(previous_ids) + ext_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer, [False] * len(previous_ids) + ext_content
+            ),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
         )

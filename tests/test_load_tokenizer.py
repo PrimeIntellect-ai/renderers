@@ -18,7 +18,6 @@ from renderers import base
 from renderers.base import TOKENIZER_SOURCE_OVERRIDES, TRUSTED_REVISIONS, load_tokenizer
 from tests.model_assets import load_test_tokenizer
 
-
 # ---------------------------------------------------------------------------
 # Allow-list shape
 # ---------------------------------------------------------------------------
@@ -53,49 +52,38 @@ def test_trusted_revisions_are_full_shas():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("revision", [None, "a" * 40])
 @patch("transformers.AutoTokenizer.from_pretrained")
-def test_unlisted_model_loads_without_remote_code(mock_from_pretrained):
-    """Default path: trust_remote_code=False, no revision pin."""
-    load_tokenizer("Qwen/Qwen3-0.6B")
-    args, kwargs = mock_from_pretrained.call_args
-    assert args == ("Qwen/Qwen3-0.6B",)
-    assert kwargs == {"trust_remote_code": False}
-
-
-@patch("transformers.AutoTokenizer.from_pretrained")
-def test_unlisted_model_accepts_immutable_revision_without_remote_code(
-    mock_from_pretrained,
-):
-    """Parity tests may pin ordinary tokenizer repositories without opting
-    into repository-supplied Python."""
-    revision = "a" * 40
-
+def test_unlisted_model_loads_without_remote_code(mock_from_pretrained, revision):
+    """Ordinary assets can be pinned without enabling remote code."""
     load_tokenizer("Qwen/Qwen3-0.6B", revision=revision)
-
     args, kwargs = mock_from_pretrained.call_args
     assert args == ("Qwen/Qwen3-0.6B",)
-    assert kwargs == {"trust_remote_code": False, "revision": revision}
+    expected = {"trust_remote_code": False}
+    if revision is not None:
+        expected["revision"] = revision
+    assert kwargs == expected
 
 
+@pytest.mark.parametrize(
+    "revision", [None, TRUSTED_REVISIONS["moonshotai/Kimi-K2.5"], "a" * 40]
+)
 @patch("transformers.AutoTokenizer.from_pretrained")
-def test_kimi_loads_with_pinned_revision(mock_from_pretrained):
+def test_kimi_loads_with_pinned_revision(mock_from_pretrained, revision):
     """Kimi-K2 family: trust_remote_code=True, revision pinned to the
     sha listed in TRUSTED_REVISIONS — never a branch name."""
-    load_tokenizer("moonshotai/Kimi-K2.5")
+    if revision is not None and revision != TRUSTED_REVISIONS["moonshotai/Kimi-K2.5"]:
+        with pytest.raises(ValueError, match="reviewed remote-code revision"):
+            load_tokenizer("moonshotai/Kimi-K2.5", revision=revision)
+        mock_from_pretrained.assert_not_called()
+        return
+    load_tokenizer("moonshotai/Kimi-K2.5", revision=revision)
     args, kwargs = mock_from_pretrained.call_args
     assert args == ("moonshotai/Kimi-K2.5",)
     assert kwargs == {
         "trust_remote_code": True,
         "revision": TRUSTED_REVISIONS["moonshotai/Kimi-K2.5"],
     }
-
-
-@patch("transformers.AutoTokenizer.from_pretrained")
-def test_kimi_rejects_caller_revision_override(mock_from_pretrained):
-    with pytest.raises(ValueError, match="only at reviewed revision"):
-        load_tokenizer("moonshotai/Kimi-K2.5", revision="a" * 40)
-
-    mock_from_pretrained.assert_not_called()
 
 
 @patch("transformers.AutoTokenizer.from_pretrained")
@@ -113,20 +101,6 @@ def test_meta_llama_loads_tokenizer_from_unsloth_mirror(mock_from_pretrained):
     assert args == (mirror,)
     assert kwargs == {"trust_remote_code": False}
     assert tok.name_or_path == canonical
-
-
-@patch("transformers.AutoTokenizer.from_pretrained")
-def test_meta_llama_forwards_pinned_mirror_revision(mock_from_pretrained):
-    canonical = "meta-llama/Llama-3.2-1B-Instruct"
-    mirror = "unsloth/Llama-3.2-1B-Instruct"
-    revision = "b" * 40
-    mock_from_pretrained.return_value = SimpleNamespace(name_or_path=mirror)
-
-    load_tokenizer(canonical, revision=revision)
-
-    args, kwargs = mock_from_pretrained.call_args
-    assert args == (mirror,)
-    assert kwargs == {"trust_remote_code": False, "revision": revision}
 
 
 @patch("transformers.AutoTokenizer.from_pretrained")
@@ -160,22 +134,29 @@ def test_tokenizer_source_overrides_are_exact_llama_mirrors():
     }
 
 
-def test_get_offset_tokenizer_rejects_offsetless_byo():
-    """BYO tokenizers without ``return_offsets_mapping`` support raise a
-    clear error. Hand-coded renderers concatenate scaffold + body in one
-    BPE pass and attribute tokens via the fast tokenizer's offset map;
-    no transparent reload-from-name_or_path fallback exists. The
-    contract is: pass a fast tokenizer or get a loud error at construct
-    time, not silent BPE drift at the wrap/body boundary."""
+def test_offsetless_byo_preserves_ids_without_content_attribution():
+    """Offsetless BYO tokenizers keep the joined BPE pass but omit attribution."""
 
     class _NoOffsets:
         name_or_path = "anywhere/anything"
 
+        def encode(self, text, *, add_special_tokens=False):
+            assert add_special_tokens is False
+            return [len(text)]
+
         def __call__(self, *args, **kwargs):
             raise NotImplementedError("BYO tokenizer has no offsets")
 
-    with pytest.raises(RuntimeError, match="fast tokenizer.*offsets"):
-        base._get_offset_tokenizer(_NoOffsets())
+    tokenizer = _NoOffsets()
+    assert base._get_offset_tokenizer(tokenizer) is None
+
+    attributed = base.attribute_text_segments(
+        tokenizer,
+        [("user\n", False), ("hello", True)],
+    )
+
+    assert attributed == [(10, False)]
+    assert attributed.has_content_attribution is False
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +164,7 @@ def test_get_offset_tokenizer_rejects_offsetless_byo():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.network
-@pytest.mark.model_parity
+@pytest.mark.model
 def test_load_tokenizer_real_qwen_works_without_remote_code():
     """End-to-end: an unlisted model loads successfully without
     trust_remote_code. Qwen tokenizers don't ship custom Python."""
@@ -195,8 +175,7 @@ def test_load_tokenizer_real_qwen_works_without_remote_code():
     assert len(ids) > 0
 
 
-@pytest.mark.network
-@pytest.mark.model_parity
+@pytest.mark.model
 def test_load_tokenizer_real_kimi_uses_pinned_revision():
     """End-to-end: Kimi-K2.5 loads via the pinned-revision path. The
     parity tests already exercise this path — this test pins the

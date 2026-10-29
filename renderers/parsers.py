@@ -440,13 +440,11 @@ class ThinkTextReasoningParser:
         self._tokenizer = tokenizer  # unused, for Protocol compat
 
     def extract(self, text: str) -> tuple[str | None, str]:
-        if "</think>" not in text:
+        if not text.startswith("<think>"):
             return None, text
-        before, _, after = text.partition("</think>")
-        if "<think>" in before:
-            reasoning = before.split("<think>", 1)[-1]
-        else:
-            reasoning = before
+        reasoning, close, after = text[len("<think>") :].partition("</think>")
+        if not close:
+            return reasoning, ""
         # Preserve whitespace on both sides of the `</think>` boundary —
         # chat templates round-trip it verbatim (GLM-4.5 emits reasoning and
         # content back-to-back with no separator), so stripping here causes

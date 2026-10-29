@@ -1,9 +1,8 @@
 """DeepSeek-R1 renderer: the reasoning variant of the DeepSeek format.
 
-General byte-parity vs ``apply_chat_template`` is covered by the conftest
-barrage (``test_render_ids`` now includes both DeepSeek models). These tests
-pin the behaviors that distinguish R1 from V3: the ``<think>`` generation
-prompt and the stripping of ``</think>`` from historical assistant turns.
+General byte parity lives in ``test_parity.py``. These tests pin the behaviors
+that distinguish R1 from V3: the ``<think>`` generation prompt and the
+stripping of ``</think>`` from historical assistant turns.
 """
 
 from functools import lru_cache
@@ -15,83 +14,21 @@ from renderers import (
     DeepSeekV3Renderer,
     create_renderer,
 )
-from tests.model_assets import load_test_tokenizer
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 
 @lru_cache
 def _r1():
-    tok = load_test_tokenizer("deepseek-ai/DeepSeek-R1")
+    tok = load_tokenizer("deepseek-ai/DeepSeek-R1")
     return tok, create_renderer(tok)
 
 
 @lru_cache
 def _v3():
-    tok = load_test_tokenizer("deepseek-ai/DeepSeek-V3")
+    tok = load_tokenizer("deepseek-ai/DeepSeek-V3")
     return tok, create_renderer(tok)
-
-
-# Baseline render_ids == apply_chat_template parity. Tool-cycle shapes are
-# intentionally excluded: the DeepSeek template renders tool_calls only when
-# content is None (a pre-existing renderer↔template gap, tracked separately),
-# which is orthogonal to the V3/R1 reasoning split this module covers.
-_PARITY_SHAPES = [
-    (
-        "single_turn",
-        [
-            {"role": "user", "content": "What is 2+2?"},
-            {"role": "assistant", "content": "4"},
-        ],
-        {},
-    ),
-    (
-        "multi_turn",
-        [
-            {"role": "user", "content": "A"},
-            {"role": "assistant", "content": "B"},
-            {"role": "user", "content": "C"},
-            {"role": "assistant", "content": "D"},
-        ],
-        {},
-    ),
-    (
-        "reasoning_content_field",
-        [
-            {"role": "user", "content": "x"},
-            {"role": "assistant", "reasoning_content": "r", "content": "4"},
-        ],
-        {},
-    ),
-    (
-        "gen_prompt",
-        [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hi"},
-        ],
-        {"add_generation_prompt": True},
-    ),
-    (
-        "inline_think_history",
-        [
-            {"role": "user", "content": "q"},
-            {"role": "assistant", "content": "<think>reasoning</think>answer"},
-            {"role": "user", "content": "q2"},
-        ],
-        {},
-    ),
-]
-
-
-@pytest.mark.parametrize("loader", [_v3, _r1], ids=["v3", "r1"])
-@pytest.mark.parametrize(
-    "shape_id,messages,kwargs", _PARITY_SHAPES, ids=[s[0] for s in _PARITY_SHAPES]
-)
-def test_render_ids_matches_apply_chat_template(loader, shape_id, messages, kwargs):
-    tok, renderer = loader()
-    got = renderer.render_ids(messages, **kwargs)
-    expected = list(
-        tok.apply_chat_template(messages, tokenize=True, return_dict=False, **kwargs)
-    )
-    assert got == expected
 
 
 def test_auto_detection_picks_the_right_renderer():
@@ -150,3 +87,9 @@ def test_v3_emits_content_verbatim_ignoring_reasoning():
 
     assert got == expected
     assert "should be ignored" not in tok.decode(got)
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _r1.cache_clear()
+    _v3.cache_clear()

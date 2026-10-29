@@ -1,4 +1,4 @@
-"""Laguna-XS.2 / XS-2.1 Renderer.
+"""Poolside Laguna renderer family.
 
 Main properties:
 - Prefix is the single token ``〈|EOS|〉`` (also the EOS / stop token).
@@ -36,13 +36,21 @@ XS-2.1's template (upstream rev ``575f0f28``) is served by the
   section ends at ``</available_tools>``.
 - The ``<system>`` block is emitted whenever there is system content,
   tools, or ``enable_thinking`` — even if that leaves it empty.
+
+Laguna M.1's official template (revision ``2bf8a4ab``) is served by
+:class:`LagunaM1Renderer`. It shares XS.2's byte layout, tool syntax, and
+generation prompt, but has no fallback system prompt and reads assistant
+reasoning from ``reasoning`` before falling back to ``reasoning_content``.
+
+S-2.1 subclasses :class:`LagunaXS21Renderer` from :mod:`renderers.laguna_s21`,
+overriding only the ``_render_history_reasoning`` seam.
 """
 
 from __future__ import annotations
 
 import json
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
 
 from renderers.base import (
     Content,
@@ -50,13 +58,21 @@ from renderers.base import (
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
+    _content_mask_or_empty,
+    _infer_offsets_from_decode,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
 )
-from renderers.configs import LagunaXS2RendererConfig, LagunaXS21RendererConfig
+from renderers.configs import (
+    LagunaM1RendererConfig,
+    LagunaS21RendererConfig,
+    LagunaXS2RendererConfig,
+    LagunaXS21RendererConfig,
+)
 from renderers.parsing import parse_laguna_xs2
 
 _DEFAULT_SYSTEM_MESSAGE = (
@@ -104,10 +120,21 @@ _TOOLS_HEADER_XS21 = (
 
 
 class LagunaXS2Renderer:
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        return True
+
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
-        config: LagunaXS2RendererConfig | LagunaXS21RendererConfig | None = None,
+        tokenizer: Tokenizer,
+        config: (
+            LagunaXS2RendererConfig
+            | LagunaM1RendererConfig
+            | LagunaXS21RendererConfig
+            | LagunaS21RendererConfig
+            | None
+        ) = None,
     ):
         self._tokenizer = tokenizer
         self.config = config or LagunaXS2RendererConfig()
@@ -309,7 +336,7 @@ class LagunaXS2Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
@@ -332,6 +359,7 @@ class LagunaXS2Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_laguna_xs2(
             self._tokenizer,
@@ -342,6 +370,12 @@ class LagunaXS2Renderer:
             tool_call_id=self._tool_call,
             tool_call_end_id=self._tool_call_end,
             tools=tools,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=set(self.get_stop_token_ids()),
+                assistant_prefix="<assistant>",
+            ),
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -361,6 +395,20 @@ class LagunaXS2Renderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_call,
+            assistant_prefix="<assistant>",
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._think_end]
+
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
             new_messages,
@@ -466,7 +514,9 @@ class LagunaXS2Renderer:
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=[False] * len(previous_ids) + ext_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer, [False] * len(previous_ids) + ext_content
+            ),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
         )
@@ -481,12 +531,9 @@ class LagunaXS2Renderer:
         emit_text,
         emit_text_segments,
     ) -> None:
-        # Raw passthrough is an XS.2-only template gate; the XS-2.1
-        # config doesn't define it.
-        if (
-            isinstance(self.config, LagunaXS2RendererConfig)
-            and self.config.render_assistant_messages_raw
-        ):
+        # Raw passthrough is shared by XS.2 and M.1; XS-2.1's config does
+        # not expose this template gate.
+        if getattr(self.config, "render_assistant_messages_raw", False):
             self._render_assistant_raw(
                 msg_idx,
                 content,
@@ -495,16 +542,7 @@ class LagunaXS2Renderer:
             )
             return
 
-        reasoning_content = ""
-        if isinstance(msg.get("reasoning_content"), str):
-            reasoning_content = msg["reasoning_content"]
-        else:
-            # When the caller stores reasoning as a ``ThinkingPart`` inside
-            # a list-form ``content`` (e.g. after parse_response →
-            # reserialize), pull it out here so it survives the re-render.
-            part_thinking = self._thinking_text(msg.get("content"))
-            if part_thinking:
-                reasoning_content = part_thinking
+        reasoning_content, content = self._assistant_reasoning_and_content(msg, content)
 
         # ``<assistant>\n`` is template-injected scaffolding — the chat
         # template emits these as the generation prompt at inference and
@@ -567,6 +605,22 @@ class LagunaXS2Renderer:
         emit_special(self._assistant_end, msg_idx, is_sampled=True, is_content=True)
         emit_text("\n", msg_idx, is_sampled=False, is_content=False)
 
+    def _assistant_reasoning_and_content(
+        self, msg: Message, content: str
+    ) -> tuple[str, str]:
+        """Return the reasoning/body pair used by the XS.2 template."""
+        reasoning_content = ""
+        if isinstance(msg.get("reasoning_content"), str):
+            reasoning_content = msg["reasoning_content"]
+        else:
+            # When the caller stores reasoning as a ``ThinkingPart`` inside
+            # a list-form ``content`` (e.g. after parse_response →
+            # reserialize), pull it out here so it survives the re-render.
+            part_thinking = self._thinking_text(msg.get("content"))
+            if part_thinking:
+                reasoning_content = part_thinking
+        return reasoning_content, content
+
     def _render_assistant_raw(
         self,
         msg_idx: int,
@@ -620,6 +674,43 @@ class LagunaXS2Renderer:
         emit_text("\n", msg_idx, is_sampled=False, is_content=False)
 
 
+class LagunaM1Renderer(LagunaXS2Renderer):
+    """Renderer for the official ``poolside/Laguna-M.1`` checkpoint.
+
+    The token protocol is shared with XS.2, while the absent fallback
+    system prompt and assistant-reasoning precedence are M.1-specific.
+    """
+
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        config: LagunaM1RendererConfig | None = None,
+    ):
+        super().__init__(tokenizer, config or LagunaM1RendererConfig())
+        self._default_system_message = ""
+
+    def _assistant_reasoning_and_content(
+        self, msg: Message, content: str
+    ) -> tuple[str, str]:
+        # Match the official Jinja exactly: ``reasoning`` wins whenever it
+        # is a string (including the empty string), then
+        # ``reasoning_content`` is considered. An inline </think> block is
+        # removed from content and becomes the fallback reasoning source.
+        reasoning_content = ""
+        if isinstance(msg.get("reasoning"), str):
+            reasoning_content = msg["reasoning"]
+        elif isinstance(msg.get("reasoning_content"), str):
+            reasoning_content = msg["reasoning_content"]
+
+        if "</think>" in content:
+            if not reasoning_content:
+                before_close = content.split("</think>", 1)[0].rstrip("\n")
+                reasoning_content = before_close.split("<think>")[-1].lstrip("\n")
+            content = content.rsplit("</think>", 1)[-1].lstrip("\n")
+
+        return reasoning_content, content
+
+
 class LagunaXS21Renderer(LagunaXS2Renderer):
     """Laguna-XS-2.1 — mirrors the ``poolside/Laguna-XS-2.1`` chat
     template (upstream rev ``575f0f28``); see the module docstring for
@@ -632,10 +723,17 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
-        config: LagunaXS21RendererConfig | None = None,
+        tokenizer: Tokenizer,
+        config: LagunaXS21RendererConfig | LagunaS21RendererConfig | None = None,
     ):
         super().__init__(tokenizer, config or LagunaXS21RendererConfig())
+
+    def _render_history_reasoning(self) -> bool:
+        """Whether an assistant turn renders its ``<think>{reasoning}</think>``
+        block (vs opening with a bare ``</think>``). Mirrors the template's
+        reasoning-display gate; XS-2.1 gates this on ``enable_thinking`` alone.
+        """
+        return self.config.enable_thinking
 
     def render(
         self,
@@ -715,12 +813,52 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
                 tool_text += "</available_tools>"
                 header_segs.append((tool_text, False))
             header_segs.append(("</system>\n", False))
-            for tok_id, is_content in attribute_text_segments(
+            attributed = attribute_text_segments(
                 self._tokenizer, header_segs, overlap_is_content=True
-            ):
+            )
+            fallback_indices: list[int] | None = None
+            if not attributed.has_content_attribution:
+                full_header = "".join(text for text, _ in header_segs)
+                offsets = _infer_offsets_from_decode(
+                    self._tokenizer,
+                    [token_id for token_id, _ in attributed],
+                    full_header,
+                )
+                if offsets is None:
+                    fallback_index = 0 if caller_has_system and has_sys_content else -1
+                    fallback_indices = [fallback_index] * len(attributed)
+                else:
+                    content_spans: list[tuple[int, int]] = []
+                    position = 0
+                    for text, is_content in header_segs:
+                        end = position + len(text)
+                        if is_content:
+                            content_spans.append((position, end))
+                        position = end
+                    fallback_indices = [
+                        0
+                        if (
+                            any(
+                                span_start < end and start < span_end
+                                for span_start, span_end in content_spans
+                            )
+                            if end > start
+                            else any(
+                                span_start <= start < span_end
+                                for span_start, span_end in content_spans
+                            )
+                        )
+                        else -1
+                        for start, end in offsets
+                    ]
+            for position, (tok_id, is_content) in enumerate(attributed):
+                if fallback_indices is not None:
+                    message_index = fallback_indices[position]
+                else:
+                    message_index = 0 if is_content else -1
                 emit_special(
                     tok_id,
-                    0 if is_content else -1,
+                    message_index,
                     is_sampled=False,
                     is_content=is_content,
                 )
@@ -774,7 +912,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
@@ -784,6 +922,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         # The XS-2.1 template renders reasoning and content verbatim (no
         # newline wrapping), so the parse is verbatim too.
@@ -797,6 +936,12 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             tool_call_end_id=self._tool_call_end,
             tools=tools,
             strip_newlines=False,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=set(self.get_stop_token_ids()),
+                assistant_prefix="<assistant>",
+            ),
         )
 
     def bridge_to_next_turn(
@@ -813,6 +958,20 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_call,
+            assistant_prefix="<assistant>",
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._think_end]
+
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
             new_messages,
@@ -892,7 +1051,9 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=[False] * len(previous_ids) + ext_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer, [False] * len(previous_ids) + ext_content
+            ),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
         )
@@ -920,7 +1081,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         # scaffolding the model never samples.
         emit_special(self._assistant, msg_idx, is_sampled=False, is_content=False)
 
-        if self.config.enable_thinking:
+        if self._render_history_reasoning():
             # ``<think>{reasoning}</think>`` renders verbatim, even when
             # the reasoning is empty; the opener is the gen-prompt
             # prefill, the rest the model sampled.

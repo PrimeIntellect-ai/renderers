@@ -1,7 +1,7 @@
 """Unit tests for ``trim_to_turn_close`` and the bridge contract invariants
 that every renderer's ``bridge_to_next_turn`` must uphold.
 
-Cross-renderer parity is validated in test_render_ids.py and test_roundtrip.py;
+Cross-renderer parity is validated in test_parity.py and test_roundtrip.py;
 this file exercises the shared primitive + protocol-level guarantees with a
 fake renderer so we get fast, deterministic coverage of the tricky corners
 (truncation opt-in, assistant-in-extension rejection, empty inputs).

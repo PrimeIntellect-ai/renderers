@@ -19,33 +19,18 @@ from __future__ import annotations
 from functools import lru_cache
 
 import pytest
+from parity import models_for
 
-# (HF model name, renderer name) — one representative per renderer class.
-_BRIDGE_MODELS = [
-    ("Qwen/Qwen3-8B", "auto"),
-    ("PrimeIntellect/Qwen3-0.6B", "auto"),
-    ("Qwen/Qwen3.5-9B", "auto"),
-    ("Qwen/Qwen3.6-35B-A3B", "auto"),
-    ("zai-org/GLM-5", "auto"),
-    ("zai-org/GLM-5.1", "auto"),
-    ("THUDM/GLM-4.5-Air", "auto"),
-    ("MiniMaxAI/MiniMax-M2.5", "auto"),
-    ("moonshotai/Kimi-K2-Instruct", "auto"),
-    ("moonshotai/Kimi-K2.5", "auto"),
-    ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "auto"),
-    ("tencent/Hy3", "auto"),
-    ("meta-llama/Llama-3.2-1B-Instruct", "llama-3"),
-    ("openai/gpt-oss-20b", "gpt-oss"),
-]
+_BRIDGE_MODELS = [(case.model, case.renderer) for case in models_for("bridge")]
 
 
 @lru_cache(maxsize=None)
 def _load(model_name: str, renderer_name: str):
     from renderers import create_renderer
-    from tests.model_assets import load_test_tokenizer
     from renderers.configs import config_from_name
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
-    tok = load_test_tokenizer(model_name)
+    tok = load_tokenizer(model_name)
     return tok, create_renderer(tok, config_from_name(renderer_name))
 
 
@@ -53,7 +38,10 @@ def pytest_generate_tests(metafunc):
     if "br_model" in metafunc.fixturenames:
         metafunc.parametrize(
             "br_model,br_renderer_name",
-            _BRIDGE_MODELS,
+            [
+                pytest.param(model, renderer, marks=pytest.mark.model)
+                for model, renderer in _BRIDGE_MODELS
+            ],
             ids=[m for m, _ in _BRIDGE_MODELS],
         )
 
@@ -109,6 +97,13 @@ def _simulate_prior_turn(renderer, assistant=None):
     full_with_assistant = renderer.render_ids(
         prior + assistant, add_generation_prompt=False
     )
+    # Some templates render a content-only historical turn without the live
+    # prompt's reasoning prefill (Harmony also changes analysis to final).
+    # Slice only at an actual shared boundary; cutting by length alone silently
+    # removes content or a reasoning closer and manufactures a malformed turn.
+    if full_with_assistant[: len(prev_prompt)] != prev_prompt:
+        prev_prompt = renderer.render_ids(prior, add_generation_prompt=False)
+        assert full_with_assistant[: len(prev_prompt)] == prev_prompt
     prev_completion = list(full_with_assistant[len(prev_prompt) :])
 
     # Trim past any trailing scaffolding the template emits AFTER the
@@ -213,6 +208,25 @@ def test_bridge_extension_includes_new_message_text(
     )
 
 
+def test_qwen3_renders_openai_text_content_parts(br_renderer, br_tokenizer, br_model):
+    """Text content lists must not become an empty user turn."""
+    if br_model not in {"Qwen/Qwen3-8B", "Qwen/Qwen3-4B"}:
+        pytest.skip(f"{br_model}: not a Qwen3 text renderer")
+
+    text = "CONTENT_LIST_SENTINEL_XYZ"
+    string_ids = br_renderer.render_ids(
+        [{"role": "user", "content": text}], add_generation_prompt=True
+    )
+    list_ids = br_renderer.render_ids(
+        [{"role": "user", "content": [{"type": "text", "text": text}]}],
+        add_generation_prompt=True,
+    )
+
+    assert list_ids == string_ids
+    assert text in br_tokenizer.decode(list_ids, skip_special_tokens=False)
+
+
+@pytest.mark.model
 def test_bridge_declines_across_user_query_when_template_drops_thinking():
     """Qwen3's template drops a past block's thinking once a new user turn
     arrives. The resolved ``tool_cycle`` bridge policy therefore treats a
@@ -227,10 +241,10 @@ def test_bridge_declines_across_user_query_when_template_drops_thinking():
       - no prior thinking + new user query -> decline; no marker lookback.
     """
     from renderers import create_renderer
-    from tests.model_assets import load_test_tokenizer
     from renderers.configs import Qwen3RendererConfig
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
-    tok = load_test_tokenizer("Qwen/Qwen3-8B")
+    tok = load_tokenizer("Qwen/Qwen3-8B")
     im_end = tok.convert_tokens_to_ids("<|im_end|>")
 
     u1 = {"role": "user", "content": "What is 2+2?"}
@@ -316,14 +330,15 @@ def test_bridge_declines_across_user_turn_when_thinking_present(br_renderer, br_
     assert extended is not None, f"{br_model}: should still bridge within a tool cycle"
 
 
+@pytest.mark.model
 def test_bridge_keeps_thinking_when_history_kwarg_disables_truncation():
     """GLM ``clear_thinking=False`` / Nemotron ``truncate_history_thinking=
     False`` keep all past thinking (the template doesn't strip it), so the
     bridge must NOT decline across a user turn — declining would re-render and
     re-tokenize model-sampled thinking bytes."""
     from renderers import create_renderer
-    from tests.model_assets import load_test_tokenizer
     from renderers.configs import GLM5RendererConfig, Nemotron3RendererConfig
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     asst = [
         {"role": "assistant", "reasoning_content": "Let me think.", "content": "Hi"}
@@ -336,7 +351,7 @@ def test_bridge_keeps_thinking_when_history_kwarg_disables_truncation():
         ),
     ]
     for model, cfg in cases:
-        r = create_renderer(load_test_tokenizer(model), cfg)
+        r = create_renderer(load_tokenizer(model), cfg)
         prev_prompt, prev_completion = _simulate_prior_turn(r, asst)
         bridged = r.bridge_to_next_turn(
             prev_prompt, prev_completion, [{"role": "user", "content": "next"}]
@@ -344,3 +359,8 @@ def test_bridge_keeps_thinking_when_history_kwarg_disables_truncation():
         assert bridged is not None, (
             f"{model}: bridge must keep verbatim when the template keeps all thinking"
         )
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _load.cache_clear()

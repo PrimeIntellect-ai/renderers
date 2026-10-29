@@ -1,13 +1,13 @@
-"""Sampled-token stability with thinking disabled (Qwen family).
+"""Sampled-token stability with thinking disabled.
 
-With ``enable_thinking=False`` the generation prompt prefills the empty
-``<think>\\n\\n</think>\\n\\n`` wrapper, so the wrapper is part of every
-sampled turn's token stream. In an agentic rollout the conversation keeps
-growing (tool responses, budget / prune-reminder user messages, ...) and may
-be re-rendered from messages. The upstream Jinja template strips the wrapper
-from assistant turns at or before the last user query, so a re-render would
-diverge token-for-token from the stream the model actually sampled — forking
-any token-identity comparison on byte-identical messages.
+For the affected Qwen and Gemma 4 variants, the generation prompt prefills an
+empty thinking wrapper, so that wrapper is part of every sampled turn's token
+stream. In an agentic rollout the conversation keeps growing (tool responses,
+budget / prune-reminder user messages, ...) and may be re-rendered from
+messages. The upstream Jinja templates strip the wrapper from assistant
+history, so a re-render would diverge token-for-token from the stream the model
+actually sampled — forking any token-identity comparison on byte-identical
+messages.
 
 These tests pin the renderer-side guarantee that fixes this: with thinking
 disabled, historical assistant turns without ``reasoning_content`` re-emit
@@ -16,37 +16,41 @@ prefix of every later re-render of the grown conversation, and the bridge
 and a full re-render agree.
 
 This is a deliberate, documented deviation from ``apply_chat_template`` —
-see the carve-out in ``test_renderer_config_parity.py`` and the module
-docstrings of ``renderers/qwen3.py`` / ``renderers/qwen35.py``.
+see the carve-out in ``test_parity.py`` and the module
+docstrings of the affected renderers.
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
 
+import pytest
+from parity import models_for
 
 from renderers import create_renderer
-from tests.model_assets import load_test_tokenizer
-from renderers.configs import (
-    Qwen3RendererConfig,
-    Qwen35RendererConfig,
-    Qwen36RendererConfig,
-)
+from renderers.configs import _config_class_for
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 # One representative model per affected renderer family, each with
 # thinking explicitly disabled.
 _MODELS = [
-    ("Qwen/Qwen3-8B", Qwen3RendererConfig(enable_thinking=False)),
-    ("Qwen/Qwen3.5-9B", Qwen35RendererConfig(enable_thinking=False)),
-    ("Qwen/Qwen3.6-35B-A3B", Qwen36RendererConfig(enable_thinking=False)),
+    (
+        case.model,
+        _config_class_for(case.resolved_renderer)(enable_thinking=False),
+    )
+    for case in models_for("disabled-thinking")
 ]
 
-_EMPTY_WRAPPER = "<think>\n\n</think>\n\n"
+_EMPTY_WRAPPERS = {
+    "google/gemma-4-26B-A4B-it": "<|channel>thought\n<channel|>",
+}
 
 
 @lru_cache(maxsize=None)
 def _load(model_name: str):
-    return load_test_tokenizer(model_name)
+    return load_tokenizer(model_name)
 
 
 def pytest_generate_tests(metafunc):
@@ -103,7 +107,8 @@ def test_wrapper_reemitted_on_historical_turn(dt_model, dt_config):
     )
     turn = [t for t, i in zip(rendered.token_ids, rendered.message_indices) if i == 1]
     text = tok.decode(turn)
-    assert _EMPTY_WRAPPER in text, (
+    expected_wrapper = _EMPTY_WRAPPERS.get(dt_model, "<think>\n\n</think>\n\n")
+    assert expected_wrapper in text, (
         f"{dt_model}: historical assistant turn rendered without the "
         f"prefilled empty think wrapper: {text!r}"
     )
@@ -224,3 +229,8 @@ def test_historical_reasoning_stays_template_faithful(dt_model, dt_config):
         )
     )
     assert ours == theirs
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _load.cache_clear()

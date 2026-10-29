@@ -1,8 +1,7 @@
 # Renderer config
 
-`renderers.RendererConfig` is the typed input to `create_renderer` and
-`create_renderer_pool`. It pins the renderer choice and its config at
-construction time.
+`renderers.RendererConfig` is the typed input to `create_renderer`. It pins the
+renderer choice and its config at construction time.
 
 ```python
 from renderers import create_renderer, Qwen35RendererConfig
@@ -19,9 +18,11 @@ construction.
 
 ## Per-renderer configs
 
-Use `type(config).template_field_names()` to inspect the fields that mirror
-chat-template kwargs. Those fields are covered by parity tests against
-`apply_chat_template` in `tests/test_renderer_config_parity.py`.
+Use `type(config).template_field_names()` to inspect the explicit allowlist of
+fields accepted through `chat_template_kwargs`. Every renderer-specific field
+is classified as either a template field or a renderer-only field at class
+definition time. Template fields are covered by the model/scenario/kwarg
+product in `tests/test_parity.py`.
 
 | Renderer | Config class | Template fields | Renderer-only fields |
 | --- | --- | --- | --- |
@@ -29,21 +30,30 @@ chat-template kwargs. Those fields are covered by parity tests against
 | PrimeIntellect Qwen3 | `PrimeQwen3RendererConfig` | - | - |
 | Qwen3.5 | `Qwen35RendererConfig` | `enable_thinking`, `add_vision_id` | `image_cache_max` |
 | Qwen3.6 | `Qwen36RendererConfig` | `enable_thinking`, `add_vision_id`, `preserve_thinking` | `image_cache_max` |
+| Qwen3.8 | `Qwen38RendererConfig` | `enable_thinking`, `add_vision_id`, `preserve_thinking`, `reasoning_effort` | `image_cache_max` |
 | Qwen3-VL | `Qwen3VLRendererConfig` | `add_vision_id` | `image_cache_max` |
+| Gemma 4 | `Gemma4RendererConfig` | `enable_thinking`, `preserve_thinking` | `image_cache_max` |
 | GLM-5 / 5.1 | `GLM5RendererConfig` / `GLM51RendererConfig` | `enable_thinking`, `clear_thinking` | - |
+| GLM-5.3 / 5.3 Flash | `GLM53RendererConfig` / `GLM53FlashRendererConfig` | `clear_thinking`, `reasoning_effort` | - |
 | GLM-4.5 | `GLM45RendererConfig` | `enable_thinking` | - |
 | gpt-oss | `GptOssRendererConfig` | `reasoning_effort`, `conversation_start_date` | `use_system_prompt`, `knowledge_cutoff`, `model_identity`, `auto_drop_analysis` |
+| Muse Glimmer | `MuseGlimmerRendererConfig` | `reasoning_strength`, `knowledge_cutoff`, `current_date` | - |
 | Hy3 | `Hy3RendererConfig` | `reasoning_effort`, `preserved_thinking`, `is_training`, `raw_last_assistant`, `fallback_strategy` | - |
 | Kimi K2 | `KimiK2RendererConfig` | - | `enable_thinking` |
 | Kimi K2.5 / 2.6 | `KimiK25RendererConfig` | `thinking` | `image_cache_max` |
+| Inkling / Inkling-Small | `InklingRendererConfig` | `reasoning_effort` | `image_cache_max`, `audio_cache_max` |
 | Laguna XS.2 | `LagunaXS2RendererConfig` | `enable_thinking`, `render_assistant_messages_raw` | - |
+| Laguna M.1 | `LagunaM1RendererConfig` | `enable_thinking`, `render_assistant_messages_raw` | - |
 | Laguna XS-2.1 | `LagunaXS21RendererConfig` | `enable_thinking` | - |
+| Laguna S-2.1 | `LagunaS21RendererConfig` | `enable_thinking`, `preserve_thinking` | - |
 | Llama 3 | `Llama3RendererConfig` | `date_string`, `tools_in_user_message` | - |
 | MiniMax M2 | `MiniMaxM2RendererConfig` | `model_identity` | - |
 | Nemotron-3 Nano / Super | `Nemotron3RendererConfig` | `enable_thinking`, `truncate_history_thinking`, `low_effort` | - |
 | Nemotron-3 Ultra | `Nemotron3UltraRendererConfig` | `enable_thinking`, `truncate_history_thinking`, `medium_effort` | - |
+| Nemotron-3.5 Lightning | `Nemotron35RendererConfig` | `enable_thinking`, `truncate_history_thinking` | - |
 | DeepSeek V3 | `DeepSeekV3RendererConfig` | - | - |
 | DeepSeek R1 | `DeepSeekR1RendererConfig` | - | - |
+| DeepSeek V4 Flash 0731 | `DeepSeekV4RendererConfig` | `enable_thinking`, `drop_thinking`, `reasoning_effort` | - |
 
 Configs are frozen value objects. To override a field, construct a new instance
 or call `config.model_copy(update={...})`.
@@ -69,15 +79,13 @@ r = create_renderer(
     tokenizer,
     chat_template_kwargs={"enable_thinking": False},
 )
-pool = create_renderer_pool(
-    "Qwen/Qwen3-8B",
-    chat_template_kwargs={"enable_thinking": False},
-)
 ```
 
 Renderers resolves auto configs before applying `chat_template_kwargs`, so the
-kwargs validate against the concrete renderer config. Unknown kwargs, or kwargs
-that conflict with an explicit `thinking_retention`, fail at construction.
+kwargs validate against the concrete renderer's template-field allowlist.
+Unknown kwargs, renderer-only fields, or kwargs that conflict with an explicit
+`thinking_retention` fail at construction. Renderer-only options remain valid
+when supplied through the typed config itself.
 
 Auto-resolution fails loudly for VLMs without an exact registered renderer.
 Text-only unknown models fall back to `DefaultRenderer`, unless
@@ -86,7 +94,10 @@ cannot implement selective bridge retention, so that combination raises.
 `AutoRendererConfig` with `chat_template_kwargs` also raises for unknown models,
 because renderers cannot validate those kwargs without a concrete renderer.
 Use an explicit model-specific config, or `DefaultRendererConfig(...)` when you
-intentionally want opaque `apply_chat_template` kwargs.
+intentionally want opaque `apply_chat_template` kwargs. Even for the default
+renderer, typed fields such as `tool_parser`, `reasoning_parser`, and
+`thinking_retention` must be passed through the config rather than through the
+opaque kwargs mapping.
 
 ## `thinking_retention`
 
@@ -128,15 +139,20 @@ the knobs its template actually exposes:
 | Qwen3 | `enable_thinking=False -> all`, else `tool_cycle` |
 | Qwen3.5 | `enable_thinking=False -> all`, else `tool_cycle` |
 | Qwen3.6 | `preserve_thinking=True -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
+| Qwen3.8 | `preserve_thinking=True -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
+| Gemma 4 | `preserve_thinking=True -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | GLM-5 / 5.1 | `clear_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
+| GLM-5.3 / 5.3 Flash | `clear_thinking=False -> all`, else `tool_cycle` |
 | GLM-4.5 | `enable_thinking=False -> all`, else `tool_cycle` |
 | gpt-oss | `auto_drop_analysis=False -> all`, else `tool_cycle` |
+| Muse Glimmer | `all` (the template keeps every assistant's reasoning) |
 | Hy3 | `preserved_thinking=True -> all`, else `tool_cycle` |
 | Kimi K2.5 / 2.6 | `thinking=False -> all`, else `tool_cycle` |
-| Nemotron-3 | `truncate_history_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
+| Nemotron-3 / 3.5 | `truncate_history_thinking=False -> all`; else `enable_thinking=False -> all`; else `tool_cycle` |
 | DeepSeek R1 | `template` |
+| DeepSeek V4 Flash 0731 | `enable_thinking=False` or `drop_thinking=False -> all`, else `tool_cycle` |
 | MiniMax M2 | `tool_cycle` |
-| DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / XS-2.1, Llama 3 | `all` |
+| DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / M.1 / XS-2.1 / S-2.1, Llama 3, Inkling | `all` |
 | PrimeIntellect Qwen3 | `all` |
 
 Config construction raises when an explicit template knob directly contradicts

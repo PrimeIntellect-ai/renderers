@@ -25,15 +25,17 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import pytest
+from parity import models_for
+
 from renderers.base import ToolCallParseStatus
+
+pytestmark = pytest.mark.model
 
 # Both GLM renderers share ``parse_glm`` and are served by the same
 # strict vLLM parser (the ``glm45`` and ``glm47`` aliases both resolve
 # to ``Glm47MoeModelToolParser`` in vLLM ≥ 0.24).
-_MODELS = [
-    ("THUDM/GLM-4.5-Air", "auto"),
-    ("zai-org/GLM-5", "auto"),
-]
+_MODELS = [(case.model, case.renderer) for case in models_for("glm-tool-names")]
 
 _TOOLS = [
     {
@@ -57,9 +59,9 @@ _TOOLS = [
 @lru_cache(maxsize=None)
 def _load(model: str, renderer_name: str):
     from renderers import config_from_name, create_renderer
-    from tests.model_assets import load_test_tokenizer
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
-    tok = load_test_tokenizer(model)
+    tok = load_tokenizer(model)
     return tok, create_renderer(tok, config_from_name(renderer_name))
 
 
@@ -75,7 +77,7 @@ def pytest_generate_tests(metafunc):
 def _parse(model: str, renderer_name: str, text: str, tools):
     tok, renderer = _load(model, renderer_name)
     ids = tok.encode(text, add_special_tokens=False)
-    return renderer.parse_response(ids, tools=tools)
+    return renderer.parse_response(ids, tools=tools, prompt_ids=[])
 
 
 def _statuses(parsed):
@@ -181,3 +183,8 @@ def test_openai_envelope_tools_are_recognized(model, renderer_name):
         wrapped,
     )
     assert _statuses(parsed) == [ToolCallParseStatus.OK]
+
+
+def teardown_module():
+    """Release model resources when this module finishes, not at process exit."""
+    _load.cache_clear()

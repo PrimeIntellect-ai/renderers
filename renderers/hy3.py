@@ -27,13 +27,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
 
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
     ToolSpec,
+    Tokenizer,
+    _content_mask_or_empty,
+    _get_offset_tokenizer,
+    _infer_offsets_from_decode,
     attribute_text_segments,
     extract_message_tool_names,
     reject_assistant_in_extension,
@@ -72,9 +76,17 @@ _TOOL_RESPONSE_END = f"</tool_response{_HYTK}>"
 class Hy3Renderer:
     """Deterministic message → token renderer for Tencent Hy3 models."""
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Require retention regardless of whether tools are supplied.
+        return not self.config.raw_last_assistant and (
+            self.config.is_training or self.config.preserved_thinking is True
+        )
+
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: Hy3RendererConfig | None = None,
     ):
         self._tokenizer = tokenizer
@@ -239,13 +251,34 @@ class Hy3Renderer:
         if not segments:
             return []
         full_text = "".join(text for text, _, _ in segments)
-        encoding = self._tokenizer(
-            full_text,
-            add_special_tokens=False,
-            return_offsets_mapping=True,
-        )
-        token_ids = list(encoding["input_ids"])
-        offsets = list(encoding["offset_mapping"])
+        offset_tokenizer = _get_offset_tokenizer(self._tokenizer)
+        if offset_tokenizer is None:
+            token_ids = self._encode(full_text)
+            offsets = _infer_offsets_from_decode(
+                self._tokenizer,
+                token_ids,
+                full_text,
+            )
+            if offsets is None:
+                # Token IDs remain exact even when a lossy decoder prevents
+                # reconstructing boundaries. Associate the opaque joined run
+                # with a contributing caller system message rather than
+                # silently classifying its body as global scaffold.
+                fallback_idx = next(
+                    (msg_idx for text, _, msg_idx in segments if text and msg_idx >= 0),
+                    -1,
+                )
+                return [(token_id, False, fallback_idx) for token_id in token_ids]
+            has_content_attribution = False
+        else:
+            encoding = offset_tokenizer(
+                full_text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+            token_ids = list(encoding["input_ids"])
+            offsets = list(encoding["offset_mapping"])
+            has_content_attribution = True
 
         spans: list[tuple[int, int, bool, int]] = []
         pos = 0
@@ -255,13 +288,19 @@ class Hy3Renderer:
         total_len = pos
 
         out: list[tuple[int, bool, int]] = []
-        last = (spans[-1][2], spans[-1][3])
+        last = (
+            spans[-1][2] if has_content_attribution else False,
+            spans[-1][3],
+        )
         for tok_id, (start, _end) in zip(token_ids, offsets):
             attr = last
             if start < total_len:
                 for seg_start, seg_end, seg_is_content, seg_idx in spans:
                     if seg_start <= start < seg_end:
-                        attr = (seg_is_content, seg_idx)
+                        attr = (
+                            seg_is_content if has_content_attribution else False,
+                            seg_idx,
+                        )
                         break
             out.append((tok_id, attr[0], attr[1]))
         return out
@@ -432,7 +471,7 @@ class Hy3Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
@@ -560,6 +599,7 @@ class Hy3Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         return parse_hy3(
             self._tokenizer,
@@ -577,6 +617,14 @@ class Hy3Renderer:
             arg_value_id=self._arg_value,
             arg_value_end_id=self._arg_value_end,
             tools=tools,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                open_marker=_THINK,
+                close_marker=_THINK_END,
+                stop_ids=set(self.get_stop_token_ids()),
+                assistant_prefix="<｜hy_Assistant:opensource｜>",
+            ),
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -598,6 +646,23 @@ class Hy3Renderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_calls,
+            open_id=self._think,
+            close_id=self._think_end,
+            open_marker=_THINK,
+            close_marker=_THINK_END,
+            assistant_prefix="<｜hy_Assistant:opensource｜>",
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [*previous_completion_ids, self._think_end]
 
         if should_rerender_for_thinking_retention(
             self._thinking_retention_for(tools),
@@ -700,7 +765,9 @@ class Hy3Renderer:
             token_ids=previous_ids + ext,
             message_indices=[-1] * len(previous_ids) + ext_indices,
             sampled_mask=[False] * total_len,
-            is_content=[False] * len(previous_ids) + ext_content,
+            is_content=_content_mask_or_empty(
+                self._tokenizer, [False] * len(previous_ids) + ext_content
+            ),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
         )

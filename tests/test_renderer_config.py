@@ -3,14 +3,16 @@ auto-resolution, and ``extra="forbid"`` enforcement on per-renderer
 configs."""
 
 from types import SimpleNamespace
+from typing import Literal
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
-
 from renderers import (
     AutoRendererConfig,
+    BaseRendererConfig,
     DefaultRendererConfig,
     GLM5RendererConfig,
+    GLM53RendererConfig,
     GptOssRendererConfig,
     Nemotron3RendererConfig,
     Qwen3RendererConfig,
@@ -19,8 +21,15 @@ from renderers import (
     RendererConfig,
     base,
     create_renderer,
-    create_renderer_pool,
 )
+
+
+def test_renderer_specific_fields_require_explicit_classification():
+    with pytest.raises(TypeError, match="missing=\\['unclassified'\\]"):
+
+        class _InvalidRendererConfig(BaseRendererConfig):
+            name: Literal["invalid-test"] = "invalid-test"
+            unclassified: bool = False
 
 
 def test_per_renderer_config_rejects_unknown_fields():
@@ -42,6 +51,12 @@ def test_discriminated_union_dispatches_on_name():
     assert isinstance(parsed, GLM5RendererConfig)
     assert parsed.enable_thinking is False
     assert parsed.clear_thinking is False
+
+
+def test_glm53_defaults_match_its_template():
+    cfg = GLM53RendererConfig()
+    assert cfg.clear_thinking is False
+    assert cfg.reasoning_effort == "max"
 
 
 def test_discriminated_union_rejects_wrong_renderer_kwargs():
@@ -131,31 +146,6 @@ def test_create_renderer_auto_applies_chat_template_kwargs(monkeypatch):
     assert renderer.config.enable_thinking is False
 
 
-def test_create_renderer_pool_forwards_chat_template_kwargs(monkeypatch):
-    """Pool construction uses the same renderer-owned config resolution."""
-
-    class _FakeQwen3:
-        def __init__(self, tokenizer, config):
-            self.config = config
-
-    monkeypatch.setitem(base.RENDERER_REGISTRY, "qwen3", _FakeQwen3)
-    monkeypatch.setitem(base.MODEL_RENDERER_MAP, "fake/qwen3", "qwen3")
-    monkeypatch.setattr(
-        base,
-        "load_tokenizer",
-        lambda name: SimpleNamespace(name_or_path=name),
-    )
-
-    pool = create_renderer_pool(
-        "fake/qwen3",
-        size=1,
-        chat_template_kwargs={"enable_thinking": False},
-    )
-
-    assert isinstance(pool._sole.config, Qwen3RendererConfig)
-    assert pool._sole.config.enable_thinking is False
-
-
 def test_auto_unknown_model_rejects_chat_template_kwargs():
     tok = SimpleNamespace(name_or_path="unknown/text-model")
 
@@ -163,7 +153,7 @@ def test_auto_unknown_model_rejects_chat_template_kwargs():
         create_renderer(tok, chat_template_kwargs={"enable_thinking": False})
 
 
-def test_chat_template_kwargs_validate_against_resolved_config(monkeypatch):
+def test_chat_template_kwargs_validate_against_explicit_allowlist(monkeypatch):
     class _FakeQwen3:
         def __init__(self, tokenizer, config):
             self.config = config
@@ -171,10 +161,47 @@ def test_chat_template_kwargs_validate_against_resolved_config(monkeypatch):
     monkeypatch.setitem(base.RENDERER_REGISTRY, "qwen3", _FakeQwen3)
     monkeypatch.setitem(base.MODEL_RENDERER_MAP, "fake/qwen3", "qwen3")
 
-    with pytest.raises(ValidationError, match="enable_thinkng"):
+    with pytest.raises(ValueError, match="Allowed: enable_thinking"):
         create_renderer(
             SimpleNamespace(name_or_path="fake/qwen3"),
             chat_template_kwargs={"enable_thinkng": False},
+        )
+
+
+def test_chat_template_kwargs_reject_renderer_internal_fields(monkeypatch):
+    class _FakeQwen35:
+        def __init__(self, tokenizer, config):
+            self.config = config
+
+    monkeypatch.setitem(base.RENDERER_REGISTRY, "qwen3.5", _FakeQwen35)
+
+    with pytest.raises(ValueError, match="image_cache_max"):
+        create_renderer(
+            SimpleNamespace(name_or_path="fake/qwen35"),
+            Qwen35RendererConfig(),
+            chat_template_kwargs={"image_cache_max": 1},
+        )
+
+    renderer = create_renderer(
+        SimpleNamespace(name_or_path="fake/qwen35"),
+        Qwen35RendererConfig(image_cache_max=1),
+    )
+    assert renderer.config.image_cache_max == 1
+
+
+def test_default_renderer_chat_template_kwargs_remain_open_ended():
+    renderer = create_renderer(
+        SimpleNamespace(name_or_path="unknown/text-model"),
+        DefaultRendererConfig(),
+        chat_template_kwargs={"custom_jinja_kwarg": True},
+    )
+    assert renderer.config.model_extra == {"custom_jinja_kwarg": True}
+
+    with pytest.raises(ValueError, match="tool_parser"):
+        create_renderer(
+            SimpleNamespace(name_or_path="unknown/text-model"),
+            DefaultRendererConfig(),
+            chat_template_kwargs={"tool_parser": "qwen3"},
         )
 
 
@@ -322,3 +349,9 @@ def test_default_renderer_config_rejects_legacy_preserve_flags():
 
     cfg = DefaultRendererConfig(some_jinja_kwarg=True)
     assert cfg.model_extra["some_jinja_kwarg"] is True
+
+
+def test_message_required_keys():
+    assert base.Message.__required_keys__ == {"role", "content"}
+    assert "tool_calls" in base.Message.__optional_keys__
+    assert "reasoning_content" in base.Message.__optional_keys__

@@ -25,7 +25,7 @@ import json
 import re
 from typing import Any
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
 
 from renderers.base import (
     Message,
@@ -36,6 +36,9 @@ from renderers.base import (
     RenderedTokens,
     ToolCallParseStatus,
     ToolSpec,
+    Tokenizer,
+    _content_mask_or_empty,
+    _require_transformers,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -43,7 +46,11 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
-from renderers.parsing import _reasoning_end_token_index, parse_kimi_k2_section
+from renderers.parsing import (
+    _find,
+    _reasoning_end_token_index,
+    parse_kimi_k2_section,
+)
 from renderers.qwen3_vl import (
     _image_hash,
     _is_image_part,
@@ -422,8 +429,7 @@ def _parse_kimi_k2_response(
     token_ids: list[int],
     *,
     stop_ids: set[int],
-    think_open_ids: list[int],
-    think_close_ids: list[int],
+    prefilled_thinking: bool,
     tool_calls_section_begin_id: int | None,
     tool_calls_section_end_id: int | None,
     tool_call_begin_id: int | None,
@@ -443,8 +449,7 @@ def _parse_kimi_k2_response(
     probe). Spans stay ``None`` here since text positions don't cheaply map
     back to token offsets across BPE.
 
-    ``<think>...</think>`` is always text-extracted from the content slice
-    (K2.5 emits them as plain text, not special tokens).
+    Initial reasoning is identified before scanning tool-call sections.
     """
     # Strip stop token
     ids = list(token_ids)
@@ -453,12 +458,31 @@ def _parse_kimi_k2_response(
             ids = ids[:i]
             break
 
+    boundary = scan_reasoning(
+        tokenizer,
+        ids,
+        tool_start_id=tool_calls_section_begin_id,
+        tool_start_closes_reasoning=True,
+        prefilled=prefilled_thinking,
+        assistant_prefix="<|im_assistant|>assistant<|im_middle|>",
+    )
+    if boundary.is_open:
+        return ParsedResponse(
+            content="", reasoning_content=boundary.text, reasoning_complete=False
+        )
+
     # Reasoning first: a tool-call section the model drafts *inside* its
     # <think> trace must not be parsed as a real call (regression #78 — cf.
     # parse_qwen3). K2.5 renders </think> as text, so locate the boundary by
     # decoding; the section scan then starts past it. content_ids still begins
     # at 0, so the </think> text-split below recovers reasoning unchanged.
-    reasoning_end = _reasoning_end_token_index(tokenizer, ids)
+    # Without </think>, the section opener itself ends reasoning.
+    if boundary.closed_by_tool:
+        reasoning_end = _find(ids, tool_calls_section_begin_id)
+    elif boundary.text is not None:
+        reasoning_end = _reasoning_end_token_index(tokenizer, ids)
+    else:
+        reasoning_end = 0
 
     # Token-ID path — produces spans. Only run if every relevant special
     # token resolved at init (i.e. is in the tokenizer's vocab).
@@ -481,6 +505,8 @@ def _parse_kimi_k2_response(
             tool_call_end_id=tool_call_end_id,
             scan_start=reasoning_end,
         )
+        if boundary.closed_by_tool:
+            content_ids = content_ids[reasoning_end:]
         text = (
             tokenizer.decode(content_ids, skip_special_tokens=False)
             if content_ids
@@ -534,32 +560,9 @@ def _parse_kimi_k2_response(
                     )
                 )
 
-    # Extract reasoning from <think>...</think> in the content text. Partition
-    # on <think> first so any tokens BEFORE the open tag (e.g. the assistant
-    # role tag, when the caller slices the completion to include the prompt's
-    # gen-prompt-equivalent) don't leak into reasoning_content.
-    reasoning: str | None = None
-    if "<think>" in text:
-        _, _, after_open = text.partition("<think>")
-        if "</think>" in after_open:
-            reasoning_raw, _, text = after_open.partition("</think>")
-            reasoning = reasoning_raw.strip("\n") or None
-            text = text.strip("\n")
-        else:
-            # Truncated reasoning (no closing tag) — discard any partial
-            # tool-call attempts since the model never finished thinking.
-            return ParsedResponse(
-                content="",
-                reasoning_content=after_open.strip() or None,
-                tool_calls=[],
-            )
-    elif "</think>" in text:
-        # Sampler stripped the prefilled <think> open tag — see
-        # _normalize_response_tokens. Keep prior behaviour: everything
-        # before </think> is reasoning, everything after is content.
-        before, _, after = text.partition("</think>")
-        reasoning = before.strip("\n") or None
-        text = after.strip("\n")
+    reasoning = boundary.text
+    if reasoning is not None:
+        text = text.partition("</think>")[2].strip("\n")
 
     return ParsedResponse(
         content=text.strip(),
@@ -590,9 +593,17 @@ class KimiK25Renderer:
     The tokenizer should be ``moonshotai/Kimi-K2-Instruct`` (same as K2).
     """
 
+    @property
+    def is_prefix_stable(self) -> bool:
+        """Whether full renders preserve completed conversation prefixes."""
+        # Completing a tool cycle strips its earlier reasoning, even with thinking=False.
+        return False
+
+    supports_process_multimodal = True
+
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Tokenizer,
         config: KimiK25RendererConfig | None = None,
         *,
         processor: Any = None,
@@ -630,11 +641,6 @@ class KimiK25Renderer:
         self._media_pad = self._token_id("<|media_pad|>")
         self._media_end = self._token_id("<|media_end|>")
 
-        # <think> / </think> may be multi-token in K2.5; we encode them as text.
-        # We cache the encoded IDs for use in _normalize_response_tokens.
-        self._think_open_ids: list[int] = self._encode("<think>")
-        self._think_close_ids: list[int] = self._encode("</think>")
-
         # The stop token for generation
         self._endoftext: int | None = self._try_token_id("<|endoftext|>")
 
@@ -655,8 +661,6 @@ class KimiK25Renderer:
     def _get_processor(self):
         if self._processor is not None:
             return self._processor
-        from transformers import AutoProcessor
-
         name = getattr(self._tokenizer, "name_or_path", None)
         if not name:
             raise RuntimeError(
@@ -666,10 +670,12 @@ class KimiK25Renderer:
                 "known name_or_path so the processor can be auto-loaded."
             )
         # Kimi's processor is custom Python in the model repo and requires
-        # trust_remote_code=True. Callers using ``create_renderer_pool`` go
-        # through ``load_tokenizer`` which already pins the revision; for
-        # auto-load here, we delegate to AutoProcessor with the same flag.
-        self._processor = AutoProcessor.from_pretrained(name, trust_remote_code=True)
+        # trust_remote_code=True, so auto-loading delegates to AutoProcessor
+        # with that flag.
+        transformers = _require_transformers("Auto-loading a Kimi K2.5 processor")
+        self._processor = transformers.AutoProcessor.from_pretrained(
+            name, trust_remote_code=True
+        )
         return self._processor
 
     def _process_image(self, part: dict[str, Any]):
@@ -733,6 +739,7 @@ class KimiK25Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
+        process_multimodal: bool = True,
     ) -> RenderedTokens:
         """Render messages to tokens, matching the K2.5 chat template.
 
@@ -820,7 +827,10 @@ class KimiK25Renderer:
             ``<|media_content|>``, ``<|media_end|>``, the trailing
             ``\\n``) are template-injected scaffold.
             """
-            _, out, _num_patches, h = self._process_image(part)
+            if process_multimodal:
+                _, out, _num_patches, h = self._process_image(part)
+            else:
+                out = h = None
             emit_special(
                 self._media_begin, msg_idx, is_sampled=is_sampled, is_content=False
             )
@@ -839,6 +849,9 @@ class KimiK25Renderer:
                 self._media_end, msg_idx, is_sampled=is_sampled, is_content=False
             )
             emit_text("\n", msg_idx, is_sampled=is_sampled, is_content=False)
+            if not process_multimodal:
+                return
+            assert out is not None and h is not None
             mm_hashes.setdefault("image", []).append(h)
             mm_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=1)
@@ -955,7 +968,7 @@ class KimiK25Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
             multi_modal_data=mm_data,
@@ -979,38 +992,28 @@ class KimiK25Renderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002 — section-JSON wire format quotes strings, schema not needed
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
         stop_ids: set[int] = {self._im_end}
         if self._endoftext is not None:
             stop_ids.add(self._endoftext)
 
-        # Restore the synthetic <think> prefill if it was stripped by the
-        # sampler. ``parse`` then walks ``normalized``, so any token_span we
-        # emit is in the *normalized* frame. We track the prepend offset and
-        # shift spans back so they refer to the caller's ``token_ids``.
-        normalized = self._normalize_response_tokens(list(token_ids))
-        prepend_offset = len(normalized) - len(token_ids)
-
-        parsed = _parse_kimi_k2_response(
+        return _parse_kimi_k2_response(
             self._tokenizer,
-            normalized,
+            token_ids,
             stop_ids=stop_ids,
-            think_open_ids=self._think_open_ids,
-            think_close_ids=self._think_close_ids,
+            prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=stop_ids,
+                assistant_prefix="<|im_assistant|>assistant<|im_middle|>",
+            ),
             tool_calls_section_begin_id=self._tool_calls_section_begin,
             tool_calls_section_end_id=self._tool_calls_section_end,
             tool_call_begin_id=self._tool_call_begin,
             tool_call_argument_begin_id=self._tool_call_argument_begin,
             tool_call_end_id=self._tool_call_end,
         )
-
-        if prepend_offset:
-            for tc in parsed.tool_calls:
-                if tc.token_span is not None:
-                    start, end = tc.token_span
-                    tc.token_span = (start - prepend_offset, end - prepend_offset)
-
-        return parsed
 
     def get_stop_token_ids(self) -> list[int]:
         stop = [self._im_end]
@@ -1026,6 +1029,7 @@ class KimiK25Renderer:
         *,
         tools: list[ToolSpec] | None = None,
         previous_multi_modal_data: MultiModalData | None = None,
+        process_multimodal: bool = True,
     ) -> "RenderedTokens | None":
         if (
             not previous_prompt_ids
@@ -1033,6 +1037,23 @@ class KimiK25Renderer:
             or reject_assistant_in_extension(new_messages)
         ):
             return None
+
+        boundary = scan_reasoning(
+            self._tokenizer,
+            previous_completion_ids,
+            prompt_ids=previous_prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            tool_start_id=self._tool_calls_section_begin,
+            tool_start_closes_reasoning=True,
+            assistant_prefix="<|im_assistant|>assistant<|im_middle|>",
+        )
+        if boundary.is_open:
+            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
+                return None
+            previous_completion_ids = [
+                *previous_completion_ids,
+                *list(self._tokenizer.encode("</think>", add_special_tokens=False)),
+            ]
 
         if should_rerender_for_thinking_retention(
             self.effective_thinking_retention,
@@ -1114,7 +1135,10 @@ class KimiK25Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            _, out, _num_patches, h = self._process_image(part)
+            if process_multimodal:
+                _, out, _num_patches, h = self._process_image(part)
+            else:
+                out = h = None
             emit_special(self._media_begin, msg_idx)
             emit_text("image", msg_idx)
             emit_special(self._media_content, msg_idx)
@@ -1124,6 +1148,9 @@ class KimiK25Renderer:
             emit_special(self._media_pad, msg_idx, is_content=is_content)
             emit_special(self._media_end, msg_idx)
             emit_text("\n", msg_idx)
+            if not process_multimodal:
+                return
+            assert out is not None and h is not None
             new_hashes.setdefault("image", []).append(h)
             new_placeholders.setdefault("image", []).append(
                 PlaceholderRange(offset=offset, length=1)
@@ -1187,17 +1214,17 @@ class KimiK25Renderer:
         # below never mutates the caller's previous_multi_modal_data.
         merged_hashes: dict[str, list[str]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
-            if previous_multi_modal_data
+            if process_multimodal and previous_multi_modal_data
             else {}
         )
         merged_placeholders: dict[str, list[PlaceholderRange]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
-            if previous_multi_modal_data
+            if process_multimodal and previous_multi_modal_data
             else {}
         )
         merged_items: dict[str, list[dict[str, Any]]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
-            if previous_multi_modal_data
+            if process_multimodal and previous_multi_modal_data
             else {}
         )
         for modality, vals in new_hashes.items():
@@ -1214,7 +1241,7 @@ class KimiK25Renderer:
                 token_ids=tokens,
                 message_indices=indices,
                 sampled_mask=sampled,
-                is_content=content_mask,
+                is_content=_content_mask_or_empty(self._tokenizer, content_mask),
                 message_roles=bridge_roles,
                 message_tool_names=bridge_tool_names,
             )
@@ -1228,7 +1255,7 @@ class KimiK25Renderer:
             token_ids=tokens,
             message_indices=indices,
             sampled_mask=sampled,
-            is_content=content_mask,
+            is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=bridge_roles,
             message_tool_names=bridge_tool_names,
             multi_modal_data=mm_data,
@@ -1476,41 +1503,3 @@ class KimiK25Renderer:
                 is_sampled=False,
                 is_content=True,
             )
-
-    def _normalize_response_tokens(self, response: list[int]) -> list[int]:
-        """Restore the synthetic ``<think>`` prefill if the sampler stripped it.
-
-        When thinking is enabled the generation prompt ends with a ``<think>``
-        prefill. Some samplers strip the prefill from the returned token IDs.
-        If the response contains ``</think>`` (encoded tokens) but does NOT
-        start with ``<think>`` (encoded tokens), we prepend the ``<think>``
-        tokens so the downstream text-based parser sees a complete block.
-        """
-        if not response:
-            return response
-
-        open_ids = self._think_open_ids
-        close_ids = self._think_close_ids
-
-        if not open_ids or not close_ids:
-            return response
-
-        # Check whether <think> appears anywhere in the response. Checking
-        # anywhere (not just the start) avoids false positives when the
-        # caller's slicing happens to include earlier scaffolding tokens
-        # (e.g. the assistant role tag) before the open tag.
-        contains_open = any(
-            response[j : j + len(open_ids)] == open_ids
-            for j in range(len(response) - len(open_ids) + 1)
-        )
-
-        # Check whether </think> appears anywhere in the response
-        contains_close = any(
-            response[j : j + len(close_ids)] == close_ids
-            for j in range(len(response) - len(close_ids) + 1)
-        )
-
-        if not contains_open and contains_close:
-            return open_ids + response
-
-        return response

@@ -16,6 +16,9 @@ on:
       - "uv.lock"
       - ".github/workflows/test.yml"
 
+permissions:
+  contents: read
+
 jobs:
   unit:
     name: Offline (Python ${{ matrix.python-version }})

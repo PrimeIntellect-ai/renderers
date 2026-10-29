@@ -9,7 +9,7 @@ on:
       - "uv.lock"
       - ".github/workflows/test.yml"
   pull_request:
-    branches: [main]
+    branches: [main, "codex/**"]
     paths:
       - "**.py"
       - "pyproject.toml"

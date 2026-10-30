@@ -32,6 +32,7 @@ from renderers.base import (
     _content_mask_or_empty,
     _require_transformers,
     attribute_text_segments,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -129,6 +130,8 @@ class Nemotron3Renderer:
     # reasoning-block glue.
     _config_cls: type = Nemotron3RendererConfig
     _ultra: bool = False
+    # Tokenize unsampled body text with special-token strings split.
+    _split_body_special_tokens: bool = True
 
     def __init__(
         self,
@@ -189,10 +192,12 @@ class Nemotron3Renderer:
             )
         return tid
 
-    def _encode(self, text: str) -> list[int]:
+    def _encode(self, text: str, *, split_special_tokens: bool = False) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return encode_text(
+            self._tokenizer, text, split_special_tokens=split_special_tokens
+        )
 
     # ------------------------------------------------------------------
     # Content rendering
@@ -338,7 +343,12 @@ class Nemotron3Renderer:
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
             emit_ids(
-                self._encode(text),
+                self._encode(
+                    text,
+                    split_special_tokens=self._split_body_special_tokens
+                    and is_content
+                    and not is_sampled,
+                ),
                 msg_idx,
                 is_sampled=is_sampled,
                 is_content=is_content,
@@ -348,7 +358,9 @@ class Nemotron3Renderer:
             segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
         ) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer,
+                segments,
+                split_special_tokens=self._split_body_special_tokens and not is_sampled,
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -630,7 +642,12 @@ class Nemotron3Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(
+                text,
+                split_special_tokens=self._split_body_special_tokens
+                and is_content
+                and not is_sampled,
+            )
             ext.extend(ids)
             ext_indices.extend([msg_idx] * len(ids))
             ext_sampled.extend([is_sampled] * len(ids))
@@ -643,7 +660,9 @@ class Nemotron3Renderer:
             is_sampled: bool = False,
         ) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer,
+                segments,
+                split_special_tokens=self._split_body_special_tokens and not is_sampled,
             ):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)
@@ -909,6 +928,9 @@ class Nemotron35Renderer(Nemotron3Renderer):
     _ultra = True
     supports_process_multimodal = True
     supports_multimodal_bridge = False
+    # Image placeholders are spliced into the body text, and a literal
+    # ``<image>`` in user text is an image slot (HF processor semantics).
+    _split_body_special_tokens = False
 
     _processor_model_prefix = "nvidia/NVIDIA-Nemotron-3.5"
 

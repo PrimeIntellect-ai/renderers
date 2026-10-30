@@ -8,8 +8,10 @@ import pytest
 
 from renderers import MalformedGenerateResponseError
 from renderers.base import (
+    MultiModalData,
     ParsedResponse,
     ParsedToolCall,
+    PlaceholderRange,
     RenderedTokens,
     ToolCallParseStatus,
 )
@@ -471,7 +473,12 @@ def test_generate_process_multimodal_false_sends_content_parts():
             process_multimodal=True,
         ):
             assert process_multimodal is False
-            return RenderedTokens(token_ids=[1, 2, 3])
+            return RenderedTokens(
+                token_ids=[1, 2, 3],
+                multi_modal_data=MultiModalData(
+                    mm_placeholders={"image": [PlaceholderRange(offset=1, length=1)]}
+                ),
+            )
 
     client = _FakeClient()
     image_url = "data:image/png;base64,aW1hZ2U="
@@ -494,7 +501,13 @@ def test_generate_process_multimodal_false_sends_content_parts():
     )
 
     body = client.calls[0]["body"]
-    assert body["content_parts"] == [{"type": "image_url", "url": image_url}]
+    assert body["content_parts"] == [
+        {
+            "type": "image_url",
+            "url": image_url,
+            "placeholder": {"offset": 1, "length": 1},
+        }
+    ]
     assert body["return_token_ids"] is True
     assert "features" not in body
     assert result["renderer_prompt_ids"] == [1, 2, 3]

@@ -17,6 +17,7 @@ import httpx
 import pytest
 from openai import AsyncOpenAI
 
+from renderers.base import PlaceholderRange
 from renderers.client import generate
 
 pytestmark = pytest.mark.model
@@ -151,8 +152,16 @@ def test_one_image_placeholder_per_image():
     rendered = _render(
         [{"role": "user", "content": [IMAGE, {"type": "text", "text": "x"}, IMAGE]}]
     )
-    assert rendered.token_ids.count(_token("<|image|>")) == 2
-    assert rendered.multi_modal_data is None
+    image = _token("<|image|>")
+    assert rendered.multi_modal_data is not None
+    assert rendered.multi_modal_data.mm_placeholders == {
+        "image": [
+            PlaceholderRange(offset=k, length=1)
+            for k, token_id in enumerate(rendered.token_ids)
+            if token_id == image
+        ]
+    }
+    assert len(rendered.multi_modal_data.mm_placeholders["image"]) == 2
 
 
 def test_image_attribution():
@@ -169,7 +178,6 @@ def test_image_attribution():
         ]
     )
 
-    assert renderer.mm_token_type_id_map == {image: 1}
     assert image in rendered.token_ids
     for pos, token_id in enumerate(rendered.token_ids):
         if token_id == image:
@@ -205,6 +213,10 @@ def test_bridge_tool_response_image_matches_full_render():
         prompt_ids + completion_ids
     )
     assert bridged.token_ids == full_ids
+    assert (
+        bridged.multi_modal_data.mm_placeholders
+        == _render(messages, tools=TOOLS).multi_modal_data.mm_placeholders
+    )
 
 
 def test_bridge_user_image_matches_full_render():

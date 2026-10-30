@@ -912,6 +912,8 @@ class Nemotron35Renderer(Nemotron3Renderer):
 
     _processor_model_prefix = "nvidia/NVIDIA-Nemotron-3.5"
 
+    is_multimodal = True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -922,10 +924,6 @@ class Nemotron35Renderer(Nemotron3Renderer):
         super().__init__(tokenizer, config)
         self._processor = processor
         self._image = self._token_id("<image>", optional=True)
-
-    @property
-    def mm_token_type_id_map(self) -> dict[int, int]:
-        return {self._image: 1} if self._image is not None else {}
 
     def _image_token_id(self) -> int:
         if self._image is None:
@@ -1085,6 +1083,8 @@ class Nemotron35Renderer(Nemotron3Renderer):
             tools=tools,
             add_generation_prompt=add_generation_prompt,
         )
+        if not process_multimodal:
+            return self._with_logical_placeholders(rendered, messages)
         if not processed_images:
             return rendered
 
@@ -1124,6 +1124,39 @@ class Nemotron35Renderer(Nemotron3Renderer):
                     for processor_output, _, _ in processed_images
                 ],
             },
+        )
+        return replace(rendered, multi_modal_data=mm_data)
+
+    def _with_logical_placeholders(
+        self, rendered: RenderedTokens, messages: list[Message]
+    ) -> RenderedTokens:
+        """Record one placeholder per ``<image>`` of a logical prompt.
+
+        The Nemotron template places images as ``<image>`` text, so the
+        rendered ``<image>`` tokens are the placeholders (as in the HF
+        processor, a literal ``<image>`` in user text marks an image slot).
+        """
+        num_images = sum(
+            self._is_image_part(item)
+            for message in messages
+            if isinstance(message.get("content"), list)
+            for item in message["content"]
+        )
+        if not num_images:
+            return rendered
+        image_token_id = self._image_token_id()
+        offsets = [
+            k for k, token in enumerate(rendered.token_ids) if token == image_token_id
+        ]
+        if len(offsets) != num_images:
+            raise ValueError(
+                f"Nemotron prompt has {len(offsets)} <image> placeholders "
+                f"for {num_images} images."
+            )
+        mm_data = MultiModalData(
+            mm_placeholders={
+                "image": [PlaceholderRange(offset=k, length=1) for k in offsets]
+            }
         )
         return replace(rendered, multi_modal_data=mm_data)
 

@@ -319,6 +319,8 @@ class Qwen3VLRenderer:
 
     supports_process_multimodal = True
 
+    is_multimodal = True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -363,19 +365,6 @@ class Qwen3VLRenderer:
             f"Special token {token!r} not found in tokenizer vocabulary"
         )
         return tid
-
-    @property
-    def mm_token_type_id_map(self) -> dict[int, int]:
-        """Token-id → modality marker used to build ``mm_token_type_ids``.
-
-        Qwen3-VL uses a single placeholder token per image/video patch
-        (``<|image_pad|>``, ``<|video_pad|>``); the trainer's forward
-        expects a per-token int tensor where 1 = image patch, 2 = video
-        patch, 0 = anything else. The orchestrator walks the final token
-        sequence and applies this map (constant per renderer instance,
-        cached at construction) — no separate processor load needed.
-        """
-        return {self._image_pad: 1, self._video_pad: 2}
 
     def _encode(self, text: str) -> list[int]:
         if not text:
@@ -507,12 +496,12 @@ class Qwen3VLRenderer:
             for _ in range(n):
                 em.special(self._image_pad, is_sampled=False, is_content=True)
             em.special(self._vision_end, is_sampled=False, is_content=False)
+            mm_placeholders.setdefault("image", []).append(
+                PlaceholderRange(offset=offset, length=n)
+            )
             if process_multimodal:
                 assert out is not None and h is not None
                 mm_hashes.setdefault("image", []).append(h)
-                mm_placeholders.setdefault("image", []).append(
-                    PlaceholderRange(offset=offset, length=n)
-                )
                 mm_items.setdefault("image", []).append(
                     {
                         "pixel_values": out["pixel_values"],
@@ -746,7 +735,6 @@ class Qwen3VLRenderer:
         # correctly.
         if (
             self.config.add_vision_id
-            and process_multimodal
             and previous_multi_modal_data is None
             and self._vision_start in previous_ids
         ):
@@ -774,22 +762,19 @@ class Qwen3VLRenderer:
         new_hashes: dict[str, list[str]] = {}
         new_placeholders: dict[str, list[PlaceholderRange]] = {}
         new_items: dict[str, list[dict[str, Any]]] = {}
-        # Seed the vision counters from any prior-turn images / videos
-        # the bridge was handed via ``previous_multi_modal_data``. The
-        # ``add_vision_id`` template numbers placeholders across the
-        # whole conversation, so a new turn's first image is
-        # ``Picture {prev_total + 1}``. The bridge can't recover this
-        # count from raw token ids, so callers must thread
-        # ``previous_multi_modal_data`` through when they want
-        # ``add_vision_id`` parity across turns.
-        prev_image_count = 0
-        prev_video_count = 0
-        if process_multimodal and previous_multi_modal_data is not None:
-            prev_image_count = len(previous_multi_modal_data.mm_items.get("image", []))
-            prev_video_count = len(previous_multi_modal_data.mm_items.get("video", []))
-        elif not process_multimodal:
-            prev_image_count = previous_ids.count(self._image_pad)
-        vision_counts = {"image": prev_image_count, "video": prev_video_count}
+        # Seed the vision counters from prior-turn images / videos so a new
+        # turn's first image is ``Picture {prev_total + 1}``. Token ids can't
+        # tell a placeholder from a sampled or literal placeholder token, so
+        # callers thread ``previous_multi_modal_data``.
+        previous_placeholders = (
+            previous_multi_modal_data.mm_placeholders
+            if previous_multi_modal_data is not None
+            else {}
+        )
+        vision_counts = {
+            "image": len(previous_placeholders.get("image", [])),
+            "video": len(previous_placeholders.get("video", [])),
+        }
 
         def emit_image(part: dict[str, Any]) -> None:
             if process_multimodal:
@@ -809,12 +794,12 @@ class Qwen3VLRenderer:
             for _ in range(n):
                 em.special(self._image_pad, is_sampled=False, is_content=True)
             em.special(self._vision_end, is_sampled=False, is_content=False)
+            new_placeholders.setdefault("image", []).append(
+                PlaceholderRange(offset=offset, length=n)
+            )
             if process_multimodal:
                 assert out is not None and h is not None
                 new_hashes.setdefault("image", []).append(h)
-                new_placeholders.setdefault("image", []).append(
-                    PlaceholderRange(offset=offset, length=n)
-                )
                 new_items.setdefault("image", []).append(
                     {
                         "pixel_values": out["pixel_values"],
@@ -879,17 +864,17 @@ class Qwen3VLRenderer:
         # caller's previous_multi_modal_data.
         merged_hashes = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
-            if process_multimodal and previous_multi_modal_data
+            if previous_multi_modal_data
             else {}
         )
         merged_placeholders = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
-            if process_multimodal and previous_multi_modal_data
+            if previous_multi_modal_data
             else {}
         )
         merged_items = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
-            if process_multimodal and previous_multi_modal_data
+            if previous_multi_modal_data
             else {}
         )
         for modality, vals in new_hashes.items():

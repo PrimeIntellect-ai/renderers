@@ -179,6 +179,8 @@ class InklingRenderer:
         # Reused tool-call IDs can change names resolved for earlier tool responses.
         return False
 
+    is_multimodal = True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -227,13 +229,6 @@ class InklingRenderer:
         # Per-instance FIFO media caches (keyed by content hash).
         self._image_cache: dict[str, tuple[Any, int]] = {}
         self._audio_cache: dict[str, dict[str, Any]] = {}
-
-    @property
-    def mm_token_type_id_map(self) -> dict[int, int]:
-        """Token-id → modality marker. Only the image placeholder carries a
-        vision marker (1); audio has no entry in the orchestrator's
-        image/video type map (the model consumes ``audio_input_ids`` directly)."""
-        return {self._image_pad: 1}
 
     # ------------------------------------------------------------------
     # Token / processor helpers

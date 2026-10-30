@@ -545,7 +545,9 @@ async def generate(
             return (
                 list(prompt_ids),
                 renderer.get_stop_token_ids(),
-                multi_modal_data,
+                multi_modal_data
+                if multi_modal_data is not None or prompt_attribution is None
+                else prompt_attribution.multi_modal_data,
                 prompt_attribution,
             )
         render_kwargs: dict[str, Any] = {}
@@ -598,6 +600,8 @@ async def generate(
     content_parts = (
         _content_parts(messages, renderer=renderer) if not process_multimodal else None
     )
+    if content_parts and mm_data is not None:
+        _attach_placeholders(content_parts, mm_data)
     features = (
         _build_mm_features(renderer, mm_data)
         if process_multimodal and mm_data and not mm_data.is_empty()
@@ -761,6 +765,36 @@ def _content_parts(
                 raise ValueError(f"{part_type} content part is missing a URL")
             parts.append({"type": _MEDIA_URL_TYPES[part_type], "url": url})
     return parts
+
+
+def _attach_placeholders(
+    content_parts: list[dict[str, Any]], mm_data: MultiModalData
+) -> None:
+    """Pair each raw media part with the prompt range where the renderer placed it.
+
+    The engine expands media at these ranges, so a placeholder token id that
+    appears anywhere else (sampled by the model, or in text) stays text. A
+    prebuilt prompt without ``multi_modal_data`` sends no ranges, and the engine
+    falls back to matching placeholder tokens.
+    """
+    placeholders = sorted(
+        (
+            placeholder
+            for ranges in mm_data.mm_placeholders.values()
+            for placeholder in ranges
+        ),
+        key=lambda placeholder: placeholder.offset,
+    )
+    if len(placeholders) != len(content_parts):
+        raise ValueError(
+            f"Renderer placed {len(placeholders)} media placeholders for "
+            f"{len(content_parts)} media content parts."
+        )
+    for part, placeholder in zip(content_parts, placeholders):
+        part["placeholder"] = {
+            "offset": placeholder.offset,
+            "length": placeholder.length,
+        }
 
 
 def _build_mm_features(

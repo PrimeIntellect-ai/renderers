@@ -245,15 +245,15 @@ async def test_unfinished_reasoning_survives_client_and_controls_bridge(
     bridge = renderer.bridge_to_next_turn(
         result["prompt_ids"], sampled, [{"role": "user", "content": "Continue."}]
     )
-    if stopped:
-        assert bridge is None
-    else:
-        assert bridge is not None
-        prefix = result["prompt_ids"] + sampled
-        assert bridge.token_ids[: len(prefix)] == prefix
-        close = tok.encode("</think>", add_special_tokens=False)
-        assert bridge.token_ids[len(prefix) : len(prefix) + len(close)] == close
-        assert not any(bridge.sampled_mask[len(prefix) :])
+    # Truncated: the bridge closes the reasoning. Stopped: the stop already ended the
+    # turn, so it is extended exactly as sampled, with no close inserted.
+    assert bridge is not None
+    prefix = result["prompt_ids"] + sampled
+    assert bridge.token_ids[: len(prefix)] == prefix
+    close = tok.encode("</think>", add_special_tokens=False)
+    closed = bridge.token_ids[len(prefix) : len(prefix) + len(close)] == close
+    assert closed is not stopped
+    assert not any(bridge.sampled_mask[len(prefix) :])
 
 
 def teardown_module():

@@ -335,9 +335,10 @@ class DeepSeekV3Renderer:
             tool_start_id=self._tool_calls_begin,
             assistant_prefix="<｜Assistant｜>",
         )
-        if boundary.is_open:
-            if any(t in self.get_stop_token_ids() for t in previous_completion_ids):
-                return None
+        # A sampled stop token already ended the turn: extend it as sampled.
+        if boundary.is_open and not any(
+            t in self.get_stop_token_ids() for t in previous_completion_ids
+        ):
             previous_completion_ids = [
                 *previous_completion_ids,
                 *list(self._tokenizer.encode("</think>", add_special_tokens=False)),

@@ -132,6 +132,30 @@ def test_parse_generate_response_preserves_multiple_compact_choices(separators):
     assert sampled.tolist() == [] and top_ids == [] and top_logprobs == []
 
 
+def test_compact_sampler_draws_keep_repeats():
+    choice = _compact_choice(
+        {
+            "logprobs": {
+                "content": [
+                    {
+                        "token": "token_id:7",
+                        "logprob": -2.0,
+                        "top_logprobs": [
+                            {"token": f"token_id:{i}", "logprob": p}
+                            for i, p in [(1, -0.1), (1, -0.1), (7, -2.0)]
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+    choice["compact_logprobs"]["samples"] = True
+    sampled, ids, logprobs = _parse_compact_logprobs(choice, [7], 3)
+    assert sampled.tolist() == [-2.0]
+    assert ids == [[1, 1, 7]]
+    assert np.allclose(logprobs, [[-0.1, -0.1, -2.0]])
+
+
 @pytest.mark.parametrize("sampled", [1, 3, 5])
 @pytest.mark.parametrize("compact", [False, True])
 @pytest.mark.parametrize(

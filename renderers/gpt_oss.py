@@ -20,7 +20,8 @@ This renderer is a thin adapter that:
     verified empirically. Tool calls render as gpt-oss samples them,
     channel-first with a content type
     (``<|channel|>commentary to=functions.x <|constrain|>json``, or ``code``
-    for arguments that aren't a JSON object); tool results keep the
+    for arguments that aren't a JSON object, unless the call carries the
+    ``content_type`` it was sampled with); tool results keep the
     recipient-first header (``to=assistant<|channel|>commentary``).
 
 Special tokens
@@ -850,7 +851,14 @@ class GptOssRenderer:
             recipient = name if name.startswith("functions.") else f"functions.{name}"
             m = HarmonyMessage.from_role_and_content(Role.ASSISTANT, args)
             m = m.with_channel("commentary").with_recipient(recipient)
-            out.append(m.with_content_type("json" if _is_json_object(args) else "code"))
+            # The header as sampled when the call carries it; else the type its arguments suggest.
+            sampled = tc.get("content_type") or fn.get("content_type")
+            content_type = (
+                sampled
+                if sampled in ("json", "code")
+                else ("json" if _is_json_object(args) else "code")
+            )
+            out.append(m.with_content_type(content_type))
 
         # Empty assistant (no text and no tool_calls) — emit an empty
         # final-channel message so message_indices stays non-empty.

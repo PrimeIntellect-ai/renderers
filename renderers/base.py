@@ -619,12 +619,22 @@ class ParsedToolCall:
     it back as the call's ``arguments`` re-renders the call with the
     model's own spacing, which ``json.dumps(arguments)`` generally
     doesn't. It's ``None`` for other formats.
+
+    ``content_type`` is the call's content type as the model sampled it in the
+    call's header, for formats whose header carries one (gpt-oss: the word after
+    ``<|constrain|>``, else the header's bare content type such as ``code``;
+    ``None`` when the header has none). The model doesn't always pick the type
+    its arguments would suggest (gpt-oss samples `` code`` for JSON objects too),
+    so passing it back as the tool call's ``content_type`` (on the tool-call dict
+    or its ``function`` dict) re-renders the header as sampled; the gpt-oss
+    renderer honours ``json`` and ``code``. It's ``None`` for other formats.
     """
 
     raw: str
     name: str | None = None
     arguments: dict[str, Any] | str | None = None
     arguments_text: str | None = None
+    content_type: str | None = None
     token_span: tuple[int, int] | None = None
     status: ToolCallParseStatus = ToolCallParseStatus.OK
     id: str | None = None  # native tool-call id when the format carries one (Kimi K2)

@@ -1745,8 +1745,19 @@ def parse_gpt_oss(
         recipient_match = re.search(r"to=([^\s<]+)", header_text)
         recipient = recipient_match.group(1) if recipient_match else None
 
-        if recipient and recipient.startswith("functions."):
+        if recipient_match and recipient and recipient.startswith("functions."):
             tool_name = recipient[len("functions.") :]
+            if constrain_id in header_ids:
+                after = _decode(
+                    tokenizer, header_ids[header_ids.index(constrain_id) + 1 :]
+                ).split()
+            else:
+                # The header's words after the recipient, without its channel (recipient-first headers
+                # put ``<|channel|>commentary`` there).
+                after = re.sub(
+                    r"<\|channel\|>\s*\S+", " ", header_text[recipient_match.end() :]
+                ).split()
+            content_type = after[0] if after else None
             block_end = body_end + 1 if body_closed else body_end
             span = (block_start, block_end)
             try:
@@ -1758,6 +1769,7 @@ def parse_gpt_oss(
                         name=tool_name or None,
                         arguments=body_text,
                         arguments_text=body_text,
+                        content_type=content_type,
                         token_span=span,
                         status=ToolCallParseStatus.INVALID_JSON,
                     )
@@ -1775,6 +1787,7 @@ def parse_gpt_oss(
                         name=tool_name or None,
                         arguments=arguments,
                         arguments_text=body_text,
+                        content_type=content_type,
                         token_span=span,
                         status=status,
                     )

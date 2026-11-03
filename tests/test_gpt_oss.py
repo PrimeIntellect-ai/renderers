@@ -106,3 +106,80 @@ def test_rerendered_tool_calls_equal_sampled_tokens():
                 if header in text
             }
     assert content_types == {"json", "code"}
+
+
+def test_a_code_header_on_json_arguments_round_trips():
+    """gpt-oss sometimes samples `` code`` for a call whose arguments are a JSON
+    object. The parsed call carries the sampled ``content_type``, and a re-render
+    given it reproduces the sampled tokens; without it the header follows the
+    arguments."""
+    tok = load_tokenizer("openai/gpt-oss-20b")
+    renderer = create_renderer(tok, GptOssRendererConfig(reasoning_effort="low"))
+    args = '{"command":"ls -R"}'
+    user = {"role": "user", "content": "List the files."}
+    prompt = renderer.render_ids([user], add_generation_prompt=True)
+    sampled = tok.encode(
+        "List files.<|end|>"
+        "<|start|>assistant<|channel|>commentary to=functions.bash code"
+        f"<|message|>{args}<|call|>",
+        add_special_tokens=False,
+    )
+    (call,) = renderer.parse_response(sampled, prompt_ids=prompt).tool_calls
+    assert (call.arguments_text, call.content_type) == (args, "code")
+
+    def assistant_tokens(**extra):
+        message = {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "List files.",
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "id": "call_0",
+                    "function": {"name": "bash", "arguments": args},
+                    **extra,
+                }
+            ],
+        }
+        rendered = renderer.render([user, message])
+        return [
+            t for t, i in zip(rendered.token_ids, rendered.message_indices) if i == 1
+        ]
+
+    # The prompt's generation header plus the sample are the assistant turn's tokens.
+    turn = prompt[len(renderer.render_ids([user])) :] + sampled
+    assert assistant_tokens(content_type=call.content_type) == turn
+    assert assistant_tokens() != turn
+    assert "<|constrain|>json" in tok.decode(assistant_tokens())
+
+
+def test_a_tool_call_header_content_type_is_parsed_as_sampled():
+    tok = load_tokenizer("openai/gpt-oss-20b")
+    renderer = create_renderer(tok, GptOssRendererConfig(reasoning_effort="low"))
+    prompt = renderer.render_ids(
+        [{"role": "user", "content": "q"}], add_generation_prompt=True
+    )
+
+    def content_type(header):
+        sampled = tok.encode(
+            f"Go.<|end|><|start|>assistant{header}<|message|>{{}}<|call|>",
+            add_special_tokens=False,
+        )
+        return (
+            renderer.parse_response(sampled, prompt_ids=prompt)
+            .tool_calls[0]
+            .content_type
+        )
+
+    assert (
+        content_type("<|channel|>commentary to=functions.bash <|constrain|>json")
+        == "json"
+    )
+    assert content_type("<|channel|>commentary to=functions.bash code") == "code"
+    assert (
+        content_type(" to=functions.bash<|channel|>commentary <|constrain|>json")
+        == "json"
+    )
+    # A header without a content type has none.
+    assert content_type("<|channel|>commentary to=functions.bash") is None
+    assert content_type(" to=functions.bash<|channel|>commentary") is None

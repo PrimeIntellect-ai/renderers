@@ -60,7 +60,7 @@ def test_qwen38_is_registered_with_native_defaults(qwen38_model):
 
     assert tokenizer.name_or_path == qwen38_model
     assert MODEL_RENDERER_MAP[tokenizer.name_or_path] == "qwen3.8"
-    assert MULTIMODAL_MODELS[tokenizer.name_or_path] == {"image"}
+    assert MULTIMODAL_MODELS[tokenizer.name_or_path] == {"image", "video"}
     assert isinstance(renderer, Qwen38Renderer)
     assert renderer.config.enable_thinking is True
     assert renderer.config.reasoning_effort == "xhigh"

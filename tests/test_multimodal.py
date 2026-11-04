@@ -7,9 +7,11 @@ support which non-text modalities. This test matrix iterates over every
 1. **Token byte-parity** — ``Renderer.render_ids(...)`` matches
    ``processor.apply_chat_template(..., tokenize=False)`` piped through
    ``processor(images=..., text=..., return_tensors="pt")["input_ids"]``.
-2. **Placeholder anchoring** — ``RenderedTokens.multi_modal_data.mm_placeholders``
-   exactly cover the runs of the modality's placeholder token id
-   (``<|image_pad|>`` for images, ``<|video_pad|>`` for videos).
+2. **Placeholder anchoring** — the embedding positions of
+   ``RenderedTokens.multi_modal_data.mm_placeholders`` (all of a range, or
+   its ``is_embed`` positions) exactly cover the runs of the modality's
+   placeholder token id (``<|image_pad|>`` for images, ``<|video_pad|>``
+   for videos).
 3. **Bridge byte-parity** — ``bridge_to_next_turn`` with new multimodal
    messages produces the same token sequence as a fresh full render of
    the combined message list.
@@ -171,13 +173,27 @@ def _detect_family(model_name: str) -> str:
 def _qwen_vl_processor_input_ids(processor, messages, add_gp):
     """Run the Qwen-VL family processor pipeline on ``messages``.
 
-    Two-step: ``apply_chat_template`` → text; collect images from messages;
-    ``processor(images=, text=)`` to get expanded ``input_ids``.
+    Two-step: ``apply_chat_template`` → text; collect images / videos from
+    messages; ``processor(images=, videos=, text=)`` to get expanded
+    ``input_ids``.
     """
     text = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=add_gp
     )
+    return _qwen_vl_expand(processor, text, messages)
+
+
+def _qwen_vl_expand(processor, text, messages):
+    """Expand ``text``'s placeholders with the media found in ``messages``.
+
+    Videos are ``(frames, metadata)`` pairs already sampled the way vLLM's
+    loader samples them, so the processor gets ``do_sample_frames=False``
+    — as vLLM's Qwen3-VL processor passes it for pre-sampled frames.
+    """
+    from transformers.video_utils import VideoMetadata
+
     images = []
+    videos = []
     for msg in messages:
         content = msg.get("content")
         if not isinstance(content, list):
@@ -192,9 +208,25 @@ def _qwen_vl_processor_input_ids(processor, messages, add_gp):
             ):
                 if "image" in item and not isinstance(item["image"], dict):
                     images.append(item["image"])
-    return processor(images=images, text=text, return_tensors="pt")["input_ids"][
-        0
-    ].tolist()
+            elif item.get("type") == "video" and "video" in item:
+                videos.append(item["video"])
+    if not videos:
+        return processor(images=images, text=text, return_tensors="pt")["input_ids"][
+            0
+        ].tolist()
+    return processor(
+        images=images or None,
+        videos=[frames for frames, _ in videos],
+        video_metadata=[
+            VideoMetadata(
+                **{k: v for k, v in metadata.items() if k != "do_sample_frames"}
+            )
+            for _, metadata in videos
+        ],
+        do_sample_frames=False,
+        text=text,
+        return_tensors="pt",
+    )["input_ids"][0].tolist()
 
 
 def _audio_content_part(audio):
@@ -278,12 +310,37 @@ def _audio_sample():
     return (0.1 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
 
 
+def _video_sample():
+    """Eight 64x96 RGB frames sampled from a 4 s, 10 fps clip.
+
+    A ``(frames, metadata)`` pair as vLLM's Qwen3-VL video loader returns
+    it (2 fps sampling of 40 frames), so the renderer and the processor see
+    the same frames without a video decoder.
+    """
+    frames = (np.arange(8 * 64 * 96 * 3) % 251).astype(np.uint8)
+    metadata = {
+        "total_num_frames": 40,
+        "fps": 10.0,
+        "duration": 4.0,
+        "video_backend": "opencv",
+        "frames_indices": [0, 6, 11, 17, 22, 28, 33, 39],
+        "do_sample_frames": False,
+    }
+    return frames.reshape(8, 64, 96, 3), metadata
+
+
+def _video_content_part(video):
+    return {"type": "video", "video": video}
+
+
 def _sample_for(modality: str, tiny_image):
     """The per-modality media item cases are built from."""
     if modality == "image":
         return tiny_image
     if modality == "audio":
         return _audio_sample()
+    if modality == "video":
+        return _video_sample()
     raise NotImplementedError(f"No sample for modality {modality!r}.")
 
 
@@ -332,6 +389,16 @@ def _modality_kit(modality: str, model_name: str):
             }
         raise NotImplementedError(
             f"Audio test kit not implemented for family {family!r}."
+        )
+    if modality == "video":
+        if family == "qwen_vl":
+            return {
+                "make_part": _video_content_part,
+                "placeholder_token": "<|video_pad|>",
+                "processor_input_ids": _qwen_vl_processor_input_ids,
+            }
+        raise NotImplementedError(
+            f"Video test kit not implemented for family {family!r}."
         )
     raise NotImplementedError(
         f"Test kit for modality {modality!r} not implemented yet."
@@ -632,7 +699,11 @@ def test_multimodal_byte_parity_vs_processor(mm_model_name, modality, tiny_image
     "mm_model_name,modality", _CASES, ids=[f"{m}|{mo}" for m, mo in _CASES]
 )
 def test_multimodal_placeholders_match_pad_runs(mm_model_name, modality, tiny_image):
-    """``mm_placeholders`` exactly cover the runs of the modality's pad token."""
+    """``mm_placeholders`` exactly cover the runs of the modality's pad token.
+
+    A video's range also holds its frame timestamps and vision markers, so
+    its pads are the ``is_embed`` positions of the range.
+    """
     if not _model_assets_available(mm_model_name):
         pytest.skip(
             f"{mm_model_name}: optional private model metadata not cached locally"
@@ -663,10 +734,19 @@ def test_multimodal_placeholders_match_pad_runs(mm_model_name, modality, tiny_im
             else:
                 i += 1
 
-        claimed = [
-            (p.offset, p.length)
-            for p in rendered.multi_modal_data.mm_placeholders.get(modality, [])
-        ]
+        claimed: list[tuple[int, int]] = []
+        for p in rendered.multi_modal_data.mm_placeholders.get(modality, []):
+            if p.is_embed is None:
+                claimed.append((p.offset, p.length))
+                continue
+            assert len(p.is_embed) == p.length
+            for k, embed in enumerate(p.is_embed):
+                if not embed:
+                    continue
+                if claimed and claimed[-1][0] + claimed[-1][1] == p.offset + k:
+                    claimed[-1] = (claimed[-1][0], claimed[-1][1] + 1)
+                else:
+                    claimed.append((p.offset + k, 1))
         assert claimed == pad_runs, (
             f"{mm_model_name} / {modality} / {case.id}: "
             f"mm_placeholders {claimed} vs actual pad runs {pad_runs}"
@@ -901,8 +981,8 @@ def test_tool_response_image_byte_parity(mm_model_name, modality, tiny_image):
     Skipped for renderers that haven't grown the feature yet; flips to a
     real assertion as they do.
     """
-    if modality != "image":
-        pytest.skip("Tool-response media path is image-only for now.")
+    if modality not in ("image", "video"):
+        pytest.skip("Tool-response media path covers images and videos only.")
     if not _model_assets_available(mm_model_name):
         pytest.skip(
             f"{mm_model_name}: optional private model metadata not cached locally"
@@ -916,7 +996,8 @@ def test_tool_response_image_byte_parity(mm_model_name, modality, tiny_image):
             f"{type(renderer).__name__} does not yet emit images inside tool responses"
         )
 
-    for case in _build_tool_image_cases(kit["make_part"], tiny_image):
+    sample = _sample_for(modality, tiny_image)
+    for case in _build_tool_image_cases(kit["make_part"], sample):
         messages, add_gp = case.values
         if _skip_for_disabled_thinking_deviation(renderer, case.id):
             continue
@@ -944,24 +1025,7 @@ def _qwen_vl_processor_input_ids_with_kwargs(
         add_generation_prompt=add_gp,
         **template_kwargs,
     )
-    images = []
-    for msg in messages:
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for item in content:
-            if not isinstance(item, dict):
-                continue
-            if (
-                item.get("type") in ("image", "image_url")
-                or "image" in item
-                or "image_url" in item
-            ):
-                if "image" in item and not isinstance(item["image"], dict):
-                    images.append(item["image"])
-    return processor(images=images, text=text, return_tensors="pt")["input_ids"][
-        0
-    ].tolist()
+    return _qwen_vl_expand(processor, text, messages)
 
 
 # ``add_vision_id`` is exposed on the Qwen-VL family renderers
@@ -969,7 +1033,9 @@ def _qwen_vl_processor_input_ids_with_kwargs(
 # / K2.6's template has no equivalent toggle, so it's intentionally
 # absent from ``KimiK25RendererConfig`` and skipped here.
 _ADD_VISION_ID_CASES = [
-    (m, mo) for m, mo in _CASES if mo == "image" and _detect_family(m) == "qwen_vl"
+    (m, mo)
+    for m, mo in _CASES
+    if mo in ("image", "video") and _detect_family(m) == "qwen_vl"
 ]
 
 
@@ -1007,7 +1073,8 @@ def test_add_vision_id_parity_vs_processor(
     if hasattr(renderer, "_processor") and renderer._processor is None:
         renderer._processor = processor
 
-    for case in _build_cases(kit["make_part"], tiny_image):
+    sample = _sample_for(modality, tiny_image)
+    for case in _build_cases(kit["make_part"], sample):
         messages, add_gp = case.values
         if _skip_for_disabled_thinking_deviation(renderer, case.id):
             continue
@@ -1063,12 +1130,13 @@ def test_bridge_refuses_when_add_vision_id_loses_prior_count(
     )
     if hasattr(renderer, "_processor") and renderer._processor is None:
         renderer._processor = processor
+    sample = _sample_for(modality, tiny_image)
 
     initial = [
         {
             "role": "user",
             "content": [
-                kit["make_part"](tiny_image),
+                kit["make_part"](sample),
                 {"type": "text", "text": "Turn one."},
             ],
         }
@@ -1077,7 +1145,7 @@ def test_bridge_refuses_when_add_vision_id_loses_prior_count(
         {
             "role": "user",
             "content": [
-                kit["make_part"](tiny_image),
+                kit["make_part"](sample),
                 {"type": "text", "text": "Turn two."},
             ],
         }

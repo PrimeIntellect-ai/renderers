@@ -960,7 +960,19 @@ def _build_qwen_vl_features(
 
     Returns ``None`` semantics live one level up — this helper assumes
     the caller already verified ``mm_data`` is non-empty.
+
+    Videos are refused: a Qwen3-VL video's placeholder holds frame
+    timestamps and vision markers between its pads, and the features
+    payload has no ``is_embed`` mask to say which positions take the
+    video embeddings. ``process_multimodal=False`` lets vLLM expand the
+    video from ``content_parts`` instead.
     """
+    if mm_data.mm_items.get("video"):
+        raise NotImplementedError(
+            "vLLM's /inference/v1/generate features cannot carry Qwen-VL "
+            "videos (no is_embed mask for their placeholders). Use "
+            "process_multimodal=False to send them as content_parts."
+        )
     _require_transformers("Encoding Qwen-VL multimodal features for vLLM")
     try:
         import torch

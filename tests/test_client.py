@@ -8,12 +8,15 @@ import pytest
 
 from renderers import MalformedGenerateResponseError
 from renderers.base import (
+    MultiModalData,
     ParsedResponse,
     ParsedToolCall,
+    PlaceholderRange,
     RenderedTokens,
     ToolCallParseStatus,
 )
 from renderers.client import (
+    _build_qwen_vl_features,
     _parse_compact_logprobs,
     _parse_completion_top_logprobs,
     generate,
@@ -458,7 +461,14 @@ def test_generate_builds_request_body_and_parses_response(
     assert tc.status == ToolCallParseStatus.OK
 
 
-def test_generate_process_multimodal_false_sends_content_parts():
+@pytest.mark.parametrize(
+    "part_type,media_url",
+    [
+        ("image_url", "data:image/png;base64,aW1hZ2U="),
+        ("video_url", "data:video/mp4;base64,dmlkZW8="),
+    ],
+)
+def test_generate_process_multimodal_false_sends_content_parts(part_type, media_url):
     class DeferredMultimodalRenderer(_FakeRenderer):
         supports_process_multimodal = True
 
@@ -474,7 +484,6 @@ def test_generate_process_multimodal_false_sends_content_parts():
             return RenderedTokens(token_ids=[1, 2, 3])
 
     client = _FakeClient()
-    image_url = "data:image/png;base64,aW1hZ2U="
     result = asyncio.run(
         generate(
             client=client,
@@ -484,7 +493,7 @@ def test_generate_process_multimodal_false_sends_content_parts():
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "look"},
-                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": part_type, part_type: {"url": media_url}},
                     ],
                 }
             ],
@@ -494,12 +503,28 @@ def test_generate_process_multimodal_false_sends_content_parts():
     )
 
     body = client.calls[0]["body"]
-    assert body["content_parts"] == [{"type": "image_url", "url": image_url}]
+    assert body["content_parts"] == [{"type": part_type, "url": media_url}]
     assert body["return_token_ids"] is True
     assert "features" not in body
     assert result["renderer_prompt_ids"] == [1, 2, 3]
     assert result["prompt_ids"] == [1, 2, 2, 3]
     assert result["mm_placeholders"] == {"image": [{"offset": 1, "length": 2}]}
+
+
+def test_qwen_vl_features_refuse_videos():
+    """vLLM's features payload has no ``is_embed`` mask, which a video's
+    placeholder needs: its frame timestamps and markers sit between pads."""
+    mm_data = MultiModalData(
+        mm_hashes={"video": ["h"]},
+        mm_placeholders={
+            "video": [
+                PlaceholderRange(offset=1, length=3, is_embed=[False, True, False])
+            ]
+        },
+        mm_items={"video": [{"pixel_values_videos": np.zeros((4, 1536))}]},
+    )
+    with pytest.raises(NotImplementedError, match="process_multimodal=False"):
+        _build_qwen_vl_features(mm_data, spatial_merge_size=2)
 
 
 def test_generate_rejects_missing_completion_logprobs_before_parsing():

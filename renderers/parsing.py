@@ -1,22 +1,14 @@
-"""Token-level parsing — operates on token IDs directly.
+"""Parse completion tokens into content, reasoning, and tool-call attempts.
 
-Finds structural boundaries by token ID where the tokenizer has atomic
-markers. Text-delimited grammars fall back to decoded markers so BPE merges
-at the boundary do not hide them.
-
-Every parser emits ``list[ParsedToolCall]`` covering every attempt —
-successful and malformed alike — with a ``status`` enum classifying the
-outcome and a ``token_span`` recording where in the (stop-stripped)
-token stream the attempt sat. Callers filter on ``status == OK`` for the
-clean subset; verifier and RL-loss code uses the rest. This diverges from
-vLLM's ``ExtractedToolCallInformation`` (single ``tools_called`` bool, no
-per-call status) and SGLang's ``StreamingParseResult`` (silent drop on
-failure) — see ``ToolCallParseStatus`` docstring for the rationale.
+Malformed attempts retain their status and token span for training.
 """
 
 from __future__ import annotations
 
 import json
+import math
+import re
+import uuid
 from typing import Any
 
 from renderers.base import (
@@ -33,26 +25,48 @@ from renderers.tagged import (
     scan_tagged_response,
 )
 
-# ── Schema-aware argument coercion ──────────────────────────────────
-#
-# XML-style tool-call formats render argument values verbatim inside
-# ``<arg_value>`` tags with no quoting. ``true`` and the string
-# ``"true"`` produce identical wire bytes; without the tool schema, the
-# parser has no signal to distinguish them and defaults to
-# ``json.loads`` (the historical behavior). When the caller passes
-# ``tools=[...]``, parsers consult the per-parameter declared type to
-# keep string args verbatim, matching vLLM / SGLang reference parsers.
+_FUNCTION_BLOCK_RE = re.compile(
+    r"<function=(.*?)</function>|<function=(.*)$", re.DOTALL
+)
+_PARAMETER_BLOCK_RE = re.compile(
+    r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)",
+    re.DOTALL,
+)
+
+
+# Schema coercion follows vLLM v0.32.0:
+# https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/tool_parsers/utils.py
+_TYPE_ALIASES: dict[str, str] = {
+    "str": "string",
+    "text": "string",
+    "varchar": "string",
+    "char": "string",
+    "enum": "string",
+    "int": "integer",
+    "int32": "integer",
+    "int64": "integer",
+    "uint": "integer",
+    "uint32": "integer",
+    "uint64": "integer",
+    "long": "integer",
+    "short": "integer",
+    "unsigned": "integer",
+    "float": "number",
+    "float32": "number",
+    "float64": "number",
+    "double": "number",
+    "bool": "boolean",
+    "dict": "object",
+    "arr": "array",
+    "list": "array",
+    "sequence": "array",
+}
 
 
 def _build_param_type_index(
     tools: list[ToolSpec] | None,
 ) -> dict[str, dict[str, dict[str, Any]]]:
-    """Map tool name → param name → param JSON-schema fragment.
-
-    Accepts both flat ``ToolSpec`` (``{name, description, parameters}``)
-    and the OpenAI envelope (``{"type": "function", "function": {...}}``)
-    so callers can pass either shape.
-    """
+    """Index parameter schemas by tool name and parameter name."""
     if not tools:
         return {}
     index: dict[str, dict[str, dict[str, Any]]] = {}
@@ -70,16 +84,48 @@ def _build_param_type_index(
     return index
 
 
-def _extract_tool_names(tools: list[ToolSpec] | None) -> set[str] | None:
-    """Set of declared tool names, or ``None`` when ``tools`` is empty.
+def _extract_types_from_schema(schema: Any) -> list[str]:
+    """Collect declared, enum, and union types; default to string."""
+    if not isinstance(schema, dict):
+        return ["string"]
 
-    ``None`` disables name validation — mirroring vLLM's
-    ``ParserEngine._is_valid_tool_name``, which returns ``True`` whenever
-    the request carries no tools. Accepts both flat ``ToolSpec`` and the
-    OpenAI ``{"type": "function", "function": {...}}`` envelope, like
-    ``_build_param_type_index`` (but independent of it: a tool with no
-    ``parameters.properties`` still counts as a known name).
-    """
+    types: set[str] = set()
+
+    declared = schema.get("type")
+    if isinstance(declared, str):
+        types.add(declared)
+    elif isinstance(declared, list):
+        types.update(t for t in declared if isinstance(t, str))
+
+    enum = schema.get("enum")
+    if isinstance(enum, list):
+        for value in enum:
+            if value is None:
+                types.add("null")
+            elif isinstance(value, bool):
+                types.add("boolean")
+            elif isinstance(value, int):
+                types.add("integer")
+            elif isinstance(value, float):
+                types.add("number")
+            elif isinstance(value, str):
+                types.add("string")
+            elif isinstance(value, list):
+                types.add("array")
+            elif isinstance(value, dict):
+                types.add("object")
+
+    for field in ("anyOf", "oneOf", "allOf"):
+        choices = schema.get(field)
+        if isinstance(choices, list):
+            for choice in choices:
+                types.update(_extract_types_from_schema(choice))
+
+    return list(types) if types else ["string"]
+
+
+def _extract_tool_names(tools: list[ToolSpec] | None) -> set[str] | None:
+    """Return declared tool names, or None to disable name validation."""
     if not tools:
         return None
     names: set[str] = set()
@@ -90,42 +136,51 @@ def _extract_tool_names(tools: list[ToolSpec] | None) -> set[str] | None:
     return names
 
 
+def _parse_json_arg(text: str) -> tuple[Any, bool]:
+    """Decode finite JSON, or return the text with a parse-error flag."""
+    try:
+        value = json.loads(text)
+        json.dumps(value, allow_nan=False)
+    except (ValueError, TypeError):
+        return text, True
+    return value, False
+
+
 def _coerce_arg_value(
     text: str, param_schema: dict[str, Any] | None
 ) -> tuple[Any, bool]:
-    """Coerce a raw ``<arg_value>`` body to its declared type.
+    """Coerce an XML argument; the flag marks an unparseable fallback."""
+    types = {t.strip().lower() for t in _extract_types_from_schema(param_schema)}
+    types = {_TYPE_ALIASES.get(t, t) for t in types}
 
-    Returns ``(value, used_json_fallback)``. The boolean is ``True`` only
-    when ``json.loads`` was attempted, raised, AND the schema doesn't
-    permit a string. Returning a string verbatim because the schema
-    permits strings is NOT a fallback.
-
-    Rule (matches vLLM / SGLang reference parsers):
-
-    - If the param's declared ``type`` is ``"string"`` (or single-element
-      ``["string"]``), return ``text`` verbatim — never ``json.loads``.
-    - Otherwise try ``json.loads``. If that fails, return raw ``text``.
-      The ``used_json_fallback`` flag is ``True`` only when the schema
-      does NOT permit a string — i.e. the fallback is truly suspect.
-
-    Union types (``anyOf``/``oneOf``) that include ``"string"`` alongside
-    other types still attempt ``json.loads`` first so an explicit
-    integer / bool can parse; the string branch wins as fallback, and
-    landing there is expected — not a malformed-JSON signal.
-    """
-    string_is_allowed = False
-    if param_schema is not None:
-        declared = param_schema.get("type")
-        if declared == "string" or declared == ["string"]:
-            return text, False
-        for branch in param_schema.get("anyOf") or param_schema.get("oneOf") or []:
-            if isinstance(branch, dict) and branch.get("type") == "string":
-                string_is_allowed = True
-                break
-    try:
-        return json.loads(text), False
-    except (json.JSONDecodeError, ValueError):
-        return text, not string_is_allowed
+    if "null" in types and text.lower() == "null":
+        return None, False
+    if "integer" in types:
+        try:
+            return int(text), False
+        except (ValueError, TypeError):
+            pass
+    if "number" in types:
+        try:
+            value = float(text)
+        except (ValueError, TypeError):
+            pass
+        else:
+            if math.isfinite(value):
+                return (int(value) if value.is_integer() else value), False
+    if "boolean" in types:
+        lowered = text.lower().strip()
+        if lowered in ("true", "1"):
+            return True, False
+        if lowered in ("false", "0"):
+            return False, False
+    if types & {"object", "array"}:
+        value, invalid = _parse_json_arg(text)
+        if not invalid:
+            return value, False
+    if "string" in types:
+        return text, False
+    return _parse_json_arg(text)
 
 
 def _find(ids: list[int], target: int, start: int = 0) -> int:
@@ -332,18 +387,7 @@ def parse_qwen35(
     tools: list[ToolSpec] | None = None,
     prefilled_thinking: bool = False,
 ) -> ParsedResponse:
-    """Parse Qwen3.5 completion tokens. XML-style tool calls, token-level thinking.
-
-    ``reasoning_content`` contract: ``None`` means the completion carried no
-    think block at all; a string (possibly empty) means a think block was
-    present. The distinction matters for renderers with key-presence
-    semantics (PrimeQwen3Renderer): a sampled ``<think></think>`` must
-    round-trip parse → message → render back to the same tokens, so an
-    empty-but-present block is ``""``, never ``None``.
-
-    ``prefilled_thinking`` declares whether the generation prompt opened reasoning.
-    Direct helper calls default to an unprefilled completion.
-    """
+    """Parse XML tool calls and token-delimited reasoning."""
     ids = _strip_stop_tokens(token_ids, stop_ids)
     boundary = scan_reasoning(
         tokenizer,
@@ -359,9 +403,8 @@ def parse_qwen35(
             content="", reasoning_content=boundary.text, reasoning_complete=False
         )
 
-    # Thinking: find </think> by token ID
     reasoning = None
-    parse_offset = 0  # shift to map local indices back to stop-stripped ids
+    parse_offset = 0
     think_end = _find(ids, think_end_id)
     if boundary.closed_by_tool:
         reasoning = boundary.text.strip()
@@ -371,26 +414,37 @@ def parse_qwen35(
         parse_offset = think_end + 1
     ids = ids[parse_offset:]
 
+    full_text = _decode(tokenizer, ids)
     tc_start = _find(ids, tool_call_id)
-    tool_calls: list[ParsedToolCall] = []
-    if tc_start != -1:
-        content_text = _decode(tokenizer, ids[:tc_start]).strip()
-        tool_calls = _parse_xml_tool_calls(
-            tokenizer,
-            ids[tc_start:],
-            tool_call_id,
-            tool_call_end_id,
-            section_offset=parse_offset + tc_start,
-            param_index=_build_param_type_index(tools),
-        )
-    else:
-        content_text = _decode(tokenizer, ids).strip()
+    param_index = _build_param_type_index(tools)
+    try:
+        if tc_start != -1:
+            content_text = _decode(tokenizer, ids[:tc_start])
+            tool_calls = _parse_xml_tool_calls(
+                tokenizer,
+                ids[tc_start:],
+                tool_call_id,
+                tool_call_end_id,
+                section_offset=parse_offset + tc_start,
+                param_index=param_index,
+            )
+        else:
+            # Qwen's grammar also accepts functions without a tool wrapper.
+            tool_calls = _parse_xml_function_blocks(
+                full_text,
+                param_index=param_index,
+                token_span=(parse_offset, parse_offset + len(ids)),
+                wrapper_unclosed=False,
+            )
+            content_text = (
+                full_text.partition("<function=")[0] if tool_calls else full_text
+            )
+    except Exception:
+        # Keep the raw response available when extraction fails.
+        content_text = full_text
+        tool_calls = []
 
-    # ``reasoning`` is None only when no think block was found; keep ""
-    # (empty-but-present block) intact so ``<think></think>`` samples
-    # round-trip — collapsing it to None made PrimeQwen3Renderer drop the
-    # block on re-render, forking the token stream for the rest of the
-    # rollout.
+    # Empty reasoning blocks must survive parse/render round trips.
     return ParsedResponse(
         content=content_text,
         reasoning_content=reasoning,
@@ -407,68 +461,103 @@ def _parse_xml_tool_calls(
     section_offset: int,
     param_index: dict[str, dict[str, dict[str, Any]]],
 ) -> list[ParsedToolCall]:
-    """Parse Qwen3.5-style XML tool calls from token IDs."""
-    import re
-
+    """Parse XML wrappers, keeping their token spans for training."""
     tool_calls: list[ParsedToolCall] = []
     i = 0
     while i < len(ids):
-        if ids[i] == tc_id:
-            end = _find(ids, tc_end_id, i + 1)
-            if end == -1:
-                raw = _decode(tokenizer, ids[i + 1 :])
-                tool_calls.append(
-                    ParsedToolCall(
-                        raw=raw,
-                        token_span=(section_offset + i, section_offset + len(ids)),
-                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
-                    )
-                )
-                break
-            block_text = _decode(tokenizer, ids[i + 1 : end])
-            span = (section_offset + i, section_offset + end + 1)
-            name_match = re.search(r"<function=([^>]+)>", block_text)
-            if not name_match:
-                tool_calls.append(
-                    ParsedToolCall(
-                        raw=block_text,
-                        token_span=span,
-                        status=ToolCallParseStatus.MALFORMED_STRUCTURE,
-                    )
-                )
-                i = end + 1
-                continue
+        if ids[i] != tc_id:
+            i += 1
+            continue
 
-            name = name_match.group(1)
-            params = param_index.get(name, {})
-            arguments: dict = {}
-            any_json_fallback = False
-            for pm in re.finditer(
-                r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>", block_text, re.DOTALL
-            ):
-                arg_name = pm.group(1)
-                arg_value = pm.group(2).strip()
-                value, used_fallback = _coerce_arg_value(
-                    arg_value, params.get(arg_name)
-                )
-                arguments[arg_name] = value
-                any_json_fallback = any_json_fallback or used_fallback
+        end = _find(ids, tc_end_id, i + 1)
+        unclosed = end == -1
+        if unclosed:
+            end = len(ids)
+        block_text = _decode(tokenizer, ids[i + 1 : end])
+        span = (section_offset + i, section_offset + end + (0 if unclosed else 1))
+
+        block_calls = _parse_xml_function_blocks(
+            block_text,
+            param_index=param_index,
+            token_span=span,
+            wrapper_unclosed=unclosed,
+        )
+        if block_calls:
+            tool_calls.extend(block_calls)
+        else:
             tool_calls.append(
                 ParsedToolCall(
                     raw=block_text,
-                    name=name,
-                    arguments=arguments,
                     token_span=span,
                     status=(
-                        ToolCallParseStatus.INVALID_JSON
-                        if any_json_fallback
-                        else ToolCallParseStatus.OK
+                        ToolCallParseStatus.UNCLOSED_BLOCK
+                        if unclosed
+                        else ToolCallParseStatus.MALFORMED_STRUCTURE
                     ),
                 )
             )
-            i = end + 1
+
+        if unclosed:
+            break
+        i = end + 1
+    return tool_calls
+
+
+def _parse_xml_function_blocks(
+    text: str,
+    *,
+    param_index: dict[str, dict[str, dict[str, Any]]],
+    token_span: tuple[int, int] | None,
+    wrapper_unclosed: bool,
+) -> list[ParsedToolCall]:
+    """Recover function blocks; sibling calls share the enclosing token span."""
+    tool_calls: list[ParsedToolCall] = []
+    for match in _FUNCTION_BLOCK_RE.finditer(text):
+        closed_body, open_body = match.groups()
+        body = closed_body if closed_body is not None else (open_body or "")
+        name, separator, params_text = body.partition(">")
+        if not separator or "<" in name:
+            tool_calls.append(
+                ParsedToolCall(
+                    raw=body,
+                    token_span=token_span,
+                    status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+                )
+            )
+            continue
+
+        name = name.strip()
+        params = param_index.get(name, {})
+        arguments: dict = {}
+        any_fallback = False
+        for capture in _PARAMETER_BLOCK_RE.findall(params_text):
+            arg_name, separator, arg_value = capture.partition(">")
+            if not separator:
+                continue
+            arg_value = arg_value.removeprefix("\n").removesuffix("\n")
+            value, used_fallback = _coerce_arg_value(arg_value, params.get(arg_name))
+            arguments[arg_name] = value
+            any_fallback = any_fallback or used_fallback
+
+        # Truncation takes precedence over argument parsing errors.
+        if wrapper_unclosed or closed_body is None:
+            status = ToolCallParseStatus.UNCLOSED_BLOCK
+        elif not name:
+            status = ToolCallParseStatus.MISSING_NAME
+        elif any_fallback:
+            status = ToolCallParseStatus.INVALID_JSON
         else:
-            i += 1
+            status = ToolCallParseStatus.OK
+        tool_calls.append(
+            ParsedToolCall(
+                raw=body,
+                name=name or None,
+                arguments=arguments,
+                id=f"chatcmpl-tool-{uuid.uuid4().hex[-16:]}",
+                token_span=token_span,
+                status=status,
+            )
+        )
     return tool_calls
 
 

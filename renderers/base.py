@@ -63,7 +63,10 @@ class VideoPart(TypedDict, total=False):
     """A video attached to a message.
 
     Mirrors :class:`ImagePart`; the renderer turns frames into the
-    model's video placeholder sequence at render time.
+    model's video placeholder sequence at render time. Accepts a
+    ``(frames, metadata)`` pair as vLLM's video loaders return it, raw
+    bytes, a filesystem path, a URL, a data URI, or the OpenAI-style
+    ``video_url`` content part verbatim.
     """
 
     type: Literal["video", "video_url"]
@@ -193,10 +196,16 @@ class PlaceholderRange:
     first placeholder token; ``length`` is the count of consecutive
     placeholder tokens. Wraps the vLLM-style ``mm_placeholders`` shape
     without depending on vLLM types.
+
+    ``is_embed`` marks which tokens of the range take the item's embeddings,
+    as vLLM's ``PlaceholderRange.is_embed`` does; ``None`` means all of them.
+    A Qwen3-VL video's range also holds its frame timestamps and per-frame
+    vision markers, which keep their text embeddings.
     """
 
     offset: int
     length: int
+    is_embed: list[bool] | None = None
 
 
 @dataclass
@@ -1089,9 +1098,11 @@ MODEL_RENDERER_MAP: dict[str, str] = {
 # (every model supports it), so it doesn't appear in the set.
 MULTIMODAL_MODELS: dict[str, set[str]] = {
     "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026": {"image"},
-    "Qwen/Qwen3-VL-4B-Instruct": {"image"},
-    "Qwen/Qwen3-VL-8B-Instruct": {"image"},
-    "Qwen/Qwen3-VL-30B-A3B-Instruct": {"image"},
+    # Qwen3-VL and the Qwen3.5 / 3.6 / 3.8 VLMs below also take videos
+    # (``Qwen3VLVideoProcessor``).
+    "Qwen/Qwen3-VL-4B-Instruct": {"image", "video"},
+    "Qwen/Qwen3-VL-8B-Instruct": {"image", "video"},
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": {"image", "video"},
     "google/gemma-4-E2B-it": {"image"},
     "google/gemma-4-E4B-it": {"image"},
     "google/gemma-4-26B-A4B-it": {"image"},
@@ -1099,19 +1110,19 @@ MULTIMODAL_MODELS: dict[str, set[str]] = {
     # Qwen3.5 is itself a VLM family (HF tag ``image-text-to-text``,
     # processor class ``Qwen3VLProcessor``) — same vision tokens and
     # image-processor as Qwen3-VL, with a different tool-call format.
-    "Qwen/Qwen3.5-0.8B": {"image"},
-    "Qwen/Qwen3.5-2B": {"image"},
-    "Qwen/Qwen3.5-4B": {"image"},
-    "Qwen/Qwen3.5-9B": {"image"},
-    "Qwen/Qwen3.5-35B-A3B": {"image"},
-    "Qwen/Qwen3.5-122B-A10B": {"image"},
-    "Qwen/Qwen3.5-397B-A17B": {"image"},
+    "Qwen/Qwen3.5-0.8B": {"image", "video"},
+    "Qwen/Qwen3.5-2B": {"image", "video"},
+    "Qwen/Qwen3.5-4B": {"image", "video"},
+    "Qwen/Qwen3.5-9B": {"image", "video"},
+    "Qwen/Qwen3.5-35B-A3B": {"image", "video"},
+    "Qwen/Qwen3.5-122B-A10B": {"image", "video"},
+    "Qwen/Qwen3.5-397B-A17B": {"image", "video"},
     # Qwen3.6 extends Qwen3.5's chat template; same VL bits, only
     # tool-call argument serialization differs.
-    "Qwen/Qwen3.6-35B-A3B": {"image"},
+    "Qwen/Qwen3.6-35B-A3B": {"image", "video"},
     # Qwen3.8 adds reasoning-effort control and preserves thinking by default.
-    "Qwen/Qwen3.8-27B": {"image"},
-    "Qwen/Qwen3.8-Flash-Next": {"image"},
+    "Qwen/Qwen3.8-27B": {"image", "video"},
+    "Qwen/Qwen3.8-Flash-Next": {"image", "video"},
     # Kimi K2.5 / K2.6 are unified VLMs (HF tag ``image-text-to-text``)
     # with custom processor (``KimiK25Processor`` + ``KimiK25VisionProcessor``).
     # Vision wrap is different from Qwen-VL:
@@ -1675,7 +1686,11 @@ class RenderedTrainingSample:
 def _build_mm_token_type_ids(
     mm_placeholders: dict[str, list[PlaceholderRange]], length: int
 ) -> list[int]:
-    """Per-token modality flags (0=text, 1=image, 2=video) from placeholder ranges."""
+    """Per-token modality flags (0=text, 1=image, 2=video) from placeholder ranges.
+
+    Only a range's embedding tokens (``is_embed``) are flagged, so a video's
+    frame timestamps and vision markers stay text.
+    """
     ids = [0] * length
     for modality, ranges in mm_placeholders.items():
         type_id = _MM_TYPE_ID.get(modality, 0)
@@ -1684,7 +1699,8 @@ def _build_mm_token_type_ids(
         for r in ranges:
             end = min(r.offset + r.length, length)
             for i in range(r.offset, end):
-                ids[i] = type_id
+                if r.is_embed is None or r.is_embed[i - r.offset]:
+                    ids[i] = type_id
     return ids
 
 

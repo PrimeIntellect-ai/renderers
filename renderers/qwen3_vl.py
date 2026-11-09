@@ -15,6 +15,16 @@ stable identifier for cache lookup. The wire-format conversion to
 vLLM's ``/inference/v1/generate`` ``features`` field lives in
 ``renderers.client``.
 
+Videos expand as vLLM 0.32's Qwen3-VL processor expands them: the
+template's ``<|vision_start|><|video_pad|><|vision_end|>`` keeps its
+markers, and the ``<|video_pad|>`` becomes, per frame pair, a
+``<t seconds>`` timestamp + ``<|vision_start|>`` + N×``<|video_pad|>`` +
+``<|vision_end|>`` (``N = H * W // merge_size**2`` of ``video_grid_thw``).
+The video's placeholder spans that expansion, with ``is_embed`` marking
+the pads; ``mm_items`` carries ``pixel_values_videos`` and
+``video_grid_thw``. With ``process_multimodal=False`` the single
+``<|video_pad|>`` is left for vLLM to expand.
+
 BPE boundary discipline: text runs that the chat template emits
 contiguously (e.g. ``"user\\n" + content_text``) must be encoded as a
 single tokenizer call — otherwise BPE merges differ from the template's
@@ -27,11 +37,15 @@ also can't merge across.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import io
 import json
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
+
+import numpy as np
 
 from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
 
@@ -166,6 +180,247 @@ def _image_hash(pil_image) -> str:
     h.update(pil_image.tobytes())
     h.update(f"{pil_image.size}".encode())
     return h.hexdigest()[:32]
+
+
+# vLLM 0.32's Qwen3-VL video loader (``Qwen3VLVideoBackend``) samples 2 frames
+# per second, keeping at least 4 and at most 768 frames.
+_VIDEO_SAMPLE_FPS = 2
+_VIDEO_MIN_FRAMES = 4
+_VIDEO_MAX_FRAMES = 768
+
+
+def _load_video(item: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
+    """Resolve a VideoPart to sampled RGB frames and their metadata.
+
+    Accepts a ``(frames, metadata)`` pair as vLLM's video loaders return it:
+    ``(T, H, W, 3)`` uint8 RGB frames, and metadata with ``total_num_frames``,
+    ``fps``, ``frames_indices`` and ``do_sample_frames``. Raw bytes,
+    filesystem paths, ``file://``/``http(s)://`` URLs, and
+    ``data:video/...;base64,...`` URIs are decoded by :func:`_decode_video`.
+    """
+    raw: Any
+    if "video" in item:
+        raw = item["video"]
+    elif "video_url" in item:
+        vu = item.get("video_url")
+        raw = vu.get("url") if isinstance(vu, dict) else vu
+    else:
+        raw = item.get("url") or item.get("path")
+
+    if isinstance(raw, (tuple, list)) and len(raw) == 2 and isinstance(raw[1], Mapping):
+        frames, metadata = raw
+        return np.asarray(frames), dict(metadata)
+
+    if isinstance(raw, (bytes, bytearray)):
+        return _decode_video(bytes(raw))
+
+    if not isinstance(raw, str):
+        raise TypeError(
+            f"Unsupported video source {type(raw).__name__!r}; expected "
+            "(frames, metadata), bytes, path, http(s):// URL, file:// URL, "
+            "or data: URI."
+        )
+
+    if raw.startswith("data:"):
+        _, _, payload = raw.partition(",")
+        return _decode_video(base64.b64decode(payload))
+
+    parsed = urlparse(raw)
+    if parsed.scheme in ("http", "https"):
+        import urllib.request
+
+        with urllib.request.urlopen(raw) as resp:  # noqa: S310 — user-supplied URL
+            return _decode_video(resp.read())
+
+    if parsed.scheme == "file" or parsed.scheme == "":
+        path = parsed.path if parsed.scheme == "file" else raw
+        with open(path, "rb") as f:
+            return _decode_video(f.read())
+
+    raise ValueError(f"Unsupported video URL scheme: {parsed.scheme!r} in {raw!r}")
+
+
+def _decode_video(data: bytes) -> tuple[np.ndarray, dict[str, Any]]:
+    """Decode and sample a video the way vLLM 0.32's Qwen3-VL loader does.
+
+    Mirrors ``Qwen3VLVideoBackend.load_bytes`` with its default OpenCV codec
+    (``vllm/multimodal/video.py``, ``video_decoders/opencv.py``): the same
+    frame count and fps probes, the same frame indices, and the same
+    grab/retrieve loop, so a ``video_url`` yields the frames and metadata
+    vLLM builds from it.
+    """
+    try:
+        import cv2
+        import cv2.videoio_registry as vr
+    except ImportError as exc:
+        raise RuntimeError(
+            "OpenCV is required to decode videos, as in vLLM. Install with "
+            "`pip install opencv-python-headless`, or pass pre-decoded "
+            "`(frames, metadata)`."
+        ) from exc
+
+    # The first stream-buffered backend vLLM accepts (FFmpeg in practice).
+    api_pref = None
+    for backend in vr.getStreamBufferedBackends():
+        if not vr.hasBackend(backend):
+            continue
+        if not vr.isBackendBuiltIn(backend):
+            _, abi, api = vr.getStreamBufferedBackendPluginVersion(backend)
+            if abi < 1 or (abi == 1 and api < 2):
+                continue
+        api_pref = backend
+        break
+    # Keep the stream referenced until ``release``; releasing a capture
+    # whose stream was already freed crashes.
+    stream = io.BytesIO(data)
+    cap = cv2.VideoCapture(stream, api_pref, [])
+    if not cap.isOpened():
+        raise ValueError("Could not open video stream")
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        # An mp4 edit list can hide decoded lead-in frames that the frame
+        # count still includes; vLLM then trusts the end-of-stream position.
+        if total > 0 and cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0):
+            visible = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+            at_stream_end = not cap.grab()
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            if at_stream_end and 0 < visible < total - 1:
+                total = visible
+        duration = total / fps if fps > 0 else 0
+        if fps <= 0:
+            # vLLM, like HF's Qwen3VLVideoProcessor, assumes a 24 fps source.
+            fps = 24.0
+        num_frames = int(total / fps * _VIDEO_SAMPLE_FPS)
+        num_frames = min(max(num_frames, _VIDEO_MIN_FRAMES), _VIDEO_MAX_FRAMES, total)
+        if num_frames <= 0:
+            raise ValueError("Video stream has no frames")
+        indices = np.linspace(0, total - 1, num_frames).round().astype(int).tolist()
+        wanted = set(indices)
+        frames: list[np.ndarray] = []
+        valid: list[int] = []
+        for idx in range(max(indices) + 1):
+            if not cap.grab():
+                continue
+            if idx in wanted:
+                ok, frame = cap.retrieve()
+                if ok:
+                    frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    valid.append(idx)
+    finally:
+        cap.release()
+        stream.close()
+    if not frames:
+        raise ValueError("Could not decode any video frames")
+    metadata = {
+        "total_num_frames": total,
+        "fps": fps,
+        "duration": duration,
+        "video_backend": "opencv",
+        "frames_indices": valid,
+        # vLLM lets the HF video processor sample when it kept every frame.
+        "do_sample_frames": len(valid) == total,
+    }
+    return np.stack(frames), metadata
+
+
+def _video_hash(frames: np.ndarray, metadata: dict[str, Any]) -> str:
+    """Stable per-video identifier: the sampled frames plus the metadata
+    their timestamps derive from."""
+    h = hashlib.sha256()
+    h.update(np.ascontiguousarray(frames).tobytes())
+    h.update(f"{frames.shape}".encode())
+    indices = [int(i) for i in metadata.get("frames_indices") or []]
+    h.update(
+        f"{metadata.get('fps')}|{metadata.get('total_num_frames')}|"
+        f"{indices}|{metadata.get('do_sample_frames')}".encode()
+    )
+    return h.hexdigest()[:32]
+
+
+def _video_timestamps(metadata: dict[str, Any], video_processor: Any) -> list[float]:
+    """Seconds of each frame pair, as vLLM 0.32 computes them.
+
+    ``Qwen3VLProcessingInfo._get_video_second_idx`` with the video
+    processor's default fps: when the HF processor samples the frames
+    itself (``do_sample_frames``), its indices are recomputed first.
+    """
+    indices = [int(i) for i in metadata["frames_indices"]]
+    fps = metadata["fps"]
+    if metadata.get("do_sample_frames", False):
+        total = metadata["total_num_frames"]
+        num_frames = int(total / fps * video_processor.fps)
+        num_frames = min(
+            max(num_frames, video_processor.min_frames),
+            video_processor.max_frames,
+            total,
+        )
+        indices = np.linspace(0, total - 1, num_frames).round().astype(int).tolist()
+    merge = video_processor.temporal_patch_size
+    if len(indices) % merge:
+        indices = indices + [indices[-1]] * (merge - len(indices) % merge)
+    seconds = [i / fps for i in indices]
+    return [
+        (seconds[i] + seconds[i + merge - 1]) / 2 for i in range(0, len(seconds), merge)
+    ]
+
+
+def _run_video_processor(processor: Any, part: dict[str, Any]):
+    """Resolve, process, and characterize a single video part.
+
+    Returns ``(processor_out, timestamps, tokens_per_frame, video_hash)``.
+    Runs the HF video processor the way vLLM's Qwen3-VL processor does
+    (``Qwen3VLMultiModalProcessor._apply_hf_processor_main``).
+    """
+    _require_transformers("Processing Qwen3-VL videos")
+    from transformers.video_utils import VideoMetadata
+
+    frames, metadata = _load_video(part)
+    video_processor = processor.video_processor
+    known = {f.name for f in dataclasses.fields(VideoMetadata)}
+    out = video_processor(
+        videos=[frames],
+        video_metadata=[
+            VideoMetadata(**{k: v for k, v in metadata.items() if k in known})
+        ],
+        do_sample_frames=bool(metadata.get("do_sample_frames", False)),
+        return_tensors="np",
+    )
+    grid_t, grid_h, grid_w = (int(x) for x in out["video_grid_thw"][0])
+    timestamps = _video_timestamps(metadata, video_processor)
+    if len(timestamps) != grid_t:
+        raise ValueError(
+            f"Video has {grid_t} frame pairs but {len(timestamps)} timestamps"
+        )
+    merge_size = video_processor.merge_size
+    tokens_per_frame = grid_h * grid_w // (merge_size * merge_size)
+    return out, timestamps, tokens_per_frame, _video_hash(frames, metadata)
+
+
+def _video_placeholder_ids(
+    encode,
+    timestamps: list[float],
+    tokens_per_frame: int,
+    *,
+    vision_start: int,
+    vision_end: int,
+    video_pad: int,
+) -> list[int]:
+    """vLLM 0.32's expansion of one ``<|video_pad|>``.
+
+    ``Qwen3VLMultiModalProcessor.get_video_repl``: per frame pair, its
+    ``<t seconds>`` text tokenized on its own, then ``<|vision_start|>``,
+    the pads and ``<|vision_end|>``. The template's own
+    ``<|vision_start|>`` / ``<|vision_end|>`` stay around it (transformers
+    >= 5.10 processors expand only the bare video token).
+    """
+    ids: list[int] = []
+    for t in timestamps:
+        ids.extend(encode(f"<{t:.1f} seconds>"))
+        ids.append(vision_start)
+        ids.extend([video_pad] * tokens_per_frame)
+        ids.append(vision_end)
+    return ids
 
 
 class _Emitter:
@@ -460,6 +715,25 @@ class Qwen3VLRenderer:
         self._image_cache[h] = (out, num_image_tokens)
         return pil, out, num_image_tokens, h
 
+    def _process_video(self, part: dict[str, Any]):
+        """Resolve, process, and characterize a single video part.
+
+        Returns ``(processor_out, placeholder_ids, video_hash)``, where
+        ``placeholder_ids`` is vLLM's expansion of the part's
+        ``<|video_pad|>``. Unlike images, processed videos are not
+        cached: one is tens of MB.
+        """
+        out, timestamps, n, h = _run_video_processor(self._get_processor(), part)
+        ids = _video_placeholder_ids(
+            self._encode,
+            timestamps,
+            n,
+            vision_start=self._vision_start,
+            vision_end=self._vision_end,
+            video_pad=self._video_pad,
+        )
+        return out, ids, h
+
     def render(
         self,
         messages: list[Message],
@@ -520,6 +794,47 @@ class Qwen3VLRenderer:
                     }
                 )
 
+        def emit_video(part: dict[str, Any]) -> None:
+            # Sibling of ``emit_image``: the template's ``<|vision_start|>``
+            # / ``<|vision_end|>`` wrap the video, and with
+            # ``process_multimodal`` its ``<|video_pad|>`` is expanded here
+            # as vLLM expands it. Only the ``<|video_pad|>`` placeholders
+            # are body content; the frame timestamps (tokenized on their
+            # own, as vLLM does) and vision markers are scaffold.
+            if process_multimodal:
+                out, ids, h = self._process_video(part)
+            else:
+                out = h = None
+                ids = [self._video_pad]
+            vision_counts["video"] += 1
+            if self.config.add_vision_id:
+                em.text(
+                    f"Video {vision_counts['video']}: ",
+                    is_sampled=False,
+                    is_content=False,
+                )
+            em.special(self._vision_start, is_sampled=False, is_content=False)
+            offset = em.cursor()
+            for tid in ids:
+                em.special(tid, is_sampled=False, is_content=tid == self._video_pad)
+            em.special(self._vision_end, is_sampled=False, is_content=False)
+            if process_multimodal:
+                assert out is not None and h is not None
+                mm_hashes.setdefault("video", []).append(h)
+                mm_placeholders.setdefault("video", []).append(
+                    PlaceholderRange(
+                        offset=offset,
+                        length=len(ids),
+                        is_embed=[tid == self._video_pad for tid in ids],
+                    )
+                )
+                mm_items.setdefault("video", []).append(
+                    {
+                        "pixel_values_videos": out["pixel_values_videos"],
+                        "video_grid_thw": out["video_grid_thw"],
+                    }
+                )
+
         def render_media_content(content: Any) -> None:
             """Emit a user/tool content list with media handled inline.
 
@@ -527,8 +842,8 @@ class Qwen3VLRenderer:
             samples — every text fragment goes in as ``is_sampled=False``.
             Text from the caller IS the message body, so every text
             fragment is ``is_content=True``; the vision-marker specials
-            around image_pad placeholders are scaffold (handled in
-            :func:`emit_image`).
+            around image_pad / video_pad placeholders are scaffold
+            (handled in :func:`emit_image` / :func:`emit_video`).
             """
             if isinstance(content, str):
                 em.text(content, is_sampled=False, is_content=True)
@@ -547,9 +862,7 @@ class Qwen3VLRenderer:
                     if _is_image_part(item):
                         emit_image(item)
                     elif _is_video_part(item):
-                        raise NotImplementedError(
-                            "Video parts are not yet supported by Qwen3VLRenderer."
-                        )
+                        emit_video(item)
                     elif "text" in item:
                         em.text(item["text"], is_sampled=False, is_content=True)
 
@@ -789,6 +1102,7 @@ class Qwen3VLRenderer:
             prev_video_count = len(previous_multi_modal_data.mm_items.get("video", []))
         elif not process_multimodal:
             prev_image_count = previous_ids.count(self._image_pad)
+            prev_video_count = previous_ids.count(self._video_pad)
         vision_counts = {"image": prev_image_count, "video": prev_video_count}
 
         def emit_image(part: dict[str, Any]) -> None:
@@ -822,6 +1136,41 @@ class Qwen3VLRenderer:
                     }
                 )
 
+        def emit_video(part: dict[str, Any]) -> None:
+            if process_multimodal:
+                out, ids, h = self._process_video(part)
+            else:
+                out = h = None
+                ids = [self._video_pad]
+            vision_counts["video"] += 1
+            if self.config.add_vision_id:
+                em.text(
+                    f"Video {vision_counts['video']}: ",
+                    is_sampled=False,
+                    is_content=False,
+                )
+            em.special(self._vision_start, is_sampled=False, is_content=False)
+            offset = em.cursor()
+            for tid in ids:
+                em.special(tid, is_sampled=False, is_content=tid == self._video_pad)
+            em.special(self._vision_end, is_sampled=False, is_content=False)
+            if process_multimodal:
+                assert out is not None and h is not None
+                new_hashes.setdefault("video", []).append(h)
+                new_placeholders.setdefault("video", []).append(
+                    PlaceholderRange(
+                        offset=offset,
+                        length=len(ids),
+                        is_embed=[tid == self._video_pad for tid in ids],
+                    )
+                )
+                new_items.setdefault("video", []).append(
+                    {
+                        "pixel_values_videos": out["pixel_values_videos"],
+                        "video_grid_thw": out["video_grid_thw"],
+                    }
+                )
+
         def render_media_content(content: Any) -> None:
             if isinstance(content, str):
                 em.text(content, is_sampled=False, is_content=True)
@@ -840,9 +1189,7 @@ class Qwen3VLRenderer:
                     if _is_image_part(item):
                         emit_image(item)
                     elif _is_video_part(item):
-                        raise NotImplementedError(
-                            "Video parts are not yet supported by Qwen3VLRenderer."
-                        )
+                        emit_video(item)
                     elif "text" in item:
                         em.text(item["text"], is_sampled=False, is_content=True)
 

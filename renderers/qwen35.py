@@ -16,8 +16,10 @@ processor class ``Qwen3VLProcessor``). When a user/tool message carries an
 ``ImagePart``, the renderer emits the same ``<|vision_start|>``+N×``<|image_pad|>``
 +``<|vision_end|>`` expansion as the HF chat template (``N =
 image_grid_thw.prod() // merge_size**2``) and ships processed pixel_values via
-``RenderedTokens.multi_modal_data``. Text-only inputs take the original fast
-path and remain byte-identical to ``apply_chat_template``.
+``RenderedTokens.multi_modal_data``. A ``VideoPart`` expands as vLLM's Qwen3-VL
+processor expands it, with frame timestamps (see ``renderers.qwen3_vl``).
+Text-only inputs take the original fast path and remain byte-identical to
+``apply_chat_template``.
 """
 
 from __future__ import annotations
@@ -52,6 +54,8 @@ from renderers.qwen3_vl import (
     _is_image_part,
     _is_video_part,
     _load_pil_image,
+    _run_video_processor,
+    _video_placeholder_ids,
 )
 
 # ---------------------------------------------------------------------------
@@ -231,6 +235,24 @@ class Qwen35Renderer:
             self._image_cache.pop(next(iter(self._image_cache)))
         self._image_cache[h] = (out, num_image_tokens)
         return pil, out, num_image_tokens, h
+
+    def _process_video(self, part: dict[str, Any]):
+        """Resolve, process, and characterize a single video part.
+
+        Returns ``(processor_out, placeholder_ids, video_hash)``. Mirrors
+        ``Qwen3VLRenderer._process_video``: ``placeholder_ids`` is vLLM's
+        expansion of the part's ``<|video_pad|>``; videos are not cached.
+        """
+        out, timestamps, n, h = _run_video_processor(self._get_processor(), part)
+        ids = _video_placeholder_ids(
+            self._encode,
+            timestamps,
+            n,
+            vision_start=self._vision_start,
+            vision_end=self._vision_end,
+            video_pad=self._video_pad,
+        )
+        return out, ids, h
 
     @staticmethod
     def _content_has_media(content: Any) -> bool:
@@ -474,6 +496,52 @@ class Qwen35Renderer:
                     }
                 )
 
+        def emit_video(part: dict[str, Any], msg_idx: int) -> None:
+            # Sibling of ``emit_image``: the template's ``<|vision_start|>``
+            # / ``<|vision_end|>`` wrap the video, and with
+            # ``process_multimodal`` its ``<|video_pad|>`` is expanded here
+            # as vLLM expands it. Only the ``<|video_pad|>`` placeholders
+            # are body content; the frame timestamps (tokenized on their
+            # own, as vLLM does) and vision markers are scaffold.
+            if process_multimodal:
+                out, ids, h = self._process_video(part)
+            else:
+                out = h = None
+                ids = [self._video_pad]
+            vision_counts["video"] += 1
+            if self.config.add_vision_id:
+                emit_text(
+                    f"Video {vision_counts['video']}: ",
+                    msg_idx,
+                    is_sampled=False,
+                    is_content=False,
+                )
+            emit_special(
+                self._vision_start, msg_idx, is_sampled=False, is_content=False
+            )
+            offset = len(tokens)
+            for tid in ids:
+                emit_special(
+                    tid, msg_idx, is_sampled=False, is_content=tid == self._video_pad
+                )
+            emit_special(self._vision_end, msg_idx, is_sampled=False, is_content=False)
+            if process_multimodal:
+                assert out is not None and h is not None
+                mm_hashes.setdefault("video", []).append(h)
+                mm_placeholders.setdefault("video", []).append(
+                    PlaceholderRange(
+                        offset=offset,
+                        length=len(ids),
+                        is_embed=[tid == self._video_pad for tid in ids],
+                    )
+                )
+                mm_items.setdefault("video", []).append(
+                    {
+                        "pixel_values_videos": out["pixel_values_videos"],
+                        "video_grid_thw": out["video_grid_thw"],
+                    }
+                )
+
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             """Emit a user message whose content list contains image parts.
 
@@ -509,9 +577,8 @@ class Qwen35Renderer:
                         flush_buf()
                         emit_image(item, msg_idx)
                     elif _is_video_part(item):
-                        raise NotImplementedError(
-                            "Video parts are not yet supported by Qwen35Renderer."
-                        )
+                        flush_buf()
+                        emit_video(item, msg_idx)
                     elif "text" in item:
                         if item["text"]:
                             buf_segments.append((item["text"], True))
@@ -628,6 +695,7 @@ class Qwen35Renderer:
                     emit_special=emit_special,
                     emit_text=emit_text,
                     emit_image=emit_image,
+                    emit_video=emit_video,
                     emit_text_segments=emit_text_segments,
                 )
 
@@ -798,6 +866,7 @@ class Qwen35Renderer:
             prev_video_count = len(previous_multi_modal_data.mm_items.get("video", []))
         elif not process_multimodal:
             prev_image_count = previous_ids.count(self._image_pad)
+            prev_video_count = previous_ids.count(self._video_pad)
         vision_counts = {"image": prev_image_count, "video": prev_video_count}
 
         def emit_special(
@@ -866,6 +935,37 @@ class Qwen35Renderer:
                     }
                 )
 
+        def emit_video(part: dict[str, Any], msg_idx: int = -1) -> None:
+            if process_multimodal:
+                out, ids, h = self._process_video(part)
+            else:
+                out = h = None
+                ids = [self._video_pad]
+            vision_counts["video"] += 1
+            if self.config.add_vision_id:
+                emit_text(f"Video {vision_counts['video']}: ", msg_idx)
+            emit_special(self._vision_start, msg_idx)
+            offset = len(tokens)
+            for tid in ids:
+                emit_special(tid, msg_idx, is_content=tid == self._video_pad)
+            emit_special(self._vision_end, msg_idx)
+            if process_multimodal:
+                assert out is not None and h is not None
+                new_hashes.setdefault("video", []).append(h)
+                new_placeholders.setdefault("video", []).append(
+                    PlaceholderRange(
+                        offset=offset,
+                        length=len(ids),
+                        is_embed=[tid == self._video_pad for tid in ids],
+                    )
+                )
+                new_items.setdefault("video", []).append(
+                    {
+                        "pixel_values_videos": out["pixel_values_videos"],
+                        "video_grid_thw": out["video_grid_thw"],
+                    }
+                )
+
         def emit_user_with_media(content_list: list[Any], msg_idx: int) -> None:
             emit_special(self._im_start, msg_idx)
             buf_segments: list[tuple[str, bool]] = [("user\n", False)]
@@ -884,9 +984,8 @@ class Qwen35Renderer:
                         flush_buf()
                         emit_image(item, msg_idx)
                     elif _is_video_part(item):
-                        raise NotImplementedError(
-                            "Video parts are not yet supported by Qwen35Renderer."
-                        )
+                        flush_buf()
+                        emit_video(item, msg_idx)
                     elif "text" in item:
                         if item["text"]:
                             buf_segments.append((item["text"], True))
@@ -933,6 +1032,7 @@ class Qwen35Renderer:
                     emit_special=emit_special,
                     emit_text=emit_text,
                     emit_image=emit_image,
+                    emit_video=emit_video,
                     emit_text_segments=emit_text_segments,
                 )
             else:
@@ -1157,6 +1257,7 @@ class Qwen35Renderer:
         emit_special,
         emit_text,
         emit_image,
+        emit_video,
         emit_text_segments,
     ) -> None:
         # Consecutive tool messages share a single <|im_start|>user ... <|im_end|>
@@ -1187,7 +1288,8 @@ class Qwen35Renderer:
             # Mirror the chat template's ``render_content`` macro for list
             # content: text segments BPE-encode together up to a media
             # boundary, then each image emits ``<|vision_start|>`` + N×
-            # ``<|image_pad|>`` + ``<|vision_end|>`` inline.
+            # ``<|image_pad|>`` + ``<|vision_end|>`` inline (a video, its
+            # expansion; see ``emit_video``).
             # ``_content_has_media`` returns False unless content is a list,
             # but the type checker can't follow that through the call.
             assert isinstance(raw_content, list)
@@ -1212,9 +1314,8 @@ class Qwen35Renderer:
                         flush_buf()
                         emit_image(item, msg_idx)
                     elif _is_video_part(item):
-                        raise NotImplementedError(
-                            "Video parts are not yet supported by Qwen35Renderer."
-                        )
+                        flush_buf()
+                        emit_video(item, msg_idx)
                     elif "text" in item:
                         if item["text"]:
                             buf_segments.append((item["text"], True))

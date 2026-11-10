@@ -207,7 +207,8 @@ def _sampler_support(
 ) -> dict[str, Any]:
     """The sampler's per-token support in CSR form: completion token ``i`` owns ``counts[i]`` entries of
     the flat ``ids`` (and ``logprobs``, the sampler's logprob of each id). ``replayed`` rows are the exact
-    set the token was sampled from; other rows are a head of the sampler's distribution."""
+    set the token was sampled from; other rows are a head of the sampler's distribution, or i.i.d. draws
+    from it (repeats kept)."""
     return {
         "ids": ids.astype(np.int32, copy=False),
         "counts": counts.astype(np.int32, copy=False),
@@ -304,6 +305,7 @@ def _parse_compact_logprobs(
     choice: Mapping[str, Any], completion_ids: list[int], k: int | None
 ) -> tuple[np.ndarray, list[list[int]] | None, list[list[float]] | None]:
     ids, values, offsets, num_top = _decode_compact_logprobs(choice, completion_ids)
+    samples = choice["compact_logprobs"].get("samples") is True
     sampled = []
     top_ids: list[list[int]] = []
     top_logprobs: list[list[float]] = []
@@ -318,7 +320,13 @@ def _parse_compact_logprobs(
                 "Missing compact sampled-token evidence"
             )
         sampled.append(row[token_id])
-        if k is not None:
+        if k is not None and samples:
+            # Rows of i.i.d. sampler draws: the sampled token, then the draws with repeats kept.
+            if ids[start] != token_id or end - start < 2:
+                raise MalformedGenerateResponseError("Invalid compact sampler draws")
+            top_ids.append(ids[start + 1 : end].tolist())
+            top_logprobs.append(values[start + 1 : end].tolist())
+        elif k is not None:
             head = dict(islice(row.items(), max(num_top, 1)))
             selected_ids, selected_logprobs = _select_sampler_head(
                 head, token_id, row[token_id], k

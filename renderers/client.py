@@ -30,7 +30,7 @@ from renderers.base import (
     ToolSpec,
     _require_transformers,
 )
-from renderers.streaming import ResponseStream, TextDelta, remaining_deltas
+from renderers.streaming import TextDelta, TextStream, remaining_deltas
 
 _request_logger = logging.getLogger("renderers.client")
 ROUTED_EXPERTS_DATA_PREFIX = b'"routed_experts":{"data":"'
@@ -976,8 +976,8 @@ async def generate_stream(
     Per channel, the deltas concatenate to the result's field with surrounding
     whitespace stripped. Tool calls are not streamed: text stops at the first
     tool-call opener and the calls arrive in the result. A renderer without
-    ``response_stream`` still works; its text arrives in one delta per channel
-    just before the result.
+    ``response_stream`` (or whose ``response_stream`` returns ``None``) still
+    works; its text arrives in one delta per channel just before the result.
 
     Compact logprobs are not available on a streamed request, so the sampled
     logprobs and any top-k head travel as native JSON.
@@ -1003,7 +1003,7 @@ async def generate_stream(
         stream=True,
     )
     make_stream = getattr(renderer, "response_stream", None)
-    splitter: ResponseStream | None = (
+    splitter: TextStream | None = (
         make_stream(prompt_ids=request.prompt_ids) if make_stream is not None else None
     )
     choice: dict[str, Any] = {"token_ids": [], "logprobs": {"content": []}}

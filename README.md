@@ -143,11 +143,25 @@ async with aclosing(generate_stream(client=client, renderer=r, messages=messages
   top-k head travel as native JSON.
 - Leaving the loop early closes the connection, which aborts generation.
 
-`Qwen3Renderer` and `DeepSeekV4Renderer` stream token by token. Other renderers
-work too, but deliver their text in one delta per channel just before the
-result. A renderer opts in by implementing
-`response_stream(*, prompt_ids=None) -> ResponseStream | None`; see
-`renderers/streaming.py`.
+Every bundled renderer streams token by token. A renderer provides
+`response_stream(*, prompt_ids=None)`, which returns a `TextStream` from
+`renderers/streaming.py`: most formats declare their markers in a
+`StreamGrammar`, and Harmony, Gemma 4, Inkling and Muse Glimmer subclass
+`ChannelStream` with their own token grammar. A renderer without the method
+(or one that returns `None`, as `DefaultRenderer` does for a custom parser it
+cannot describe) still works: its text arrives in one delta per channel just
+before the result.
+
+A few parser rules look back at text that has already been streamed. When
+one applies, the result is still correct, the mismatch is logged, and that
+channel gets no further delta:
+
+- A completion that ends inside reasoning parses to empty `content`. Gemma 4
+  and Inkling can emit content before a later, unfinished thought.
+- Muse Glimmer rewrites `content` to the raw completion when a tool message
+  carries no complete invocation.
+- Llama 3 restarts the body after a role header, which an engine does not
+  sample mid-completion.
 
 ### Prefix stability
 

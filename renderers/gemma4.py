@@ -46,6 +46,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 
+from renderers.streaming import ChannelStream, TextDelta, TextStream
 from renderers.configs import Gemma4RendererConfig
 from renderers.qwen3_vl import (
     _image_hash,
@@ -426,6 +427,76 @@ class _ArgumentParser:
             if raw:
                 return raw
             raise ValueError("missing literal") from None
+
+
+class _Gemma4Stream(ChannelStream):
+    """An initial thought channel (or one the prompt opened), then content."""
+
+    _THOUGHT = "thought\n"
+
+    def __init__(self, renderer: "Gemma4Renderer", prefilled: bool):
+        super().__init__(renderer._tokenizer)
+        self._renderer = renderer
+        self._prefilled = prefilled
+        self._state = "first"
+        # Tokens of a possible ``thought\n`` label after the channel opener.
+        self._label: list[int] = []
+        # Reasoning text not yet known to differ from a spelled-out label.
+        self._guard: str | None = None
+
+    def _token(self, token_id: int, deltas: list[TextDelta]) -> None:
+        r = self._renderer
+        if self._state == "first":
+            if token_id == r._turn_start:
+                # A replayed role header, which the parser strips.
+                self._done = True
+                return
+            if token_id == r._channel_start:
+                self._state = "label"
+                return
+            self._state = "reasoning" if self._prefilled else "content"
+            self._guard = "" if self._prefilled else None
+        if self._state == "label":
+            expected = r._thought_prefix
+            if token_id == expected[len(self._label)]:
+                self._label.append(token_id)
+                if len(self._label) == len(expected):
+                    self._state = "reasoning"
+                return
+            # Not the label: these tokens are reasoning text after all.
+            self._state, self._guard = "reasoning", ""
+            for label_id in self._label:
+                self._reasoning(label_id, deltas)
+            if self._done:
+                return
+        if token_id in r.get_stop_token_ids() or token_id == r._tool_call_start:
+            self._done = True
+        elif self._state == "reasoning":
+            if token_id == r._channel_end:
+                self._release_guard(deltas)
+                self._end_run("reasoning", deltas)
+                self._state = "content"
+            else:
+                self._reasoning(token_id, deltas)
+        else:
+            self._push("content", token_id, deltas)
+
+    def _reasoning(self, token_id: int, deltas: list[TextDelta]) -> None:
+        if self._guard is None:
+            self._push("reasoning", token_id, deltas)
+            return
+        # The parser drops a spelled-out label only from a thought that never
+        # closes, so reasoning that starts with one cannot be streamed.
+        self._guard += self._detokenizer.push(token_id)
+        if self._guard.startswith(self._THOUGHT):
+            self._done = True
+        elif not self._THOUGHT.startswith(self._guard):
+            self._release_guard(deltas)
+
+    def _release_guard(self, deltas: list[TextDelta]) -> None:
+        if self._guard is not None:
+            self._add("reasoning", self._guard, deltas)
+            self._guard = None
 
 
 class Gemma4Renderer:
@@ -1240,6 +1311,20 @@ class Gemma4Renderer:
             content=self._decode(content_ids).strip(),
             reasoning_content=reasoning,
             tool_calls=tool_calls,
+        )
+
+    def response_stream(self, *, prompt_ids: list[int] | None = None) -> TextStream:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        return _Gemma4Stream(
+            self,
+            prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                open_marker="<|channel>thought",
+                close_marker="<channel|>",
+                stop_ids=set(self.get_stop_token_ids()),
+                initial_only=False,
+            ),
         )
 
     def get_stop_token_ids(self) -> list[int]:

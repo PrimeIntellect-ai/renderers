@@ -55,6 +55,7 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
+from renderers.streaming import ResponseStream, StreamGrammar
 from renderers.configs import Llama3RendererConfig
 from renderers.parsing import parse_llama_3
 
@@ -423,6 +424,20 @@ class Llama3Renderer:
             self._tokenizer,
             token_ids,
             stop_ids={self._eot, self._end_of_text, self._eom},
+        )
+
+    def response_stream(self, *, prompt_ids: list[int] | None = None) -> ResponseStream:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        return ResponseStream(
+            self._tokenizer,
+            StreamGrammar(
+                stop_ids=frozenset(self.get_stop_token_ids()),
+                reentrant_reasoning=True,
+                # A body that is one JSON object is a tool call as a whole.
+                silent_content_prefixes=("{",),
+                # A replayed role header moves where the body starts.
+                silent_first_ids=frozenset({self._start_header, self._end_header}),
+            ),
         )
 
     def get_stop_token_ids(self) -> list[int]:

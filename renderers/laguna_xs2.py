@@ -73,6 +73,7 @@ from renderers.configs import (
     LagunaXS2RendererConfig,
     LagunaXS21RendererConfig,
 )
+from renderers.streaming import ResponseStream, reasoning_first_stream
 from renderers.parsing import parse_laguna_xs2
 
 _DEFAULT_SYSTEM_MESSAGE = (
@@ -376,6 +377,18 @@ class LagunaXS2Renderer:
                 stop_ids=set(self.get_stop_token_ids()),
                 assistant_prefix="<assistant>",
             ),
+        )
+
+    def response_stream(self, *, prompt_ids: list[int] | None = None) -> ResponseStream:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        return reasoning_first_stream(
+            self._tokenizer,
+            prompt_ids=prompt_ids,
+            stop_ids=self.get_stop_token_ids(),
+            think_open_id=self._think,
+            think_close_id=self._think_end,
+            tool_ids=[self._tool_call],
+            assistant_prefix="<assistant>",
         )
 
     def get_stop_token_ids(self) -> list[int]:

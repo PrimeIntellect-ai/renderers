@@ -2,26 +2,29 @@
 
 The first half drives :class:`ResponseStream` with a byte-level fake
 tokenizer, so every hold-back rule is exercised without model assets. The
-second half checks the real Qwen3 and DeepSeek V4 grammars against their own
-``parse_response`` over hand-written and randomly generated completions.
+second half walks the Qwen3 and DeepSeek V4 grammars through hand-written
+completions. ``test_stream_parity.py`` checks every renderer against its own
+parser on reference and randomly generated completions.
 """
 
 from __future__ import annotations
 
 import logging
-import random
 from functools import lru_cache
 
 import pytest
 
 from renderers import DeepSeekV4Renderer, DeepSeekV4RendererConfig, Qwen3Renderer
 from renderers.streaming import (
+    ChannelStream,
     ResponseStream,
     StreamGrammar,
     TextDelta,
     remaining_deltas,
 )
 from tests.model_assets import load_test_tokenizer
+from tests.streaming_checks import joined
+from tests.streaming_checks import stream_and_check as check_stream
 
 # ── A byte-level tokenizer: ids < 256 are raw bytes, the rest are markers ──
 
@@ -75,10 +78,6 @@ def new_stream(grammar=REASONING_FIRST, *, reasoning=False) -> ResponseStream:
 def feed_each(stream: ResponseStream, token_ids: list[int]) -> list[TextDelta]:
     """Feed one token at a time; return every delta in order."""
     return [delta for token_id in token_ids for delta in stream.feed([token_id])]
-
-
-def joined(deltas: list[TextDelta], channel: str) -> str:
-    return "".join(d.text for d in deltas if d.channel == channel)
 
 
 def test_content_arrives_as_soon_as_each_token_settles_it():
@@ -338,6 +337,115 @@ def test_remaining_deltas_without_a_stream_carry_the_whole_stripped_fields():
     assert remaining_deltas({}, reasoning_content=None, content="") == []
 
 
+TEXT_THINK = StreamGrammar(
+    stop_ids=frozenset({EOS}),
+    tool_ids=frozenset({TOOL}),
+    think_open_text="<think>",
+    think_close_text="</think>",
+)
+
+
+def test_text_think_markers_split_across_tokens_open_and_close_reasoning():
+    stream = new_stream(TEXT_THINK)
+    deltas = feed_each(stream, b(" \n<think>why<think> so </think>\n\nanswer"))
+    # No part of either marker is ever sent, and a repeated opener is dropped.
+    assert joined(deltas, "reasoning") == "why so"
+    assert joined(deltas, "content") == "answer"
+
+
+def test_text_think_opener_only_counts_before_any_other_text():
+    stream = new_stream(TEXT_THINK)
+    deltas = feed_each(stream, b("a<think>b</think>c"))
+    assert joined(deltas, "reasoning") == ""
+    assert joined(deltas, "content") == "a<think>b</think>c"
+
+
+def test_text_that_only_resembles_an_opener_is_released_as_content():
+    stream = new_stream(TEXT_THINK)
+    assert feed_each(stream, b("<thi")) == []
+    assert joined(feed_each(stream, b("s>")), "content") == "<this>"
+
+
+def test_text_close_marker_prefix_is_withheld_in_reasoning():
+    stream = new_stream(TEXT_THINK, reasoning=True)
+    assert joined(feed_each(stream, b("x </th")), "reasoning") == "x"
+    assert joined(feed_each(stream, b("ree")), "reasoning") == " </three"
+    deltas = feed_each(stream, b("</think>done"))
+    assert joined(deltas, "content") == "done"
+    assert stream.streamed == {"reasoning": "x </three", "content": "done"}
+
+
+def test_content_that_may_be_a_whole_tool_call_is_not_streamed():
+    grammar = StreamGrammar(
+        stop_ids=frozenset({EOS}),
+        reentrant_reasoning=True,
+        silent_content_prefixes=("{",),
+    )
+    assert feed_each(new_stream(grammar), b(' \n{"name": "f"}')) == []
+    plain = feed_each(new_stream(grammar), b("f({})"))
+    assert joined(plain, "content") == "f({})"
+
+
+def test_framing_tokens_are_dropped_from_content_but_not_from_reasoning():
+    grammar = StreamGrammar(
+        stop_ids=frozenset({EOS}),
+        think_open_ids=frozenset({THINK}),
+        think_close_ids=frozenset({END_THINK}),
+        dropped_content_ids=frozenset({END_TOOL}),
+    )
+    stream = new_stream(grammar, reasoning=True)
+    deltas = feed_each(
+        stream, [*b("r"), END_TOOL, END_THINK, *b("a"), END_TOOL, *b("b")]
+    )
+    assert joined(deltas, "reasoning") == "r</tool_call>"
+    assert joined(deltas, "content") == "ab"
+    # Framing still counts as text before an opener.
+    late = feed_each(new_stream(grammar), [END_TOOL, THINK, *b("x")])
+    assert joined(late, "reasoning") == ""
+    assert joined(late, "content") == "<think>x"
+
+
+def test_replayed_header_is_skipped_or_silences_the_stream():
+    skipping = StreamGrammar(
+        stop_ids=frozenset({EOS}), skipped_first_ids=frozenset({TOOL})
+    )
+    assert joined(feed_each(new_stream(skipping), [TOOL, *b("hi")]), "content") == "hi"
+    silent = StreamGrammar(
+        stop_ids=frozenset({EOS}), silent_first_ids=frozenset({TOOL})
+    )
+    assert feed_each(new_stream(silent), [TOOL, *b("hi")]) == []
+    # Only the first token counts.
+    later = feed_each(new_stream(silent), [*b("a"), TOOL, *b("b")])
+    assert joined(later, "content") == "a<tool_call>b"
+
+
+class _Upper(ChannelStream):
+    """A two-token grammar: THINK and END_THINK switch the channel."""
+
+    def __init__(self):
+        super().__init__(ByteTokenizer())
+        self._channel = "content"
+
+    def _token(self, token_id, deltas):
+        if token_id == EOS:
+            self._done = True
+        elif token_id in (THINK, END_THINK):
+            self._end_run(self._channel, deltas)
+            self._channel = "reasoning" if token_id == THINK else "content"
+        else:
+            self._push(self._channel, token_id, deltas)
+
+
+def test_channel_stream_applies_the_shared_text_rules_to_a_custom_grammar():
+    stream = _Upper()
+    deltas = stream.feed(
+        [*b(" a "), THINK, *b(" r "), *b("🙂")[:2], END_THINK, *b("b "), EOS, *b("z")]
+    )
+    assert joined(deltas, "content") == "a b"
+    assert joined(deltas, "reasoning") == "r \ufffd"
+    assert stream.finish(reasoning_content="r \ufffd", content=" a b ") == []
+
+
 # ── Real grammars: the stream must agree with the renderer's own parser ──
 
 QWEN3 = "Qwen/Qwen3-0.6B"
@@ -435,48 +543,8 @@ def fmt(request) -> Format:
     return _format(request.param)
 
 
-def chunkings(token_ids: list[int], seed: int) -> list[list[list[int]]]:
-    rng = random.Random(seed)
-    plans = [[[t] for t in token_ids], [token_ids]]
-    for _ in range(3):
-        cuts = sorted(rng.sample(range(len(token_ids) + 1), min(4, len(token_ids) + 1)))
-        plans.append(
-            [token_ids[a:c] for a, c in zip([0, *cuts], [*cuts, len(token_ids)])]
-        )
-    return plans
-
-
-def stream_and_check(fmt: Format, prompt_ids: list[int], token_ids: list[int], seed=0):
-    """Stream ``token_ids`` under several chunkings and check the contract.
-
-    Returns the text streamed before ``finish`` and the parsed response.
-    """
-    parsed = fmt.renderer.parse_response(token_ids, prompt_ids=prompt_ids)
-    final = {
-        "reasoning": (parsed.reasoning_content or "").strip(),
-        "content": (parsed.content or "").strip(),
-    }
-    context = f"{fmt.name} completion={fmt.tokenizer.decode(token_ids)!r}"
-    live = None
-    for plan in chunkings(token_ids, seed):
-        stream = fmt.renderer.response_stream(prompt_ids=prompt_ids)
-        deltas = [delta for chunk in plan for delta in stream.feed(chunk)]
-        assert all(delta.text for delta in deltas), context
-        streamed = stream.streamed
-        for channel in ("reasoning", "content"):
-            assert joined(deltas, channel) == streamed[channel], context
-            # Nothing streamed may ever need to be taken back.
-            assert final[channel].startswith(streamed[channel]), (channel, context)
-        tail = stream.finish(
-            reasoning_content=parsed.reasoning_content, content=parsed.content
-        )
-        assert stream.streamed == final, context
-        assert joined(deltas + tail, "reasoning") == final["reasoning"], context
-        assert joined(deltas + tail, "content") == final["content"], context
-        # Chunk boundaries are invisible in the text.
-        live = live or streamed
-        assert streamed == live, context
-    return live, parsed
+def stream_and_check(fmt: Format, prompt_ids: list[int], token_ids: list[int]):
+    return check_stream(fmt.renderer, fmt.tokenizer, prompt_ids, token_ids)
 
 
 @pytest.mark.model
@@ -604,60 +672,6 @@ def test_think_markers_after_content_follow_the_format_grammar(fmt):
         assert live == {"reasoning": "", "content": "Before<think>aside</think>After"}
     else:
         assert live == {"reasoning": "aside", "content": "BeforeAfter"}
-
-
-def _fuzz_vocabulary(fmt: Format) -> list[list[int]]:
-    texts = [
-        "Hello",
-        " world",
-        "\n\n",
-        "  ",
-        "\n",
-        "<",
-        "</",
-        " < 3",
-        "日本語",
-        "🙂",
-        "é",
-        '{"name": "weather", "arguments": {"city": "Paris"}}',
-        "<think>"[:3],
-        "tool_call",
-    ]
-    if fmt.name != "qwen3":
-        texts += [
-            "<｜DSML｜tool_calls>",
-            "</｜DSML｜tool_calls>",
-            '<｜DSML｜invoke name="weather">',
-            "</｜DSML｜invoke>",
-            '<｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter>',
-            "<｜DSML｜",
-            "｜DSML｜",
-            "tool_calls>",
-            "invoke",
-        ]
-    vocabulary = [fmt.ids([text]) for text in texts]
-    # Markers are over-represented so most samples cross several of them.
-    for name in fmt.markers:
-        vocabulary += [[fmt.markers[name]]] * (1 if name == "STOP" else 3)
-    # Lone bytes of a multi-byte character, as a truncated completion ends.
-    emoji = fmt.ids(["🙂"])
-    if len(emoji) > 1:
-        vocabulary.append(emoji[:1])
-    return vocabulary
-
-
-@pytest.mark.model
-@pytest.mark.parametrize("seed", range(400))
-def test_random_completions_never_stream_text_the_parser_disowns(fmt, seed):
-    rng = random.Random(f"{fmt.name}-{seed}")
-    vocabulary = _fuzz_vocabulary(fmt)
-    token_ids = [
-        token_id
-        for _ in range(rng.randint(1, 14))
-        for token_id in rng.choice(vocabulary)
-    ]
-    for prompt_ids in fmt.prompts().values():
-        stream_and_check(fmt, prompt_ids, token_ids, seed=seed)
 
 
 @pytest.mark.model

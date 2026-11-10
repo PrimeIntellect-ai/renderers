@@ -45,4 +45,7 @@ def replay_client(completions, requests):
 def assert_evidence(result, ids):
     assert result["completion_ids"] == ids
     assert result["completion_logprobs"].tolist() == [-0.25] * len(ids)
-    assert result["sampling_mask"] == [[tid] for tid in ids]
+    support = result["sampler_support"]
+    assert support["replayed"] and support["logprobs"] is None
+    assert support["ids"].tolist() == ids
+    assert support["counts"].tolist() == [1] * len(ids)

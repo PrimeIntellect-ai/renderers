@@ -114,6 +114,41 @@ class Renderer(Protocol):
 - `ParsedResponse` is `(content, reasoning_content, tool_calls)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
 - Round-trip: rendering `[user, assistant(content, reasoning, tool_calls)]`, slicing the assistant completion, and feeding it through `parse_response` returns an equivalent structured message. Tested per-renderer in `tests/test_roundtrip.py`.
 
+### Streaming
+
+`renderers.client.generate_stream` takes the same arguments as `generate` and
+yields the reasoning and content text while the engine is still sampling:
+
+```python
+from contextlib import aclosing
+from renderers.client import generate_stream
+from renderers.streaming import TextDelta
+
+async with aclosing(generate_stream(client=client, renderer=r, messages=messages, model=model)) as events:
+    async for event in events:
+        if isinstance(event, TextDelta):
+            print(event.channel, event.text)   # "reasoning" or "content"
+        else:
+            result = event                     # the same dict generate() returns
+```
+
+- The last item is the result dict, built by `parse_response` over the whole
+  completion exactly as in `generate`. Record and train on that; the deltas are
+  for display.
+- Per channel, the deltas concatenate to the result's field with surrounding
+  whitespace stripped.
+- Tool calls are not streamed. Text stops at the first tool-call opener and the
+  calls arrive in the result.
+- Streamed requests cannot use compact logprobs, so sampled logprobs and any
+  top-k head travel as native JSON.
+- Leaving the loop early closes the connection, which aborts generation.
+
+`Qwen3Renderer` and `DeepSeekV4Renderer` stream token by token. Other renderers
+work too, but deliver their text in one delta per channel just before the
+result. A renderer opts in by implementing
+`response_stream(*, prompt_ids=None) -> ResponseStream | None`; see
+`renderers/streaming.py`.
+
 ### Prefix stability
 
 `renderer.is_prefix_stable` describes the constructed renderer after config and

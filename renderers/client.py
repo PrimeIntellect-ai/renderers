@@ -12,13 +12,14 @@ import binascii
 import json
 import logging
 import math
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 from itertools import islice, pairwise
 from typing import Any, cast
 
 import httpx
 import numpy as np
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, AsyncStream
 
 from renderers.base import (
     Message,
@@ -29,6 +30,7 @@ from renderers.base import (
     ToolSpec,
     _require_transformers,
 )
+from renderers.streaming import ResponseStream, TextDelta, remaining_deltas
 
 _request_logger = logging.getLogger("renderers.client")
 ROUTED_EXPERTS_DATA_PREFIX = b'"routed_experts":{"data":"'
@@ -544,6 +546,259 @@ def _parse_completion_top_logprobs(
     return top_ids, top_logprobs
 
 
+@dataclass
+class _GenerateRequest:
+    """A built generate request, plus what result assembly needs from it."""
+
+    endpoint: str
+    post_kwargs: dict[str, Any]
+    prompt_ids: list[int]
+    stop_token_ids: list[int]
+    content_parts: list[dict[str, Any]] | None
+    head_size: int | None
+    mm_data: MultiModalData | None
+    prompt_attr: RenderedTokens | None
+
+
+async def _prepare_generate(
+    *,
+    client: AsyncOpenAI,
+    renderer: Renderer,
+    messages: list[Message],
+    model: str,
+    prompt_ids: list[int] | None,
+    multi_modal_data: MultiModalData | None,
+    prompt_attribution: RenderedTokens | None,
+    tools: list[ToolSpec] | None,
+    sampling_params: dict[str, Any] | None,
+    cache_salt: str | None,
+    priority: int | None,
+    extra_headers: dict[str, str] | None,
+    max_prompt_len: int | None,
+    process_multimodal: bool,
+    stream: bool,
+) -> _GenerateRequest:
+    """Render (unless given a prompt), pre-flight, and build the request."""
+    if tools and not getattr(renderer, "supports_tools", True):
+        raise ValueError(
+            f"{type(renderer).__name__} does not support tools. "
+            "Choose a model-specific renderer instead of the default fallback."
+        )
+    if not process_multimodal and not getattr(
+        renderer, "supports_process_multimodal", False
+    ):
+        raise NotImplementedError(
+            f"{type(renderer).__name__} does not support process_multimodal=False"
+        )
+
+    def _prepare():
+        if prompt_ids is not None:
+            # Caller-supplied prompt; if they also gave us pre-computed
+            # attribution (e.g. the bridge path in verifiers), thread it
+            # through unchanged.
+            return (
+                list(prompt_ids),
+                renderer.get_stop_token_ids(),
+                multi_modal_data,
+                prompt_attribution,
+            )
+        render_kwargs: dict[str, Any] = {}
+        if not process_multimodal:
+            render_kwargs["process_multimodal"] = False
+        rendered = renderer.render(
+            messages,
+            tools=tools,
+            add_generation_prompt=True,
+            **render_kwargs,
+        )
+        return (
+            rendered.token_ids,
+            renderer.get_stop_token_ids(),
+            rendered.multi_modal_data,
+            rendered,
+        )
+
+    prompt_ids, stop_token_ids, mm_data, prompt_attr = _prepare()
+
+    if process_multimodal:
+        if max_prompt_len is None:
+            max_prompt_len = await _resolve_max_prompt_len(client, model)
+        if max_prompt_len is not None and len(prompt_ids) > max_prompt_len:
+            raise OverlongPromptError(
+                prompt_len=len(prompt_ids), max_prompt_len=max_prompt_len
+            )
+
+    sp: dict[str, Any] = dict(sampling_params or {})
+    sp["stop_token_ids"] = stop_token_ids
+    requested_logprobs = sp.get("logprobs")
+    head_size = (
+        requested_logprobs
+        if type(requested_logprobs) is int and requested_logprobs > 0
+        else None
+    )
+    sp["logprobs"] = head_size + 2 if head_size is not None else 1
+    if head_size is not None and not stream:
+        # The engine packs compact logprobs only into a complete response.
+        sp["extra_args"] = {
+            "prl_compact_logprobs": True,
+            **(sp.get("extra_args") or {}),
+        }
+    sp.setdefault("skip_special_tokens", False)
+
+    body: dict[str, Any] = {
+        "model": model,
+        "token_ids": prompt_ids,
+        "sampling_params": sp,
+    }
+    content_parts = (
+        _content_parts(messages, renderer=renderer) if not process_multimodal else None
+    )
+    features = (
+        _build_mm_features(renderer, mm_data)
+        if process_multimodal and mm_data and not mm_data.is_empty()
+        else None
+    )
+    if content_parts:
+        body["content_parts"] = content_parts
+        body["return_token_ids"] = True
+    if features is not None:
+        body["features"] = features
+    if cache_salt is not None:
+        body["cache_salt"] = cache_salt
+    if priority is not None:
+        body["priority"] = priority
+    if stream:
+        body["stream"] = True
+        body["stream_options"] = {"include_usage": True}
+
+    # /inference/v1/generate is mounted at the server root, not under /v1
+    # like the OpenAI-compatible endpoints. Build an absolute URL so the
+    # AsyncOpenAI client doesn't prepend its automatic /v1.
+    base = str(client.base_url).rstrip("/").removesuffix("/v1")
+    endpoint = f"{base}/inference/v1/generate"
+    _request_logger.debug(
+        "POST %s prompt_len=%d max_tokens=%s",
+        endpoint,
+        len(prompt_ids),
+        sp.get("max_tokens"),
+    )
+    post_kwargs: dict[str, Any] = {
+        "cast_to": httpx.Response,
+        "body": body,
+    }
+    if extra_headers:
+        post_kwargs["options"] = cast(Any, {"headers": extra_headers})
+    return _GenerateRequest(
+        endpoint=endpoint,
+        post_kwargs=post_kwargs,
+        prompt_ids=prompt_ids,
+        stop_token_ids=stop_token_ids,
+        content_parts=content_parts,
+        head_size=head_size,
+        mm_data=mm_data,
+        prompt_attr=prompt_attr,
+    )
+
+
+def _generate_result(
+    renderer: Renderer,
+    request: _GenerateRequest,
+    data: dict[str, Any],
+    tools: list[ToolSpec] | None,
+) -> dict[str, Any]:
+    """Validate the engine's response and parse it into the result dict."""
+    prompt_ids = request.prompt_ids
+    content_parts = request.content_parts
+    head_size = request.head_size
+    choice = (data.get("choices") or [{}])[0]
+    completion_ids = choice.get("token_ids") or []
+    effective_prompt_ids = data.get("prompt_token_ids")
+    if content_parts and not isinstance(effective_prompt_ids, list):
+        raise MalformedGenerateResponseError(
+            "Engine response must include prompt_token_ids when process_multimodal=False."
+        )
+    mm_placeholders = data.get("mm_placeholders")
+    if content_parts and not isinstance(mm_placeholders, dict):
+        raise MalformedGenerateResponseError(
+            "Engine response must include mm_placeholders when process_multimodal=False."
+        )
+
+    sampler_support = None
+    replayed = choice.get("sampling_mask") is not None
+    if choice.get("compact_logprobs") is not None and replayed:
+        completion_logprobs, sampler_support = _parse_replayed_support(
+            choice, completion_ids
+        )
+    elif choice.get("compact_logprobs") is not None:
+        completion_logprobs, top_ids, top_logprobs = _parse_compact_logprobs(
+            choice, completion_ids, head_size
+        )
+        if top_ids is not None and top_logprobs is not None:
+            sampler_support = _pack_sampler_rows(top_ids, top_logprobs, replayed=False)
+    else:
+        completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
+        if head_size is not None:
+            sampler_support = _pack_sampler_rows(
+                *_parse_completion_top_logprobs(choice, completion_ids, head_size),
+                replayed=replayed,
+            )
+        elif replayed:
+            sampler_support = _parse_mask_support(choice, completion_ids)
+
+    parsed = renderer.parse_response(
+        completion_ids,
+        prompt_ids=list(effective_prompt_ids or prompt_ids),
+        tools=tools,
+    )
+
+    routed_experts = choice.get("routed_experts")
+
+    # /inference/v1/generate returns finish_reason in {"stop","length",...} —
+    # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
+    # when we extracted at least one well-formed tool call client-side, so
+    # OpenAI-compatible agent loops continue past the tool turn instead of
+    # treating the response as final. Malformed attempts (INVALID_JSON,
+    # UNCLOSED_BLOCK, ...) don't qualify — those still surface on
+    # ``parsed.tool_calls`` so verifiers can inspect them, but they don't
+    # trigger the tool-loop continuation.
+    finish_reason = choice.get("finish_reason")
+    ok_tool_calls = [
+        tc for tc in parsed.tool_calls if tc.status == ToolCallParseStatus.OK
+    ]
+    if ok_tool_calls and finish_reason == "stop":
+        finish_reason = "tool_calls"
+
+    return {
+        "request_id": data.get("request_id") or "",
+        "usage": data.get("usage"),
+        "prompt_ids": list(effective_prompt_ids or prompt_ids),
+        "renderer_prompt_ids": list(prompt_ids) if content_parts else None,
+        "mm_placeholders": mm_placeholders,
+        "completion_ids": list(completion_ids),
+        "completion_logprobs": completion_logprobs,
+        "sampler_support": sampler_support,
+        "content": parsed.content,
+        "reasoning_content": parsed.reasoning_content,
+        "tool_calls": parsed.tool_calls,
+        "finish_reason": finish_reason,
+        "reasoning_complete": parsed.reasoning_complete,
+        "routed_experts": routed_experts,
+        "weight_versions": choice.get("weight_versions"),
+        # The mm sidecar consumed on the request side, surfaced back so
+        # callers can persist it on the trajectory step for downstream
+        # multi-turn bridging and training-sample construction.
+        "multi_modal_data": request.mm_data,
+        # The renderer's per-token attribution for the prompt — either
+        # the RenderedTokens computed here via renderer.render(...) or
+        # the one threaded in by the caller alongside prompt_ids (the
+        # bridge path). Lets downstream consumers (verifiers
+        # RendererClient → prime-rl) build SFT-on-tool-body and other
+        # selective loss masks without a second render pass. ``None``
+        # when the caller passed prompt_ids without attribution.
+        "prompt_attribution": request.prompt_attr,
+    }
+
+
 async def generate(
     *,
     client: AsyncOpenAI,
@@ -634,201 +889,152 @@ async def generate(
     pass. ``None`` when the caller passed pre-built ``prompt_ids``
     without attribution.
     """
-    if tools and not getattr(renderer, "supports_tools", True):
-        raise ValueError(
-            f"{type(renderer).__name__} does not support tools. "
-            "Choose a model-specific renderer instead of the default fallback."
-        )
-    if not process_multimodal and not getattr(
-        renderer, "supports_process_multimodal", False
-    ):
-        raise NotImplementedError(
-            f"{type(renderer).__name__} does not support process_multimodal=False"
-        )
-
-    def _prepare():
-        if prompt_ids is not None:
-            # Caller-supplied prompt; if they also gave us pre-computed
-            # attribution (e.g. the bridge path in verifiers), thread it
-            # through unchanged.
-            return (
-                list(prompt_ids),
-                renderer.get_stop_token_ids(),
-                multi_modal_data,
-                prompt_attribution,
-            )
-        render_kwargs: dict[str, Any] = {}
-        if not process_multimodal:
-            render_kwargs["process_multimodal"] = False
-        rendered = renderer.render(
-            messages,
-            tools=tools,
-            add_generation_prompt=True,
-            **render_kwargs,
-        )
-        return (
-            rendered.token_ids,
-            renderer.get_stop_token_ids(),
-            rendered.multi_modal_data,
-            rendered,
-        )
-
-    prompt_ids, stop_token_ids, mm_data, prompt_attr = _prepare()
-
-    if process_multimodal:
-        if max_prompt_len is None:
-            max_prompt_len = await _resolve_max_prompt_len(client, model)
-        if max_prompt_len is not None and len(prompt_ids) > max_prompt_len:
-            raise OverlongPromptError(
-                prompt_len=len(prompt_ids), max_prompt_len=max_prompt_len
-            )
-
-    sp: dict[str, Any] = dict(sampling_params or {})
-    sp["stop_token_ids"] = stop_token_ids
-    requested_logprobs = sp.get("logprobs")
-    head_size = (
-        requested_logprobs
-        if type(requested_logprobs) is int and requested_logprobs > 0
-        else None
-    )
-    sp["logprobs"] = head_size + 2 if head_size is not None else 1
-    if head_size is not None:
-        sp["extra_args"] = {
-            "prl_compact_logprobs": True,
-            **(sp.get("extra_args") or {}),
-        }
-    sp.setdefault("skip_special_tokens", False)
-
-    body: dict[str, Any] = {
-        "model": model,
-        "token_ids": prompt_ids,
-        "sampling_params": sp,
-    }
-    content_parts = (
-        _content_parts(messages, renderer=renderer) if not process_multimodal else None
-    )
-    features = (
-        _build_mm_features(renderer, mm_data)
-        if process_multimodal and mm_data and not mm_data.is_empty()
-        else None
-    )
-    if content_parts:
-        body["content_parts"] = content_parts
-        body["return_token_ids"] = True
-    if features is not None:
-        body["features"] = features
-    if cache_salt is not None:
-        body["cache_salt"] = cache_salt
-    if priority is not None:
-        body["priority"] = priority
-
-    # /inference/v1/generate is mounted at the server root, not under /v1
-    # like the OpenAI-compatible endpoints. Build an absolute URL so the
-    # AsyncOpenAI client doesn't prepend its automatic /v1.
-    base = str(client.base_url).rstrip("/").removesuffix("/v1")
-    endpoint = f"{base}/inference/v1/generate"
-    _request_logger.debug(
-        "POST %s prompt_len=%d max_tokens=%s",
-        endpoint,
-        len(prompt_ids),
-        sp.get("max_tokens"),
-    )
-    post_kwargs: dict[str, Any] = {
-        "cast_to": httpx.Response,
-        "body": body,
-    }
-    if extra_headers:
-        post_kwargs["options"] = cast(Any, {"headers": extra_headers})
-    raw_response = await client.post(endpoint, **post_kwargs)
-    data = parse_generate_response(raw_response.content)
-
-    choice = (data.get("choices") or [{}])[0]
-    completion_ids = choice.get("token_ids") or []
-    effective_prompt_ids = data.get("prompt_token_ids")
-    if content_parts and not isinstance(effective_prompt_ids, list):
-        raise MalformedGenerateResponseError(
-            "Engine response must include prompt_token_ids when process_multimodal=False."
-        )
-    mm_placeholders = data.get("mm_placeholders")
-    if content_parts and not isinstance(mm_placeholders, dict):
-        raise MalformedGenerateResponseError(
-            "Engine response must include mm_placeholders when process_multimodal=False."
-        )
-
-    sampler_support = None
-    replayed = choice.get("sampling_mask") is not None
-    if choice.get("compact_logprobs") is not None and replayed:
-        completion_logprobs, sampler_support = _parse_replayed_support(
-            choice, completion_ids
-        )
-    elif choice.get("compact_logprobs") is not None:
-        completion_logprobs, top_ids, top_logprobs = _parse_compact_logprobs(
-            choice, completion_ids, head_size
-        )
-        if top_ids is not None and top_logprobs is not None:
-            sampler_support = _pack_sampler_rows(top_ids, top_logprobs, replayed=False)
-    else:
-        completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
-        if head_size is not None:
-            sampler_support = _pack_sampler_rows(
-                *_parse_completion_top_logprobs(choice, completion_ids, head_size),
-                replayed=replayed,
-            )
-        elif replayed:
-            sampler_support = _parse_mask_support(choice, completion_ids)
-
-    parsed = renderer.parse_response(
-        completion_ids,
-        prompt_ids=list(effective_prompt_ids or prompt_ids),
+    request = await _prepare_generate(
+        client=client,
+        renderer=renderer,
+        messages=messages,
+        model=model,
+        prompt_ids=prompt_ids,
+        multi_modal_data=multi_modal_data,
+        prompt_attribution=prompt_attribution,
         tools=tools,
+        sampling_params=sampling_params,
+        cache_salt=cache_salt,
+        priority=priority,
+        extra_headers=extra_headers,
+        max_prompt_len=max_prompt_len,
+        process_multimodal=process_multimodal,
+        stream=False,
     )
+    raw_response = await client.post(request.endpoint, **request.post_kwargs)
+    data = parse_generate_response(raw_response.content)
+    return _generate_result(renderer, request, data, tools)
 
-    routed_experts = choice.get("routed_experts")
 
-    # /inference/v1/generate returns finish_reason in {"stop","length",...} —
-    # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
-    # when we extracted at least one well-formed tool call client-side, so
-    # OpenAI-compatible agent loops continue past the tool turn instead of
-    # treating the response as final. Malformed attempts (INVALID_JSON,
-    # UNCLOSED_BLOCK, ...) don't qualify — those still surface on
-    # ``parsed.tool_calls`` so verifiers can inspect them, but they don't
-    # trigger the tool-loop continuation.
-    finish_reason = choice.get("finish_reason")
-    ok_tool_calls = [
-        tc for tc in parsed.tool_calls if tc.status == ToolCallParseStatus.OK
-    ]
-    if ok_tool_calls and finish_reason == "stop":
-        finish_reason = "tool_calls"
+def _merge_stream_chunk(data: dict[str, Any], chunk: Mapping[str, Any]) -> list[int]:
+    """Fold one stream chunk into ``data``, the equivalent complete response.
 
-    return {
-        "request_id": data.get("request_id") or "",
-        "usage": data.get("usage"),
-        "prompt_ids": list(effective_prompt_ids or prompt_ids),
-        "renderer_prompt_ids": list(prompt_ids) if content_parts else None,
-        "mm_placeholders": mm_placeholders,
-        "completion_ids": list(completion_ids),
-        "completion_logprobs": completion_logprobs,
-        "sampler_support": sampler_support,
-        "content": parsed.content,
-        "reasoning_content": parsed.reasoning_content,
-        "tool_calls": parsed.tool_calls,
-        "finish_reason": finish_reason,
-        "reasoning_complete": parsed.reasoning_complete,
-        "routed_experts": routed_experts,
-        "weight_versions": choice.get("weight_versions"),
-        # The mm sidecar consumed on the request side, surfaced back so
-        # callers can persist it on the trajectory step for downstream
-        # multi-turn bridging and training-sample construction.
-        "multi_modal_data": mm_data,
-        # The renderer's per-token attribution for the prompt — either
-        # the RenderedTokens computed here via renderer.render(...) or
-        # the one threaded in by the caller alongside prompt_ids (the
-        # bridge path). Lets downstream consumers (verifiers
-        # RendererClient → prime-rl) build SFT-on-tool-body and other
-        # selective loss masks without a second render pass. ``None``
-        # when the caller passed prompt_ids without attribution.
-        "prompt_attribution": prompt_attr,
+    Returns the completion token IDs the chunk added.
+    """
+    for key in ("request_id", "prompt_token_ids", "mm_placeholders", "usage"):
+        if chunk.get(key) is not None:
+            data[key] = chunk[key]
+    merged = data["choices"][0]
+    added: list[int] = []
+    for choice in chunk.get("choices") or []:
+        if choice.get("index", 0) != 0:
+            continue
+        if choice.get("compact_logprobs") is not None:
+            raise MalformedGenerateResponseError(
+                "Compact logprobs cannot be merged from a streamed response."
+            )
+        token_ids = choice.get("token_ids") or []
+        added.extend(token_ids)
+        merged["token_ids"].extend(token_ids)
+        logprobs = choice.get("logprobs")
+        if isinstance(logprobs, Mapping) and isinstance(logprobs.get("content"), list):
+            merged["logprobs"]["content"].extend(logprobs["content"])
+        mask = choice.get("sampling_mask")
+        if mask is not None:
+            if not isinstance(mask, list):
+                raise MalformedGenerateResponseError(
+                    "A streamed sampling mask must be a list of per-token rows."
+                )
+            merged.setdefault("sampling_mask", []).extend(mask)
+        # The engine sends these once, complete, on the finishing chunk.
+        for key in ("finish_reason", "routed_experts", "weight_versions"):
+            if choice.get(key) is not None:
+                merged[key] = choice[key]
+    return added
+
+
+async def generate_stream(
+    *,
+    client: AsyncOpenAI,
+    renderer: Renderer,
+    messages: list[Message],
+    model: str,
+    prompt_ids: list[int] | None = None,
+    multi_modal_data: MultiModalData | None = None,
+    prompt_attribution: RenderedTokens | None = None,
+    tools: list[ToolSpec] | None = None,
+    sampling_params: dict[str, Any] | None = None,
+    cache_salt: str | None = None,
+    priority: int | None = None,
+    extra_headers: dict[str, str] | None = None,
+    max_prompt_len: int | None = None,
+    process_multimodal: bool = True,
+) -> AsyncIterator[TextDelta | dict[str, Any]]:
+    """:func:`generate` with the reasoning and content text streamed as it arrives.
+
+    Takes the same arguments as :func:`generate`. Yields
+    :class:`~renderers.streaming.TextDelta` items and then, last, the same
+    result dict :func:`generate` returns. That dict is built by the renderer's
+    ``parse_response`` over the whole completion, exactly as in the
+    non-streaming path, so it is what callers record and train on.
+
+    Per channel, the deltas concatenate to the result's field with surrounding
+    whitespace stripped. Tool calls are not streamed: text stops at the first
+    tool-call opener and the calls arrive in the result. A renderer without
+    ``response_stream`` still works; its text arrives in one delta per channel
+    just before the result.
+
+    Compact logprobs are not available on a streamed request, so the sampled
+    logprobs and any top-k head travel as native JSON.
+
+    Closing the iterator early closes the connection, which aborts the
+    engine's generation.
+    """
+    request = await _prepare_generate(
+        client=client,
+        renderer=renderer,
+        messages=messages,
+        model=model,
+        prompt_ids=prompt_ids,
+        multi_modal_data=multi_modal_data,
+        prompt_attribution=prompt_attribution,
+        tools=tools,
+        sampling_params=sampling_params,
+        cache_salt=cache_salt,
+        priority=priority,
+        extra_headers=extra_headers,
+        max_prompt_len=max_prompt_len,
+        process_multimodal=process_multimodal,
+        stream=True,
+    )
+    make_stream = getattr(renderer, "response_stream", None)
+    splitter: ResponseStream | None = (
+        make_stream(prompt_ids=request.prompt_ids) if make_stream is not None else None
+    )
+    choice: dict[str, Any] = {"token_ids": [], "logprobs": {"content": []}}
+    data: dict[str, Any] = {"choices": [choice]}
+    post_kwargs: dict[str, Any] = {
+        **request.post_kwargs,
+        "cast_to": dict[str, Any],
+        "stream": True,
+        "stream_cls": AsyncStream[dict[str, Any]],
     }
+    chunks = await client.post(request.endpoint, **post_kwargs)
+    try:
+        async for chunk in chunks:
+            added = _merge_stream_chunk(data, chunk)
+            if splitter is not None and added:
+                for delta in splitter.feed(added):
+                    yield delta
+    finally:
+        await chunks.close()
+    if choice.get("finish_reason") is None:
+        raise MalformedGenerateResponseError(
+            "Engine stream ended without a finish reason."
+        )
+    result = _generate_result(renderer, request, data, tools)
+    for delta in remaining_deltas(
+        splitter.streamed if splitter is not None else {},
+        reasoning_content=result["reasoning_content"],
+        content=result["content"],
+    ):
+        yield delta
+    yield result
 
 
 _MEDIA_URL_TYPES = {

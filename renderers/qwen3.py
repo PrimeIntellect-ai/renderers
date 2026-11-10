@@ -20,7 +20,12 @@ from __future__ import annotations
 
 import json
 
-from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
+from renderers.reasoning import (
+    _single_marker_id,
+    prompt_ends_in_reasoning,
+    scan_reasoning,
+)
+from renderers.streaming import ResponseStream, StreamGrammar
 
 from renderers.base import (
     Message,
@@ -329,6 +334,29 @@ class Qwen3Renderer:
 
     def get_stop_token_ids(self) -> list[int]:
         return [self._im_end, self._endoftext]
+
+    def response_stream(
+        self, *, prompt_ids: list[int] | None = None
+    ) -> ResponseStream | None:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        think_start = _single_marker_id(self._tokenizer, "<think>")
+        if think_start is None:
+            # The parser then matches think markers in text, not by token ID.
+            return None
+        return ResponseStream(
+            self._tokenizer,
+            StreamGrammar(
+                stop_ids=frozenset(self.get_stop_token_ids()),
+                think_open_ids=frozenset({think_start}),
+                think_close_ids=frozenset({self._think_end}),
+                tool_ids=frozenset({self._tool_call}),
+            ),
+            reasoning=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                stop_ids=set(self.get_stop_token_ids()),
+            ),
+        )
 
     def bridge_to_next_turn(
         self,

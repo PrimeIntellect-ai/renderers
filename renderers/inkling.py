@@ -58,6 +58,7 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
+from renderers.streaming import ChannelStream, TextDelta, TextStream
 from renderers.configs import INKLING_EFFORT_MAP, InklingRendererConfig
 from renderers.parsing import parse_inkling
 from renderers.qwen3_vl import _image_hash, _load_pil_image
@@ -162,6 +163,70 @@ def _audio_hash(wav: np.ndarray, sampling_rate: int) -> str:
     h = hashlib.sha256(str(sampling_rate).encode())
     h.update(np.ascontiguousarray(wav).tobytes())
     return h.hexdigest()
+
+
+class _InklingStream(ChannelStream):
+    """``<|end_message|>``-terminated segments, each typed by its first token."""
+
+    def __init__(self, renderer: "InklingRenderer", prefilled: bool):
+        super().__init__(renderer._tokenizer)
+        self._renderer = renderer
+        self._prefilled = prefilled
+        self._first_segment = True
+        self._at_head = True  # nothing of this segment consumed yet
+        self._kind: str | None = None  # None until the segment's type is known
+        # An untyped segment is content, unless an invoke marker turns its
+        # text into a tool name; it waits for its terminator.
+        self._untyped: list[int] = []
+
+    def _token(self, token_id: int, deltas: list[TextDelta]) -> None:
+        r = self._renderer
+        if token_id in r.get_stop_token_ids():
+            self._done = True
+        elif token_id == r._end_message:
+            if self._kind == "untyped":
+                for held in self._untyped:
+                    self._push("content", held, deltas)
+            self._end_run(
+                None
+                if self._kind is None
+                else "reasoning"
+                if self._kind == "reasoning"
+                else "content",
+                deltas,
+            )
+            self._first_segment, self._at_head = False, True
+            self._kind, self._untyped = None, []
+        elif self._kind is None:
+            if self._at_head and token_id == r._message_model:
+                self._at_head = False
+                return
+            self._at_head = False
+            if token_id == r._content_thinking:
+                self._kind = "reasoning"
+            elif self._first_segment and self._prefilled:
+                self._kind = "reasoning"
+                self._body(token_id, deltas)
+            elif token_id == r._content_text:
+                self._kind = "content"
+            else:
+                self._kind = "untyped"
+                self._body(token_id, deltas)
+        else:
+            self._body(token_id, deltas)
+
+    def _body(self, token_id: int, deltas: list[TextDelta]) -> None:
+        r = self._renderer
+        if self._kind == "content":
+            self._push("content", token_id, deltas)
+        elif token_id == r._content_invoke_tool_json or (
+            self._kind == "untyped" and token_id == r._content_invoke_tool_text
+        ):
+            self._done = True
+        elif self._kind == "reasoning":
+            self._push("reasoning", token_id, deltas)
+        else:
+            self._untyped.append(token_id)
 
 
 class InklingRenderer:
@@ -536,6 +601,24 @@ class InklingRenderer:
             invoke_text_id=self._content_invoke_tool_text,
             end_message_id=self._end_message,
             prefilled_thinking=prompt_ends_in_reasoning(
+                self._tokenizer,
+                prompt_ids,
+                open_marker="<|content_thinking|>",
+                close_marker="<|end_message|>",
+                stop_ids={
+                    *self.get_stop_token_ids(),
+                    self._end_message,
+                    self._content_text,
+                },
+                initial_only=False,
+            ),
+        )
+
+    def response_stream(self, *, prompt_ids: list[int] | None = None) -> TextStream:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        return _InklingStream(
+            self,
+            prompt_ends_in_reasoning(
                 self._tokenizer,
                 prompt_ids,
                 open_marker="<|content_thinking|>",

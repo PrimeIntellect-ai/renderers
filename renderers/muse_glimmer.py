@@ -50,6 +50,7 @@ from renderers.base import (
     resolve_thinking_retention,
     should_rerender_for_thinking_retention,
 )
+from renderers.streaming import Channel, ChannelStream, TextDelta, TextStream
 from renderers.configs import MuseGlimmerRendererConfig
 
 _IMAGE_TYPES = ("image", "image_url")
@@ -244,6 +245,141 @@ class _TokenStream:
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
         )
+
+
+_RECIPIENT = r"[A-Za-z0-9_.\-:/]"
+# What may sit between a real ``<|start|>`` and its ``<|message|>``.
+_STREAM_HEADER_RE = re.compile(
+    rf"[^\S\n]*(?:assistant)?[^\S\n]*(?:to=(?P<rcpt>{_RECIPIENT}+))?[^\S\n]*"
+)
+# Any prefix of the above: a header that may still be completed.
+_STREAM_HEADER_PREFIX_RE = re.compile(
+    r"[^\S\n]*(?:"
+    + "|".join("assistant"[:n] for n in range(9, 0, -1))
+    + rf")?[^\S\n]*(?:to=(?:{_RECIPIENT}*[^\S\n]*)?|to?)?"
+)
+# A bare header right before ``<|message|>``: an optional recipient.
+_STREAM_BARE_HEADER_RE = re.compile(
+    rf"(?P<ws>[^\S\n]*)(?:to=(?P<rcpt>{_RECIPIENT}+))?[^\S\n]*\Z"
+)
+# Body text that a following ``<|message|>`` could still claim as a recipient.
+_STREAM_HOLD_RE = re.compile(rf"(?:to={_RECIPIENT}*[^\S\n]*|to?)\Z")
+
+
+class _MuseGlimmerStream(ChannelStream):
+    """Messages addressed ``to=self`` are reasoning; unaddressed or
+    ``to=user`` ones are content. A message to anything else is a tool call
+    and ends the stream.
+    """
+
+    def __init__(
+        self, renderer: "MuseGlimmerRenderer", inside: bool, recipient: str | None
+    ):
+        super().__init__(renderer._tokenizer)
+        self._renderer = renderer
+        # "leading" is text before any header; "outside" is between messages.
+        self._mode = "leading"
+        self._channel: Channel | None = "content"
+        # Unsent text that a ``<|message|>`` could still turn into a header.
+        self._tail = ""
+        # Text since a ``<|start|>`` whose header is not resolved yet.
+        self._header: str | None = None
+        self._reasoning_before = False
+        self._message_has_text = False
+        if inside:
+            self._open(recipient)
+
+    def _token(self, token_id: int, deltas: list[TextDelta]) -> None:
+        r = self._renderer
+        if token_id in r.get_stop_token_ids():
+            self._done = True
+        elif token_id == r._start:
+            self._text(self._detokenizer.flush(), deltas)
+            self._release(deltas)
+            self._header = ""
+        elif token_id == r._message:
+            self._text(self._detokenizer.flush(), deltas)
+            self._header_end(deltas)
+        elif token_id == r._eom and self._mode != "leading":
+            self._text(self._detokenizer.flush(), deltas)
+            self._release(deltas)
+            self._close()
+            self._mode, self._channel = "outside", None
+        else:
+            if token_id == r._eom:
+                # Before any message, an end marker is ordinary leading text.
+                self._text(self._detokenizer.flush() + "<|eom|>", deltas)
+                return
+            self._text(self._detokenizer.push(token_id), deltas)
+
+    def _text(self, text: str, deltas: list[TextDelta]) -> None:
+        if not text:
+            return
+        if self._header is not None:
+            self._header += text
+            if _STREAM_HEADER_PREFIX_RE.fullmatch(self._header):
+                return
+            # Not a header after all: the marker and its text are body.
+            text, self._header = "<|start|>" + self._header, None
+        text = self._tail + text
+        hold = _STREAM_HOLD_RE.search(text)
+        cut = hold.start() if hold else len(text)
+        self._tail = text[cut:]
+        self._send(text[:cut], deltas)
+
+    def _send(self, text: str, deltas: list[TextDelta]) -> None:
+        if not text or self._channel is None:
+            return
+        if self._channel == "reasoning" and not self._message_has_text:
+            # Separate reasoning messages are joined with a newline.
+            if self._reasoning_before:
+                text = "\n" + text
+        self._message_has_text = True
+        self._add(self._channel, text, deltas)
+
+    def _release(self, deltas: list[TextDelta]) -> None:
+        """Nothing can claim the held text any more: it is body."""
+        text = self._tail
+        if self._header is not None:
+            text += "<|start|>" + self._header
+        self._tail, self._header = "", None
+        self._send(text, deltas)
+
+    def _header_end(self, deltas: list[TextDelta]) -> None:
+        if self._header is not None and (
+            match := _STREAM_HEADER_RE.fullmatch(self._header)
+        ):
+            recipient = match.group("rcpt")
+            self._header = None
+        else:
+            text = self._tail
+            if self._header is not None:
+                text += "<|start|>" + self._header
+            self._tail, self._header = "", None
+            match = _STREAM_BARE_HEADER_RE.search(text)
+            assert match is not None
+            recipient = match.group("rcpt")
+            # Whitespace before a bare recipient stays with the body.
+            self._send(text[: match.end("ws")], deltas)
+        self._close()
+        if self._mode == "leading":
+            # Leading text is stripped on its own.
+            self._pending["content"] = ""
+        self._open(recipient)
+
+    def _close(self) -> None:
+        if self._channel == "reasoning" and self._message_has_text:
+            self._reasoning_before = True
+        self._message_has_text = False
+
+    def _open(self, recipient: str | None) -> None:
+        self._mode = "message"
+        if recipient == "self":
+            self._channel = "reasoning"
+        elif recipient in (None, "user"):
+            self._channel = "content"
+        else:
+            self._done = True
 
 
 class MuseGlimmerRenderer:
@@ -613,6 +749,10 @@ class MuseGlimmerRenderer:
             add_generation_prompt=add_generation_prompt,
             process_multimodal=process_multimodal,
         ).token_ids
+
+    def response_stream(self, *, prompt_ids: list[int] | None = None) -> TextStream:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        return _MuseGlimmerStream(self, *self._open_recipient(prompt_ids))
 
     def get_stop_token_ids(self) -> list[int]:
         return [self._eot, self._end_of_text]

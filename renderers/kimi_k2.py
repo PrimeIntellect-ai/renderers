@@ -32,6 +32,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import KimiK2RendererConfig
+from renderers.streaming import ResponseStream, reasoning_first_stream
 from renderers.parsing import parse_kimi_k2
 
 _DEFAULT_SYSTEM = "You are Kimi, an AI assistant created by Moonshot AI."
@@ -357,6 +358,16 @@ class KimiK2Renderer:
                 stop_ids=set(self.get_stop_token_ids()),
                 assistant_prefix="<|im_assistant|>assistant<|im_middle|>",
             ),
+        )
+
+    def response_stream(self, *, prompt_ids: list[int] | None = None) -> ResponseStream:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        return reasoning_first_stream(
+            self._tokenizer,
+            prompt_ids=prompt_ids,
+            stop_ids=self.get_stop_token_ids(),
+            tool_ids=[self._tool_calls_section_begin],
+            assistant_prefix="<|im_assistant|>assistant<|im_middle|>",
         )
 
     def get_stop_token_ids(self) -> list[int]:

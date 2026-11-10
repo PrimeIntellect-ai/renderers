@@ -27,6 +27,7 @@ from renderers.parsing import (
     _strip_stop_tokens,
 )
 
+from renderers.streaming import ResponseStream, reasoning_first_stream
 from renderers.configs import DefaultRendererConfig
 from renderers.parsers import (
     ThinkTextReasoningParser,
@@ -250,6 +251,39 @@ class DefaultRenderer:
             if isinstance(self._reasoning_parser, ThinkTextReasoningParser)
             or reasoning_content is not None
             else None,
+        )
+
+    def response_stream(
+        self, *, prompt_ids: list[int] | None = None
+    ) -> ResponseStream | None:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        if not (
+            self._reasoning_parser is None
+            or isinstance(self._reasoning_parser, ThinkTextReasoningParser)
+        ):
+            return None
+        tool_ids: list[int | None] = []
+        if self._tool_parser is not None:
+            # The bundled tool parsers all open on one token.
+            opener = getattr(self._tool_parser, "_tc_id", None) or getattr(
+                self._tool_parser, "_tcs_begin", None
+            )
+            if opener is None:
+                return None
+            tool_ids.append(opener)
+        specials = getattr(self._tokenizer, "all_special_tokens", None) or []
+        framing = [
+            self._tokenizer.convert_tokens_to_ids(token)
+            for token in specials
+            if token and token not in {"<think>", "</think>"}
+        ]
+        return reasoning_first_stream(
+            self._tokenizer,
+            prompt_ids=prompt_ids,
+            stop_ids=self.get_stop_token_ids(),
+            tool_ids=tool_ids,
+            # parse_response strips framing tokens from content.
+            dropped_content_ids=[i for i in framing if isinstance(i, int)],
         )
 
     def get_stop_token_ids(self) -> list[int]:

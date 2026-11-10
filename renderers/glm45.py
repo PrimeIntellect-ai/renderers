@@ -27,6 +27,7 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
 )
 from renderers.configs import GLM45RendererConfig
+from renderers.streaming import ResponseStream, StreamGrammar
 from renderers.parsing import parse_glm
 
 _TOOLS_HEADER = (
@@ -295,6 +296,22 @@ class GLM45Renderer:
             arg_value_end_id=self._arg_value_end,
             tools=tools,
             thinking_enabled=self.config.enable_thinking,
+        )
+
+    def response_stream(self, *, prompt_ids: list[int] | None = None) -> ResponseStream:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        thinking = self.config.enable_thinking
+        return ResponseStream(
+            self._tokenizer,
+            StreamGrammar(
+                stop_ids=frozenset(self.get_stop_token_ids()),
+                # With thinking off, the parser reads think markers as text.
+                think_open_ids=frozenset({self._think} if thinking else ()),
+                think_close_ids=frozenset({self._think_end} if thinking else ()),
+                tool_ids=frozenset({self._tool_call_tok}),
+                reentrant_reasoning=True,
+            ),
+            reasoning=thinking,
         )
 
     def get_stop_token_ids(self) -> list[int]:

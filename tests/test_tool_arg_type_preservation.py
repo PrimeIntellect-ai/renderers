@@ -68,15 +68,17 @@ PROMPT = [
 ]
 
 
-# Each case: a single ``x`` argument whose value is a STRING that
-# happens to be valid JSON of another type. With a schema declaring
-# ``x: string``, the parser must return the string verbatim.
-JSON_LOOKING_STRING_ARGS = [
+# String values retain their type and whitespace when the schema declares
+# ``x: string``, including values that happen to be valid JSON of another type.
+STRING_ARG_CASES = [
     pytest.param({"x": "true"}, id="string-bool"),
     pytest.param({"x": "42"}, id="string-int"),
     pytest.param({"x": "null"}, id="string-null"),
     pytest.param({"x": "[1,2,3]"}, id="string-array"),
     pytest.param({"x": '{"k": 1}'}, id="string-object"),
+    pytest.param({"x": "  Paris\nMünchen ☁  "}, id="string-whitespace"),
+    pytest.param({"x": "\n leading and trailing newline\n"}, id="string-newline"),
+    pytest.param({"x": ""}, id="string-empty"),
 ]
 
 
@@ -116,7 +118,7 @@ def _extract_assistant_tokens(renderer, prompt, assistant_msg, *, tools=None):
     return full_ids[len(prompt_ids) :]
 
 
-@pytest.mark.parametrize("args", JSON_LOOKING_STRING_ARGS)
+@pytest.mark.parametrize("args", STRING_ARG_CASES)
 def test_string_arg_follows_parser_contract(model, renderer_name, renderer, args):
     """Preserve declared strings unless the reference parser decodes JSON."""
     msg = {
@@ -135,7 +137,7 @@ def test_string_arg_follows_parser_contract(model, renderer_name, renderer, args
     assert parsed.tool_calls, f"{model}: parser returned no tool_calls"
     got = _normalize_args(parsed.tool_calls[0].arguments)
     expected = (
-        {key: json.loads(value) for key, value in args.items()}
+        {key: _normalize_args(value) for key, value in args.items()}
         if isinstance(renderer, MuseGlimmerRenderer)
         else args
     )

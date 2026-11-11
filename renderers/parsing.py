@@ -447,7 +447,7 @@ def _parse_xml_tool_calls(
                 r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>", block_text, re.DOTALL
             ):
                 arg_name = pm.group(1)
-                arg_value = pm.group(2).strip()
+                arg_value = pm.group(2)
                 value, used_fallback = _coerce_arg_value(
                     arg_value, params.get(arg_name)
                 )
@@ -597,7 +597,7 @@ def _parse_glm_tool_call(
                 if ave == -1:
                     structure_broke = True
                     break
-                val_text = _decode(tokenizer, block[av + 1 : ave]).strip()
+                val_text = _decode(tokenizer, block[av + 1 : ave])
                 value, used_fallback = _coerce_arg_value(val_text, params.get(key))
                 arguments[key] = value
                 any_json_fallback = any_json_fallback or used_fallback
@@ -799,7 +799,7 @@ def _parse_hy3_tool_calls(
                     if ave == -1:
                         structure_broke = True
                         break
-                    val_text = _decode(tokenizer, arg_ids[av + 1 : ave]).strip()
+                    val_text = _decode(tokenizer, arg_ids[av + 1 : ave])
                     value, used_fallback = _coerce_arg_value(val_text, params.get(key))
                     arguments[key] = value
                     any_json_fallback = any_json_fallback or used_fallback
@@ -978,7 +978,7 @@ def _parse_laguna_xs2_tool_calls(
                 re.DOTALL,
             ):
                 k = m.group(1).strip()
-                v = m.group(2).strip()
+                v = m.group(2)
                 value, used_fallback = _coerce_arg_value(v, params.get(k))
                 arguments[k] = value
                 any_json_fallback = any_json_fallback or used_fallback
@@ -1417,7 +1417,7 @@ def parse_minimax(
                             re.DOTALL,
                         ):
                             pname = pm.group(1)
-                            pval = pm.group(2).strip()
+                            pval = pm.group(2)
                             value, used_fallback = _coerce_arg_value(
                                 pval, params.get(pname)
                             )

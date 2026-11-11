@@ -46,6 +46,7 @@ from renderers.base import (
     _content_mask_or_empty,
     _require_transformers,
     attribute_text_segments,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -269,11 +270,14 @@ class _Emitter:
         # plain ``encode()`` call so we don't pay for the offset
         # tokenizer. This is the common case (pure scaffold flushes, or
         # pure body flushes).
+        split_special_tokens = not self._buf_sampled
         first_ic = segments[0][1]
         all_same = all(ic == first_ic for _, ic in segments)
         if all_same:
             joined = "".join(text for text, _ in segments)
-            ids = self._encode(joined)
+            ids = self._encode(
+                joined, split_special_tokens=split_special_tokens and first_ic
+            )
             self.token_ids.extend(ids)
             self.message_indices.extend([self._buf_idx] * len(ids))
             self.sampled.extend([self._buf_sampled] * len(ids))
@@ -286,7 +290,9 @@ class _Emitter:
             "_Emitter mixed-is_content flush requires a tokenizer; "
             "pass one to the constructor."
         )
-        for tok_id, is_content in attribute_text_segments(self._tokenizer, segments):
+        for tok_id, is_content in attribute_text_segments(
+            self._tokenizer, segments, split_special_tokens=split_special_tokens
+        ):
             self.token_ids.append(tok_id)
             self.message_indices.append(self._buf_idx)
             self.sampled.append(self._buf_sampled)
@@ -377,10 +383,12 @@ class Qwen3VLRenderer:
         """
         return {self._image_pad: 1, self._video_pad: 2}
 
-    def _encode(self, text: str) -> list[int]:
+    def _encode(self, text: str, *, split_special_tokens: bool = False) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return encode_text(
+            self._tokenizer, text, split_special_tokens=split_special_tokens
+        )
 
     def _get_processor(self):
         if self._processor is not None:

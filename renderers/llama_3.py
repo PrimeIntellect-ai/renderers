@@ -49,6 +49,7 @@ from renderers.base import (
     Tokenizer,
     _content_mask_or_empty,
     attribute_text_segments,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -132,10 +133,12 @@ class Llama3Renderer:
         )
         return tid
 
-    def _encode(self, text: str) -> list[int]:
+    def _encode(self, text: str, *, split_special_tokens: bool = False) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return encode_text(
+            self._tokenizer, text, split_special_tokens=split_special_tokens
+        )
 
     @staticmethod
     def _content_str(content: Any) -> str:
@@ -205,7 +208,7 @@ class Llama3Renderer:
         def emit_text(
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content and not is_sampled)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
@@ -219,7 +222,7 @@ class Llama3Renderer:
             scaffold/body split stay attributed without splitting the
             encode call (which could shift BPE merges at the boundary)."""
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=not is_sampled
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -485,7 +488,7 @@ class Llama3Renderer:
             segments: list[tuple[str, bool]], msg_idx: int = -1
         ) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=True
             ):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)

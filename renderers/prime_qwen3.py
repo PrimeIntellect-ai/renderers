@@ -17,6 +17,7 @@ from renderers.base import (
     _content_mask_or_empty,
     _get_offset_tokenizer,
     attribute_text_segments,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -153,7 +154,9 @@ class _TokenBuilder:
     ) -> None:
         if not text:
             return
-        token_ids = self.tokenizer.encode(text, add_special_tokens=False)
+        token_ids = encode_text(
+            self.tokenizer, text, split_special_tokens=content and not sampled
+        )
         self.token_ids.extend(token_ids)
         self.message_indices.extend([message_index] * len(token_ids))
         self.sampled_mask.extend([sampled] * len(token_ids))
@@ -166,7 +169,9 @@ class _TokenBuilder:
         *,
         sampled: bool,
     ) -> None:
-        for token_id, content in attribute_text_segments(self.tokenizer, segments):
+        for token_id, content in attribute_text_segments(
+            self.tokenizer, segments, split_special_tokens=not sampled
+        ):
             self.token_ids.append(token_id)
             self.message_indices.append(message_index)
             self.sampled_mask.append(sampled)

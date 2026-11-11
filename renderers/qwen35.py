@@ -39,6 +39,7 @@ from renderers.base import (
     _content_mask_or_empty,
     _require_transformers,
     attribute_text_segments,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -249,10 +250,12 @@ class Qwen35Renderer:
         )
         return tid
 
-    def _encode(self, text: str) -> list[int]:
+    def _encode(self, text: str, *, split_special_tokens: bool = False) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return encode_text(
+            self._tokenizer, text, split_special_tokens=split_special_tokens
+        )
 
     # ------------------------------------------------------------------
     # Content rendering (mirrors the render_content Jinja macro)
@@ -407,7 +410,7 @@ class Qwen35Renderer:
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
             emit_ids(
-                self._encode(text),
+                self._encode(text, split_special_tokens=is_content and not is_sampled),
                 msg_idx,
                 is_sampled=is_sampled,
                 is_content=is_content,
@@ -424,7 +427,7 @@ class Qwen35Renderer:
             without splitting the encode call (which could shift BPE
             merges at the boundary)."""
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=not is_sampled
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -819,7 +822,7 @@ class Qwen35Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content and not is_sampled)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
@@ -832,7 +835,7 @@ class Qwen35Renderer:
             is_sampled: bool = False,
         ) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=not is_sampled
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)

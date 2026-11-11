@@ -2024,11 +2024,30 @@ def _content_mask_or_empty(
     return content_mask
 
 
+def encode_text(
+    tokenizer: Tokenizer, text: str, *, split_special_tokens: bool = False
+) -> list[int]:
+    """Encode ``text`` without BOS/EOS.
+
+    ``split_special_tokens=True`` tokenizes special-token strings in
+    ``text`` as plain text, so caller body text the model did not sample
+    (user, system and tool content) can never inject special tokens. The
+    flag is only forwarded when set, so a BYO ``encode`` only needs to
+    accept it when rendering such text.
+    """
+    if split_special_tokens:
+        return tokenizer.encode(
+            text, add_special_tokens=False, split_special_tokens=True
+        )
+    return tokenizer.encode(text, add_special_tokens=False)
+
+
 def attribute_text_segments(
     tokenizer: Tokenizer,
     segments: "list[tuple[str, bool]]",
     *,
     overlap_is_content: bool = False,
+    split_special_tokens: bool = False,
 ) -> AttributedTextSegments:
     """Tokenize concatenated segments as a single BPE pass and return
     ``(token_id, is_content)`` pairs.
@@ -2065,6 +2084,11 @@ def attribute_text_segments(
     empty ``RenderedTokens.is_content`` list rather than exposing a partial or
     inaccurate mask.
 
+    ``split_special_tokens=True`` encodes the joined text with special-token
+    strings split into plain text (see :func:`encode_text`). Callers set it
+    for unsampled body text, and only when no scaffold segment relies on a
+    special token being parsed from its text.
+
     Empty input or empty joined text returns an empty list.
     """
     if not segments:
@@ -2075,7 +2099,9 @@ def attribute_text_segments(
 
     offset_tokenizer = _get_offset_tokenizer(tokenizer)
     if offset_tokenizer is None:
-        token_ids = tokenizer.encode(full_text, add_special_tokens=False)
+        token_ids = encode_text(
+            tokenizer, full_text, split_special_tokens=split_special_tokens
+        )
         return AttributedTextSegments(
             ((token_id, False) for token_id in token_ids),
             has_content_attribution=False,
@@ -2084,6 +2110,7 @@ def attribute_text_segments(
         full_text,
         add_special_tokens=False,
         return_offsets_mapping=True,
+        split_special_tokens=split_special_tokens,
     )
     token_ids = list(encoding["input_ids"])
     offsets = list(encoding["offset_mapping"])

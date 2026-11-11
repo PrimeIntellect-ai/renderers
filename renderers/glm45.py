@@ -21,6 +21,7 @@ from renderers.base import (
     ToolSpec,
     _content_mask_or_empty,
     attribute_text_segments,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -80,6 +81,7 @@ class GLM45Renderer:
         self._endoftext = self._token_id("<|endoftext|>")
         self._think = self._token_id("<think>")
         self._think_end = self._token_id("</think>")
+        self._nothink = self._token_id("/nothink")
         self._tool_call_tok = self._token_id("<tool_call>")
         self._tool_call_end_tok = self._token_id("</tool_call>")
         self._arg_key = self._token_id("<arg_key>")
@@ -94,10 +96,19 @@ class GLM45Renderer:
         )
         return tid
 
-    def _encode(self, text: str) -> list[int]:
+    def _encode(self, text: str, *, split_special_tokens: bool = False) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return encode_text(
+            self._tokenizer, text, split_special_tokens=split_special_tokens
+        )
+
+    def _strip_nothink(self, content: str) -> str:
+        """With thinking disabled, a caller ``/nothink`` suffix merges into the
+        injected ``/nothink`` token, as in the template."""
+        if not self.config.enable_thinking and content.endswith("/nothink"):
+            return content[: -len("/nothink")]
+        return content
 
     @staticmethod
     def _visible_text(content: Any) -> str:
@@ -148,7 +159,7 @@ class GLM45Renderer:
         def emit_text(
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content and not is_sampled)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
@@ -165,7 +176,7 @@ class GLM45Renderer:
             without splitting the encode call (which could shift BPE
             merges at the boundary)."""
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=not is_sampled
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -217,11 +228,12 @@ class GLM45Renderer:
                 )
                 # ``\n`` is scaffold; ``content`` is body; the optional
                 # ``/nothink`` suffix is scaffold the renderer injects
-                # when ``enable_thinking=False``.
-                user_segments: list[tuple[str, bool]] = [("\n", False), (content, True)]
-                if not self.config.enable_thinking and not content.endswith("/nothink"):
-                    user_segments.append(("/nothink", False))
-                emit_text_segments(user_segments, i, is_sampled=False)
+                # when ``enable_thinking=False``. GLM-4.5-Air marks it
+                # special, so it is emitted by id while the body is split.
+                body = self._strip_nothink(content)
+                emit_text_segments([("\n", False), (body, True)], i, is_sampled=False)
+                if not self.config.enable_thinking:
+                    emit_special(self._nothink, i, is_sampled=False, is_content=False)
 
             elif role == "assistant":
                 self._render_assistant(
@@ -373,7 +385,7 @@ class GLM45Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content and not is_sampled)
             ext.extend(ids)
             ext_indices.extend([msg_idx] * len(ids))
             ext_sampled.extend([is_sampled] * len(ids))
@@ -386,7 +398,7 @@ class GLM45Renderer:
             is_sampled: bool = False,
         ) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=not is_sampled
             ):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)
@@ -414,13 +426,10 @@ class GLM45Renderer:
             if role == "user":
                 if not (i == 0 and last_prev == self._user):
                     emit_special(self._user, i)
-                user_segments: list[tuple[str, bool]] = [
-                    ("\n", False),
-                    (content, True),
-                ]
-                if not self.config.enable_thinking and not content.endswith("/nothink"):
-                    user_segments.append(("/nothink", False))
-                emit_text_segments(user_segments, i)
+                body = self._strip_nothink(content)
+                emit_text_segments([("\n", False), (body, True)], i)
+                if not self.config.enable_thinking:
+                    emit_special(self._nothink, i)
             elif role == "system":
                 emit_special(self._system, i)
                 emit_text_segments([("\n", False), (content, True)], i)

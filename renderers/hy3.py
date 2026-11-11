@@ -39,6 +39,7 @@ from renderers.base import (
     _get_offset_tokenizer,
     _infer_offsets_from_decode,
     attribute_text_segments,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -159,10 +160,12 @@ class Hy3Renderer:
         )
         return tid
 
-    def _encode(self, text: str) -> list[int]:
+    def _encode(self, text: str, *, split_special_tokens: bool = False) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return encode_text(
+            self._tokenizer, text, split_special_tokens=split_special_tokens
+        )
 
     @staticmethod
     def _visible_text(content: Any) -> str:
@@ -245,7 +248,9 @@ class Hy3Renderer:
         BPE pass, attributing each token to its source segment via offset
         mapping. Generalises :func:`attribute_text_segments` with a message
         index — needed where a system blob abuts the tools block with no
-        special-token boundary between them.
+        special-token boundary between them. The header is never sampled, so
+        special-token strings are split; the tags the tools block spells as
+        text are non-special added tokens and still match.
         """
         segments = [s for s in segments if s[0]]
         if not segments:
@@ -253,7 +258,7 @@ class Hy3Renderer:
         full_text = "".join(text for text, _, _ in segments)
         offset_tokenizer = _get_offset_tokenizer(self._tokenizer)
         if offset_tokenizer is None:
-            token_ids = self._encode(full_text)
+            token_ids = self._encode(full_text, split_special_tokens=True)
             offsets = _infer_offsets_from_decode(
                 self._tokenizer,
                 token_ids,
@@ -275,6 +280,7 @@ class Hy3Renderer:
                 full_text,
                 add_special_tokens=False,
                 return_offsets_mapping=True,
+                split_special_tokens=True,
             )
             token_ids = list(encoding["input_ids"])
             offsets = list(encoding["offset_mapping"])
@@ -337,7 +343,7 @@ class Hy3Renderer:
         def emit_text(
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content and not is_sampled)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
@@ -347,7 +353,7 @@ class Hy3Renderer:
             segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
         ) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=not is_sampled
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -700,14 +706,14 @@ class Hy3Renderer:
         def emit_text(
             text: str, msg_idx: int = -1, *, is_content: bool = False
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content)
             ext.extend(ids)
             ext_indices.extend([msg_idx] * len(ids))
             ext_content.extend([is_content] * len(ids))
 
         def emit_text_segments(segments: list[tuple[str, bool]], msg_idx: int) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=True
             ):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)

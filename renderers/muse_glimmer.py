@@ -45,6 +45,7 @@ from renderers.base import (
     ToolSpec,
     _get_offset_tokenizer,
     _infer_offsets_from_decode,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -203,13 +204,21 @@ class _TokenStream:
         if not segments:
             return
         full = "".join(s[0] for s in segments)
+        # A run with no sampled segment is caller text plus plain-text
+        # scaffold, so special-token strings in it stay text.
+        split_special_tokens = not any(s[2] for s in segments)
         if self._offsets is not None:
             enc = self._offsets(
-                full, add_special_tokens=False, return_offsets_mapping=True
+                full,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+                split_special_tokens=split_special_tokens,
             )
             ids, offsets = list(enc["input_ids"]), list(enc["offset_mapping"])
         else:
-            ids = self._tokenizer.encode(full, add_special_tokens=False)
+            ids = encode_text(
+                self._tokenizer, full, split_special_tokens=split_special_tokens
+            )
             offsets = _infer_offsets_from_decode(self._tokenizer, ids, full)
         bounds, pos = [], 0
         for seg in segments:

@@ -62,6 +62,7 @@ from renderers.base import (
     _content_mask_or_empty,
     _infer_offsets_from_decode,
     attribute_text_segments,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -162,10 +163,12 @@ class LagunaXS2Renderer:
         )
         return tid
 
-    def _encode(self, text: str) -> list[int]:
+    def _encode(self, text: str, *, split_special_tokens: bool = False) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return encode_text(
+            self._tokenizer, text, split_special_tokens=split_special_tokens
+        )
 
     @staticmethod
     def _visible_text(content: Content | None) -> str:
@@ -221,7 +224,7 @@ class LagunaXS2Renderer:
         def emit_text(
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content and not is_sampled)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
@@ -231,7 +234,7 @@ class LagunaXS2Renderer:
             segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
         ) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=not is_sampled
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -458,7 +461,7 @@ class LagunaXS2Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content and not is_sampled)
             ext.extend(ids)
             ext_indices.extend([msg_idx] * len(ids))
             ext_sampled.extend([is_sampled] * len(ids))
@@ -471,7 +474,7 @@ class LagunaXS2Renderer:
             is_sampled: bool = False,
         ) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=not is_sampled
             ):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)
@@ -761,7 +764,7 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         def emit_text(
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content and not is_sampled)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
@@ -775,7 +778,10 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             # overlap attribution keeps every body byte in the content
             # run.
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments, overlap_is_content=True
+                self._tokenizer,
+                segments,
+                overlap_is_content=True,
+                split_special_tokens=not is_sampled,
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -814,7 +820,10 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
                 header_segs.append((tool_text, False))
             header_segs.append(("</system>\n", False))
             attributed = attribute_text_segments(
-                self._tokenizer, header_segs, overlap_is_content=True
+                self._tokenizer,
+                header_segs,
+                overlap_is_content=True,
+                split_special_tokens=True,
             )
             fallback_indices: list[int] | None = None
             if not attributed.has_content_attribution:
@@ -1015,7 +1024,10 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
             is_sampled: bool = False,
         ) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments, overlap_is_content=True
+                self._tokenizer,
+                segments,
+                overlap_is_content=True,
+                split_special_tokens=not is_sampled,
             ):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)

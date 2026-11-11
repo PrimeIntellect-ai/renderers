@@ -31,6 +31,7 @@ from renderers.base import (
     _content_mask_or_empty,
     _get_offset_tokenizer,
     _infer_offsets_from_decode,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -470,11 +471,15 @@ class DeepSeekV4Renderer:
                     spans.append((position, end, message_index, sampled, content))
                 position = end
 
+            # Runs are delimited by specials, so a run without sampled
+            # spans holds only caller text and plain-text scaffold.
+            split_special_tokens = not any(span[3] for span in spans)
             offset_tokenizer = _get_offset_tokenizer(self._tokenizer)
             if offset_tokenizer is None:
-                text_ids = self._tokenizer.encode(
+                text_ids = encode_text(
+                    self._tokenizer,
                     full_text,
-                    add_special_tokens=False,
+                    split_special_tokens=split_special_tokens,
                 )
                 offsets = _infer_offsets_from_decode(
                     self._tokenizer,
@@ -509,6 +514,7 @@ class DeepSeekV4Renderer:
                     full_text,
                     add_special_tokens=False,
                     return_offsets_mapping=True,
+                    split_special_tokens=split_special_tokens,
                 )
                 text_ids = list(encoding["input_ids"])
                 offsets = list(encoding["offset_mapping"])

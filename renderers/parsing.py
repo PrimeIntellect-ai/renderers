@@ -29,6 +29,7 @@ from renderers.reasoning import scan_reasoning
 from renderers.tagged import (
     DEEPSEEK_V4_GRAMMAR,
     GLM_GRAMMAR,
+    TaggedGrammar,
     TaggedToolBlock,
     scan_tagged_response,
 )
@@ -1204,6 +1205,9 @@ def parse_deepseek_v4(
     thinking_enabled: bool,
     think_end_id: int,
     think_start_id: int,
+    grammar: TaggedGrammar = DEEPSEEK_V4_GRAMMAR,
+    invoke_tag: str = "｜DSML｜invoke",
+    parameter_tag: str = "｜DSML｜parameter",
 ) -> ParsedResponse:
     """Parse a DeepSeek V4 completion.
 
@@ -1213,6 +1217,8 @@ def parse_deepseek_v4(
     decoded grammar carries an explicit ``string=`` flag for lossless argument
     type recovery. ``thinking_enabled`` describes the prompt's initial channel;
     reasoning opened in the completion is recognized independently.
+    DeepSeek-V4.1 spells its DSML tags differently and passes its own
+    ``grammar`` and tag names.
     """
     ids = _strip_stop_tokens(token_ids, stop_ids)
     parsed = scan_tagged_response(
@@ -1220,7 +1226,7 @@ def parse_deepseek_v4(
         ids,
         thinking=thinking_enabled,
         atomic_markers={think_start_id: "think_start", think_end_id: "think_end"},
-        grammar=DEEPSEEK_V4_GRAMMAR,
+        grammar=grammar,
     )
     reasoning = parsed.boundary.text
     return ParsedResponse(
@@ -1230,19 +1236,24 @@ def parse_deepseek_v4(
             if parsed.boundary.is_open
             else (reasoning or "").rstrip() or None
         ),
-        tool_calls=[_parse_deepseek_v4_tool_call(block) for block in parsed.tools],
+        tool_calls=[
+            _parse_deepseek_v4_tool_call(block, invoke_tag, parameter_tag)
+            for block in parsed.tools
+        ],
         reasoning_complete=not parsed.boundary.is_open,
     )
 
 
-def _parse_deepseek_v4_tool_call(region: TaggedToolBlock) -> ParsedToolCall:
+def _parse_deepseek_v4_tool_call(
+    region: TaggedToolBlock, invoke_tag: str, parameter_tag: str
+) -> ParsedToolCall:
     """Convert one DSML attempt; the shared grammar owns its boundaries."""
     import re
 
-    invoke_end = "</｜DSML｜invoke>"
+    invoke_end = f"</{invoke_tag}>"
+    parameter = re.escape(parameter_tag)
     parameter_pattern = re.compile(
-        r'<｜DSML｜parameter name="(.*?)" string="(true|false)">'
-        r"(.*?)</｜DSML｜parameter>",
+        rf'<{parameter} name="(.*?)" string="(true|false)">(.*?)</{parameter}>',
         re.DOTALL,
     )
     raw = region.text
@@ -1255,7 +1266,7 @@ def _parse_deepseek_v4_tool_call(region: TaggedToolBlock) -> ParsedToolCall:
     else:
         header = raw[: header_end + 2]
         name_match = re.fullmatch(
-            r'<｜DSML｜invoke name="(.*?)">\n',
+            rf'<{re.escape(invoke_tag)} name="(.*?)">\n',
             header,
             flags=re.DOTALL,
         )

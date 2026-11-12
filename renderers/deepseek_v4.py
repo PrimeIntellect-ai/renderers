@@ -40,6 +40,7 @@ from renderers.base import (
 from renderers.configs import DeepSeekV4RendererConfig
 from renderers.parsing import parse_deepseek_v4
 from renderers.reasoning import prompt_ends_in_reasoning
+from renderers.tagged import DEEPSEEK_V4_GRAMMAR
 
 _BOS = "<｜begin▁of▁sentence｜>"
 _EOS = "<｜end▁of▁sentence｜>"
@@ -87,17 +88,17 @@ _REASONING_EFFORT_PROMPTS = {
 
 _TOOLS_TEMPLATE = """## Tools
 
-You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<{dsml}tool_calls>" block like the following:
+You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<{calls}>" block like the following:
 
-<{dsml}tool_calls>
-<{dsml}invoke name="$TOOL_NAME">
-<{dsml}parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{dsml}parameter>
+<{calls}>
+<{invoke} name="$TOOL_NAME">
+<{parameter} name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{parameter}>
 ...
-</{dsml}invoke>
-<{dsml}invoke name="$TOOL_NAME2">
+</{invoke}>
+<{invoke} name="$TOOL_NAME2">
 ...
-</{dsml}invoke>
-</{dsml}tool_calls>
+</{invoke}>
+</{calls}>
 
 String parameters should be specified as is and set `string="true"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string="false"`.
 
@@ -300,6 +301,12 @@ class DeepSeekV4Renderer:
 
     _implied_thinking_retention = "tool_cycle"
 
+    # Full DSML tag names, as in ``<{_invoke_tag} name="...">``.
+    _calls_tag = f"{_DSML}tool_calls"
+    _invoke_tag = f"{_DSML}invoke"
+    _parameter_tag = f"{_DSML}parameter"
+    _grammar = DEEPSEEK_V4_GRAMMAR
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -335,46 +342,69 @@ class DeepSeekV4Renderer:
             raise ValueError(f"Expected one token for {token!r}, got {ids}")
         return ids[0]
 
-    def _reasoning_effort_prompt(self) -> str:
-        """Text emitted after BOS in thinking mode; subclasses can replace it."""
+    def _preamble(self, *, opens_with_system: bool) -> str:  # noqa: ARG002
+        """Text emitted after BOS, before the first message.
+
+        ``opens_with_system`` tells whether the rendered conversation starts
+        with a system message (including the synthetic one carrying tools).
+        """
+        if not self.config.enable_thinking:
+            return ""
         return _REASONING_EFFORT_PROMPTS[self.config.reasoning_effort]
 
+    def _is_turn_start(self, message: _LogicalMessage) -> bool:
+        """Whether ``message`` opens a turn, bounding dropped historical reasoning."""
+        return message.role in _QUERY_ROLES
+
+    def _tool_target(self, messages: list[_LogicalMessage]) -> int | None:
+        """Index of the message carrying the tools block; ``None`` adds a leading one."""
+        for role in ("developer", "system"):
+            for index, message in enumerate(messages):
+                if message.role == role:
+                    return index
+        return None
+
     @staticmethod
-    def _render_tools(tools: list[ToolSpec]) -> str:
+    def _tool_call_arguments(raw_arguments: Any) -> Any:
+        if isinstance(raw_arguments, str):
+            try:
+                return json.loads(raw_arguments)
+            except (json.JSONDecodeError, TypeError):
+                return {"arguments": raw_arguments}
+        if isinstance(raw_arguments, Mapping):
+            return dict(raw_arguments)
+        return {"arguments": raw_arguments}
+
+    def _render_tools(self, tools: list[ToolSpec]) -> str:
         schemas = [_json(dict(_tool_function(tool))) for tool in tools]
         return _TOOLS_TEMPLATE.format(
-            dsml=_DSML,
+            calls=self._calls_tag,
+            invoke=self._invoke_tag,
+            parameter=self._parameter_tag,
             think_start=_THINK_START,
             think_end=_THINK_END,
             tool_schemas="\n".join(schemas),
         )
 
-    @staticmethod
-    def _render_tool_call(tool_call: Mapping[str, Any]) -> str:
+    def _render_tool_call(self, tool_call: Mapping[str, Any]) -> str:
         function = _tool_call_function(tool_call)
         name = function.get("name")
-        raw_arguments = function.get("arguments", {})
-        if isinstance(raw_arguments, str):
-            try:
-                arguments = json.loads(raw_arguments)
-            except (json.JSONDecodeError, TypeError):
-                arguments = {"arguments": raw_arguments}
-        elif isinstance(raw_arguments, Mapping):
-            arguments = dict(raw_arguments)
-        else:
-            arguments = {"arguments": raw_arguments}
+        arguments = self._tool_call_arguments(function.get("arguments", {}))
 
         params: list[str] = []
         for key, value in arguments.items():
             is_string = isinstance(value, str)
             rendered_value = value if is_string else _json(value)
             params.append(
-                f'<{_DSML}parameter name="{key}" '
+                f'<{self._parameter_tag} name="{key}" '
                 f'string="{str(is_string).lower()}">{rendered_value}'
-                f"</{_DSML}parameter>"
+                f"</{self._parameter_tag}>"
             )
         arguments_text = "\n".join(params)
-        return f'<{_DSML}invoke name="{name}">\n{arguments_text}\n</{_DSML}invoke>'
+        return (
+            f'<{self._invoke_tag} name="{name}">\n{arguments_text}\n'
+            f"</{self._invoke_tag}>"
+        )
 
     def render(
         self,
@@ -388,7 +418,7 @@ class DeepSeekV4Renderer:
             tools=tools,
             add_generation_prompt=add_generation_prompt,
             add_bos=True,
-            add_effort_prompt=True,
+            add_preamble=True,
         )
 
     def _render(
@@ -398,7 +428,7 @@ class DeepSeekV4Renderer:
         tools: list[ToolSpec] | None,
         add_generation_prompt: bool,
         add_bos: bool,
-        add_effort_prompt: bool,
+        add_preamble: bool,
     ) -> RenderedTokens:
         if not messages:
             raise ValueError("No messages provided.")
@@ -413,7 +443,7 @@ class DeepSeekV4Renderer:
                 (
                     index
                     for index, message in enumerate(logical_messages)
-                    if message.role in _QUERY_ROLES
+                    if self._is_turn_start(message)
                 ),
                 default=-1,
             )
@@ -578,39 +608,27 @@ class DeepSeekV4Renderer:
             if text:
                 pending_text.append((text, message_index, sampled, content))
 
-        if add_bos:
-            emit_special(self._bos, -1)
-        if add_effort_prompt and self.config.enable_thinking:
-            emit_text(self._reasoning_effort_prompt(), -1)
-
         last_query_index = -1
         for index, message in enumerate(logical_messages):
-            if message.role in _QUERY_ROLES:
+            if self._is_turn_start(message):
                 last_query_index = index
 
-        tool_target: int | None = None
-        if tools:
-            tool_target = next(
-                (
-                    index
-                    for index, message in enumerate(logical_messages)
-                    if message.role == "developer"
+        tool_target = self._tool_target(logical_messages) if tools else None
+
+        if add_bos:
+            emit_special(self._bos, -1)
+        if add_preamble:
+            emit_text(
+                self._preamble(
+                    opens_with_system=logical_messages[0].role == "system"
+                    or bool(tools and tool_target is None)
                 ),
-                None,
+                -1,
             )
-            if tool_target is None:
-                tool_target = next(
-                    (
-                        index
-                        for index, message in enumerate(logical_messages)
-                        if message.role == "system"
-                    ),
-                    None,
-                )
-            if tool_target is None:
-                # Equivalent to an empty synthetic system message carrying
-                # tools in the reference encoder.
-                emit_text("\n\n" + self._render_tools(tools), -1)
+        if tools and tool_target is None:
+            # Equivalent to an empty synthetic system message carrying
+            # tools in the reference encoder.
+            emit_text("\n\n" + self._render_tools(tools), -1)
 
         for index, message in enumerate(logical_messages):
             role = message.role
@@ -683,8 +701,8 @@ class DeepSeekV4Renderer:
                         self._render_tool_call(call) for call in message.tool_calls
                     )
                     emit_text(
-                        f"\n\n<{_DSML}tool_calls>\n{rendered_calls}\n"
-                        f"</{_DSML}tool_calls>",
+                        f"\n\n<{self._calls_tag}>\n{rendered_calls}\n"
+                        f"</{self._calls_tag}>",
                         msg_idx,
                         sampled=True,
                         content=True,
@@ -808,6 +826,9 @@ class DeepSeekV4Renderer:
             ),
             think_end_id=self._think_end,
             think_start_id=self._think_start,
+            grammar=self._grammar,
+            invoke_tag=self._invoke_tag,
+            parameter_tag=self._parameter_tag,
         )
 
     def get_stop_token_ids(self) -> list[int]:
@@ -863,7 +884,7 @@ class DeepSeekV4Renderer:
                 tools=None,
                 add_generation_prompt=True,
                 add_bos=False,
-                add_effort_prompt=False,
+                add_preamble=False,
             )
         except ValueError:
             return None

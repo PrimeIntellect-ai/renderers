@@ -1028,6 +1028,34 @@ class DeepSeekV4RendererConfig(BaseRendererConfig):
         return self
 
 
+class DeepSeekV41RendererConfig(DeepSeekV4RendererConfig):
+    """DeepSeek-V4.1-Flash reference-encoder configuration.
+
+    V4.1's encoder is V4's with a numeric reasoning-effort budget, a
+    ``<｜System｜>`` token in front of the conversation's opening effort prefix
+    or system message, and thinking mode on by default.
+    """
+
+    name: Literal["deepseek-v4.1"] = "deepseek-v4.1"
+
+    enable_thinking: bool = True
+    """Select thinking mode, the V4.1 encoder's default."""
+
+    reasoning_effort: Literal["low", "high", "max"] | int = "high"
+    """Thinking-only budget: an int in [1, 100], or ``low`` / ``high`` / ``max`` (50 / 75 / 100)."""
+
+    @model_validator(mode="after")
+    def _check_reasoning_effort(self) -> Self:
+        if (
+            isinstance(self.reasoning_effort, int)
+            and not 1 <= self.reasoning_effort <= 100
+        ):
+            raise ValueError(
+                f"reasoning_effort must be in [1, 100], got {self.reasoning_effort}"
+            )
+        return self
+
+
 class CustomRendererConfig(BaseRendererConfig):
     """Config for a renderer that lives outside this package.
 
@@ -1096,6 +1124,7 @@ RendererConfig = Annotated[
         DeepSeekV3RendererConfig,
         DeepSeekR1RendererConfig,
         DeepSeekV4RendererConfig,
+        DeepSeekV41RendererConfig,
         CustomRendererConfig,
     ],
     Field(discriminator="name"),
@@ -1147,6 +1176,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "deepseek-v3": DeepSeekV3RendererConfig,
     "deepseek-r1": DeepSeekR1RendererConfig,
     "deepseek-v4": DeepSeekV4RendererConfig,
+    "deepseek-v4.1": DeepSeekV41RendererConfig,
 }
 
 
@@ -1180,6 +1210,7 @@ __all__ = [
     "DeepSeekR1RendererConfig",
     "DeepSeekV3RendererConfig",
     "DeepSeekV4RendererConfig",
+    "DeepSeekV41RendererConfig",
     "GLM45RendererConfig",
     "GLM51RendererConfig",
     "GLM53FlashRendererConfig",

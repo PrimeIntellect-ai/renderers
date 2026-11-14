@@ -18,7 +18,7 @@ from functools import lru_cache
 
 import pytest
 
-from renderers.base import ToolCallParseStatus
+from renderers.base import PlaceholderRange, ToolCallParseStatus
 
 pytestmark = pytest.mark.model
 
@@ -241,9 +241,14 @@ def test_one_placeholder_per_image_and_attribution():
     rendered = _render(
         [{"role": "user", "content": [IMAGE, {"type": "text", "text": "x"}, IMAGE]}]
     )
-    assert renderer.mm_token_type_id_map == {patch: 1}
-    assert rendered.token_ids.count(patch) == 2
-    assert rendered.multi_modal_data is None
+    assert rendered.multi_modal_data.mm_placeholders == {
+        "image": [
+            PlaceholderRange(offset=k, length=1)
+            for k, token_id in enumerate(rendered.token_ids)
+            if token_id == patch
+        ]
+    }
+    assert len(rendered.multi_modal_data.mm_placeholders["image"]) == 2
     for pos, token_id in enumerate(rendered.token_ids):
         if token_id == patch:
             assert rendered.message_indices[pos] == 0

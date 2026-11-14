@@ -39,6 +39,7 @@ from renderers.base import (
     MultiModalData,
     ParsedResponse,
     ParsedToolCall,
+    PlaceholderRange,
     RenderedTokens,
     Tokenizer,
     ToolCallParseStatus,
@@ -183,6 +184,7 @@ class _TokenStream:
         self.indices: list[int] = []
         self.sampled: list[bool] = []
         self.content: list[bool] = []
+        self.placeholders: dict[str, list[PlaceholderRange]] = {}
         self._pending: list[tuple[str, int, bool, bool]] = []
 
     def special(
@@ -193,6 +195,14 @@ class _TokenStream:
         self.indices.append(msg_idx)
         self.sampled.append(sampled)
         self.content.append(content)
+
+    def placeholder(self, token_id: int, msg_idx: int, modality: str) -> None:
+        """Place one media placeholder token and record where it sits."""
+        self.flush()
+        self.placeholders.setdefault(modality, []).append(
+            PlaceholderRange(offset=len(self.tokens), length=1)
+        )
+        self.special(token_id, msg_idx, sampled=False, content=True)
 
     def text(self, text: str, msg_idx: int, *, sampled: bool, content: bool) -> None:
         if text:
@@ -243,6 +253,9 @@ class _TokenStream:
             is_content=content,
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
+            multi_modal_data=MultiModalData(mm_placeholders=self.placeholders)
+            if self.placeholders
+            else None,
         )
 
 
@@ -259,6 +272,8 @@ class MuseGlimmerRenderer:
         # assistant tool call with its ``tool_call_id`` anywhere in the
         # conversation, so a later reused id renames an earlier tool result.
         return False
+
+    is_multimodal = True
 
     def __init__(
         self, tokenizer: Tokenizer, config: MuseGlimmerRendererConfig | None = None
@@ -289,10 +304,6 @@ class MuseGlimmerRenderer:
             f"Special token {token!r} not found in tokenizer vocabulary"
         )
         return tid
-
-    @property
-    def mm_token_type_id_map(self) -> dict[int, int]:
-        return {self._patch: 1}
 
     # ── media ───────────────────────────────────────────────────────────
 
@@ -339,8 +350,7 @@ class MuseGlimmerRenderer:
                     item.get("text", ""), msg_idx, sampled=sampled, content=True
                 )
             elif isinstance(item, dict) and item.get("type") in _IMAGE_TYPES:
-                # The placeholder stands for caller-provided image data.
-                stream.special(self._patch, msg_idx, sampled=False, content=True)
+                stream.placeholder(self._patch, msg_idx, "image")
 
     @staticmethod
     def _text_of(content: Any) -> str:
@@ -903,6 +913,19 @@ class MuseGlimmerRenderer:
         stream.special(self._start, -1, sampled=False, content=False)
         stream.text("assistant", -1, sampled=False, content=False)
         ext = stream.rendered(new_messages, prefix=len(previous))
+        placeholders = {
+            modality: list(ranges)
+            for modality, ranges in (
+                previous_multi_modal_data.mm_placeholders
+                if previous_multi_modal_data is not None
+                else {}
+            ).items()
+        }
+        for modality, ranges in stream.placeholders.items():
+            placeholders.setdefault(modality, []).extend(
+                PlaceholderRange(offset=len(previous) + r.offset, length=r.length)
+                for r in ranges
+            )
         return RenderedTokens(
             token_ids=previous + ext.token_ids,
             message_indices=[-1] * len(previous) + ext.message_indices,
@@ -910,4 +933,7 @@ class MuseGlimmerRenderer:
             is_content=ext.is_content,
             message_roles=ext.message_roles,
             message_tool_names=ext.message_tool_names,
+            multi_modal_data=MultiModalData(mm_placeholders=placeholders)
+            if placeholders
+            else None,
         )

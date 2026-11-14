@@ -884,16 +884,10 @@ class MultimodalRenderer(Renderer, Protocol):
     signature below.
     """
 
-    @property
-    def mm_token_type_id_map(self) -> dict[int, int]:
-        """Map from special-token IDs to per-token modality markers.
-
-        Convention: ``1`` = image placeholder (e.g. ``<|image_pad|>``),
-        ``2`` = video placeholder (e.g. ``<|video_pad|>``). The
-        orchestrator stamps these onto each rendered token to drive
-        the trainer's vision-encoder slicing logic.
-        """
-        ...
+    is_multimodal: bool
+    """``True`` on renderers that place media placeholders. Placeholder
+    positions are reported in ``MultiModalData.mm_placeholders``; token ids
+    never identify media."""
 
     def bridge_to_next_turn(
         self,

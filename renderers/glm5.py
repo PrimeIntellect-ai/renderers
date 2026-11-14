@@ -421,6 +421,7 @@ class GLM5Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
+        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids
@@ -892,6 +893,7 @@ class GLM53Renderer(GLM5Renderer):
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
+        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         tool_messages = [m for m in new_messages if m.get("role") == "tool"]
         if len(tool_messages) > 1 or any(
@@ -901,7 +903,11 @@ class GLM53Renderer(GLM5Renderer):
             # cannot be recovered from the raw sampled completion tokens.
             return None
         return super().bridge_to_next_turn(
-            previous_prompt_ids, previous_completion_ids, new_messages, tools=tools
+            previous_prompt_ids,
+            previous_completion_ids,
+            new_messages,
+            tools=tools,
+            previous_tool_call_ids=previous_tool_call_ids,
         )
 
     def render(
@@ -1138,10 +1144,15 @@ class GLM53FlashRenderer(GLM53Renderer):
         tools: list[ToolSpec] | None = None,
         previous_multi_modal_data: MultiModalData | None = None,
         process_multimodal: bool = True,
+        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         self._validate_media(new_messages, process_multimodal=process_multimodal)
         # Logical prompts carry no processed image data, so nothing from
         # ``previous_multi_modal_data`` needs carrying forward.
         return super().bridge_to_next_turn(
-            previous_prompt_ids, previous_completion_ids, new_messages, tools=tools
+            previous_prompt_ids,
+            previous_completion_ids,
+            new_messages,
+            tools=tools,
+            previous_tool_call_ids=previous_tool_call_ids,
         )

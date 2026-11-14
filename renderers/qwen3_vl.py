@@ -688,6 +688,7 @@ class Qwen3VLRenderer:
         tools: list[ToolSpec] | None = None,
         previous_multi_modal_data: MultiModalData | None = None,
         process_multimodal: bool = True,
+        previous_tool_call_ids: list[str] | None = None,
     ) -> "RenderedTokens | None":
         """Extend the prior turn with ``new_messages``.
 

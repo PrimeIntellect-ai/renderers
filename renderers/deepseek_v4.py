@@ -289,6 +289,27 @@ def _prepare_messages(messages: list[Message]) -> list[_LogicalMessage]:
     return merged
 
 
+def _order_tool_results(
+    messages: list[Message], call_ids: list[str] | None
+) -> list[Message] | None:
+    """Put a bridge tail's tool results in call order, as `_prepare_messages` does for a
+    full render. None when that order cannot be proven: no issuing call ids, a result for
+    an unknown call, or a task message that splits the results across logical messages."""
+    if not call_ids or any(message.get("task") for message in messages):
+        return None
+    order = {str(call_id): index for index, call_id in enumerate(call_ids)}
+    results = [message for message in messages if message.get("role") == "tool"]
+    if any(str(message.get("tool_call_id") or "") not in order for message in results):
+        return None
+    ordered = iter(
+        sorted(results, key=lambda message: order[str(message["tool_call_id"])])
+    )
+    return [
+        next(ordered) if message.get("role") == "tool" else message
+        for message in messages
+    ]
+
+
 class DeepSeekV4Renderer:
     """Renderer for ``deepseek-ai/DeepSeek-V4-Flash-0731``."""
 
@@ -820,6 +841,7 @@ class DeepSeekV4Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002
+        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids
@@ -842,11 +864,10 @@ class DeepSeekV4Renderer:
             is_user_query=_is_query_message,
         ):
             return None
-        # Full rendering sorts parallel tool results by IDs from the issuing
-        # assistant.  The bridge only receives the new slice, so it cannot
-        # prove parity when more than one result is present.
         if sum(message.get("role") == "tool" for message in new_messages) > 1:
-            return None
+            new_messages = _order_tool_results(new_messages, previous_tool_call_ids)
+            if new_messages is None:
+                return None
 
         previous_ids = trim_to_turn_close(
             previous_prompt_ids,

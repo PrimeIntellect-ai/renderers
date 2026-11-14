@@ -808,6 +808,7 @@ class Renderer(Protocol):
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
+        previous_tool_call_ids: list[str] | None = None,
     ) -> "RenderedTokens | None":
         """Extend ``prev_prompt_ids + prev_completion_ids`` with the tokens
         the next turn adds, without re-rendering the sampled tokens.
@@ -856,6 +857,11 @@ class Renderer(Protocol):
         ``previous_multi_modal_data`` kwarg via the
         :class:`MultimodalRenderer` Protocol override.
 
+        ``previous_tool_call_ids`` are the tool call ids of the assistant turn
+        being extended, in call order. Renderers whose full render orders
+        parallel tool results by them use the ids to extend such a tail;
+        the others ignore them.
+
         Return ``None`` whenever the renderer can't prove that contract
         holds — the caller falls back to a full re-render. In particular,
         bridges refuse assistant messages in ``new_messages`` (those would
@@ -903,6 +909,7 @@ class MultimodalRenderer(Renderer, Protocol):
         *,
         tools: list[ToolSpec] | None = None,
         previous_multi_modal_data: "MultiModalData | None" = None,
+        previous_tool_call_ids: list[str] | None = None,
     ) -> "RenderedTokens | None":
         """Same contract as :meth:`Renderer.bridge_to_next_turn`, plus:
 

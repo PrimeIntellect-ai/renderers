@@ -555,6 +555,7 @@ class Nemotron3Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
+        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids
@@ -1136,6 +1137,7 @@ class Nemotron35Renderer(Nemotron3Renderer):
         tools: list[ToolSpec] | None = None,
         previous_multi_modal_data: MultiModalData | None = None,
         process_multimodal: bool = True,
+        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         has_new_images = any(
             isinstance(message.get("content"), list)
@@ -1152,4 +1154,5 @@ class Nemotron35Renderer(Nemotron3Renderer):
             previous_completion_ids,
             new_messages,
             tools=tools,
+            previous_tool_call_ids=previous_tool_call_ids,
         )

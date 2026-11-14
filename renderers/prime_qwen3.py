@@ -651,6 +651,7 @@ class PrimeQwen3Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002
+        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids

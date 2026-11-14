@@ -828,6 +828,7 @@ class MuseGlimmerRenderer:
         tools: list[ToolSpec] | None = None,
         previous_multi_modal_data: MultiModalData | None = None,
         process_multimodal: bool = True,
+        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         self._validate_media(new_messages, process_multimodal=process_multimodal)
         if (

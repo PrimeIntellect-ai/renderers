@@ -531,6 +531,75 @@ def test_bridge_extends_a_single_tool_result_exactly():
     )
 
 
+def _parallel_call_turn():
+    first_messages = [
+        {"role": "user", "content": "Check both cities"},
+        {
+            "role": "assistant",
+            "reasoning_content": "two calls",
+            "tool_calls": [
+                {
+                    "id": "a",
+                    "function": {"name": "weather", "arguments": {"city": "Rome"}},
+                },
+                {
+                    "id": "b",
+                    "function": {"name": "weather", "arguments": {"city": "Oslo"}},
+                },
+            ],
+        },
+    ]
+    results = [
+        {"role": "tool", "tool_call_id": "a", "content": "sunny"},
+        {"role": "tool", "tool_call_id": "b", "content": "rainy"},
+    ]
+    return first_messages, results
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_bridge_extends_parallel_tool_results_given_call_ids(reverse):
+    renderer = _renderer(enable_thinking=True)
+    first_messages, results = _parallel_call_turn()
+    tail = results[::-1] if reverse else results
+    prompt = renderer.render_ids(
+        first_messages[:1], tools=TOOLS, add_generation_prompt=True
+    )
+    completion = renderer.render_ids(first_messages, tools=TOOLS)[len(prompt) :]
+
+    bridged = renderer.bridge_to_next_turn(
+        prompt, completion, tail, tools=TOOLS, previous_tool_call_ids=["a", "b"]
+    )
+
+    full_messages = [*first_messages, *tail]
+    full = renderer.render_ids(full_messages, tools=TOOLS, add_generation_prompt=True)
+    assert bridged is not None
+    assert bridged.token_ids == full
+    assert full == render_reference(
+        _tokenizer(),
+        full_messages,
+        tools=TOOLS,
+        enable_thinking=True,
+        add_generation_prompt=True,
+    )
+
+
+@pytest.mark.parametrize("call_ids", [None, ["a"], ["a", "c"]])
+def test_bridge_declines_parallel_tool_results_without_matching_call_ids(call_ids):
+    renderer = _renderer(enable_thinking=True)
+    first_messages, results = _parallel_call_turn()
+    prompt = renderer.render_ids(
+        first_messages[:1], tools=TOOLS, add_generation_prompt=True
+    )
+    completion = renderer.render_ids(first_messages, tools=TOOLS)[len(prompt) :]
+
+    assert (
+        renderer.bridge_to_next_turn(
+            prompt, completion, results, tools=TOOLS, previous_tool_call_ids=call_ids
+        )
+        is None
+    )
+
+
 def test_bridge_declines_at_developer_query_boundary_when_dropping_thinking():
     renderer = _renderer(enable_thinking=True)
     prior_messages = [{"role": "user", "content": "Q1"}]

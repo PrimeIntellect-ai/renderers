@@ -18,6 +18,7 @@ from renderers.base import (
 from renderers.client import (
     _parse_compact_logprobs,
     _parse_completion_top_logprobs,
+    _parse_replayed_support,
     generate,
     parse_generate_response,
 )
@@ -59,6 +60,64 @@ def _parse_test_head(choice, sampled, k, compact):
         _, ids, logprobs = _parse_compact_logprobs(_compact_choice(choice), sampled, k)
         return ids, logprobs
     return _parse_completion_top_logprobs(choice, sampled, k)
+
+
+def _replayed_choice(rows, sampled):
+    """A paired replay response: each row's kept ids and their sampler probabilities."""
+    ids = np.asarray([i for row in rows for i, _ in row], dtype=np.int32)
+    counts = np.asarray([len(row) for row in rows], dtype=np.int32)
+    values = np.log(np.asarray([p for row in rows for _, p in row], dtype=np.float32))
+    return {
+        "token_ids": sampled,
+        "compact_logprobs": {
+            "data": base64.b64encode(
+                ids.astype("<u4").tobytes() + values.astype("<f4").tobytes()
+            ).decode("ascii"),
+            "format": "u32-f32-le-v1",
+            "offsets": [0, *np.cumsum(counts).tolist()],
+            "num_top_logprobs": int(counts.max(initial=0)),
+        },
+        "sampling_mask": {
+            name: {
+                "data": base64.b64encode(array.tobytes()).decode(),
+                "shape": [len(array)],
+                "dtype": "int32",
+            }
+            for name, array in (("ids", ids), ("counts", counts))
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "error", [None, "mass", "unsampled", "duplicate", "mask", "empty"]
+)
+def test_replayed_support_keeps_the_recorded_mask_with_its_probabilities(error):
+    rows = [[(3, 0.2), (1, 0.6), (2, 0.2)], [(9, 1.0)]]
+    sampled = [3, 9]
+    if error == "mass":
+        rows[0][1] = (1, 0.5)
+    elif error == "unsampled":
+        sampled = [4, 9]
+    elif error == "duplicate":
+        rows[0] = [(3, 0.2), (1, 0.6), (3, 0.2)]
+    choice = _replayed_choice(rows, sampled)
+    if error == "mask":
+        choice["sampling_mask"] = _replayed_choice(
+            [[(3, 0.2), (1, 0.6), (5, 0.2)], [(9, 1.0)]], sampled
+        )["sampling_mask"]
+    elif error == "empty":
+        choice = _replayed_choice([], [])
+    if error not in (None, "empty"):
+        with pytest.raises(MalformedGenerateResponseError):
+            _parse_replayed_support(choice, sampled)
+        return
+    logprobs, support = _parse_replayed_support(choice, choice["token_ids"])
+    expected = [] if error == "empty" else [0.2, 1.0]
+    np.testing.assert_allclose(np.exp(logprobs), expected, rtol=1e-6)
+    assert support["replayed"]
+    assert support["ids"].tolist() == [i for row in rows for i, _ in row] * (not error)
+    assert support["counts"].tolist() == [len(row) for row in rows] * (not error)
+    assert len(support["logprobs"]) == len(support["ids"])
 
 
 @pytest.mark.parametrize(
@@ -170,10 +229,9 @@ def test_top_logprobs_head_is_independent_of_sampled_action(
         _parse_test_head({"logprobs": {"content": [entry]}}, [sampled], 2, compact)
 
 
-@pytest.mark.parametrize("compact", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
 @pytest.mark.parametrize("error", [None, "missing", "mass", "mask"])
-def test_top_logprobs_preserve_complete_replay_support(compact, packed, error):
+def test_top_logprobs_preserve_complete_replay_support(packed, error):
     import math
 
     probabilities = {1: 0.6, 2: 0.2, 3: 0.2}
@@ -202,9 +260,9 @@ def test_top_logprobs_preserve_complete_replay_support(compact, packed, error):
     choice = {"logprobs": {"content": [entry]}, "sampling_mask": mask}
     if error is not None:
         with pytest.raises(MalformedGenerateResponseError):
-            _parse_test_head(choice, [3], 2, compact)
+            _parse_completion_top_logprobs(choice, [3], 2)
     else:
-        ids, logprobs = _parse_test_head(choice, [3], 2, compact)
+        ids, logprobs = _parse_completion_top_logprobs(choice, [3], 2)
         assert ids == [[1, 2, 3]]
         np.testing.assert_allclose(np.exp(logprobs), [[0.6, 0.2, 0.2]])
 
@@ -427,13 +485,13 @@ def test_generate_builds_request_body_and_parses_response(
     assert result["completion_ids"] == [7, 8]
     np.testing.assert_allclose(result["completion_logprobs"], [-0.1, -0.2])
     if head_size is not None:
-        assert result["completion_top_ids"] == [[7, 20], [8, 20]]
-        np.testing.assert_allclose(
-            result["completion_top_logprobs"], [[-0.1, -4.0], [-0.2, -4.0]]
-        )
+        support = result["sampler_support"]
+        assert not support["replayed"]
+        assert support["ids"].tolist() == [7, 20, 8, 20]
+        assert support["counts"].tolist() == [2, 2]
+        np.testing.assert_allclose(support["logprobs"], [-0.1, -4.0, -0.2, -4.0])
     else:
-        assert result["completion_top_ids"] is None
-        assert result["completion_top_logprobs"] is None
+        assert result["sampler_support"] is None
     if extra_args is not None:
         assert extra_args == {"prl_compact_logprobs": False, "custom_arg": 7}
     assert result["routed_experts"]["shape"] == [2, 1, 1]

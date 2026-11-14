@@ -843,9 +843,6 @@ class DeepSeekV4Renderer:
         tools: list[ToolSpec] | None = None,  # noqa: ARG002
         previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
-        """``previous_tool_call_ids`` are the issuing assistant's tool call ids in call
-        order. Full rendering sorts parallel tool results by them, so the bridge extends
-        more than one tool result only when they are given."""
         if (
             not previous_prompt_ids
             or not new_messages

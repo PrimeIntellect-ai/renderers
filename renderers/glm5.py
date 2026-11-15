@@ -945,6 +945,7 @@ class GLM53Renderer(GLM5Renderer):
             message_indices=[
                 order[i] if i >= 0 else i for i in bridged.message_indices
             ],
+            message_tool_names=extract_message_tool_names(new_messages),
         )
 
     def render(

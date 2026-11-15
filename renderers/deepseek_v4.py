@@ -40,6 +40,8 @@ from renderers.base import (
 from renderers.configs import DeepSeekV4RendererConfig
 from renderers.parsing import parse_deepseek_v4
 from renderers.reasoning import prompt_ends_in_reasoning
+from renderers.streaming import ResponseStream, StreamGrammar
+from renderers.tagged import DEEPSEEK_V4_GRAMMAR
 
 _BOS = "<｜begin▁of▁sentence｜>"
 _EOS = "<｜end▁of▁sentence｜>"
@@ -796,22 +798,44 @@ class DeepSeekV4Renderer:
             self._tokenizer,
             token_ids,
             stop_ids={self._eos},
-            thinking_enabled=(
-                prompt_ends_in_reasoning(
-                    self._tokenizer,
-                    prompt_ids,
-                    stop_ids=set(self.get_stop_token_ids()),
-                    assistant_prefix="<｜Assistant｜>",
-                )
-                if prompt_ids
-                else self.config.enable_thinking
-            ),
+            thinking_enabled=self._prompt_opens_reasoning(prompt_ids),
             think_end_id=self._think_end,
             think_start_id=self._think_start,
         )
 
     def get_stop_token_ids(self) -> list[int]:
         return [self._eos]
+
+    def response_stream(self, *, prompt_ids: list[int] | None = None) -> ResponseStream:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        return ResponseStream(
+            self._tokenizer,
+            StreamGrammar(
+                stop_ids=frozenset({self._eos}),
+                think_open_ids=frozenset({self._think_start}),
+                think_close_ids=frozenset({self._think_end}),
+                # Every textual marker that leaves the content channel. In
+                # reasoning the invoke opener is plain text to the parser, so
+                # stopping there only defers that text to the final parse.
+                tool_markers=tuple(
+                    marker
+                    for marker, terminal in DEEPSEEK_V4_GRAMMAR.text_markers.items()
+                    if terminal in {"section_start", "tool_start"}
+                ),
+                reentrant_reasoning=True,
+            ),
+            reasoning=self._prompt_opens_reasoning(prompt_ids),
+        )
+
+    def _prompt_opens_reasoning(self, prompt_ids: list[int] | None) -> bool:
+        if not prompt_ids:
+            return self.config.enable_thinking
+        return prompt_ends_in_reasoning(
+            self._tokenizer,
+            prompt_ids,
+            stop_ids=set(self.get_stop_token_ids()),
+            assistant_prefix="<｜Assistant｜>",
+        )
 
     def bridge_to_next_turn(
         self,

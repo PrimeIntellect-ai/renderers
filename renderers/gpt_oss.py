@@ -34,6 +34,7 @@ Special tokens
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -62,8 +63,13 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
+from renderers.streaming import ChannelStream, Channel, TextDelta, TextStream
 from renderers.configs import GptOssRendererConfig
-from renderers.parsing import harmony_blocks, parse_gpt_oss
+from renderers.parsing import (
+    _gptoss_extract_after_token,
+    harmony_blocks,
+    parse_gpt_oss,
+)
 
 
 def _reasoning_effort(effort: str | None) -> ReasoningEffort:
@@ -116,6 +122,80 @@ def _arguments_to_str(arguments: Any) -> str:
     if isinstance(arguments, str):
         return arguments
     return json.dumps(arguments, ensure_ascii=False)
+
+
+class _HarmonyStream(ChannelStream):
+    """Harmony messages: analysis is reasoning, final and commentary are content.
+
+    A commentary message addressed to a function ends the stream.
+    """
+
+    def __init__(self, renderer: "GptOssRenderer", prompt_ids: list[int] | None):
+        super().__init__(renderer._tokenizer)
+        self._renderer = renderer
+        self._prompt_ids = prompt_ids
+        self._tokenizer = renderer._tokenizer
+        # None until the first token says whether this is Harmony at all.
+        self._mode: str | None = None
+        self._header: list[int] = []
+        self._channel: Channel | None = None
+
+    def _token(self, token_id: int, deltas: list[TextDelta]) -> None:
+        r = self._renderer
+        if self._mode is None:
+            prefix = r._response_prefix([token_id], self._prompt_ids)
+            if not prefix and token_id != r._start:
+                self._mode = "raw"
+            else:
+                self._mode = "outside"
+                for prefix_id in prefix:
+                    self._block_token(prefix_id, deltas)
+                if self._done:
+                    return
+        if self._mode == "raw":
+            # No Harmony framing anywhere: the completion is plain content.
+            if token_id in r.get_stop_token_ids():
+                self._done = True
+            else:
+                self._push("content", token_id, deltas)
+            return
+        self._block_token(token_id, deltas)
+
+    def _block_token(self, token_id: int, deltas: list[TextDelta]) -> None:
+        r = self._renderer
+        if token_id == r._return:
+            self._done = True
+        elif self._mode == "header":
+            if token_id == r._message:
+                self._open_body()
+            else:
+                self._header.append(token_id)
+        elif token_id == r._start:
+            self._end_run(self._channel if self._mode == "body" else None, deltas)
+            self._mode, self._header = "header", []
+        elif self._mode == "body":
+            if token_id in (r._end, r._call):
+                self._end_run(self._channel, deltas)
+                self._mode = "outside"
+            elif self._channel is not None:
+                self._push(self._channel, token_id, deltas)
+
+    def _open_body(self) -> None:
+        r = self._renderer
+        header = self._tokenizer.decode(self._header, skip_special_tokens=False)
+        recipient = re.search(r"to=([^\s<]+)", header)
+        if recipient and recipient.group(1).startswith("functions."):
+            self._done = True
+            return
+        channel = _gptoss_extract_after_token(self._tokenizer, self._header, r._channel)
+        self._channel = (
+            "reasoning"
+            if channel == "analysis"
+            else "content"
+            if channel in ("final", "commentary")
+            else None
+        )
+        self._mode = "body"
 
 
 class GptOssRenderer:
@@ -533,6 +613,10 @@ class GptOssRenderer:
                 start, end = tc.token_span
                 tc.token_span = (max(0, start - len(prefix)), end - len(prefix))
         return parsed
+
+    def response_stream(self, *, prompt_ids: list[int] | None = None) -> TextStream:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        return _HarmonyStream(self, prompt_ids)
 
     def get_stop_token_ids(self) -> list[int]:
         return [self._return, self._call]

@@ -114,6 +114,55 @@ class Renderer(Protocol):
 - `ParsedResponse` is `(content, reasoning_content, tool_calls)`. It scans token ids for special-token boundaries (e.g. id `151657` for `<tool_call>` on Qwen3) — a literal `"<tool_call>"` in user content tokenizes to ordinary text ids and never matches.
 - Round-trip: rendering `[user, assistant(content, reasoning, tool_calls)]`, slicing the assistant completion, and feeding it through `parse_response` returns an equivalent structured message. Tested per-renderer in `tests/test_roundtrip.py`.
 
+### Streaming
+
+`renderers.client.generate_stream` takes the same arguments as `generate` and
+yields the reasoning and content text while the engine is still sampling:
+
+```python
+from contextlib import aclosing
+from renderers.client import generate_stream
+from renderers.streaming import TextDelta
+
+async with aclosing(generate_stream(client=client, renderer=r, messages=messages, model=model)) as events:
+    async for event in events:
+        if isinstance(event, TextDelta):
+            print(event.channel, event.text)   # "reasoning" or "content"
+        else:
+            result = event                     # the same dict generate() returns
+```
+
+- The last item is the result dict, built by `parse_response` over the whole
+  completion exactly as in `generate`. Record and train on that; the deltas are
+  for display.
+- Per channel, the deltas concatenate to the result's field with surrounding
+  whitespace stripped.
+- Tool calls are not streamed. Text stops at the first tool-call opener and the
+  calls arrive in the result.
+- Streamed requests cannot use compact logprobs, so sampled logprobs and any
+  top-k head travel as native JSON.
+- Leaving the loop early closes the connection, which aborts generation.
+
+Every bundled renderer streams token by token. A renderer provides
+`response_stream(*, prompt_ids=None)`, which returns a `TextStream` from
+`renderers/streaming.py`: most formats declare their markers in a
+`StreamGrammar`, and Harmony, Gemma 4, Inkling and Muse Glimmer subclass
+`ChannelStream` with their own token grammar. A renderer without the method
+(or one that returns `None`, as `DefaultRenderer` does for a custom parser it
+cannot describe) still works: its text arrives in one delta per channel just
+before the result.
+
+A few parser rules look back at text that has already been streamed. When
+one applies, the result is still correct, the mismatch is logged, and that
+channel gets no further delta:
+
+- A completion that ends inside reasoning parses to empty `content`. Gemma 4
+  and Inkling can emit content before a later, unfinished thought.
+- Muse Glimmer rewrites `content` to the raw completion when a tool message
+  carries no complete invocation.
+- Llama 3 restarts the body after a role header, which an engine does not
+  sample mid-completion.
+
 ### Prefix stability
 
 `renderer.is_prefix_stable` describes the constructed renderer after config and

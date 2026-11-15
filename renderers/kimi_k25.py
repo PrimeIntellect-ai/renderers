@@ -46,6 +46,7 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import KimiK25RendererConfig
+from renderers.streaming import ResponseStream, reasoning_first_stream
 from renderers.parsing import (
     _find,
     _reasoning_end_token_index,
@@ -1013,6 +1014,21 @@ class KimiK25Renderer:
             tool_call_begin_id=self._tool_call_begin,
             tool_call_argument_begin_id=self._tool_call_argument_begin,
             tool_call_end_id=self._tool_call_end,
+        )
+
+    def response_stream(self, *, prompt_ids: list[int] | None = None) -> ResponseStream:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        return reasoning_first_stream(
+            self._tokenizer,
+            prompt_ids=prompt_ids,
+            stop_ids=self.get_stop_token_ids(),
+            tool_ids=[self._tool_calls_section_begin],
+            # The parser also accepts a section spelled out in plain text.
+            tool_markers=(
+                "<|tool_calls_section_begin|>",
+                "<|tool_call_section_begin|>",
+            ),
+            assistant_prefix="<|im_assistant|>assistant<|im_middle|>",
         )
 
     def get_stop_token_ids(self) -> list[int]:

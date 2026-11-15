@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 
 from renderers.reasoning import scan_reasoning, prompt_ends_in_reasoning
+from renderers.streaming import ResponseStream, reasoning_first_stream
 
 from renderers.base import (
     Message,
@@ -329,6 +330,16 @@ class Qwen3Renderer:
 
     def get_stop_token_ids(self) -> list[int]:
         return [self._im_end, self._endoftext]
+
+    def response_stream(self, *, prompt_ids: list[int] | None = None) -> ResponseStream:
+        """Incremental reasoning/content text for a completion of ``prompt_ids``."""
+        return reasoning_first_stream(
+            self._tokenizer,
+            prompt_ids=prompt_ids,
+            stop_ids=self.get_stop_token_ids(),
+            think_close_id=self._think_end,
+            tool_ids=[self._tool_call],
+        )
 
     def bridge_to_next_turn(
         self,

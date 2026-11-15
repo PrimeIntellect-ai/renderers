@@ -565,6 +565,7 @@ async def generate(
             rendered,
         )
 
+    caller_prompt_ids = prompt_ids is not None
     prompt_ids, stop_token_ids, mm_data, prompt_attr = _prepare()
 
     # Client-side multimodal expansion, opt-in via RENDERERS_CLIENT_MM_EXPANSION=1. For
@@ -585,25 +586,31 @@ async def generate(
             expanded.multi_modal_data is not None
             and not expanded.multi_modal_data.is_empty()
         ):
+            # The expansion must be the caller's prompt with each media placeholder widened in
+            # place. Only the renderer knows its logical form (Nemotron 3.5 renders <image> and
+            # expands it to <img> + pads + </img>), so compare against its own unexpanded render
+            # instead of reconstructing one from the placeholder spans. prompt_ids is already
+            # that render unless the caller supplied it.
+            logical_ids = prompt_ids
+            if caller_prompt_ids:
+                # Not on the Renderer protocol; supports_process_multimodal was checked above.
+                logical_kwargs: dict[str, Any] = {"process_multimodal": False}
+                logical = await asyncio.to_thread(
+                    renderer.render,
+                    messages,
+                    tools=tools,
+                    add_generation_prompt=True,
+                    **logical_kwargs,
+                )
+                logical_ids = logical.token_ids
+            if list(prompt_ids) != list(logical_ids):
+                raise MalformedGenerateResponseError(
+                    "RENDERERS_CLIENT_MM_EXPANSION: client-side expansion does not match the caller's prompt_ids."
+                )
             placeholders = {
                 modality: [{"offset": p.offset, "length": p.length} for p in ranges]
                 for modality, ranges in expanded.multi_modal_data.mm_placeholders.items()
             }
-            spans = sorted(
-                (p["offset"], p["length"])
-                for ranges in placeholders.values()
-                for p in ranges
-            )
-            covered = {
-                i for offset, length in spans for i in range(offset, offset + length)
-            }
-            outside = [t for i, t in enumerate(expanded.token_ids) if i not in covered]
-            pads = {expanded.token_ids[offset] for offset, _ in spans}
-            # The expansion must be the caller's prompt with each image pad widened in place.
-            if outside != [t for t in prompt_ids if t not in pads]:
-                raise MalformedGenerateResponseError(
-                    "RENDERERS_CLIENT_MM_EXPANSION: client-side expansion does not match the caller's prompt_ids."
-                )
             client_mm = (list(prompt_ids), placeholders)
             prompt_ids = list(expanded.token_ids)
             mm_data = expanded.multi_modal_data
@@ -729,29 +736,7 @@ async def generate(
     if ok_tool_calls and finish_reason == "stop":
         finish_reason = "tool_calls"
 
-    if client_mm is not None:
-        renderer_prompt_ids, mm_placeholders = client_mm
-        return {
-            "request_id": data.get("request_id") or "",
-            "usage": data.get("usage"),
-            "prompt_ids": list(prompt_ids),
-            "renderer_prompt_ids": renderer_prompt_ids,
-            "mm_placeholders": mm_placeholders,
-            "completion_ids": list(completion_ids),
-            "completion_logprobs": completion_logprobs,
-            "content": parsed.content,
-            "reasoning_content": parsed.reasoning_content,
-            "tool_calls": parsed.tool_calls,
-            "finish_reason": finish_reason,
-            "reasoning_complete": parsed.reasoning_complete,
-            "routed_experts": routed_experts,
-            "sampling_mask": sampling_mask,
-            # Same as the process_multimodal=False path: no client-side sidecar is surfaced.
-            "multi_modal_data": None,
-            "prompt_attribution": prompt_attr,
-        }
-
-    return {
+    result: dict[str, Any] = {
         "request_id": data.get("request_id") or "",
         "usage": data.get("usage"),
         "prompt_ids": list(effective_prompt_ids or prompt_ids),
@@ -782,6 +767,15 @@ async def generate(
         # when the caller passed prompt_ids without attribution.
         "prompt_attribution": prompt_attr,
     }
+    if client_mm is not None:
+        # Same contract as process_multimodal=False: the expanded prompt we sent, the caller's
+        # logical prompt, placeholder ranges in the expanded prompt, and no mm sidecar.
+        renderer_prompt_ids, placeholders = client_mm
+        result["prompt_ids"] = list(prompt_ids)
+        result["renderer_prompt_ids"] = renderer_prompt_ids
+        result["mm_placeholders"] = placeholders
+        result["multi_modal_data"] = None
+    return result
 
 
 _MEDIA_URL_TYPES = {

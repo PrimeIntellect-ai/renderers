@@ -502,56 +502,101 @@ def test_generate_process_multimodal_false_sends_content_parts():
     assert result["mm_placeholders"] == {"image": [{"offset": 1, "length": 2}]}
 
 
-def test_generate_client_mm_expansion(monkeypatch):
+class _ExpandingRenderer(_FakeRenderer):
+    """Logical prompt [1, 2, 3] with one image pad (2) that expands to [2, 2]."""
+
+    supports_process_multimodal = True
+
+    def render(
+        self,
+        messages,
+        *,
+        tools=None,
+        add_generation_prompt=False,
+        process_multimodal=True,
+    ):
+        from renderers.base import MultiModalData, PlaceholderRange
+
+        if not process_multimodal:
+            return RenderedTokens(token_ids=[1, 2, 3])
+        mm = MultiModalData(
+            mm_hashes={"image": ["aaa"]},
+            mm_placeholders={"image": [PlaceholderRange(offset=1, length=2)]},
+            mm_items={"image": [{}]},
+        )
+        return RenderedTokens(token_ids=[1, 2, 2, 3], multi_modal_data=mm)
+
+
+def _run_mm_generate(client, *, prompt_ids=None):
+    image = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
+    }
+    return asyncio.run(
+        generate(
+            client=client,
+            renderer=_ExpandingRenderer(),
+            messages=[{"role": "user", "content": [image]}],
+            model="test-model",
+            prompt_ids=prompt_ids,
+            sampling_params={"logprobs": 2},
+            process_multimodal=False,
+        )
+    )
+
+
+def _mm_client():
+    client = _FakeClient()
+    for entry in client.choice["logprobs"]["content"]:
+        entry["top_logprobs"] = [
+            {"token": entry["token"], "logprob": entry["logprob"]},
+            {"token": "token_id:20", "logprob": -4.0},
+            {"token": "token_id:21", "logprob": -5.0},
+            {"token": "token_id:22", "logprob": -6.0},
+        ]
+    client.choice["weight_versions"] = [{"version": 3, "start": 0, "end": 2}]
+    return client
+
+
+@pytest.mark.parametrize("prompt_ids", [None, [1, 2, 3]])
+def test_generate_client_mm_expansion(monkeypatch, prompt_ids):
     from renderers import client as client_mod
-    from renderers.base import MultiModalData, PlaceholderRange
 
-    class ExpandingRenderer(_FakeRenderer):
-        supports_process_multimodal = True
-
-        def render(
-            self,
-            messages,
-            *,
-            tools=None,
-            add_generation_prompt=False,
-            process_multimodal=True,
-        ):
-            if not process_multimodal:
-                return RenderedTokens(token_ids=[1, 2, 3])
-            mm = MultiModalData(
-                mm_hashes={"image": ["aaa"]},
-                mm_placeholders={"image": [PlaceholderRange(offset=1, length=2)]},
-                mm_items={"image": [{}]},
-            )
-            return RenderedTokens(token_ids=[1, 2, 2, 3], multi_modal_data=mm)
-
-    monkeypatch.setenv("RENDERERS_CLIENT_MM_EXPANSION", "1")
     monkeypatch.setattr(
         client_mod,
         "_build_mm_features",
         lambda renderer, data: {"mm_hashes": data.mm_hashes},
     )
-    client = _FakeClient()
-    image = {
-        "type": "image_url",
-        "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
-    }
-    result = asyncio.run(
-        generate(
-            client=client,
-            renderer=ExpandingRenderer(),
-            messages=[{"role": "user", "content": [image]}],
-            model="test-model",
-            process_multimodal=False,
-        )
-    )
+    # Engine-side expansion is the reference contract the flag must reproduce.
+    reference = _run_mm_generate(_mm_client(), prompt_ids=prompt_ids)
+
+    monkeypatch.setenv("RENDERERS_CLIENT_MM_EXPANSION", "1")
+    client = _mm_client()
+    result = _run_mm_generate(client, prompt_ids=prompt_ids)
 
     body = client.calls[0]["body"]
     assert "content_parts" not in body
+    assert body["features"] == {"mm_hashes": {"image": ["aaa"]}}
     assert body["token_ids"] == [1, 2, 2, 3]
-    assert result["renderer_prompt_ids"] == [1, 2, 3]
-    assert result["mm_placeholders"] == {"image": [{"offset": 1, "length": 2}]}
+    assert result.keys() == reference.keys()
+    assert result["prompt_ids"] == reference["prompt_ids"] == [1, 2, 2, 3]
+    assert result["renderer_prompt_ids"] == reference["renderer_prompt_ids"]
+    assert result["mm_placeholders"] == reference["mm_placeholders"]
+    assert result["multi_modal_data"] is None
+    assert result["completion_top_ids"] == [[7, 20], [8, 20]]
+    np.testing.assert_allclose(
+        result["completion_top_logprobs"], [[-0.1, -4.0], [-0.2, -4.0]]
+    )
+    assert result["weight_versions"] == [{"version": 3, "start": 0, "end": 2}]
+
+
+def test_generate_client_mm_expansion_rejects_mismatched_prompt_ids(monkeypatch):
+    monkeypatch.setenv("RENDERERS_CLIENT_MM_EXPANSION", "1")
+    client = _mm_client()
+
+    with pytest.raises(MalformedGenerateResponseError, match="does not match"):
+        _run_mm_generate(client, prompt_ids=[1, 2, 4])
+    assert client.calls == []
 
 
 def test_generate_rejects_missing_completion_logprobs_before_parsing():

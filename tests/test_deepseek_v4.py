@@ -574,6 +574,15 @@ def test_bridge_extends_parallel_tool_results_given_call_ids(reverse):
     full = renderer.render_ids(full_messages, tools=TOOLS, add_generation_prompt=True)
     assert bridged is not None
     assert bridged.token_ids == full
+    for position, message in enumerate(tail):
+        content = [
+            token
+            for token, index, keep in zip(
+                bridged.token_ids, bridged.message_indices, bridged.is_content
+            )
+            if index == position and keep
+        ]
+        assert _tokenizer().decode(content) == message["content"]
     assert full == render_reference(
         _tokenizer(),
         full_messages,

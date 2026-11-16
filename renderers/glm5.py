@@ -12,7 +12,8 @@ Key differences from Qwen family:
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 from renderers.base import (
@@ -421,7 +422,6 @@ class GLM5Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
-        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids
@@ -886,6 +886,10 @@ class GLM53Renderer(GLM5Renderer):
                 return [by_id[call_id] for call_id in call_ids if call_id in by_id]
         return [(i, content) for i, _, content in results]
 
+    # ``bridge_to_next_turn`` takes ``previous_tool_call_ids``; callers that hold
+    # the previous assistant message should pass its tool-call IDs.
+    supports_previous_tool_call_ids = True
+
     def bridge_to_next_turn(
         self,
         previous_prompt_ids: list[int],
@@ -893,21 +897,55 @@ class GLM53Renderer(GLM5Renderer):
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
-        previous_tool_call_ids: list[str] | None = None,
+        previous_tool_call_ids: Sequence[str] | None = None,
     ) -> RenderedTokens | None:
+        """``previous_tool_call_ids`` are the IDs of the previous assistant
+        message's tool calls, in order. The template puts the tool results that
+        follow an assistant turn in that order, and the IDs cannot be recovered
+        from the sampled tokens, so without them several results in a row are
+        declined."""
         tool_messages = [m for m in new_messages if m.get("role") == "tool"]
-        if len(tool_messages) > 1 or any(
-            _is_list_of_outputs(m.get("content")) for m in tool_messages
-        ):
-            # Sorting needs the original assistant's tool-call IDs. Those IDs
-            # cannot be recovered from the raw sampled completion tokens.
+        if any(_is_list_of_outputs(m.get("content")) for m in tool_messages):
             return None
-        return super().bridge_to_next_turn(
+        # Only the results directly after the assistant turn are ordered by its
+        # calls; a later block has no assistant before it and keeps its order.
+        leading = 0
+        while (
+            leading < len(new_messages) and new_messages[leading].get("role") == "tool"
+        ):
+            leading += 1
+        order = list(range(len(new_messages)))
+        if leading > 1:
+            if previous_tool_call_ids is None:
+                return None
+            assistant: Message = {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": call_id} for call_id in previous_tool_call_ids],
+            }
+            results = self._tool_results([assistant, *new_messages[:leading]], 1)
+            order[:leading] = [i - 1 for i, _ in results]
+        reordered = order != sorted(order)
+        if reordered and any(
+            isinstance(new_messages[i].get("content"), list) for i in order[:leading]
+        ):
+            # Media of reordered results would have to be reordered with them.
+            return None
+        bridged = super().bridge_to_next_turn(
             previous_prompt_ids,
             previous_completion_ids,
-            new_messages,
+            [new_messages[i] for i in order],
             tools=tools,
-            previous_tool_call_ids=previous_tool_call_ids,
+        )
+        if bridged is None or not reordered:
+            return bridged
+        # Attribute tokens to the caller's message positions, not the rendered ones.
+        return replace(
+            bridged,
+            message_indices=[
+                order[i] if i >= 0 else i for i in bridged.message_indices
+            ],
+            message_tool_names=extract_message_tool_names(new_messages),
         )
 
     def render(
@@ -1142,9 +1180,9 @@ class GLM53FlashRenderer(GLM53Renderer):
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
+        previous_tool_call_ids: Sequence[str] | None = None,
         previous_multi_modal_data: MultiModalData | None = None,
         process_multimodal: bool = True,
-        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         self._validate_media(new_messages, process_multimodal=process_multimodal)
         # Logical prompts carry no processed image data, so nothing from

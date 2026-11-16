@@ -388,7 +388,6 @@ class LagunaXS2Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
-        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids
@@ -952,7 +951,6 @@ class LagunaXS21Renderer(LagunaXS2Renderer):
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
-        previous_tool_call_ids: list[str] | None = None,
     ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids

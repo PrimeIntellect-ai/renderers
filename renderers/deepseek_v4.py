@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from collections.abc import Sequence
 from typing import Any, Mapping
 
 from renderers.base import (
@@ -289,29 +290,31 @@ def _prepare_messages(messages: list[Message]) -> list[_LogicalMessage]:
     return merged
 
 
-def _order_tool_results(
-    messages: list[Message], call_ids: list[str] | None
-) -> list[Message] | None:
-    """Put a bridge tail's tool results in call order, as `_prepare_messages` does for a
-    full render. None when that order cannot be proven: no issuing call ids, a result for
-    an unknown call, or a task message that splits the results across logical messages."""
+def _tool_result_order(
+    messages: list[Message], call_ids: Sequence[str] | None
+) -> list[int] | None:
+    """The positions of a bridge tail in render order: tool results in call order, as
+    `_prepare_messages` puts them for a full render, everything else in place. None when
+    that order cannot be proven: no issuing call ids, a result for an unknown call, or a
+    task message that splits the results across logical messages."""
     if not call_ids or any(message.get("task") for message in messages):
         return None
-    order = {str(call_id): index for index, call_id in enumerate(call_ids)}
-    results = [message for message in messages if message.get("role") == "tool"]
-    if any(str(message.get("tool_call_id") or "") not in order for message in results):
+    rank = {str(call_id): index for index, call_id in enumerate(call_ids)}
+    results = [i for i, message in enumerate(messages) if message.get("role") == "tool"]
+    if any(str(messages[i].get("tool_call_id") or "") not in rank for i in results):
         return None
     ordered = iter(
-        sorted(results, key=lambda message: order[str(message["tool_call_id"])])
+        sorted(results, key=lambda i: rank[str(messages[i]["tool_call_id"])])
     )
-    return [
-        next(ordered) if message.get("role") == "tool" else message
-        for message in messages
-    ]
+    return [next(ordered) if i in results else i for i in range(len(messages))]
 
 
 class DeepSeekV4Renderer:
     """Renderer for ``deepseek-ai/DeepSeek-V4-Flash-0731``."""
+
+    # ``bridge_to_next_turn`` takes ``previous_tool_call_ids``; callers that hold
+    # the previous assistant message should pass its tool-call IDs.
+    supports_previous_tool_call_ids = True
 
     @property
     def is_prefix_stable(self) -> bool:
@@ -841,8 +844,12 @@ class DeepSeekV4Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,  # noqa: ARG002
-        previous_tool_call_ids: list[str] | None = None,
+        previous_tool_call_ids: Sequence[str] | None = None,
     ) -> RenderedTokens | None:
+        """``previous_tool_call_ids`` are the IDs of the previous assistant message's
+        tool calls, in order. A full render sorts parallel tool results by them, and the
+        IDs cannot be recovered from the sampled tokens, so without them several results
+        in a row are declined."""
         if (
             not previous_prompt_ids
             or not new_messages
@@ -864,10 +871,12 @@ class DeepSeekV4Renderer:
             is_user_query=_is_query_message,
         ):
             return None
+        order = list(range(len(new_messages)))
         if sum(message.get("role") == "tool" for message in new_messages) > 1:
-            new_messages = _order_tool_results(new_messages, previous_tool_call_ids)
-            if new_messages is None:
+            tool_order = _tool_result_order(new_messages, previous_tool_call_ids)
+            if tool_order is None:
                 return None
+            order = tool_order
 
         previous_ids = trim_to_turn_close(
             previous_prompt_ids,
@@ -880,7 +889,7 @@ class DeepSeekV4Renderer:
 
         try:
             extension = self._render(
-                new_messages,
+                [new_messages[i] for i in order],
                 tools=None,
                 add_generation_prompt=True,
                 add_bos=False,
@@ -890,16 +899,18 @@ class DeepSeekV4Renderer:
             return None
 
         prior_length = len(previous_ids)
+        # Attribute tokens to the caller's message positions, not the rendered ones.
         return RenderedTokens(
             token_ids=previous_ids + extension.token_ids,
-            message_indices=[-1] * prior_length + extension.message_indices,
+            message_indices=[-1] * prior_length
+            + [order[i] if i >= 0 else i for i in extension.message_indices],
             sampled_mask=[False] * (prior_length + len(extension.token_ids)),
             is_content=_content_mask_or_empty(
                 self._tokenizer,
                 [False] * prior_length + extension.is_content,
             ),
-            message_roles=extension.message_roles,
-            message_tool_names=extension.message_tool_names,
+            message_roles=[message.get("role") or "" for message in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
         )
 
 

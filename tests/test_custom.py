@@ -113,6 +113,27 @@ def test_file_import_paths_load_once_per_process(toy_file):
     )
 
 
+def test_lazy_configs_import_their_renderer_when_created(toy_file, monkeypatch):
+    # Parses where the renderer's package isn't installed; only the path's form is checked.
+    lazy = CustomRendererConfig(
+        import_path="private_pkg.renderers.ToyRenderer", lazy=True, effort=7
+    )
+    with pytest.raises(ValueError, match="must look like"):
+        CustomRendererConfig(import_path="private_pkg", lazy=True)
+    with pytest.raises(ModuleNotFoundError):
+        create_renderer(object(), lazy)
+    monkeypatch.syspath_prepend(str(toy_file.parent))
+    lazy = lazy.model_copy(update={"import_path": "toy_renderer.ToyRenderer"})
+    assert create_renderer(object(), lazy).config.effort == 7
+    with pytest.raises(ValidationError):
+        create_renderer(
+            object(),
+            CustomRendererConfig(
+                import_path="toy_renderer.ToyRenderer", lazy=True, unknown=1
+            ),
+        )
+
+
 def test_invalid_import_paths_fail_clearly(toy_file, tmp_path):
     with pytest.raises(ValueError, match="must look like"):
         CustomRendererConfig(import_path=str(toy_file))

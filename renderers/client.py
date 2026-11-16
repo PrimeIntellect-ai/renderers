@@ -304,6 +304,8 @@ def _parse_compact_logprobs(
     choice: Mapping[str, Any], completion_ids: list[int], k: int | None
 ) -> tuple[np.ndarray, list[list[int]] | None, list[list[float]] | None]:
     ids, values, offsets, num_top = _decode_compact_logprobs(choice, completion_ids)
+    if choice["compact_logprobs"].get("samples"):
+        return _parse_sampler_draws(ids, values, offsets, completion_ids, k)
     sampled = []
     top_ids: list[list[int]] = []
     top_logprobs: list[list[float]] = []
@@ -330,6 +332,39 @@ def _parse_compact_logprobs(
         top_ids if k is not None else None,
         top_logprobs if k is not None else None,
     )
+
+
+def _parse_sampler_draws(
+    ids: np.ndarray,
+    values: np.ndarray,
+    offsets: list[int],
+    completion_ids: list[int],
+    k: int | None,
+) -> tuple[np.ndarray, list[list[int]], list[list[float]]]:
+    """Rows of the sampled token followed by ``k`` i.i.d. draws from the sampler: the sampled token's
+    logprob, and the draws in order, repeats kept, as each token's support."""
+    if k is None:
+        raise MalformedGenerateResponseError(
+            "Sampler draws need a requested logprob count"
+        )
+    sampled = []
+    draw_ids: list[list[int]] = []
+    draw_logprobs: list[list[float]] = []
+    for token_id, start, end in zip(completion_ids, offsets, offsets[1:]):
+        if int(ids[start]) != token_id or values[start] == VLLM_LOGPROB_SENTINEL:
+            raise MalformedGenerateResponseError(
+                "Missing compact sampled-token evidence"
+            )
+        if end - start - 1 != k:
+            raise MalformedGenerateResponseError(
+                f"Expected {k} sampler draws per token, got {end - start - 1}"
+            )
+        if (values[start + 1 : end] == VLLM_LOGPROB_SENTINEL).any():
+            raise MalformedGenerateResponseError("A sampler draw has no probability")
+        sampled.append(values[start])
+        draw_ids.append(ids[start + 1 : end].tolist())
+        draw_logprobs.append(values[start + 1 : end].tolist())
+    return np.asarray(sampled, dtype=np.float32), draw_ids, draw_logprobs
 
 
 def _logprob_token_id(entry: Mapping[str, Any]) -> int | None:
@@ -621,6 +656,8 @@ async def generate(
     mask when the engine returned them. Otherwise, when ``sampling_params["logprobs"]``
     is a positive int, the rows are that many top candidates of the sampler's
     distribution, independent of the sampled token and full-vocabulary normalized.
+    When the engine marks its compact logprobs ``samples``, the rows are instead that
+    many i.i.d. draws from the sampler, in order and with repeats.
 
     ``prompt_attribution`` is the renderer's :class:`RenderedTokens` for
     the prompt — either the one this call computed via
@@ -633,7 +670,65 @@ async def generate(
     ``sampled_mask`` for RL trainable spans) without a second render
     pass. ``None`` when the caller passed pre-built ``prompt_ids``
     without attribution.
+
+    A renderer that defines its own ``generate`` (a custom renderer that
+    samples in several requests, say) receives this call's arguments and
+    returns the same dict; it can call :func:`generate_once` for each request.
     """
+    custom_generate = getattr(renderer, "generate", None)
+    if custom_generate is not None:
+        return await custom_generate(
+            client=client,
+            renderer=renderer,
+            messages=messages,
+            model=model,
+            prompt_ids=prompt_ids,
+            multi_modal_data=multi_modal_data,
+            prompt_attribution=prompt_attribution,
+            tools=tools,
+            sampling_params=sampling_params,
+            cache_salt=cache_salt,
+            priority=priority,
+            extra_headers=extra_headers,
+            max_prompt_len=max_prompt_len,
+            process_multimodal=process_multimodal,
+        )
+    return await generate_once(
+        client=client,
+        renderer=renderer,
+        messages=messages,
+        model=model,
+        prompt_ids=prompt_ids,
+        multi_modal_data=multi_modal_data,
+        prompt_attribution=prompt_attribution,
+        tools=tools,
+        sampling_params=sampling_params,
+        cache_salt=cache_salt,
+        priority=priority,
+        extra_headers=extra_headers,
+        max_prompt_len=max_prompt_len,
+        process_multimodal=process_multimodal,
+    )
+
+
+async def generate_once(
+    *,
+    client: AsyncOpenAI,
+    renderer: Renderer,
+    messages: list[Message],
+    model: str,
+    prompt_ids: list[int] | None = None,
+    multi_modal_data: MultiModalData | None = None,
+    prompt_attribution: RenderedTokens | None = None,
+    tools: list[ToolSpec] | None = None,
+    sampling_params: dict[str, Any] | None = None,
+    cache_salt: str | None = None,
+    priority: int | None = None,
+    extra_headers: dict[str, str] | None = None,
+    max_prompt_len: int | None = None,
+    process_multimodal: bool = True,
+) -> dict[str, Any]:
+    """One /inference/v1/generate request through ``renderer`` (see :func:`generate`)."""
     if tools and not getattr(renderer, "supports_tools", True):
         raise ValueError(
             f"{type(renderer).__name__} does not support tools. "

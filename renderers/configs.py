@@ -1050,15 +1050,23 @@ class CustomRendererConfig(BaseRendererConfig):
     import_path: str
     """Renderer class as ``my_module.Class`` or ``path/to/file.py:Class``."""
 
-    _internal_fields = frozenset({"import_path"})
+    lazy: bool = False
+    """Check only the form of ``import_path`` at config load, and import the
+    renderer and validate its fields when it is first created. For configs
+    validated where the renderer's package isn't installed."""
+
+    _internal_fields = frozenset({"import_path", "lazy"})
 
     @model_validator(mode="after")
     def _validate_renderer_fields(self) -> Self:
         # Fail at config load, not at the first render: the import path must
         # resolve and the renderer's config must accept the other fields.
-        from renderers.custom import custom_renderer_config
+        from renderers.custom import custom_renderer_config, split_import_path
 
-        custom_renderer_config(self)
+        if self.lazy:
+            split_import_path(self.import_path)
+        else:
+            custom_renderer_config(self)
         return self
 
 

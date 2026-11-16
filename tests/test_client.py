@@ -18,6 +18,7 @@ from renderers.client import (
     _parse_completion_top_logprobs,
     _parse_replayed_support,
     generate,
+    generate_once,
     parse_generate_response,
 )
 
@@ -160,6 +161,36 @@ def test_compact_logprobs_require_valid_sampled_evidence(logprob):
     )
     with pytest.raises(MalformedGenerateResponseError, match="Missing compact sampled"):
         _parse_compact_logprobs(choice, [8], None)
+
+
+def test_sampler_draws_keep_repeats_and_drop_the_sampled_token():
+    # Each row is the sampled token, then K = 3 i.i.d. draws; draws repeat and may miss the sampled token.
+    choice = _compact_choice(
+        {
+            "logprobs": {
+                "content": [
+                    {
+                        "token": "token_id:7",
+                        "logprob": -0.1,
+                        "top_logprobs": [
+                            {"token": "token_id:5", "logprob": -1.0},
+                            {"token": "token_id:5", "logprob": -1.0},
+                            {"token": "token_id:9", "logprob": -2.0},
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+    choice["compact_logprobs"]["samples"] = True
+    sampled, ids, logprobs = _parse_compact_logprobs(choice, [7], 3)
+    assert sampled.tolist() == pytest.approx([-0.1])
+    assert ids == [[5, 5, 9]]
+    assert logprobs == [pytest.approx([-1.0, -1.0, -2.0])]
+    with pytest.raises(
+        MalformedGenerateResponseError, match="Expected 2 sampler draws"
+    ):
+        _parse_compact_logprobs(choice, [7], 2)
 
 
 @pytest.mark.parametrize("separators", [(",", ":"), (", ", ": ")])
@@ -1209,3 +1240,24 @@ def test_generate_forwards_reasoning_state_without_classifying_acceptance(
     assert result["completion_ids"] == [7, 8]
     assert result["completion_logprobs"] == pytest.approx([-0.1, -0.2])
     assert result["content"] == ""
+
+
+def test_generate_delegates_to_a_renderer_that_generates():
+    class SamplingRenderer(_FakeRenderer):
+        async def generate(self, **kwargs):
+            # A renderer that samples in several requests makes each one through generate_once.
+            assert kwargs["renderer"] is self
+            return {"calls": [await generate_once(**kwargs) for _ in range(2)]}
+
+    client = _FakeClient()
+    result = asyncio.run(
+        generate(
+            client=client,
+            renderer=SamplingRenderer(),
+            messages=[{"role": "user", "content": "hi"}],
+            model="test-model",
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+        )
+    )
+    assert len(result["calls"]) == 2
+    assert result["calls"][0]["completion_ids"] == result["calls"][1]["completion_ids"]

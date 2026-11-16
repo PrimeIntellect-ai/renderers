@@ -21,8 +21,8 @@ if TYPE_CHECKING:
     from renderers.configs import BaseRendererConfig, CustomRendererConfig
 
 
-def load_target(import_path: str) -> Any:
-    """Return the object that ``import_path`` names."""
+def split_import_path(import_path: str) -> tuple[str, str]:
+    """``(module, attribute)`` of ``import_path``, checked for form without importing anything."""
     module_ref, sep, attr = import_path.rpartition(":")
     if not sep and not _is_file_ref(import_path):
         module_ref, sep, attr = import_path.rpartition(".")
@@ -30,6 +30,12 @@ def load_target(import_path: str) -> Any:
         raise ValueError(
             f"Import path {import_path!r} must look like 'my_module.Name' or 'path/to/file.py:Name'"
         )
+    return module_ref, attr
+
+
+def load_target(import_path: str) -> Any:
+    """Return the object that ``import_path`` names."""
+    module_ref, attr = split_import_path(import_path)
     module = load_module(module_ref)
     try:
         return getattr(module, attr)
@@ -94,6 +100,6 @@ def custom_renderer_config(config: "CustomRendererConfig") -> "BaseRendererConfi
     """The renderer's own typed config, built from the fields next to ``import_path``."""
     config_cls = load_custom_renderer(config.import_path).config_class
     data = dict(config.model_extra or {})
-    for field_name in config.model_fields_set - {"name", "import_path"}:
+    for field_name in config.model_fields_set - {"name", "import_path", "lazy"}:
         data[field_name] = getattr(config, field_name)
     return config_cls.model_validate(data)

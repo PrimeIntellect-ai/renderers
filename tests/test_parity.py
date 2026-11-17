@@ -121,16 +121,21 @@ def test_catalog_covers_every_declared_kwarg():
 
 def test_catalog_covers_every_finite_declared_kwarg_value():
     missing = []
-    config_classes = {
-        _config_class_for(case.resolved_renderer) for case in MODEL_CATALOG
-    }
+    config_classes = {}
+    for case in MODEL_CATALOG:
+        config_cls = _config_class_for(case.resolved_renderer)
+        extras = config_classes.setdefault(config_cls, {})
+        for field, values in case.kwarg_values:
+            extras.setdefault(field, set()).update(values)
     for config_cls in sorted(config_classes, key=lambda cls: cls.__name__):
+        extras = config_classes[config_cls]
         for field in sorted(config_cls.template_field_names()):
             annotation = config_cls.model_fields[field].annotation
+            covered = set(KWARG_VALUES[field]) | extras.get(field, set())
             absent = tuple(
                 value
                 for value in _required_annotation_values(annotation)
-                if value not in KWARG_VALUES[field]
+                if value not in covered
             )
             if absent:
                 missing.append(f"{config_cls.__name__}.{field}: {absent!r}")

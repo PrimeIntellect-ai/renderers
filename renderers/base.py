@@ -1069,6 +1069,7 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # chat-template, and processor assets (vision + audio; transformers >= 5.14).
     "thinkingmachines/Inkling": "inkling",
     "thinkingmachines/Inkling-Small": "inkling",
+    "thinkingmachines/Inkling-2-Small": "inkling-2",
     "thinkingmachines/Inkling-2-Small-MXFP8": "inkling-2",
     "thinkingmachines/Inkling-2-Small-bf16": "inkling-2",
     # Tencent Hunyuan Hy3 (295B-A21B MoE). The FP8 checkpoint shares the same

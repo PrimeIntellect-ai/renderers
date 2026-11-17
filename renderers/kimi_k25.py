@@ -601,6 +601,8 @@ class KimiK25Renderer:
 
     supports_process_multimodal = True
 
+    is_multimodal = True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -650,13 +652,6 @@ class KimiK25Renderer:
         # for Kimi (we emit a single placeholder regardless), but kept for
         # consistency / debugging.
         self._image_cache: dict[str, tuple[Any, int]] = {}
-
-    @property
-    def mm_token_type_id_map(self) -> dict[int, int]:
-        """Token-id → modality marker. For Kimi K2.5 only ``<|media_pad|>``
-        carries an image marker (1); the model expands per-patch attention
-        internally from ``pixel_values``."""
-        return {self._media_pad: 1}
 
     def _get_processor(self):
         if self._processor is not None:
@@ -849,13 +844,13 @@ class KimiK25Renderer:
                 self._media_end, msg_idx, is_sampled=is_sampled, is_content=False
             )
             emit_text("\n", msg_idx, is_sampled=is_sampled, is_content=False)
+            mm_placeholders.setdefault("image", []).append(
+                PlaceholderRange(offset=offset, length=1)
+            )
             if not process_multimodal:
                 return
             assert out is not None and h is not None
             mm_hashes.setdefault("image", []).append(h)
-            mm_placeholders.setdefault("image", []).append(
-                PlaceholderRange(offset=offset, length=1)
-            )
             # ``grid_thws`` (Kimi) is the per-image equivalent of Qwen-VL's
             # ``image_grid_thw``. Ship under Kimi's native key so the
             # orchestrator's generic ``torch.cat``-based packer routes it
@@ -1148,13 +1143,13 @@ class KimiK25Renderer:
             emit_special(self._media_pad, msg_idx, is_content=is_content)
             emit_special(self._media_end, msg_idx)
             emit_text("\n", msg_idx)
+            new_placeholders.setdefault("image", []).append(
+                PlaceholderRange(offset=offset, length=1)
+            )
             if not process_multimodal:
                 return
             assert out is not None and h is not None
             new_hashes.setdefault("image", []).append(h)
-            new_placeholders.setdefault("image", []).append(
-                PlaceholderRange(offset=offset, length=1)
-            )
             new_items.setdefault("image", []).append(
                 {
                     "pixel_values": out["pixel_values"],
@@ -1214,17 +1209,17 @@ class KimiK25Renderer:
         # below never mutates the caller's previous_multi_modal_data.
         merged_hashes: dict[str, list[str]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_hashes.items()}
-            if process_multimodal and previous_multi_modal_data
+            if previous_multi_modal_data
             else {}
         )
         merged_placeholders: dict[str, list[PlaceholderRange]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_placeholders.items()}
-            if process_multimodal and previous_multi_modal_data
+            if previous_multi_modal_data
             else {}
         )
         merged_items: dict[str, list[dict[str, Any]]] = (
             {k: list(v) for k, v in previous_multi_modal_data.mm_items.items()}
-            if process_multimodal and previous_multi_modal_data
+            if previous_multi_modal_data
             else {}
         )
         for modality, vals in new_hashes.items():

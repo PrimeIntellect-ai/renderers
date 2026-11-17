@@ -107,7 +107,6 @@ def test_image_content_expands_and_attaches_only_model_inputs():
 
     assert messages[0]["content"][1]["image"] is image
     assert image_processor.calls == 1
-    assert renderer.mm_token_type_id_map == {18: 1}
     assert rendered.multi_modal_data is not None
     assert rendered.multi_modal_data.mm_hashes.keys() == {"image"}
     assert len(rendered.multi_modal_data.mm_hashes["image"]) == 1
@@ -143,7 +142,9 @@ def test_deferred_multimodal_processing_keeps_one_logical_image_token():
     )
 
     assert rendered.token_ids.count(18) == 1
-    assert rendered.multi_modal_data is None
+    assert rendered.multi_modal_data.mm_placeholders == {
+        "image": [PlaceholderRange(offset=rendered.token_ids.index(18), length=1)]
+    }
 
 
 def test_two_images_produce_two_distinct_placeholder_ranges():
@@ -196,7 +197,6 @@ def test_text_only_nemotron35_tokenizer_does_not_need_image_token():
 
     renderer = Nemotron35Renderer(_TextTokenizer())
 
-    assert renderer.mm_token_type_id_map == {}
     assert renderer.render_ids([{"role": "user", "content": "Hello"}])
 
 

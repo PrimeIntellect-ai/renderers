@@ -20,6 +20,7 @@ from renderers.base import (
     Message,
     MultiModalData,
     ParsedResponse,
+    PlaceholderRange,
     RenderedTokens,
     Tokenizer,
     ToolSpec,
@@ -90,6 +91,11 @@ class GLM5Renderer:
     # instead of just emitting ``</think>`` as a separator. Subclassed in
     # GLM51Renderer; GLM-5 proper keeps this off.
     empty_think_on_last_assistant: bool = False
+
+    # Special-token id -> modality for media placeholders. Renderers that place
+    # media fill it; a placeholder is recorded only where ``emit_special``
+    # places it, never for text that tokenizes to the same id.
+    _media_tokens: dict[int, str] = {}
 
     # GLM-5.1 uses the same template surface and binds the same kwargs.
     # Subclassed in ``GLM51Renderer`` so the registry can dispatch on the
@@ -210,10 +216,15 @@ class GLM5Renderer:
         indices: list[int] = []
         sampled: list[bool] = []
         content_mask: list[bool] = []
+        mm_placeholders: dict[str, list[PlaceholderRange]] = {}
 
         def emit_special(
             token_id: int, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
+            if modality := self._media_tokens.get(token_id):
+                mm_placeholders.setdefault(modality, []).append(
+                    PlaceholderRange(offset=len(tokens), length=1)
+                )
             tokens.append(token_id)
             indices.append(msg_idx)
             sampled.append(is_sampled)
@@ -345,6 +356,9 @@ class GLM5Renderer:
             is_content=_content_mask_or_empty(self._tokenizer, content_mask),
             message_roles=[m.get("role") or "" for m in messages],
             message_tool_names=extract_message_tool_names(messages),
+            multi_modal_data=MultiModalData(mm_placeholders=mm_placeholders)
+            if mm_placeholders
+            else None,
         )
 
     def _emit_generation_prompt(self, emit_special) -> None:
@@ -422,6 +436,7 @@ class GLM5Renderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
+        previous_multi_modal_data: MultiModalData | None = None,
     ) -> RenderedTokens | None:
         if (
             not previous_prompt_ids
@@ -464,6 +479,14 @@ class GLM5Renderer:
         ext_indices: list[int] = []
         ext_sampled: list[bool] = []
         ext_content: list[bool] = []
+        mm_placeholders = {
+            modality: list(ranges)
+            for modality, ranges in (
+                previous_multi_modal_data.mm_placeholders
+                if previous_multi_modal_data is not None
+                else {}
+            ).items()
+        }
 
         # Bridge populates ``message_indices`` (relative to ``new_messages``)
         # and ``sampled_mask`` (uniformly ``False`` — every token the
@@ -480,6 +503,10 @@ class GLM5Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
+            if modality := self._media_tokens.get(token_id):
+                mm_placeholders.setdefault(modality, []).append(
+                    PlaceholderRange(offset=len(previous_ids) + len(ext), length=1)
+                )
             ext.append(token_id)
             ext_indices.append(msg_idx)
             ext_sampled.append(is_sampled)
@@ -579,6 +606,9 @@ class GLM5Renderer:
             ),
             message_roles=[m.get("role") or "" for m in new_messages],
             message_tool_names=extract_message_tool_names(new_messages),
+            multi_modal_data=MultiModalData(mm_placeholders=mm_placeholders)
+            if mm_placeholders
+            else None,
         )
 
     def _render_assistant(
@@ -897,6 +927,7 @@ class GLM53Renderer(GLM5Renderer):
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
+        previous_multi_modal_data: MultiModalData | None = None,
         previous_tool_call_ids: Sequence[str] | None = None,
     ) -> RenderedTokens | None:
         """``previous_tool_call_ids`` are the IDs of the previous assistant
@@ -936,6 +967,7 @@ class GLM53Renderer(GLM5Renderer):
             previous_completion_ids,
             [new_messages[i] for i in order],
             tools=tools,
+            previous_multi_modal_data=previous_multi_modal_data,
         )
         if bridged is None or not reordered:
             return bridged
@@ -970,6 +1002,10 @@ class GLM53Renderer(GLM5Renderer):
         rendered.sampled_mask[insertion:insertion] = [False] * len(preamble)
         if rendered.is_content:
             rendered.is_content[insertion:insertion] = [False] * len(preamble)
+        if rendered.multi_modal_data is not None:
+            for ranges in rendered.multi_modal_data.mm_placeholders.values():
+                for placeholder in ranges:
+                    placeholder.offset += len(preamble)
         return rendered
 
     def _render_assistant(
@@ -1061,6 +1097,8 @@ class GLM53FlashRenderer(GLM53Renderer):
     _config_cls = GLM53FlashRendererConfig
     supports_process_multimodal = True
 
+    is_multimodal = True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -1070,10 +1108,7 @@ class GLM53FlashRenderer(GLM53Renderer):
         self._begin_of_image = self._token_id("<|begin_of_image|>")
         self._image = self._token_id("<|image|>")
         self._end_of_image = self._token_id("<|end_of_image|>")
-
-    @property
-    def mm_token_type_id_map(self) -> dict[int, int]:
-        return {self._image: 1}
+        self._media_tokens = {self._image: "image"}
 
     @staticmethod
     def _validate_media(messages: list[Message], *, process_multimodal: bool) -> None:
@@ -1185,12 +1220,11 @@ class GLM53FlashRenderer(GLM53Renderer):
         process_multimodal: bool = True,
     ) -> RenderedTokens | None:
         self._validate_media(new_messages, process_multimodal=process_multimodal)
-        # Logical prompts carry no processed image data, so nothing from
-        # ``previous_multi_modal_data`` needs carrying forward.
         return super().bridge_to_next_turn(
             previous_prompt_ids,
             previous_completion_ids,
             new_messages,
             tools=tools,
             previous_tool_call_ids=previous_tool_call_ids,
+            previous_multi_modal_data=previous_multi_modal_data,
         )

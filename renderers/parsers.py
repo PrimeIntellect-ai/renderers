@@ -452,10 +452,106 @@ class ThinkTextReasoningParser:
         return (reasoning or None), after
 
 
+class Inkling2ToolParser:
+    """Inkling 2 calls: ``<|message_model|>[name]<|content_invoke_tool_json|>{"name":..,"args":..}<|end_message|>``.
+
+    The model writes one framing token per block — a thinking block, one or more
+    text blocks, and one block per tool call (the tool name optionally in the block
+    header). Text- and error-shaped invoke blocks are visible content, as in
+    vLLM's Inkling parser. Generation ends with ``<|content_model_end_sampling|>``,
+    which the renderer strips before parsing.
+    """
+
+    MODEL = "<|message_model|>"
+    END_MESSAGE = "<|end_message|>"
+    KINDS = {
+        "<|content_thinking|>": "thinking",
+        "<|content_text|>": "text",
+        "<|content_invoke_tool_json|>": "tool_json",
+        "<|content_invoke_tool_text|>": "tool_text",
+        "<|content_tool_error|>": "tool_error",
+    }
+
+    def __init__(self, tokenizer):
+        self._tokenizer = tokenizer
+        self._model_id = _token_id(tokenizer, self.MODEL)
+        self._end_id = _token_id(tokenizer, self.END_MESSAGE)
+        self._kind_ids: dict[int, str] = {}
+        for token, kind in self.KINDS.items():
+            tid = _token_id(tokenizer, token)
+            if tid is not None:
+                self._kind_ids[tid] = kind
+
+    def extract(self, ids: list[int]) -> tuple[list[int], list[ParsedToolCall]]:
+        if self._model_id is None:
+            return ids, []
+        starts = [i for i, token in enumerate(ids) if token == self._model_id]
+        if not starts:
+            return ids, []
+        content_ids: list[int] = []
+        tool_calls: list[ParsedToolCall] = []
+        bounds = [*starts, len(ids)]
+        for block_start, block_end in zip(bounds, bounds[1:]):
+            body_start = block_start + 1
+            kind = None
+            kind_pos = -1
+            for pos in range(body_start, block_end):
+                kind = self._kind_ids.get(ids[pos])
+                if kind is not None:
+                    kind_pos = pos
+                    break
+            if kind is None:
+                continue
+            header = _decode(self._tokenizer, ids[body_start:kind_pos]).strip()
+            body_stop = block_end
+            if self._end_id is not None:
+                for pos in range(kind_pos + 1, block_end):
+                    if ids[pos] == self._end_id:
+                        body_stop = pos
+                        break
+            body = ids[kind_pos + 1 : body_stop]
+            if kind in ("text", "tool_text", "tool_error"):
+                content_ids.extend(body)
+                continue
+            if kind != "tool_json":
+                continue
+            payload = _decode(self._tokenizer, body).strip()
+            if not payload:
+                continue
+            span = (block_start, min(body_stop + 1, block_end))
+            try:
+                parsed = json.loads(payload)
+            except json.JSONDecodeError:
+                parsed = None
+            if not isinstance(parsed, dict):
+                # Same fallback as the Inkling parser: keep the raw payload.
+                tool_calls.append(
+                    ParsedToolCall(
+                        raw=payload,
+                        name=header or None,
+                        arguments=payload,
+                        token_span=span,
+                        status=ToolCallParseStatus.INVALID_JSON,
+                    )
+                )
+                continue
+            arguments = parsed.get("args", parsed.get("arguments", {}))
+            tool_calls.append(
+                ParsedToolCall(
+                    raw=payload,
+                    name=parsed.get("name") or header or None,
+                    arguments=arguments,
+                    token_span=span,
+                )
+            )
+        return content_ids, tool_calls
+
+
 # ── Registries ───────────────────────────────────────────────────────
 
 
 TOOL_PARSERS: dict[str, type] = {
+    "inkling2": Inkling2ToolParser,
     "qwen3": Qwen3ToolParser,
     "qwen3.5": Qwen35ToolParser,
     "glm": GlmToolParser,

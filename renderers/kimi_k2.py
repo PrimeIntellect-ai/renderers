@@ -25,6 +25,7 @@ from renderers.base import (
     ToolSpec,
     Tokenizer,
     _content_mask_or_empty,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -82,10 +83,12 @@ class KimiK2Renderer:
         )
         return tid
 
-    def _encode(self, text: str) -> list[int]:
+    def _encode(self, text: str, *, split_special_tokens: bool = False) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return encode_text(
+            self._tokenizer, text, split_special_tokens=split_special_tokens
+        )
 
     def _ensure_system_message(
         self, messages: list[Message]
@@ -205,7 +208,7 @@ class KimiK2Renderer:
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
             emit_ids(
-                self._encode(text),
+                self._encode(text, split_special_tokens=is_content and not is_sampled),
                 msg_idx,
                 is_sampled=is_sampled,
                 is_content=is_content,
@@ -441,7 +444,7 @@ class KimiK2Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content and not is_sampled)
             ext.extend(ids)
             ext_indices.extend([msg_idx] * len(ids))
             ext_sampled.extend([is_sampled] * len(ids))

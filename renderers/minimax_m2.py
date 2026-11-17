@@ -25,6 +25,7 @@ from renderers.base import (
     _content_mask_or_empty,
     _get_offset_tokenizer,
     attribute_text_segments,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -91,10 +92,12 @@ class MiniMaxM2Renderer:
         )
         return tid
 
-    def _encode(self, text: str) -> list[int]:
+    def _encode(self, text: str, *, split_special_tokens: bool = False) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return encode_text(
+            self._tokenizer, text, split_special_tokens=split_special_tokens
+        )
 
     @staticmethod
     def _visible_text(content: Any) -> str:
@@ -138,7 +141,7 @@ class MiniMaxM2Renderer:
         def emit_text(
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content and not is_sampled)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
@@ -148,7 +151,7 @@ class MiniMaxM2Renderer:
             segments: list[tuple[str, bool]], msg_idx: int, *, is_sampled: bool
         ) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=not is_sampled
             ):
                 tokens.append(tok_id)
                 indices.append(msg_idx)
@@ -176,14 +179,17 @@ class MiniMaxM2Renderer:
             """
             offset_tok = _get_offset_tokenizer(self._tokenizer)
             if offset_tok is None:
-                ids = self._encode(full_text)
+                ids = self._encode(full_text, split_special_tokens=not is_sampled)
                 tokens.extend(ids)
                 indices.extend([msg_idx] * len(ids))
                 sampled.extend([is_sampled] * len(ids))
                 content_mask.extend([False] * len(ids))
                 return
             encoding = offset_tok(
-                full_text, add_special_tokens=False, return_offsets_mapping=True
+                full_text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+                split_special_tokens=not is_sampled,
             )
             for tok_id, (start, end) in zip(
                 encoding["input_ids"], encoding["offset_mapping"]
@@ -408,7 +414,7 @@ class MiniMaxM2Renderer:
             is_sampled: bool = False,
             is_content: bool = False,
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode(text, split_special_tokens=is_content and not is_sampled)
             ext.extend(ids)
             ext_indices.extend([msg_idx] * len(ids))
             ext_sampled.extend([is_sampled] * len(ids))
@@ -421,7 +427,7 @@ class MiniMaxM2Renderer:
             is_sampled: bool = False,
         ) -> None:
             for tok_id, is_content in attribute_text_segments(
-                self._tokenizer, segments
+                self._tokenizer, segments, split_special_tokens=not is_sampled
             ):
                 ext.append(tok_id)
                 ext_indices.append(msg_idx)
@@ -438,14 +444,17 @@ class MiniMaxM2Renderer:
         ) -> None:
             offset_tok = _get_offset_tokenizer(self._tokenizer)
             if offset_tok is None:
-                ids = self._encode(full_text)
+                ids = self._encode(full_text, split_special_tokens=not is_sampled)
                 ext.extend(ids)
                 ext_indices.extend([msg_idx] * len(ids))
                 ext_sampled.extend([is_sampled] * len(ids))
                 ext_content.extend([False] * len(ids))
                 return
             encoding = offset_tok(
-                full_text, add_special_tokens=False, return_offsets_mapping=True
+                full_text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+                split_special_tokens=not is_sampled,
             )
             for tok_id, (start, end) in zip(
                 encoding["input_ids"], encoding["offset_mapping"]

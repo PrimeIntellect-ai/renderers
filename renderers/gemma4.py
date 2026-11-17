@@ -39,6 +39,7 @@ from renderers.base import (
     _content_mask_or_empty,
     _require_transformers,
     attribute_text_segments,
+    encode_text,
     extract_message_tool_names,
     reject_assistant_in_extension,
     resolve_thinking_retention,
@@ -74,6 +75,7 @@ class _Emitter:
         self._segments: list[tuple[str, bool]] = []
         self._buf_idx = msg_idx
         self._buf_sampled = False
+        self._buf_parses_specials = False
         self.msg_idx = msg_idx
 
     def set_msg_idx(self, msg_idx: int) -> None:
@@ -82,7 +84,16 @@ class _Emitter:
         self.msg_idx = msg_idx
         self._buf_idx = msg_idx
 
-    def text(self, text: str, *, is_sampled: bool, is_content: bool) -> None:
+    def text(
+        self,
+        text: str,
+        *,
+        is_sampled: bool,
+        is_content: bool,
+        parses_specials: bool = False,
+    ) -> None:
+        """Buffer ``text``; ``parses_specials`` marks text whose ``<|"|>``
+        delimiters must still tokenize as the special token."""
         if not text:
             return
         if self._segments and (
@@ -92,6 +103,7 @@ class _Emitter:
         if not self._segments:
             self._buf_idx = self.msg_idx
             self._buf_sampled = is_sampled
+        self._buf_parses_specials |= parses_specials
         self._segments.append((text, is_content))
 
     def special(self, token_id: int, *, is_sampled: bool, is_content: bool) -> None:
@@ -114,11 +126,16 @@ class _Emitter:
     def _flush(self) -> None:
         segments = self._segments
         self._segments = []
+        split_special_tokens = not (self._buf_sampled or self._buf_parses_specials)
+        self._buf_parses_specials = False
         if not segments:
             return
         first_content = segments[0][1]
         if all(is_content == first_content for _, is_content in segments):
-            ids = self._encode("".join(text for text, _ in segments))
+            ids = self._encode(
+                "".join(text for text, _ in segments),
+                split_special_tokens=split_special_tokens and first_content,
+            )
             self.token_ids.extend(ids)
             self.message_indices.extend([self._buf_idx] * len(ids))
             self.sampled.extend([self._buf_sampled] * len(ids))
@@ -127,7 +144,9 @@ class _Emitter:
         assert self._tokenizer is not None, (
             "Gemma4 _Emitter needs a tokenizer for mixed body/scaffold text."
         )
-        for token_id, is_content in attribute_text_segments(self._tokenizer, segments):
+        for token_id, is_content in attribute_text_segments(
+            self._tokenizer, segments, split_special_tokens=split_special_tokens
+        ):
             self.token_ids.append(token_id)
             self.message_indices.append(self._buf_idx)
             self.sampled.append(self._buf_sampled)
@@ -498,10 +517,12 @@ class Gemma4Renderer:
         )
         return token_id
 
-    def _encode(self, text: str) -> list[int]:
+    def _encode(self, text: str, *, split_special_tokens: bool = False) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return encode_text(
+            self._tokenizer, text, split_special_tokens=split_special_tokens
+        )
 
     @property
     def mm_token_type_id_map(self) -> dict[int, int]:
@@ -694,6 +715,7 @@ class Gemma4Renderer:
                 _format_argument(response, escape_keys=False),
                 is_sampled=assistant_body,
                 is_content=True,
+                parses_specials=True,
             )
         else:
             em.text(
@@ -705,6 +727,7 @@ class Gemma4Renderer:
                 _format_argument(response, escape_keys=False),
                 is_sampled=assistant_body,
                 is_content=True,
+                parses_specials=True,
             )
             em.text(
                 "}",

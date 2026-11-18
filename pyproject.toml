@@ -52,7 +52,7 @@ transformers = [
 # Image/audio renderers also need Pillow to resolve media inputs. Keep this as
 # a separate convenience extra so tokenizer-only users do not pull it in.
 multimodal = [
-    "pillow>=12.2.0",
+    "pillow>=13.0.0",
     "transformers>=4.50.0",
 ]
 
@@ -96,7 +96,7 @@ packages = ["renderers"]
 
 [dependency-groups]
 dev = [
-    "pillow>=12.2.0",
+    "pillow>=13.0.0",
     "pre-commit",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",

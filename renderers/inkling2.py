@@ -1,47 +1,43 @@
-"""Inkling 2 renderer.
-
-The Inkling 2 chat template is token-delimited like Inkling 1 (atomic role and
-content special tokens, ``<|end_message|>`` closed blocks), but it drops audio,
-adds optional assistant/tool name headers and closes every assistant turn with
-``<|content_model_end_sampling|>``.
-
-This renderer keeps the token stream byte-identical to
-``tokenizer.apply_chat_template`` (it renders through the template) and adds the
-attribution SFT needs:
-
-* ``message_indices`` — from the default incremental (prefix) rendering;
-* ``sampled_mask`` — an assistant turn is sampled from the first body token
-  after its ``<|content_text|>`` marker through ``<|end_message|>`` and
-  ``<|content_model_end_sampling|>``; header tokens are prompt;
-* ``is_content`` — the body tokens only.
-
-Assistant turns may carry ``reasoning_content`` and ``tool_calls``: the
-template renders them as additional ``<|message_model|>``-tagged blocks, and
-every token after the turn's first role tag is sampled and content, matching
-the Inkling renderer.
-"""
+"""Template-parity text renderer for Thinking Machines Inkling 2."""
 
 from __future__ import annotations
 
-from renderers.base import Message, RenderedTokens, ToolSpec
+from renderers.base import (
+    Message,
+    ParsedResponse,
+    RenderedTokens,
+    ToolSpec,
+    extract_message_tool_names,
+)
 from renderers.configs import Inkling2RendererConfig
 from renderers.default import DefaultRenderer
+from renderers.inkling import _classify_part
+from renderers.parsers import Inkling2ToolParser, _token_id
+from renderers.parsing import _strip_stop_tokens
 
 
 class Inkling2Renderer(DefaultRenderer):
-    """Template-parity Inkling 2 renderer with sampled-token attribution."""
+    """Use the model template for IDs and attribute its text-only message blocks."""
+
+    config: Inkling2RendererConfig
 
     def __init__(self, tokenizer, config: Inkling2RendererConfig | None = None):
         super().__init__(tokenizer, config or Inkling2RendererConfig())
+        self._message_system_id = self._special_token_id("<|message_system|>")
         self._content_text_id = self._special_token_id("<|content_text|>")
-        self._message_model_id = self._special_token_id("<|message_model|>")
+        self._end_message_id = self._special_token_id("<|end_message|>")
         self._model_end_sampling_id = self._special_token_id(
             "<|content_model_end_sampling|>"
         )
+        self._native_parser = (
+            self._tool_parser
+            if isinstance(self._tool_parser, Inkling2ToolParser)
+            else Inkling2ToolParser(tokenizer)
+        )
 
     def _special_token_id(self, token: str) -> int:
-        tid = self._tokenizer.convert_tokens_to_ids(token)
-        if not isinstance(tid, int) or tid == self._tokenizer.unk_token_id:
+        tid = _token_id(self._tokenizer, token)
+        if tid is None:
             raise ValueError(
                 f"Inkling 2 tokenizer is missing the special token {token!r}"
             )
@@ -56,6 +52,26 @@ class Inkling2Renderer(DefaultRenderer):
             kwargs["reasoning_effort"] = self.config.reasoning_effort
         return kwargs
 
+    def render_ids(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,
+        add_generation_prompt: bool = False,
+    ) -> list[int]:
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    kind, _ = _classify_part(part)
+                    if kind != "text":
+                        raise ValueError(
+                            f"Inkling2Renderer is text-only and does not support {kind} content"
+                        )
+        return super().render_ids(
+            messages, tools=tools, add_generation_prompt=add_generation_prompt
+        )
+
     def render(
         self,
         messages: list[Message],
@@ -63,93 +79,117 @@ class Inkling2Renderer(DefaultRenderer):
         tools: list[ToolSpec] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
-        rendered = super().render(
+        if not messages:
+            return super().render(
+                messages, tools=tools, add_generation_prompt=add_generation_prompt
+            )
+        ids = self.render_ids(
             messages, tools=tools, add_generation_prompt=add_generation_prompt
         )
-        ids = list(rendered.token_ids)
-        indices = list(rendered.message_indices)
+        indices = [-1] * len(ids)
         sampled = [False] * len(ids)
         is_content = [False] * len(ids)
 
-        start = 0
-        while start < len(ids):
-            end = start
-            while end < len(ids) and indices[end] == indices[start]:
-                end += 1
-            message_index = indices[start]
-            if message_index >= 0:
-                message = messages[message_index]
-                if message.get("role") == "assistant":
-                    self._mark_assistant_span(
-                        ids, message, start, end, sampled, is_content
-                    )
-            start = end
+        # A bodyless system message yields just the tools and effort scaffold.
+        # The template moves effort after the leading system messages, so
+        # incremental prefix lengths would count it against the first system.
+        scaffold = self._apply([{"role": "system", "content": []}], tools=tools)
+        offset = len(scaffold) - 1 - scaffold[::-1].index(self._message_system_id)
+        effort_len = len(scaffold) - offset
+        effort_pending = True
+
+        # The template concatenates all matching function names for an unnamed
+        # tool result, including reused IDs later in the conversation.
+        tool_names: dict[str, list[str]] = {}
+        for message in messages:
+            if message["role"] == "assistant":
+                for call in message.get("tool_calls") or []:
+                    if call_id := call.get("id"):
+                        tool_names.setdefault(call_id, []).append(
+                            call["function"]["name"]
+                        )
+
+        for index, message in enumerate(messages):
+            role = message["role"]
+            if effort_pending and role != "system":
+                offset += effort_len
+                effort_pending = False
+
+            template_message: Message = message
+            if role == "tool" and not message.get("name"):
+                name = "".join(tool_names.get(message.get("tool_call_id", ""), []))
+                template_message = message.copy()
+                template_message["name"] = name
+            standalone = self._apply([template_message])
+            span = (
+                standalone[:-effort_len]
+                if role == "system"
+                else standalone[effort_len:]
+            )
+            end = offset + len(span)
+            if span != ids[offset:end]:
+                raise ValueError("Inkling 2 template changed a message's token span")
+
+            indices[offset:end] = [index] * len(span)
+            if role == "assistant":
+                # The template supplies no generation prefill. The entire turn,
+                # including its first role/content markers, is sampled.
+                sampled[offset:end] = [True] * len(span)
+                is_content[offset:end] = [True] * len(span)
+            else:
+                is_content[offset:end] = self._text_content_mask(message, span)
+            offset = end
 
         return RenderedTokens(
             token_ids=ids,
             message_indices=indices,
-            message_roles=rendered.message_roles,
-            message_tool_names=rendered.message_tool_names,
+            message_roles=[message["role"] for message in messages],
+            message_tool_names=extract_message_tool_names(messages),
             sampled_mask=sampled,
             is_content=is_content,
         )
 
-    def _mark_assistant_span(
+    def _text_content_mask(self, message: Message, ids: list[int]) -> list[bool]:
+        mask = [False] * len(ids)
+        content = message.get("content")
+        parts = [content] if isinstance(content, str) else (content or [])
+        start = 0
+        for part in parts:
+            _, body = _classify_part(part)
+            body_ids = list(self._tokenizer.encode(body, add_special_tokens=False))
+            body_start = ids.index(self._content_text_id, start) + 1
+            end = body_start + len(body_ids)
+            if ids[body_start : end + 1] != [*body_ids, self._end_message_id]:
+                raise ValueError("Inkling 2 text body does not match its template span")
+            mask[body_start:end] = [True] * len(body_ids)
+            start = end + 1
+        return mask
+
+    def parse_response(
         self,
-        ids: list[int],
-        message: Message,
-        start: int,
-        end: int,
-        sampled: list[bool],
-        is_content: list[bool],
-    ) -> None:
-        if message.get("reasoning_content") or message.get("tool_calls"):
-            self._mark_rich_assistant_span(ids, start, end, sampled, is_content)
-            return
-        span = ids[start:end]
-        if self._content_text_id not in span:
-            raise ValueError(
-                "assistant message rendered without a <|content_text|> marker"
-            )
-        body_start = start + len(span) - 1 - span[::-1].index(self._content_text_id) + 1
-        body = message.get("content") or ""
-        body_ids = self._encode_body(body) if body else []
-        if body_ids:
-            if ids[body_start : body_start + len(body_ids)] != body_ids:
-                raise ValueError(
-                    "assistant body does not tokenize contiguously inside the rendering"
-                )
-            for offset in range(len(body_ids)):
-                sampled[body_start + offset] = True
-                is_content[body_start + offset] = True
-        # Closing markers the model samples at inference.
-        for position in range(body_start + len(body_ids), end):
-            sampled[position] = True
+        token_ids: list[int],
+        *,
+        tools: list[ToolSpec] | None = None,  # noqa: ARG002 — native JSON needs no schema
+        prompt_ids: list[int] | None = None,  # noqa: ARG002 — no generation prefill
+    ) -> ParsedResponse:
+        ids = _strip_stop_tokens(token_ids, set(self.get_stop_token_ids()))
+        if (
+            self._tool_parser is not None
+            and self._tool_parser is not self._native_parser
+        ):
+            ids, tool_calls = self._tool_parser.extract(ids)
+        else:
+            tool_calls = []
 
-    def _mark_rich_assistant_span(
-        self,
-        ids: list[int],
-        start: int,
-        end: int,
-        sampled: list[bool],
-        is_content: list[bool],
-    ) -> None:
-        """Mark a turn that renders thinking, text and/or tool-call blocks.
-
-        The template opens the turn with one role tag (scaffold) and tags every
-        later block of the turn; everything after that first role tag is the
-        model's emission, so it is sampled and content at once.
-        """
-        if ids[start] != self._message_model_id:
-            raise ValueError(
-                "assistant message rendered without a <|message_model|> tag"
-            )
-        for position in range(start + 1, end):
-            sampled[position] = True
-            is_content[position] = True
-
-    def _encode_body(self, text: str) -> list[int]:
-        return list(self._tokenizer.encode(text, add_special_tokens=False))
+        response = self._native_parser.parse(
+            ids, parse_tools=self._tool_parser is self._native_parser
+        )
+        if self._reasoning_parser is not None and response.reasoning_content is None:
+            reasoning, content = self._reasoning_parser.extract(response.content)
+            response.reasoning_content = reasoning
+            response.content = content
+        response.tool_calls.extend(tool_calls)
+        return response
 
 
 __all__ = ["Inkling2Renderer"]

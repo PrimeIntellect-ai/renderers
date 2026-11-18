@@ -19,7 +19,7 @@ import json
 import re
 from typing import Protocol, runtime_checkable
 
-from renderers.base import ParsedToolCall, ToolCallParseStatus
+from renderers.base import ParsedResponse, ParsedToolCall, ToolCallParseStatus
 
 
 # ── Shared helpers ───────────────────────────────────────────────────
@@ -453,14 +453,7 @@ class ThinkTextReasoningParser:
 
 
 class Inkling2ToolParser:
-    """Inkling 2 calls: ``<|message_model|>[name]<|content_invoke_tool_json|>{"name":..,"args":..}<|end_message|>``.
-
-    The model writes one framing token per block — a thinking block, one or more
-    text blocks, and one block per tool call (the tool name optionally in the block
-    header). Text- and error-shaped invoke blocks are visible content, as in
-    vLLM's Inkling parser. Generation ends with ``<|content_model_end_sampling|>``,
-    which the renderer strips before parsing.
-    """
+    """Parse Inkling 2's token-delimited reasoning, text and invocation blocks."""
 
     MODEL = "<|message_model|>"
     END_MESSAGE = "<|end_message|>"
@@ -483,68 +476,98 @@ class Inkling2ToolParser:
                 self._kind_ids[tid] = kind
 
     def extract(self, ids: list[int]) -> tuple[list[int], list[ParsedToolCall]]:
-        if self._model_id is None:
-            return ids, []
-        starts = [i for i, token in enumerate(ids) if token == self._model_id]
-        if not starts:
-            return ids, []
-        content_ids: list[int] = []
-        tool_calls: list[ParsedToolCall] = []
+        content, _, _, tool_calls = self._split(ids, parse_tools=True)
+        return content, tool_calls
+
+    def parse(self, ids: list[int], *, parse_tools: bool) -> ParsedResponse:
+        content, reasoning, complete, tool_calls = self._split(
+            ids, parse_tools=parse_tools
+        )
+        return ParsedResponse(
+            content=_decode(self._tokenizer, content),
+            reasoning_content=_decode(self._tokenizer, reasoning)
+            if reasoning is not None
+            else None,
+            reasoning_complete=complete,
+            tool_calls=tool_calls,
+        )
+
+    def _split(
+        self, ids: list[int], *, parse_tools: bool
+    ) -> tuple[list[int], list[int] | None, bool, list[ParsedToolCall]]:
+        if not ids:
+            return [], None, True, []
+        starts = [0, *(i for i in range(1, len(ids)) if ids[i] == self._model_id)]
         bounds = [*starts, len(ids)]
-        for block_start, block_end in zip(bounds, bounds[1:]):
-            body_start = block_start + 1
-            kind = None
-            kind_pos = -1
-            for pos in range(body_start, block_end):
-                kind = self._kind_ids.get(ids[pos])
+        content: list[int] = []
+        reasoning: list[int] | None = None
+        reasoning_complete = True
+        tool_calls: list[ParsedToolCall] = []
+        for start, end in zip(bounds, bounds[1:]):
+            header_start = start + (ids[start] == self._model_id)
+            body_end = next(
+                (pos for pos in range(header_start, end) if ids[pos] == self._end_id),
+                end,
+            )
+            for marker in range(header_start, body_end):
+                kind = self._kind_ids.get(ids[marker])
                 if kind is not None:
-                    kind_pos = pos
                     break
-            if kind is None:
+            else:
+                content.extend(ids[header_start:body_end])
                 continue
-            header = _decode(self._tokenizer, ids[body_start:kind_pos]).strip()
-            body_stop = block_end
-            if self._end_id is not None:
-                for pos in range(kind_pos + 1, block_end):
-                    if ids[pos] == self._end_id:
-                        body_stop = pos
-                        break
-            body = ids[kind_pos + 1 : body_stop]
-            if kind in ("text", "tool_text", "tool_error"):
-                content_ids.extend(body)
-                continue
-            if kind != "tool_json":
-                continue
-            payload = _decode(self._tokenizer, body).strip()
-            if not payload:
-                continue
-            span = (block_start, min(body_stop + 1, block_end))
-            try:
-                parsed = json.loads(payload)
-            except json.JSONDecodeError:
-                parsed = None
-            if not isinstance(parsed, dict):
-                # Same fallback as the Inkling parser: keep the raw payload.
+
+            body = ids[marker + 1 : body_end]
+            closed = body_end < end
+            if kind == "thinking":
+                if reasoning is None:
+                    reasoning = []
+                reasoning.extend(body)
+                reasoning_complete = closed
+            elif kind == "tool_json" and parse_tools:
+                header = _decode(self._tokenizer, ids[header_start:marker]).strip()
+                payload = _decode(self._tokenizer, body)
                 tool_calls.append(
-                    ParsedToolCall(
-                        raw=payload,
-                        name=header or None,
-                        arguments=payload,
-                        token_span=span,
-                        status=ToolCallParseStatus.INVALID_JSON,
+                    self._parse_call(
+                        header, payload, (start, min(body_end + 1, end)), closed
                     )
                 )
-                continue
-            arguments = parsed.get("args", parsed.get("arguments", {}))
-            tool_calls.append(
-                ParsedToolCall(
-                    raw=payload,
-                    name=parsed.get("name") or header or None,
-                    arguments=arguments,
-                    token_span=span,
-                )
-            )
-        return content_ids, tool_calls
+            else:
+                if kind == "tool_json":
+                    content.extend(ids[header_start:marker])
+                content.extend(body)
+
+        return content, reasoning, reasoning_complete, tool_calls
+
+    @staticmethod
+    def _parse_call(
+        header: str, payload: str, span: tuple[int, int], closed: bool
+    ) -> ParsedToolCall:
+        call = ParsedToolCall(
+            raw=payload, name=header or None, arguments=payload, token_span=span
+        )
+        if not closed:
+            call.status = ToolCallParseStatus.UNCLOSED_BLOCK
+            return call
+
+        try:
+            parsed = json.loads(payload)
+        except ValueError:
+            parsed = None
+        if not isinstance(parsed, dict):
+            call.status = ToolCallParseStatus.INVALID_JSON
+            return call
+
+        name = parsed.get("name", header)
+        arguments = parsed.get("args", parsed.get("arguments", {}))
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            call.status = ToolCallParseStatus.MALFORMED_STRUCTURE
+            return call
+        call.name = name.strip() or header or None
+        call.arguments = arguments
+        if call.name is None:
+            call.status = ToolCallParseStatus.MISSING_NAME
+        return call
 
 
 # ── Registries ───────────────────────────────────────────────────────

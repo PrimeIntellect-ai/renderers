@@ -27,7 +27,7 @@ from renderers.parsing import (
     _strip_stop_tokens,
 )
 
-from renderers.configs import DefaultRendererConfig
+from renderers.configs import DefaultRendererConfig, Inkling2RendererConfig
 from renderers.parsers import (
     ThinkTextReasoningParser,
     get_reasoning_parser,
@@ -106,7 +106,7 @@ class DefaultRenderer:
     def __init__(
         self,
         tokenizer: ChatTemplateTokenizer,
-        config: DefaultRendererConfig | None = None,
+        config: DefaultRendererConfig | Inkling2RendererConfig | None = None,
     ):
         cfg = config or DefaultRendererConfig()
         if cfg.thinking_retention is not None:

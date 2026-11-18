@@ -604,7 +604,7 @@ class Inkling2RendererConfig(BaseRendererConfig):
     """Chat-template reasoning effort. Passed to ``apply_chat_template``; the template maps the string keys to
     0.0-0.99 and defaults to 0.9 (high) when unset."""
 
-    tool_parser: str | None = None
+    tool_parser: str | None = "inkling2"
     """Name of a tool parser registered in ``renderers.parsers`` (parsing only)."""
 
     reasoning_parser: str | None = None

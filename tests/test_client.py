@@ -641,19 +641,48 @@ def test_generate_client_mm_expansion(monkeypatch, prompt_ids):
     assert result["renderer_prompt_ids"] == reference["renderer_prompt_ids"]
     assert result["mm_placeholders"] == reference["mm_placeholders"]
     assert result["multi_modal_data"] is None
-    assert result["completion_top_ids"] == [[7, 20], [8, 20]]
-    np.testing.assert_allclose(
-        result["completion_top_logprobs"], [[-0.1, -4.0], [-0.2, -4.0]]
-    )
+    support = result["sampler_support"]
+    assert support["ids"].tolist() == [7, 20, 8, 20]
+    assert support["counts"].tolist() == [2, 2]
+    np.testing.assert_allclose(support["logprobs"], [-0.1, -4.0, -0.2, -4.0])
     assert result["weight_versions"] == [{"version": 3, "start": 0, "end": 2}]
 
 
-def test_generate_client_mm_expansion_rejects_mismatched_prompt_ids(monkeypatch):
+def test_generate_client_mm_expansion_keeps_bridged_text_tokens(monkeypatch):
+    from renderers import client as client_mod
+
+    monkeypatch.setenv("RENDERERS_CLIENT_MM_EXPANSION", "1")
+    monkeypatch.setattr(
+        client_mod,
+        "_build_mm_features",
+        lambda renderer, data: {
+            "mm_placeholders": {
+                modality: [(p.offset, p.length) for p in ranges]
+                for modality, ranges in data.mm_placeholders.items()
+            }
+        },
+    )
+    client = _mm_client()
+    # A bridged prompt keeps sampled tokens ([9, 9]) that a fresh render ([1, 2, 3]) would not emit.
+    result = _run_mm_generate(client, prompt_ids=[9, 9, 2, 3])
+
+    body = client.calls[0]["body"]
+    assert body["token_ids"] == [9, 9, 2, 2, 3]
+    assert body["features"]["mm_placeholders"] == {"image": [(2, 2)]}
+    assert result["prompt_ids"] == [9, 9, 2, 2, 3]
+    assert result["renderer_prompt_ids"] == [9, 9, 2, 3]
+    assert result["mm_placeholders"] == {"image": [{"offset": 2, "length": 2}]}
+
+
+@pytest.mark.parametrize("prompt_ids", [[1, 3], [1, 4, 3]])
+def test_generate_client_mm_expansion_rejects_prompt_ids_without_the_media(
+    monkeypatch, prompt_ids
+):
     monkeypatch.setenv("RENDERERS_CLIENT_MM_EXPANSION", "1")
     client = _mm_client()
 
-    with pytest.raises(MalformedGenerateResponseError, match="does not match"):
-        _run_mm_generate(client, prompt_ids=[1, 2, 4])
+    with pytest.raises(MalformedGenerateResponseError, match="do not match"):
+        _run_mm_generate(client, prompt_ids=prompt_ids)
     assert client.calls == []
 
 

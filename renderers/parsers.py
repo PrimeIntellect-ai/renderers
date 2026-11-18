@@ -505,37 +505,49 @@ class Inkling2ToolParser:
         tool_calls: list[ParsedToolCall] = []
         for start, end in zip(bounds, bounds[1:]):
             header_start = start + (ids[start] == self._model_id)
-            body_end = next(
+            segment_end = next(
                 (pos for pos in range(header_start, end) if ids[pos] == self._end_id),
                 end,
             )
-            for marker in range(header_start, body_end):
-                kind = self._kind_ids.get(ids[marker])
-                if kind is not None:
-                    break
-            else:
-                content.extend(ids[header_start:body_end])
+            terminated = segment_end < end
+            markers = [
+                (pos, self._kind_ids[ids[pos]])
+                for pos in range(header_start, segment_end)
+                if ids[pos] in self._kind_ids
+            ]
+            if not markers:
+                content.extend(ids[header_start:segment_end])
                 continue
 
-            body = ids[marker + 1 : body_end]
-            closed = body_end < end
-            if kind == "thinking":
-                if reasoning is None:
-                    reasoning = []
-                reasoning.extend(body)
-                reasoning_complete = closed
-            elif kind == "tool_json" and parse_tools:
-                header = _decode(self._tokenizer, ids[header_start:marker]).strip()
-                payload = _decode(self._tokenizer, body)
-                tool_calls.append(
-                    self._parse_call(
-                        header, payload, (start, min(body_end + 1, end)), closed
-                    )
+            header = _decode(self._tokenizer, ids[header_start : markers[0][0]]).strip()
+            for index, (marker, kind) in enumerate(markers):
+                block_end = (
+                    markers[index + 1][0] if index + 1 < len(markers) else segment_end
                 )
-            else:
-                if kind == "tool_json":
-                    content.extend(ids[header_start:marker])
-                content.extend(body)
+                # A new content marker also ends the block it follows.
+                closed = terminated or index + 1 < len(markers)
+                body = ids[marker + 1 : block_end]
+                if kind == "thinking":
+                    if reasoning is None:
+                        reasoning = []
+                    reasoning.extend(body)
+                    reasoning_complete = closed
+                elif kind == "tool_json" and parse_tools:
+                    name_header = header if index == 0 else ""
+                    payload = _decode(self._tokenizer, body)
+                    span_start = start if index == 0 else marker
+                    span_end = block_end + (
+                        1 if terminated and block_end == segment_end else 0
+                    )
+                    tool_calls.append(
+                        self._parse_call(
+                            name_header, payload, (span_start, span_end), closed
+                        )
+                    )
+                else:
+                    if kind == "tool_json" and index == 0:
+                        content.extend(ids[header_start:marker])
+                    content.extend(body)
 
         return content, reasoning, reasoning_complete, tool_calls
 

@@ -131,6 +131,37 @@ def test_reasoning_and_auto_tool_calls(tokenizer, tool_parser):
     assert partial.content == ""
 
 
+def test_unprefixed_first_block(tokenizer):
+    renderer = create_renderer(tokenizer)
+    text = (
+        "<|content_text|>hello<|end_message|>"
+        '<|message_model|><|content_invoke_tool_json|>{"name": "search", "args": {"q": "x"}}'
+        "<|end_message|>" + _STOP
+    )
+    parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
+
+    assert parsed.content == "hello"
+    assert [call.name for call in parsed.tool_calls] == ["search"]
+    assert parsed.tool_calls[0].arguments == {"q": "x"}
+
+
+def test_tool_call_inside_thinking_block(tokenizer):
+    renderer = create_renderer(tokenizer)
+    text = (
+        "<|message_model|><|content_thinking|>reasoning"
+        '<|content_invoke_tool_json|>{"name": "search", "args": {"q": "x"}}'
+        "<|end_message|>" + _STOP
+    )
+    parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
+
+    assert parsed.reasoning_content == "reasoning"
+    assert parsed.reasoning_complete is True
+    assert parsed.content == ""
+    assert [(call.name, call.arguments, call.status) for call in parsed.tool_calls] == [
+        ("search", {"q": "x"}, ToolCallParseStatus.OK)
+    ]
+
+
 @pytest.mark.parametrize(
     ("header", "payload", "closed", "status"),
     [

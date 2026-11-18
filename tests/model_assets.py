@@ -52,6 +52,7 @@ MODEL_REVISIONS = {
     "tencent/Hy3": "a960ebc3da325ba167f069f76c41eb62c9280d22",
     "thinkingmachines/Inkling": "828496eeae4c243ff1a22f7f28ff83694f2f7bc9",
     "thinkingmachines/Inkling-Small": "8cc5877b44d343f88b92086aa1fb72897950f06a",
+    "thinkingmachines/Inkling-2-Small": "1df2d97d45210d94f781f42a6521392e5a539e46",
     "zai-org/GLM-4.7-Flash": "7dd20894a642a0aa287e9827cb1a1f7f91386b67",
     "zai-org/GLM-5": "c183ef8c61faee82855eca1ed9bb3a9a7ce3b0b2",
     "zai-org/GLM-5.1": "26e1bd6e011feb778d25ae34b09b07074139d92d",

@@ -1069,6 +1069,9 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # chat-template, and processor assets (vision + audio; transformers >= 5.14).
     "thinkingmachines/Inkling": "inkling",
     "thinkingmachines/Inkling-Small": "inkling",
+    "thinkingmachines/Inkling-2-Small": "inkling-2",
+    "thinkingmachines/Inkling-2-Small-MXFP8": "inkling-2",
+    "thinkingmachines/Inkling-2-Small-bf16": "inkling-2",
     # Tencent Hunyuan Hy3 (295B-A21B MoE). The FP8 checkpoint shares the same
     # tokenizer and chat template. Hy3-preview is deliberately unmapped: it
     # ships an older, incompatible template (un-suffixed special tokens,
@@ -1373,6 +1376,7 @@ def _populate_registry():
     from renderers.gpt_oss import GptOssRenderer
     from renderers.hy3 import Hy3Renderer
     from renderers.inkling import InklingRenderer
+    from renderers.inkling2 import Inkling2Renderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
     from renderers.laguna_s21 import LagunaS21Renderer
@@ -1417,6 +1421,7 @@ def _populate_registry():
             "deepseek-v4": DeepSeekV4Renderer,
             "hy3": Hy3Renderer,
             "inkling": InklingRenderer,
+            "inkling-2": Inkling2Renderer,
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
             "laguna-xs.2": LagunaXS2Renderer,

@@ -25,6 +25,7 @@ def test_registries_nonempty():
     assert "qwen3.5" in TOOL_PARSERS
     assert "glm" in TOOL_PARSERS
     assert "deepseek-v3" in TOOL_PARSERS
+    assert "inkling2" in TOOL_PARSERS
     assert "think" in REASONING_PARSERS
 
 
@@ -98,6 +99,67 @@ def test_qwen3_tool_parser_parallel_partial_success():
         ToolCallParseStatus.OK,
     ]
     assert [tc.name for tc in tool_calls] == ["a", None, "c"]
+
+
+def test_inkling2_tool_parser_text_and_call():
+    tok = load_tokenizer("thinkingmachines/Inkling-2-Small")
+    parser = get_tool_parser("inkling2", tok)
+    completion = (
+        "<|message_model|><|content_text|>I will search. <|end_message|>"
+        '<|message_model|><|content_invoke_tool_json|>{"name": "search", "args": {"q": "x"}}<|end_message|>'
+        "<|message_model|><|content_invoke_tool_text|>raw fallback<|end_message|>"
+    )
+    ids = list(tok.encode(completion, add_special_tokens=False))
+    content_ids, tool_calls = parser.extract(ids)
+    content = tok.decode(content_ids, skip_special_tokens=False)
+    assert "I will search." in content
+    assert "raw fallback" in content
+    assert len(tool_calls) == 1
+    assert tool_calls[0].status == ToolCallParseStatus.OK
+    assert tool_calls[0].name == "search"
+    assert tool_calls[0].arguments == {"q": "x"}
+    assert tool_calls[0].token_span is not None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"name": "f", broken',
+        '["not", "a", "dict"]',
+        '"just a string"',
+    ],
+)
+def test_inkling2_tool_parser_records_invalid_json(payload):
+    tok = load_tokenizer("thinkingmachines/Inkling-2-Small")
+    parser = get_tool_parser("inkling2", tok)
+    completion = (
+        f"<|message_model|><|content_invoke_tool_json|>{payload}<|end_message|>"
+    )
+    ids = list(tok.encode(completion, add_special_tokens=False))
+    _, tool_calls = parser.extract(ids)
+    assert len(tool_calls) == 1
+    assert tool_calls[0].status == ToolCallParseStatus.INVALID_JSON
+    assert tool_calls[0].raw == payload
+    assert tool_calls[0].arguments == payload
+
+
+def test_inkling2_renderer_supports_tools_with_parser():
+    from renderers import Inkling2RendererConfig, create_renderer
+
+    tok = load_tokenizer("thinkingmachines/Inkling-2-Small")
+    renderer = create_renderer(tok, Inkling2RendererConfig(tool_parser="inkling2"))
+    assert renderer.supports_tools is True
+
+    completion = (
+        "<|message_model|><|content_text|>ok<|end_message|>"
+        '<|message_model|><|content_invoke_tool_json|>{"name": "f", "args": {"x": 1}}<|end_message|>'
+    )
+    parsed = renderer.parse_response(
+        list(tok.encode(completion, add_special_tokens=False))
+    )
+    assert parsed.content.startswith("ok")
+    assert len(parsed.tool_calls) == 1
+    assert parsed.tool_calls[0].name == "f"
 
 
 def test_think_reasoning_parser_extracts_block():

@@ -36,6 +36,7 @@ class ModelCase:
     suites: frozenset[str] = frozenset({"parity"})
     excluded_scenarios: frozenset[str] = frozenset()
     oracle_defaults: tuple[tuple[str, Any], ...] = ()
+    kwarg_values: tuple[tuple[str, tuple[Any, ...]], ...] = ()
 
     @property
     def resolved_renderer(self) -> str:
@@ -57,6 +58,7 @@ def _model(
     bridge: bool = False,
     excluded: Iterable[str] = (),
     oracle_defaults: Mapping[str, Any] | None = None,
+    kwarg_values: Mapping[str, Iterable[Any]] | None = None,
     extra_suites: Iterable[str] = (),
 ) -> ModelCase:
     suites = {"parity"}
@@ -81,6 +83,9 @@ def _model(
         suites=frozenset(suites),
         excluded_scenarios=frozenset(excluded),
         oracle_defaults=tuple((oracle_defaults or {}).items()),
+        kwarg_values=tuple(
+            (key, tuple(values)) for key, values in (kwarg_values or {}).items()
+        ),
     )
 
 
@@ -280,6 +285,12 @@ MODEL_CATALOG = (
     ),
     _model("thinkingmachines/Inkling", bridge=True),
     _model("thinkingmachines/Inkling-Small", bridge=True),
+    _model(
+        "thinkingmachines/Inkling-2-Small",
+        shared=False,
+        roundtrip=False,
+        kwarg_values={"reasoning_effort": (None,)},
+    ),
     _model(
         "Qwen/Qwen2.5-0.5B-Instruct",
         renderer="default",
@@ -762,8 +773,11 @@ def kwarg_combinations(case: ModelCase) -> tuple[dict[str, Any], ...]:
     if not fields:
         return ({},)
 
+    values_by_field = dict(KWARG_VALUES)
+    for field, values in case.kwarg_values:
+        values_by_field[field] = (*values_by_field.get(field, ()), *values)
     combinations = [{}]
-    for values in product(*(KWARG_VALUES[field] for field in fields)):
+    for values in product(*(values_by_field[field] for field in fields)):
         kwargs = dict(zip(fields, values))
         try:
             config_cls(**kwargs)

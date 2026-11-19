@@ -226,7 +226,7 @@ def test_dsml_roundtrip_preserves_string_and_json_argument_types(prefilled, enab
     )
 
     assert parsed.reasoning_content == "Use weather."
-    assert parsed.content == "checking\n\n"
+    assert parsed.content == "checking"
     assert len(parsed.tool_calls) == 1
     call = parsed.tool_calls[0]
     assert call.status == ToolCallParseStatus.OK
@@ -440,6 +440,42 @@ def test_merged_followup_task_is_dropped_like_reference_encoder():
     text = _tokenizer().decode(rendered, skip_special_tokens=False)
     assert "<｜action｜>" not in text
     assert text.endswith(f"{ASSISTANT}<think>")
+
+
+def test_text_and_tool_calls_rerender_to_the_sampled_tokens():
+    renderer = _renderer(enable_thinking=True)
+    messages = [
+        {"role": "user", "content": "Weather?"},
+        {
+            "role": "assistant",
+            "reasoning_content": "Use weather.",
+            "content": "Checking the forecast.",
+            "tool_calls": [
+                {"function": {"name": "weather", "arguments": {"city": "Paris"}}}
+            ],
+        },
+    ]
+    rendered = renderer.render_ids(messages)
+    assistant_id = _tokenizer().encode(ASSISTANT, add_special_tokens=False)[0]
+    start = rendered.index(assistant_id) + 1
+    parsed = renderer.parse_response(rendered[start:], prompt_ids=rendered[:start])
+
+    assert parsed.content == "Checking the forecast."
+    rerendered = renderer.render_ids(
+        [
+            messages[0],
+            {
+                "role": "assistant",
+                "reasoning_content": parsed.reasoning_content,
+                "content": parsed.content,
+                "tool_calls": [
+                    {"function": {"name": call.name, "arguments": call.arguments}}
+                    for call in parsed.tool_calls
+                ],
+            },
+        ]
+    )
+    assert rerendered == rendered
 
 
 @pytest.mark.parametrize("prefix", ["", "\n", "\n\n"])

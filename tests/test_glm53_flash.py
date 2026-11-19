@@ -19,6 +19,8 @@ from openai import AsyncOpenAI
 
 from renderers.client import generate
 
+pytestmark = pytest.mark.model
+
 MODEL = "zai-org/GLM-5.3-Flash-BF16"
 GLM53_MODELS = ["zai-org/GLM-5.3", MODEL]
 
@@ -45,7 +47,7 @@ _TOOL_CALL = {
 @lru_cache(maxsize=None)
 def _load(model=MODEL):
     from renderers import create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     tok = load_tokenizer(model)
     return tok, create_renderer(tok)
@@ -622,3 +624,82 @@ def test_nested_media_validation(part):
             _render(messages)
         with pytest.raises(NotImplementedError, match=part["type"]):
             renderer.bridge_to_next_turn([], [], messages[2:], process_multimodal=False)
+
+
+def _parallel_text_results(result_ids):
+    """One assistant turn with two calls, and their text results in ``result_ids`` order."""
+    return [
+        {"role": "user", "content": "Take two screenshots."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                dict(_TOOL_CALL, id="call_a"),
+                dict(_TOOL_CALL, id="call_b"),
+            ],
+        },
+        *(
+            {"role": "tool", "tool_call_id": call_id, "content": f"result of {call_id}"}
+            for call_id in result_ids
+        ),
+    ]
+
+
+def _bridge_parallel(model, messages, **kwargs):
+    _, renderer = _load(model)
+    prompt_ids = renderer.render(
+        messages[:1], tools=TOOLS, add_generation_prompt=True
+    ).token_ids
+    full_ids = _reference(messages, tools=TOOLS, model=model)
+    observation = full_ids.index(_token("<|observation|>"), len(prompt_ids))
+    completion_ids = full_ids[len(prompt_ids) : observation + 1]
+    bridged = renderer.bridge_to_next_turn(
+        prompt_ids, completion_ids, messages[2:], tools=TOOLS, **kwargs
+    )
+    return bridged, full_ids, len(prompt_ids) + len(completion_ids)
+
+
+@pytest.mark.parametrize("model", GLM53_MODELS)
+@pytest.mark.parametrize(
+    "result_ids",
+    [("call_a", "call_b"), ("call_b", "call_a")],
+    ids=["in_order", "swapped"],
+)
+def test_bridge_orders_parallel_results_like_the_template(model, result_ids):
+    messages = _parallel_text_results(result_ids)
+    bridged, full_ids, sampled_end = _bridge_parallel(
+        model, messages, previous_tool_call_ids=["call_a", "call_b"]
+    )
+
+    assert bridged is not None
+    assert bridged.token_ids == full_ids
+    # Each result's tokens belong to the message the caller passed, wherever it rendered.
+    tok, _ = _load(model)
+    for index, call_id in enumerate(result_ids):
+        owned = [
+            token
+            for token, owner in zip(bridged.token_ids, bridged.message_indices)
+            if owner == index
+        ]
+        assert f"result of {call_id}" in tok.decode(owned)
+    assert set(bridged.message_indices[:sampled_end]) == {-1}
+
+
+@pytest.mark.parametrize("model", GLM53_MODELS)
+def test_bridge_keeps_result_order_the_template_cannot_sort(model):
+    # A result whose ID matches no call: the template leaves the block as given.
+    messages = _parallel_text_results(("call_b", "call_x"))
+    bridged, full_ids, _ = _bridge_parallel(
+        model, messages, previous_tool_call_ids=["call_a", "call_b"]
+    )
+
+    assert bridged is not None
+    assert bridged.token_ids == full_ids
+
+
+@pytest.mark.parametrize("model", GLM53_MODELS)
+def test_bridge_declines_parallel_results_without_call_ids(model):
+    messages = _parallel_text_results(("call_a", "call_b"))
+    bridged, _, _ = _bridge_parallel(model, messages)
+
+    assert bridged is None

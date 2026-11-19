@@ -15,16 +15,13 @@ support which non-text modalities. This test matrix iterates over every
    the combined message list.
 
 Tests skip per-pair when:
-- The HF snapshot isn't cached locally (network-free CI mode).
+- Optional private model metadata is unavailable locally.
 - The model lists a modality the renderer doesn't yet support
   (``NotImplementedError`` in ``render``).
 - ``Pillow`` / ``torch`` are missing.
 """
 
 from __future__ import annotations
-
-import os
-from pathlib import Path
 
 import pytest
 
@@ -33,8 +30,10 @@ from renderers import (
     Qwen3VLRenderer,
     create_renderer,
 )
-from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP
 from renderers.configs import _config_class_for
+from tests.model_assets import load_test_processor, model_revision
+from tests.model_assets import load_test_tokenizer as load_tokenizer
 
 
 def _config_for_model(model_name: str, **kwargs):
@@ -55,28 +54,25 @@ pytest.importorskip("torch", reason="torch required for multimodal tests")
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
 
+pytestmark = [pytest.mark.model, pytest.mark.multimodal]
+
 
 # ---------------------------------------------------------------------------
-# Local-snapshot gating — skip when the HF cache doesn't have the model.
+# Optional private metadata stays cache-only; public assets are pinned.
 # ---------------------------------------------------------------------------
 
 
-def _hf_snapshot_cached(model_name: str) -> bool:
-    """True iff the HF hub cache has at least one snapshot for ``model_name``.
+def _model_assets_available(model_name: str) -> bool:
+    """Download pinned public assets; keep optional private metadata cache-only."""
+    if model_name != "nvidia/NVIDIA-Nemotron-3.5-Super-EA-09112026":
+        model_revision(model_name)
+        return True
 
-    Avoids pulling weights / configs over the network during test runs.
-    Mirrors the convention used elsewhere in this repo (test_qwen35_size_coverage)
-    of relying on the user having pre-fetched relevant models.
-    """
-    cache = (
-        Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
-        / "hub"
-    )
-    safe = "models--" + model_name.replace("/", "--")
-    snapshots = cache / safe / "snapshots"
-    if not snapshots.is_dir():
+    try:
+        model_revision(model_name)
+    except KeyError:
         return False
-    return any(p.is_dir() for p in snapshots.iterdir())
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -104,36 +100,12 @@ _CASES = _modality_cases()
 _loaded: dict[str, tuple] = {}
 
 
-# Models whose processors need ``trust_remote_code=True`` (custom Python
-# in the repo) and still use a pinned revision. Nemotron 3.5 is handled
-# separately below so its selected model revision is not overridden.
-_PROCESSOR_TRUSTED_REVISIONS: dict[str, str] = {
-    "moonshotai/Kimi-K2.5": "4d01dfe0332d63057c186e0b262165819efb6611",
-    "moonshotai/Kimi-K2.6": "2755962d07cb42aa2d988a35bcb65cd4a9c2de82",
-}
-
-
 def _load_processor_and_renderer(model_name: str):
     if model_name not in _loaded:
-        from transformers import AutoProcessor
-
         tokenizer = load_tokenizer(model_name)
-        revision = _PROCESSOR_TRUSTED_REVISIONS.get(model_name)
-        if model_name.startswith("nvidia/NVIDIA-Nemotron-3.5"):
-            processor = AutoProcessor.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-            )
-        elif revision is not None:
-            processor = AutoProcessor.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                revision=revision,
-            )
-        else:
-            processor = AutoProcessor.from_pretrained(model_name)
+        processor = load_test_processor(model_name)
         renderer = create_renderer(tokenizer)
-        # Inject processor so the renderer doesn't try to fetch it lazily.
+        # Inject the pinned processor instead of lazily resolving the model again.
         if hasattr(renderer, "_processor") and renderer._processor is None:
             renderer._processor = processor
         _loaded[model_name] = (tokenizer, processor, renderer)
@@ -626,8 +598,10 @@ def test_multimodal_byte_parity_vs_processor(mm_model_name, modality, tiny_image
     token ids regardless of whether the prompt is templated server-side
     (MITO) or rendered client-side via this package.
     """
-    if not _hf_snapshot_cached(mm_model_name):
-        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+    if not _model_assets_available(mm_model_name):
+        pytest.skip(
+            f"{mm_model_name}: optional private model metadata not cached locally"
+        )
 
     kit = _modality_kit(modality, mm_model_name)
     tokenizer, processor, renderer = _load_processor_and_renderer(mm_model_name)
@@ -659,8 +633,10 @@ def test_multimodal_byte_parity_vs_processor(mm_model_name, modality, tiny_image
 )
 def test_multimodal_placeholders_match_pad_runs(mm_model_name, modality, tiny_image):
     """``mm_placeholders`` exactly cover the runs of the modality's pad token."""
-    if not _hf_snapshot_cached(mm_model_name):
-        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+    if not _model_assets_available(mm_model_name):
+        pytest.skip(
+            f"{mm_model_name}: optional private model metadata not cached locally"
+        )
 
     kit = _modality_kit(modality, mm_model_name)
     tokenizer, _, renderer = _load_processor_and_renderer(mm_model_name)
@@ -723,8 +699,10 @@ def test_multimodal_bridge_extends_and_carries_mm_data(
        the new turn's image, plus its placeholder is recorded with an
        absolute offset inside the bridged sequence.
     """
-    if not _hf_snapshot_cached(mm_model_name):
-        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+    if not _model_assets_available(mm_model_name):
+        pytest.skip(
+            f"{mm_model_name}: optional private model metadata not cached locally"
+        )
 
     kit = _modality_kit(modality, mm_model_name)
     tokenizer, processor, _ = _load_processor_and_renderer(mm_model_name)
@@ -849,8 +827,8 @@ def test_inkling_bridge_does_not_mutate_prior_mm_data(tiny_image):
     the merge copies the per-modality lists, not just the outer dict, so a
     carried-forward image doesn't grow the prior turn's list in place."""
     model = "thinkingmachines/Inkling"
-    if not _hf_snapshot_cached(model):
-        pytest.skip(f"{model}: HF snapshot not cached locally")
+    if not _model_assets_available(model):
+        pytest.skip(f"{model}: optional private model metadata not cached locally")
 
     _, processor, renderer = _load_processor_and_renderer(model)
     initial = [
@@ -899,7 +877,7 @@ def test_modality_registry_models_route_to_renderer():
     via ``create_renderer(renderer='auto')``. Guards against drift between
     the multimodal registry and ``MODEL_RENDERER_MAP``."""
     for model_name in MULTIMODAL_MODELS:
-        if not _hf_snapshot_cached(model_name):
+        if not _model_assets_available(model_name):
             continue
         tokenizer = load_tokenizer(model_name)
         renderer = create_renderer(tokenizer)
@@ -925,8 +903,10 @@ def test_tool_response_image_byte_parity(mm_model_name, modality, tiny_image):
     """
     if modality != "image":
         pytest.skip("Tool-response media path is image-only for now.")
-    if not _hf_snapshot_cached(mm_model_name):
-        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+    if not _model_assets_available(mm_model_name):
+        pytest.skip(
+            f"{mm_model_name}: optional private model metadata not cached locally"
+        )
 
     kit = _modality_kit(modality, mm_model_name)
     tokenizer, processor, renderer = _load_processor_and_renderer(mm_model_name)
@@ -1011,8 +991,10 @@ def test_add_vision_id_parity_vs_processor(
     ``processor.apply_chat_template(messages, add_vision_id=<value>)``
     token-for-token after image expansion.
     """
-    if not _hf_snapshot_cached(mm_model_name):
-        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+    if not _model_assets_available(mm_model_name):
+        pytest.skip(
+            f"{mm_model_name}: optional private model metadata not cached locally"
+        )
 
     kit = _modality_kit(modality, mm_model_name)
     tokenizer, processor, _ = _load_processor_and_renderer(mm_model_name)
@@ -1062,8 +1044,10 @@ def test_bridge_refuses_when_add_vision_id_loses_prior_count(
     ``apply_chat_template`` and a full re-render. The bridge must
     refuse (return None) so the caller falls back to a full re-render.
     """
-    if not _hf_snapshot_cached(mm_model_name):
-        pytest.skip(f"{mm_model_name}: HF snapshot not cached locally")
+    if not _model_assets_available(mm_model_name):
+        pytest.skip(
+            f"{mm_model_name}: optional private model metadata not cached locally"
+        )
 
     kit = _modality_kit(modality, mm_model_name)
     tokenizer, processor, _ = _load_processor_and_renderer(mm_model_name)
@@ -1137,8 +1121,8 @@ def test_qwen3_vl_renderer_exposes_image_modality():
     registry → load → create_renderer(auto) → expected concrete class.
     """
     model = "Qwen/Qwen3-VL-4B-Instruct"
-    if not _hf_snapshot_cached(model):
-        pytest.skip(f"{model}: HF snapshot not cached locally")
+    if not _model_assets_available(model):
+        pytest.skip(f"{model}: optional private model metadata not cached locally")
     tokenizer = load_tokenizer(model)
     renderer = create_renderer(tokenizer)
     assert isinstance(renderer, Qwen3VLRenderer)

@@ -169,9 +169,10 @@ def _parse_packed_completion_logprobs(
     return values.astype(np.float32, copy=False)
 
 
-def _parse_compact_logprobs(
-    choice: Mapping[str, Any], completion_ids: list[int], k: int | None
-) -> tuple[np.ndarray, list[list[int]] | None, list[list[float]] | None]:
+def _decode_compact_logprobs(
+    choice: Mapping[str, Any], completion_ids: list[int]
+) -> tuple[np.ndarray, np.ndarray, list[int], int]:
+    """Flat ids and logprobs of every compact row, the row offsets and the head size."""
     packed = choice.get("compact_logprobs")
     if not isinstance(packed, Mapping) or packed.get("format") != "u32-f32-le-v1":
         raise MalformedGenerateResponseError("Unsupported compact logprob format")
@@ -198,13 +199,115 @@ def _parse_compact_logprobs(
     values = np.frombuffer(raw, dtype="<f4", count=count, offset=count * 4)
     if not np.isfinite(values).all() or (values > 1e-6).any():
         raise MalformedGenerateResponseError("Invalid compact logprob values")
+    return ids, values, offsets, num_top
+
+
+def _sampler_support(
+    ids: np.ndarray, counts: np.ndarray, logprobs: np.ndarray | None, replayed: bool
+) -> dict[str, Any]:
+    """The sampler's per-token support in CSR form: completion token ``i`` owns ``counts[i]`` entries of
+    the flat ``ids`` (and ``logprobs``, the sampler's logprob of each id). ``replayed`` rows are the exact
+    set the token was sampled from; other rows are a head of the sampler's distribution."""
+    return {
+        "ids": ids.astype(np.int32, copy=False),
+        "counts": counts.astype(np.int32, copy=False),
+        "logprobs": None
+        if logprobs is None
+        else logprobs.astype(np.float32, copy=False),
+        "replayed": replayed,
+    }
+
+
+def _pack_sampler_rows(
+    ids: list[list[int]], logprobs: list[list[float]], replayed: bool
+) -> dict[str, Any]:
+    return _sampler_support(
+        np.fromiter((i for row in ids for i in row), dtype=np.int32),
+        np.fromiter((len(row) for row in ids), dtype=np.int32, count=len(ids)),
+        np.fromiter((p for row in logprobs for p in row), dtype=np.float32),
+        replayed,
+    )
+
+
+def _sampled_entries(
+    ids: np.ndarray, counts: np.ndarray, completion_ids: list[int]
+) -> np.ndarray:
+    """Which entry of each replayed row is the sampled token. Every row must be non-empty, hold distinct
+    ids and contain its sampled token."""
+    if (
+        len(counts) != len(completion_ids)
+        or int(counts.sum()) != len(ids)
+        or (counts <= 0).any()
+    ):
+        raise MalformedGenerateResponseError("Sampling mask token count mismatch")
+    ids = ids.astype(np.int64)
+    rows = np.repeat(np.arange(len(counts)), counts)
+    order = np.lexsort((ids, rows))
+    sorted_ids, sorted_rows = ids[order], rows[order]
+    repeated = (sorted_ids[1:] == sorted_ids[:-1]) & (
+        sorted_rows[1:] == sorted_rows[:-1]
+    )
+    sampled = ids == np.asarray(completion_ids, dtype=np.int64)[rows]
+    if repeated.any() or np.count_nonzero(sampled) != len(counts):
+        raise MalformedGenerateResponseError("Invalid recorded sampling support")
+    return sampled
+
+
+def _parse_replayed_support(
+    choice: Mapping[str, Any], completion_ids: list[int]
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """A replayed request's sampled logprobs and support: the recorded sampling mask with the sampler's
+    logprob of every kept id, which must normalize over it."""
+    ids, values, offsets, _ = _decode_compact_logprobs(choice, completion_ids)
+    mask = choice.get("sampling_mask")
+    if not isinstance(mask, Mapping):
+        raise MalformedGenerateResponseError("Invalid packed sampling mask")
+    mask_ids, counts = _decode_packed_sampling_mask(mask)
+    if not np.array_equal(counts, np.diff(offsets)) or not np.array_equal(
+        mask_ids, ids
+    ):
+        raise MalformedGenerateResponseError(
+            "Sampler logprobs must cover exactly the recorded sampling support"
+        )
+    if (values == VLLM_LOGPROB_SENTINEL).any():
+        raise MalformedGenerateResponseError("Missing sampling-support probabilities")
+    sampled = _sampled_entries(mask_ids, counts, completion_ids)
+    if len(counts):
+        mass = np.add.reduceat(np.exp(values.astype(np.float64)), offsets[:-1])
+        if not np.allclose(mass, 1.0, rtol=0, atol=1e-4):
+            raise MalformedGenerateResponseError(
+                "Sampler probabilities must normalize over the recorded support"
+            )
+    return values[sampled], _sampler_support(mask_ids, counts, values, replayed=True)
+
+
+def _parse_mask_support(
+    choice: Mapping[str, Any], completion_ids: list[int]
+) -> dict[str, Any]:
+    """The recorded sampling mask of a request that returned no sampler logprobs for it."""
+    mask = choice.get("sampling_mask")
+    if isinstance(mask, Mapping):
+        ids, counts = _decode_packed_sampling_mask(mask)
+        _sampled_entries(ids, counts, completion_ids)
+        return _sampler_support(ids, counts, None, replayed=True)
+    rows = _parse_sampling_mask(choice, completion_ids)
+    assert rows is not None
+    return _sampler_support(
+        np.fromiter((i for row in rows for i in row), dtype=np.int32),
+        np.fromiter((len(row) for row in rows), dtype=np.int32, count=len(rows)),
+        None,
+        replayed=True,
+    )
+
+
+def _parse_compact_logprobs(
+    choice: Mapping[str, Any], completion_ids: list[int], k: int | None
+) -> tuple[np.ndarray, list[list[int]] | None, list[list[float]] | None]:
+    ids, values, offsets, num_top = _decode_compact_logprobs(choice, completion_ids)
     sampled = []
     top_ids: list[list[int]] = []
     top_logprobs: list[list[float]] = []
-    supports = _parse_sampling_mask(choice, completion_ids) if k is not None else None
-    for index, (token_id, start, end) in enumerate(
-        zip(completion_ids, offsets, offsets[1:])
-    ):
+    for token_id, start, end in zip(completion_ids, offsets, offsets[1:]):
         # FlatLogprobs can repeat the sampled ID. Match vLLM's dict order/value semantics.
         items = list(zip(ids[start:end].tolist(), values[start:end].tolist()))
         row = dict(items)
@@ -218,11 +321,7 @@ def _parse_compact_logprobs(
         if k is not None:
             head = dict(islice(row.items(), max(num_top, 1)))
             selected_ids, selected_logprobs = _select_sampler_head(
-                head,
-                token_id,
-                row[token_id],
-                k,
-                supports[index] if supports is not None else None,
+                head, token_id, row[token_id], k
             )
             top_ids.append(selected_ids)
             top_logprobs.append(selected_logprobs)
@@ -300,6 +399,28 @@ def _parse_completion_logprobs(
     return np.asarray(completion_logprobs, dtype=np.float32)
 
 
+def _decode_packed_sampling_mask(
+    mask: Mapping[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    arrays = {}
+    for name in ("ids", "counts"):
+        packed = mask.get(name)
+        if not isinstance(packed, Mapping) or packed.get("dtype") != "int32":
+            raise MalformedGenerateResponseError("Invalid packed sampling mask")
+        try:
+            values = np.frombuffer(
+                base64.b64decode(packed["data"], validate=True), dtype=np.int32
+            )
+        except (KeyError, TypeError, ValueError, binascii.Error) as exc:
+            raise MalformedGenerateResponseError(
+                "Invalid packed sampling mask"
+            ) from exc
+        if packed.get("shape") != [len(values)] or (values < 0).any():
+            raise MalformedGenerateResponseError("Invalid packed sampling mask")
+        arrays[name] = values
+    return arrays["ids"], arrays["counts"]
+
+
 def _parse_sampling_mask(
     choice: Mapping[str, Any], completion_ids: list[int]
 ) -> list[list[int]] | None:
@@ -307,23 +428,7 @@ def _parse_sampling_mask(
     if mask is None:
         return None
     if isinstance(mask, Mapping):
-        arrays = {}
-        for name in ("ids", "counts"):
-            packed = mask.get(name)
-            if not isinstance(packed, Mapping) or packed.get("dtype") != "int32":
-                raise MalformedGenerateResponseError("Invalid packed sampling mask")
-            try:
-                values = np.frombuffer(
-                    base64.b64decode(packed["data"], validate=True), dtype=np.int32
-                )
-            except (KeyError, TypeError, ValueError, binascii.Error) as exc:
-                raise MalformedGenerateResponseError(
-                    "Invalid packed sampling mask"
-                ) from exc
-            if packed.get("shape") != [len(values)] or (values < 0).any():
-                raise MalformedGenerateResponseError("Invalid packed sampling mask")
-            arrays[name] = values
-        counts, ids = arrays["counts"], arrays["ids"]
+        ids, counts = _decode_packed_sampling_mask(mask)
         if len(counts) != len(completion_ids) or int(counts.sum()) != len(ids):
             raise MalformedGenerateResponseError("Sampling mask token count mismatch")
         mask = [row.tolist() for row in np.split(ids, np.cumsum(counts)[:-1])]
@@ -500,7 +605,7 @@ async def generate(
     Returns a dict with: request_id, prompt_ids, renderer_prompt_ids,
     mm_placeholders, completion_ids, completion_logprobs, content,
     reasoning_content, tool_calls, finish_reason, routed_experts,
-    weight_versions, multi_modal_data, prompt_attribution.
+    sampler_support, weight_versions, multi_modal_data, prompt_attribution.
     ``completion_logprobs`` is a float32 numpy array, one value per completion
     token: vLLM samples in float32, so the packed form decodes without a copy
     and the JSON forms narrow losslessly.
@@ -509,9 +614,13 @@ async def generate(
     is vLLM's (>= 0.32) list of ``{version, start, end}`` spans over
     completion-token indexes, or ``None`` when the engine labels none.
 
-    When ``sampling_params["logprobs"]`` is a positive int, also
-    ``completion_top_ids`` / ``completion_top_logprobs``
-    (original sampler probabilities, retaining full-vocabulary normalization).
+    ``sampler_support`` is the sampler's per-token support in CSR form, or ``None`` when
+    the engine returned none: ``counts[i]`` entries of the flat int32 ``ids`` (and float32
+    ``logprobs``, or ``None``) per completion token. With ``replayed`` the rows are the
+    recorded sampling masks of truncated sampling, with logprobs normalized over each
+    mask when the engine returned them. Otherwise, when ``sampling_params["logprobs"]``
+    is a positive int, the rows are that many top candidates of the sampler's
+    distribution, independent of the sampled token and full-vocabulary normalized.
 
     ``prompt_attribution`` is the renderer's :class:`RenderedTokens` for
     the prompt — either the one this call computed via
@@ -646,18 +755,27 @@ async def generate(
             "Engine response must include mm_placeholders when process_multimodal=False."
         )
 
-    completion_top_ids = None
-    completion_top_logprobs = None
-    if choice.get("compact_logprobs") is not None:
-        completion_logprobs, completion_top_ids, completion_top_logprobs = (
-            _parse_compact_logprobs(choice, completion_ids, head_size)
+    sampler_support = None
+    replayed = choice.get("sampling_mask") is not None
+    if choice.get("compact_logprobs") is not None and replayed:
+        completion_logprobs, sampler_support = _parse_replayed_support(
+            choice, completion_ids
         )
+    elif choice.get("compact_logprobs") is not None:
+        completion_logprobs, top_ids, top_logprobs = _parse_compact_logprobs(
+            choice, completion_ids, head_size
+        )
+        if top_ids is not None and top_logprobs is not None:
+            sampler_support = _pack_sampler_rows(top_ids, top_logprobs, replayed=False)
     else:
         completion_logprobs = _parse_completion_logprobs(choice, completion_ids)
         if head_size is not None:
-            completion_top_ids, completion_top_logprobs = (
-                _parse_completion_top_logprobs(choice, completion_ids, head_size)
+            sampler_support = _pack_sampler_rows(
+                *_parse_completion_top_logprobs(choice, completion_ids, head_size),
+                replayed=replayed,
             )
+        elif replayed:
+            sampler_support = _parse_mask_support(choice, completion_ids)
 
     parsed = renderer.parse_response(
         completion_ids,
@@ -666,10 +784,6 @@ async def generate(
     )
 
     routed_experts = choice.get("routed_experts")
-    # vLLM's native kept-set sampling masks (``--return-sampling-mask``):
-    # one list of surviving vocab ids per completion token, or (prime-rl's
-    # server) packed CSR ``{"ids", "counts"}`` base64 int32 arrays.
-    sampling_mask = choice.get("sampling_mask")
 
     # /inference/v1/generate returns finish_reason in {"stop","length",...} —
     # never "tool_calls" (a chat-completions concept). Promote stop→tool_calls
@@ -694,15 +808,13 @@ async def generate(
         "mm_placeholders": mm_placeholders,
         "completion_ids": list(completion_ids),
         "completion_logprobs": completion_logprobs,
-        "completion_top_ids": completion_top_ids,
-        "completion_top_logprobs": completion_top_logprobs,
+        "sampler_support": sampler_support,
         "content": parsed.content,
         "reasoning_content": parsed.reasoning_content,
         "tool_calls": parsed.tool_calls,
         "finish_reason": finish_reason,
         "reasoning_complete": parsed.reasoning_complete,
         "routed_experts": routed_experts,
-        "sampling_mask": sampling_mask,
         "weight_versions": choice.get("weight_versions"),
         # The mm sidecar consumed on the request side, surfaced back so
         # callers can persist it on the trajectory step for downstream

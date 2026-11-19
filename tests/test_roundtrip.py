@@ -14,9 +14,12 @@ from reference_continuations import ANSWER, REASONING, reference_continuation
 from replay import assert_evidence, replay_client
 
 from renderers import create_renderer
-from renderers.base import MODEL_RENDERER_MAP, ToolCallParseStatus, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP, ToolCallParseStatus
 from renderers.client import generate
 from renderers.configs import config_from_name
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 
 # Both matrices visit checkpoints in groups; reuse within each group only.
@@ -24,9 +27,13 @@ _tokenizer = lru_cache(maxsize=1)(load_tokenizer)
 # Default has no configured tool parser; Llama's template permits one call;
 # Harmony's handoff ends generation at the first call. Other formats can emit
 # multiple calls in one sampled continuation.
+# The template-parity Inkling 2 renderer has no thinking-retention bridge; its
+# rendering is covered by the parity matrix instead.
+_EXCLUDED = {"inkling-2"}
 _CASES = [
     pytest.param(case, kwargs, calls, id=f"{case.model}-{kwargs}-calls={calls}")
     for case in MODEL_CATALOG
+    if case.resolved_renderer not in _EXCLUDED
     for kwargs in kwarg_combinations(case)
     for calls in (
         [0]
@@ -125,7 +132,11 @@ async def test_reference_continuation_through_generate(case, kwargs, calls):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "case",
-    [case for case in MODEL_CATALOG if case.resolved_renderer != "default"],
+    [
+        case
+        for case in MODEL_CATALOG
+        if case.resolved_renderer not in _EXCLUDED | {"default"}
+    ],
     ids=lambda case: case.model,
 )
 async def test_reference_continuation_after_tool_dispatch(case):

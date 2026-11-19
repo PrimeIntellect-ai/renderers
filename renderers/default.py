@@ -27,7 +27,7 @@ from renderers.parsing import (
     _strip_stop_tokens,
 )
 
-from renderers.configs import DefaultRendererConfig
+from renderers.configs import DefaultRendererConfig, Inkling2RendererConfig
 from renderers.parsers import (
     ThinkTextReasoningParser,
     get_reasoning_parser,
@@ -106,7 +106,7 @@ class DefaultRenderer:
     def __init__(
         self,
         tokenizer: ChatTemplateTokenizer,
-        config: DefaultRendererConfig | None = None,
+        config: DefaultRendererConfig | Inkling2RendererConfig | None = None,
     ):
         cfg = config or DefaultRendererConfig()
         if cfg.thinking_retention is not None:
@@ -163,8 +163,12 @@ class DefaultRenderer:
             message_tool_names=extract_message_tool_names(messages),
         )
 
+    def _template_kwargs(self) -> dict:
+        """Jinja kwargs forwarded to ``apply_chat_template`` in addition to the per-call ones."""
+        return dict(self.config.model_extra or {})
+
     def _apply(self, messages, *, tools=None, add_generation_prompt=False) -> list[int]:
-        kwargs = dict(self.config.model_extra or {})
+        kwargs = self._template_kwargs()
         kwargs["add_generation_prompt"] = add_generation_prompt
         kwargs["tokenize"] = True
         if tools is not None:

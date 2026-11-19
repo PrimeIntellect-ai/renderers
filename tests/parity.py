@@ -36,6 +36,7 @@ class ModelCase:
     suites: frozenset[str] = frozenset({"parity"})
     excluded_scenarios: frozenset[str] = frozenset()
     oracle_defaults: tuple[tuple[str, Any], ...] = ()
+    kwarg_values: tuple[tuple[str, tuple[Any, ...]], ...] = ()
 
     @property
     def resolved_renderer(self) -> str:
@@ -57,6 +58,7 @@ def _model(
     bridge: bool = False,
     excluded: Iterable[str] = (),
     oracle_defaults: Mapping[str, Any] | None = None,
+    kwarg_values: Mapping[str, Iterable[Any]] | None = None,
     extra_suites: Iterable[str] = (),
 ) -> ModelCase:
     suites = {"parity"}
@@ -81,6 +83,9 @@ def _model(
         suites=frozenset(suites),
         excluded_scenarios=frozenset(excluded),
         oracle_defaults=tuple((oracle_defaults or {}).items()),
+        kwarg_values=tuple(
+            (key, tuple(values)) for key, values in (kwarg_values or {}).items()
+        ),
     )
 
 
@@ -202,6 +207,7 @@ MODEL_CATALOG = (
             "tool-call-content",
             "tool-call-none",
             "multiple-tool-calls",
+            "multiple-tool-calls-content",
             "tool-response",
             "named-tool-response",
             "consecutive-tool-responses",
@@ -217,6 +223,7 @@ MODEL_CATALOG = (
             "tool-call-content",
             "tool-call-none",
             "multiple-tool-calls",
+            "multiple-tool-calls-content",
             "tool-response",
             "named-tool-response",
             "consecutive-tool-responses",
@@ -246,7 +253,11 @@ MODEL_CATALOG = (
     _model(
         "meta-llama/Llama-3.2-1B-Instruct",
         bridge=True,
-        excluded={"multiple-tool-calls", "consecutive-tool-responses"},
+        excluded={
+            "multiple-tool-calls",
+            "multiple-tool-calls-content",
+            "consecutive-tool-responses",
+        },
         oracle_defaults={"date_string": "26 Jul 2024"},
         extra_suites={"llama-checkpoints"},
     ),
@@ -254,7 +265,11 @@ MODEL_CATALOG = (
         "meta-llama/Llama-3.2-3B-Instruct",
         shared=False,
         roundtrip=False,
-        excluded={"multiple-tool-calls", "consecutive-tool-responses"},
+        excluded={
+            "multiple-tool-calls",
+            "multiple-tool-calls-content",
+            "consecutive-tool-responses",
+        },
         oracle_defaults={"date_string": "26 Jul 2024"},
         extra_suites={"llama-checkpoints"},
     ),
@@ -270,6 +285,12 @@ MODEL_CATALOG = (
     ),
     _model("thinkingmachines/Inkling", bridge=True),
     _model("thinkingmachines/Inkling-Small", bridge=True),
+    _model(
+        "thinkingmachines/Inkling-2-Small",
+        shared=False,
+        roundtrip=False,
+        kwarg_values={"reasoning_effort": (None,)},
+    ),
     _model(
         "Qwen/Qwen2.5-0.5B-Instruct",
         renderer="default",
@@ -487,6 +508,21 @@ SCENARIOS = (
         tools=TOOLS,
     ),
     _scenario(
+        "multiple-tool-calls-content",
+        [
+            {"role": "user", "content": "Weather in Paris and London?"},
+            {
+                "role": "assistant",
+                "content": "Let me check both.",
+                "tool_calls": [
+                    _call("Paris", id="call_1"),
+                    _call("London", id="call_2"),
+                ],
+            },
+        ],
+        tools=TOOLS,
+    ),
+    _scenario(
         "tool-response",
         [
             {"role": "user", "content": "Weather?"},
@@ -660,7 +696,13 @@ SCENARIOS = (
             {"role": "system", "content": "Late instruction"},
             {"role": "user", "content": "B"},
         ],
-        only_renderers={"laguna-xs-2.1", "laguna-s-2.1"},
+        only_renderers={
+            "laguna-xs-2.1",
+            "laguna-s-2.1",
+            "nemotron-3",
+            "nemotron-3-ultra",
+            "nemotron-3.5",
+        },
     ),
     _scenario(
         "tool-declare-message",
@@ -731,8 +773,11 @@ def kwarg_combinations(case: ModelCase) -> tuple[dict[str, Any], ...]:
     if not fields:
         return ({},)
 
+    values_by_field = dict(KWARG_VALUES)
+    for field, values in case.kwarg_values:
+        values_by_field[field] = (*values_by_field.get(field, ()), *values)
     combinations = [{}]
-    for values in product(*(KWARG_VALUES[field] for field in fields)):
+    for values in product(*(values_by_field[field] for field in fields)):
         kwargs = dict(zip(fields, values))
         try:
             config_cls(**kwargs)

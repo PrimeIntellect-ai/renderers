@@ -16,7 +16,6 @@ from types import UnionType
 from typing import Annotated, Any, Literal, Mapping, Union, cast, get_args, get_origin
 
 import pytest
-
 from parity import (
     KWARG_VALUES,
     MODEL_CATALOG,
@@ -26,9 +25,11 @@ from parity import (
     kwarg_combinations,
     scenario_is_valid,
 )
+
 from renderers import create_renderer
-from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP
 from renderers.configs import RendererConfig, _config_class_for
+from tests.model_assets import load_test_tokenizer as load_tokenizer
 from tests.reference_rendering import (
     DEFAULT_REFERENCE_ORACLE,
     REFERENCE_ORACLES,
@@ -37,6 +38,8 @@ from tests.reference_rendering import (
     reference_oracle_for_renderer,
     render_reference,
 )
+
+pytestmark = pytest.mark.model
 
 
 def _id(case: ModelCase, scenario: Scenario, kwargs: Mapping[str, Any]) -> str:
@@ -118,16 +121,21 @@ def test_catalog_covers_every_declared_kwarg():
 
 def test_catalog_covers_every_finite_declared_kwarg_value():
     missing = []
-    config_classes = {
-        _config_class_for(case.resolved_renderer) for case in MODEL_CATALOG
-    }
+    config_classes = {}
+    for case in MODEL_CATALOG:
+        config_cls = _config_class_for(case.resolved_renderer)
+        extras = config_classes.setdefault(config_cls, {})
+        for field, values in case.kwarg_values:
+            extras.setdefault(field, set()).update(values)
     for config_cls in sorted(config_classes, key=lambda cls: cls.__name__):
+        extras = config_classes[config_cls]
         for field in sorted(config_cls.template_field_names()):
             annotation = config_cls.model_fields[field].annotation
+            covered = set(KWARG_VALUES[field]) | extras.get(field, set())
             absent = tuple(
                 value
                 for value in _required_annotation_values(annotation)
-                if value not in KWARG_VALUES[field]
+                if value not in covered
             )
             if absent:
                 missing.append(f"{config_cls.__name__}.{field}: {absent!r}")

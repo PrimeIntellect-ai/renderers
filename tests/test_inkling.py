@@ -22,9 +22,12 @@ import numpy as np
 import pytest
 
 from renderers import create_renderer
-from renderers.base import ToolCallParseStatus, load_tokenizer
+from renderers.base import ToolCallParseStatus
 from renderers.configs import InklingRendererConfig
 from renderers.inkling import InklingRenderer
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 _MODEL = "thinkingmachines/Inkling"
 _SMALL_MODEL = "thinkingmachines/Inkling-Small"

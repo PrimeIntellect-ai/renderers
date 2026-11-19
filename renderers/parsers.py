@@ -19,7 +19,7 @@ import json
 import re
 from typing import Protocol, runtime_checkable
 
-from renderers.base import ParsedToolCall, ToolCallParseStatus
+from renderers.base import ParsedResponse, ParsedToolCall, ToolCallParseStatus
 
 
 # ── Shared helpers ───────────────────────────────────────────────────
@@ -452,10 +452,141 @@ class ThinkTextReasoningParser:
         return (reasoning or None), after
 
 
+class Inkling2ToolParser:
+    """Parse Inkling 2's token-delimited reasoning, text and invocation blocks."""
+
+    MODEL = "<|message_model|>"
+    END_MESSAGE = "<|end_message|>"
+    KINDS = {
+        "<|content_thinking|>": "thinking",
+        "<|content_text|>": "text",
+        "<|content_invoke_tool_json|>": "tool_json",
+        "<|content_invoke_tool_text|>": "tool_text",
+        "<|content_tool_error|>": "tool_error",
+    }
+
+    def __init__(self, tokenizer):
+        self._tokenizer = tokenizer
+        self._model_id = _token_id(tokenizer, self.MODEL)
+        self._end_id = _token_id(tokenizer, self.END_MESSAGE)
+        self._kind_ids: dict[int, str] = {}
+        for token, kind in self.KINDS.items():
+            tid = _token_id(tokenizer, token)
+            if tid is not None:
+                self._kind_ids[tid] = kind
+
+    def extract(self, ids: list[int]) -> tuple[list[int], list[ParsedToolCall]]:
+        content, _, _, tool_calls = self._split(ids, parse_tools=True)
+        return content, tool_calls
+
+    def parse(self, ids: list[int], *, parse_tools: bool) -> ParsedResponse:
+        content, reasoning, complete, tool_calls = self._split(
+            ids, parse_tools=parse_tools
+        )
+        return ParsedResponse(
+            content=_decode(self._tokenizer, content),
+            reasoning_content=_decode(self._tokenizer, reasoning)
+            if reasoning is not None
+            else None,
+            reasoning_complete=complete,
+            tool_calls=tool_calls,
+        )
+
+    def _split(
+        self, ids: list[int], *, parse_tools: bool
+    ) -> tuple[list[int], list[int] | None, bool, list[ParsedToolCall]]:
+        if not ids:
+            return [], None, True, []
+        starts = [0, *(i for i in range(1, len(ids)) if ids[i] == self._model_id)]
+        bounds = [*starts, len(ids)]
+        content: list[int] = []
+        reasoning: list[int] | None = None
+        reasoning_complete = True
+        tool_calls: list[ParsedToolCall] = []
+        for start, end in zip(bounds, bounds[1:]):
+            header_start = start + (ids[start] == self._model_id)
+            segment_end = next(
+                (pos for pos in range(header_start, end) if ids[pos] == self._end_id),
+                end,
+            )
+            terminated = segment_end < end
+            markers = [
+                (pos, self._kind_ids[ids[pos]])
+                for pos in range(header_start, segment_end)
+                if ids[pos] in self._kind_ids
+            ]
+            if not markers:
+                content.extend(ids[header_start:segment_end])
+                continue
+
+            header = _decode(self._tokenizer, ids[header_start : markers[0][0]]).strip()
+            for index, (marker, kind) in enumerate(markers):
+                block_end = (
+                    markers[index + 1][0] if index + 1 < len(markers) else segment_end
+                )
+                # A new content marker also ends the block it follows.
+                closed = terminated or index + 1 < len(markers)
+                body = ids[marker + 1 : block_end]
+                if kind == "thinking":
+                    if reasoning is None:
+                        reasoning = []
+                    reasoning.extend(body)
+                    reasoning_complete = closed
+                elif kind == "tool_json" and parse_tools:
+                    name_header = header if index == 0 else ""
+                    payload = _decode(self._tokenizer, body)
+                    span_start = start if index == 0 else marker
+                    span_end = block_end + (
+                        1 if terminated and block_end == segment_end else 0
+                    )
+                    tool_calls.append(
+                        self._parse_call(
+                            name_header, payload, (span_start, span_end), closed
+                        )
+                    )
+                else:
+                    if kind == "tool_json" and index == 0:
+                        content.extend(ids[header_start:marker])
+                    content.extend(body)
+
+        return content, reasoning, reasoning_complete, tool_calls
+
+    @staticmethod
+    def _parse_call(
+        header: str, payload: str, span: tuple[int, int], closed: bool
+    ) -> ParsedToolCall:
+        call = ParsedToolCall(
+            raw=payload, name=header or None, arguments=payload, token_span=span
+        )
+        if not closed:
+            call.status = ToolCallParseStatus.UNCLOSED_BLOCK
+            return call
+
+        try:
+            parsed = json.loads(payload)
+        except ValueError:
+            parsed = None
+        if not isinstance(parsed, dict):
+            call.status = ToolCallParseStatus.INVALID_JSON
+            return call
+
+        name = parsed.get("name", header)
+        arguments = parsed.get("args", parsed.get("arguments", {}))
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            call.status = ToolCallParseStatus.MALFORMED_STRUCTURE
+            return call
+        call.name = name.strip() or header or None
+        call.arguments = arguments
+        if call.name is None:
+            call.status = ToolCallParseStatus.MISSING_NAME
+        return call
+
+
 # ── Registries ───────────────────────────────────────────────────────
 
 
 TOOL_PARSERS: dict[str, type] = {
+    "inkling2": Inkling2ToolParser,
     "qwen3": Qwen3ToolParser,
     "qwen3.5": Qwen35ToolParser,
     "glm": GlmToolParser,

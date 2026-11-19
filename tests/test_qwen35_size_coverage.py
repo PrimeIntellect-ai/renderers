@@ -18,8 +18,8 @@ import pytest
 from parity import MODEL_CATALOG
 
 from renderers import Qwen35Renderer, Qwen35RendererConfig, create_renderer
-from renderers.base import MODEL_RENDERER_MAP, load_tokenizer
-
+from renderers.base import MODEL_RENDERER_MAP
+from tests.model_assets import load_test_tokenizer as load_tokenizer
 
 _QWEN35_IN_MAP = {
     case.model for case in MODEL_CATALOG if case.resolved_renderer == "qwen3.5"
@@ -53,6 +53,7 @@ def test_no_other_qwen35_sizes_silently_added():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.model
 @pytest.mark.parametrize(
     "qwen35_model,expected_default",
     [

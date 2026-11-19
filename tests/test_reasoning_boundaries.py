@@ -4,13 +4,21 @@ from functools import lru_cache
 
 import pytest
 from parity import MODEL_CATALOG
-from renderers import create_renderer
-from renderers.base import ToolCallParseStatus, load_tokenizer
-from renderers.configs import config_from_name
 
-# Exercise every registered renderer, including inherited family variants.
+from renderers import create_renderer
+from renderers.base import ToolCallParseStatus
+from renderers.configs import config_from_name
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
+
+# Exercise every renderer with a typed thinking-retention bridge, including inherited
+# family variants. The template-parity Inkling 2 renderer has no bridge policy.
+_EXCLUDED = {"inkling-2"}
 _CASES = {}
 for _case in MODEL_CATALOG:
+    if _case.resolved_renderer in _EXCLUDED:
+        continue
     _CASES.setdefault(_case.resolved_renderer, _case.model)
 
 _GLM = {"glm-4.5", "glm-5", "glm-5.1", "glm-5.3", "glm-5.3-flash"}
@@ -357,7 +365,9 @@ def test_no_reasoning_format_keeps_literal_think_text():
 def test_catalog_covers_every_registered_renderer():
     from renderers.base import MODEL_RENDERER_MAP
 
-    assert set(MODEL_RENDERER_MAP.values()) <= set(_CASES)
+    assert set(MODEL_RENDERER_MAP.values()) <= {
+        case.resolved_renderer for case in MODEL_CATALOG
+    }
 
 
 @pytest.mark.parametrize("name", ["qwen3", "qwen3.5", "deepseek-r1", "kimi-k2.5"])

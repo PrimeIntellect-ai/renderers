@@ -25,8 +25,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import pytest
 from parity import models_for
+
 from renderers.base import ToolCallParseStatus
+
+pytestmark = pytest.mark.model
 
 # Both GLM renderers share ``parse_glm`` and are served by the same
 # strict vLLM parser (the ``glm45`` and ``glm47`` aliases both resolve
@@ -55,7 +59,7 @@ _TOOLS = [
 @lru_cache(maxsize=None)
 def _load(model: str, renderer_name: str):
     from renderers import config_from_name, create_renderer
-    from renderers.base import load_tokenizer
+    from tests.model_assets import load_test_tokenizer as load_tokenizer
 
     tok = load_tokenizer(model)
     return tok, create_renderer(tok, config_from_name(renderer_name))

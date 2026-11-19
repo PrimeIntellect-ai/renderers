@@ -15,7 +15,10 @@ from functools import lru_cache
 import pytest
 
 from renderers import Hy3RendererConfig, create_renderer
-from renderers.base import ToolCallParseStatus, load_tokenizer
+from renderers.base import ToolCallParseStatus
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 _MODEL = "tencent/Hy3"
 

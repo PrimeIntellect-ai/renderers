@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import pytest
 from pydantic import TypeAdapter
 
 from renderers import (
@@ -12,7 +13,9 @@ from renderers import (
     RendererConfig,
     create_renderer,
 )
-from renderers.base import load_tokenizer
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 _MODEL = "poolside/Laguna-M.1"
 

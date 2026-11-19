@@ -428,16 +428,16 @@ class Nemotron3Renderer:
             content = self._render_content(msg.get("content"))
             msg_orig_idx = orig_idx(i)
 
-            if role == "system":
-                if i != 0:
-                    raise ValueError("System message must be at the beginning.")
+            if role == "system" and i == 0:
                 continue  # Already handled above
 
-            elif role == "user":
+            elif role in ("user", "system"):
+                # The template renders a later system message through the
+                # user branch, under its own role header.
                 emit_special(
                     self._im_start, msg_orig_idx, is_sampled=False, is_content=False
                 )
-                user_segments: list[tuple[str, bool]] = [("user\n", False)]
+                user_segments: list[tuple[str, bool]] = [(f"{role}\n", False)]
                 if content:
                     user_segments.append((content, True))
                 # Reasoning-effort hint rides on the LAST user message only,

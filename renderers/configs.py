@@ -587,6 +587,33 @@ class InklingRendererConfig(BaseRendererConfig):
         return self
 
 
+class Inkling2RendererConfig(BaseRendererConfig):
+    """Renderer config for Thinking Machines Inkling 2.
+
+    Text-only template-parity renderer: the token stream comes from the model's
+    own chat template, and the renderer adds the sampled-token mask SFT needs.
+    """
+
+    name: Literal["inkling-2"] = "inkling-2"
+
+    reasoning_effort: (
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        | float
+        | None
+    ) = None
+    """Chat-template reasoning effort. Passed to ``apply_chat_template``; the template maps the string keys to
+    0.0-0.99 and defaults to 0.9 (high) when unset."""
+
+    tool_parser: str | None = "inkling2"
+    """Name of a tool parser registered in ``renderers.parsers`` (parsing only)."""
+
+    reasoning_parser: str | None = None
+    """Name of a reasoning parser registered in ``renderers.parsers`` (parsing only)."""
+
+    _template_fields = frozenset({"reasoning_effort"})
+    _internal_fields = frozenset({"tool_parser", "reasoning_parser"})
+
+
 class GptOssRendererConfig(BaseRendererConfig):
     """OpenAI gpt-oss (harmony) renderer config.
 
@@ -1109,6 +1136,7 @@ RendererConfig = Annotated[
         GptOssRendererConfig,
         MuseGlimmerRendererConfig,
         Hy3RendererConfig,
+        Inkling2RendererConfig,
         InklingRendererConfig,
         KimiK2RendererConfig,
         KimiK25RendererConfig,
@@ -1162,6 +1190,7 @@ _CONFIG_BY_NAME: dict[str, type[BaseRendererConfig]] = {
     "muse-glimmer": MuseGlimmerRendererConfig,
     "hy3": Hy3RendererConfig,
     "inkling": InklingRendererConfig,
+    "inkling-2": Inkling2RendererConfig,
     "kimi-k2": KimiK2RendererConfig,
     "kimi-k2.5": KimiK25RendererConfig,
     "laguna-xs.2": LagunaXS2RendererConfig,
@@ -1220,6 +1249,7 @@ __all__ = [
     "GptOssRendererConfig",
     "Hy3RendererConfig",
     "INKLING_EFFORT_MAP",
+    "Inkling2RendererConfig",
     "InklingRendererConfig",
     "KimiK25RendererConfig",
     "KimiK2RendererConfig",

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from copy import deepcopy
+from functools import lru_cache
 
 import pytest
 from pydantic import TypeAdapter
@@ -14,7 +14,10 @@ from renderers import (
     RendererConfig,
     create_renderer,
 )
-from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 
 TOOLS = [

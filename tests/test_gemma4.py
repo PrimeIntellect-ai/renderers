@@ -6,8 +6,12 @@ import pytest
 from parity import models_for
 
 from renderers import Gemma4Renderer, create_renderer
-from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS, load_tokenizer
+from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS
 from renderers.configs import Gemma4RendererConfig
+from tests.model_assets import load_test_processor
+from tests.model_assets import load_test_tokenizer as load_tokenizer
+
+pytestmark = pytest.mark.model
 
 
 _MODELS = tuple(case.model for case in models_for("gemma-checkpoints"))
@@ -298,7 +302,9 @@ def test_parser_recovers_prompt_opened_post_tool_reasoning():
 def _image_renderer():
     """A Gemma 4 renderer with a live ``Gemma4Processor``, or a skip."""
     tokenizer, _ = _gemma4()
-    renderer = Gemma4Renderer(tokenizer)
+    renderer = Gemma4Renderer(
+        tokenizer, processor=load_test_processor("google/gemma-4-31B-it")
+    )
     try:
         renderer._get_processor()
     except (RuntimeError, OSError) as exc:  # pragma: no cover - env dependent
@@ -312,6 +318,7 @@ def _tiny_image():
     return Image.new("RGB", (224, 224), color=(128, 192, 255))
 
 
+@pytest.mark.multimodal
 @pytest.mark.parametrize("size", [(224, 224), (448, 224), (224, 448)])
 def test_real_processor_keeps_one_batched_row_per_image(size):
     """Guard the ``MultiModalFieldConfig.batched('image')`` contract with
@@ -332,6 +339,7 @@ def test_real_processor_keeps_one_batched_row_per_image(size):
     assert placeholder.length > 0
 
 
+@pytest.mark.multimodal
 def test_schema_unified_image_parts_still_expand_image_tokens():
     """``Dataset.from_list`` unifies the Arrow schema across a content list,
     so an image part round-tripped through a dataset carries ``text: None``
@@ -374,6 +382,7 @@ def test_schema_unified_image_parts_still_expand_image_tokens():
     )
 
 
+@pytest.mark.multimodal
 def test_schema_unified_tool_response_image_parts_survive():
     """Same hazard on the tool-response path, which also has to keep
     accepting untyped text parts."""

@@ -1069,6 +1069,9 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     # chat-template, and processor assets (vision + audio; transformers >= 5.14).
     "thinkingmachines/Inkling": "inkling",
     "thinkingmachines/Inkling-Small": "inkling",
+    "thinkingmachines/Inkling-2-Small": "inkling-2",
+    "thinkingmachines/Inkling-2-Small-MXFP8": "inkling-2",
+    "thinkingmachines/Inkling-2-Small-bf16": "inkling-2",
     # Tencent Hunyuan Hy3 (295B-A21B MoE). The FP8 checkpoint shares the same
     # tokenizer and chat template. Hy3-preview is deliberately unmapped: it
     # ships an older, incompatible template (un-suffixed special tokens,
@@ -1313,13 +1316,14 @@ def _load_tokenizer_via_auto(model_name_or_path: str, **kwargs) -> Any:
         return tok
 
 
-def load_tokenizer(model_name_or_path: str):
+def load_tokenizer(model_name_or_path: str, *, revision: str | None = None):
     """Load a tokenizer with the renderers-package security policy.
 
     Default ``trust_remote_code=False``. Models listed in
     ``TRUSTED_REVISIONS`` (Moonshot Kimi-K2 family) load with
     ``trust_remote_code=True`` AND a pinned ``revision=<sha>`` so
     transformers only executes the reviewed commit's tokenizer Python.
+    ``revision`` pins ordinary assets without overriding reviewed remote code.
 
     ``AutoTokenizer.from_pretrained`` eagerly builds the model config to
     resolve the tokenizer class. If that construction raises on a
@@ -1338,6 +1342,11 @@ def load_tokenizer(model_name_or_path: str):
         _require_transformers("Loading a tokenizer")
         load_name_or_path = _tokenizer_source_for(model_name_or_path)
         kwargs = _tokenizer_load_kwargs(load_name_or_path)
+        if revision is not None:
+            trusted_revision = kwargs.get("revision")
+            if trusted_revision is not None and revision != trusted_revision:
+                raise ValueError("Cannot override the reviewed remote-code revision")
+            kwargs["revision"] = revision
         tok = _load_tokenizer_via_auto(load_name_or_path, **kwargs)
         return _preserve_requested_tokenizer_name(
             tok,
@@ -1368,6 +1377,7 @@ def _populate_registry():
     from renderers.gpt_oss import GptOssRenderer
     from renderers.hy3 import Hy3Renderer
     from renderers.inkling import InklingRenderer
+    from renderers.inkling2 import Inkling2Renderer
     from renderers.kimi_k2 import KimiK2Renderer
     from renderers.kimi_k25 import KimiK25Renderer
     from renderers.laguna_s21 import LagunaS21Renderer
@@ -1413,6 +1423,7 @@ def _populate_registry():
             "deepseek-v4.1": DeepSeekV41Renderer,
             "hy3": Hy3Renderer,
             "inkling": InklingRenderer,
+            "inkling-2": Inkling2Renderer,
             "kimi-k2": KimiK2Renderer,
             "kimi-k2.5": KimiK25Renderer,
             "laguna-xs.2": LagunaXS2Renderer,
@@ -2226,7 +2237,7 @@ def build_trajectory_step(
         "completion_mask": [True] * len(completion_ids),
         "completion_logprobs": [0.0] * len(completion_ids),
         "routed_experts": None,
-        "sampling_mask": None,
+        "sampler_support": None,
     }
     if (
         full_rendered.multi_modal_data is not None

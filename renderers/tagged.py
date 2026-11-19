@@ -190,3 +190,15 @@ DEEPSEEK_V4_GRAMMAR = TaggedGrammar(
         "</｜DSML｜invoke>": "tool_end",
     },
 )
+
+# vLLM's ``deepseek_v41`` parser: V4's rules with space-prefixed tag names and
+# no misspelled section openers.
+DEEPSEEK_V41_GRAMMAR = TaggedGrammar(
+    DEEPSEEK_V4_GRAMMAR.transitions,
+    {
+        "<｜DSML｜ calls>": "section_start",
+        "</｜DSML｜ calls>": "section_end",
+        "<｜DSML｜ invoke": "tool_start",
+        "</｜DSML｜ invoke>": "tool_end",
+    },
+)

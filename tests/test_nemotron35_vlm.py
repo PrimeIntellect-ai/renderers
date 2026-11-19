@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import io
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from renderers.base import MODEL_RENDERER_MAP, MULTIMODAL_MODELS, PlaceholderRange
@@ -170,6 +175,91 @@ def test_two_images_produce_two_distinct_placeholder_ranges():
     assert [placeholder.length for placeholder in placeholders] == [3, 3]
     assert placeholders[0].offset + placeholders[0].length < placeholders[1].offset
     assert len(rendered.multi_modal_data.mm_items["image"]) == 2
+
+
+def _png_data_url(size: tuple[int, int]) -> str:
+    Image = pytest.importorskip("PIL.Image")
+    buffer = io.BytesIO()
+    Image.new("RGB", size).save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+class _GenerateClient:
+    base_url = "http://fake-host:8000/v1"
+
+    def __init__(self) -> None:
+        self.bodies: list[dict[str, Any]] = []
+
+    async def post(self, path, *, cast_to, body, options=None):
+        self.bodies.append(body)
+        choice = {
+            "token_ids": [1104, 2],
+            "logprobs": {
+                "content": [
+                    {"token": "token_id:1104", "logprob": -0.1},
+                    {"token": "token_id:2", "logprob": -0.2},
+                ]
+            },
+            "finish_reason": "stop",
+        }
+        return httpx.Response(
+            200, content=json.dumps({"request_id": "r", "choices": [choice]}).encode()
+        )
+
+
+@pytest.mark.parametrize("caller_prompt_ids", [False, True])
+def test_client_mm_expansion_accepts_wrapped_image_placeholders(
+    monkeypatch, caller_prompt_ids
+):
+    from renderers import client as client_mod
+
+    monkeypatch.setenv("RENDERERS_CLIENT_MM_EXPANSION", "1")
+    monkeypatch.setattr(
+        client_mod,
+        "_build_mm_features",
+        lambda renderer, data: {"mm_hashes": data.mm_hashes},
+    )
+    renderer = Nemotron35Renderer(
+        _Tokenizer(), processor=SimpleNamespace(image_processor=_ImageProcessor())
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": _png_data_url((2, 2))}},
+                {"type": "text", "text": "compare"},
+                {"type": "image_url", "image_url": {"url": _png_data_url((3, 2))}},
+            ],
+        }
+    ]
+    logical = renderer.render(
+        messages, add_generation_prompt=True, process_multimodal=False
+    )
+    expanded = renderer.render(messages, add_generation_prompt=True)
+    client = _GenerateClient()
+
+    result = asyncio.run(
+        client_mod.generate(
+            client=client,
+            renderer=renderer,
+            messages=messages,
+            model=MODEL,
+            prompt_ids=list(logical.token_ids) if caller_prompt_ids else None,
+            process_multimodal=False,
+        )
+    )
+
+    # Each logical <image> becomes <img> + pads + </img>; the wrappers sit outside the ranges.
+    assert logical.token_ids.count(18) == 2
+    assert expanded.token_ids.count(10) == expanded.token_ids.count(11) == 2
+    assert "content_parts" not in client.bodies[0]
+    assert client.bodies[0]["token_ids"] == expanded.token_ids
+    assert result["prompt_ids"] == expanded.token_ids
+    assert result["renderer_prompt_ids"] == logical.token_ids
+    offsets = [p["offset"] for p in result["mm_placeholders"]["image"]]
+    assert [p["length"] for p in result["mm_placeholders"]["image"]] == [3, 3]
+    for offset in offsets:
+        assert expanded.token_ids[offset - 1 : offset + 4] == [10, 18, 18, 18, 11]
 
 
 def test_multimodal_bridge_uses_full_rerender_fallback():

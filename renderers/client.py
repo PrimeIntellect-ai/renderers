@@ -9,9 +9,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import dataclasses
+import difflib
 import json
 import logging
 import math
+import os
 from collections.abc import Mapping
 from itertools import islice, pairwise
 from typing import Any, cast
@@ -23,6 +26,7 @@ from openai import AsyncOpenAI
 from renderers.base import (
     Message,
     MultiModalData,
+    PlaceholderRange,
     RenderedTokens,
     Renderer,
     ToolCallParseStatus,
@@ -673,9 +677,69 @@ async def generate(
             rendered,
         )
 
+    caller_prompt_ids = prompt_ids is not None
     prompt_ids, stop_token_ids, mm_data, prompt_attr = _prepare()
 
-    if process_multimodal:
+    # Client-side multimodal expansion, opt-in via RENDERERS_CLIENT_MM_EXPANSION=1. For
+    # process_multimodal=False the engine is expected to expand the media itself and return
+    # prompt_token_ids + mm_placeholders. Servers that only accept pre-expanded prompts (e.g. Dynamo's
+    # TITO generate endpoint) return neither. With the flag set, render the media here, send vLLM's
+    # `features` payload instead, and return the same contract as process_multimodal=False.
+    client_mm = None
+    if (
+        not process_multimodal
+        and os.environ.get("RENDERERS_CLIENT_MM_EXPANSION") == "1"
+        and _content_parts(messages, renderer=renderer)  # media parts only
+    ):
+        # Rendered on the event-loop thread like _prepare: renderer image caches are not thread-safe.
+        expanded = renderer.render(messages, tools=tools, add_generation_prompt=True)
+        if (
+            expanded.multi_modal_data is not None
+            and not expanded.multi_modal_data.is_empty()
+        ):
+            # Only the renderer knows its logical form (Nemotron 3.5 renders <image> and expands it
+            # to <img> + pads + </img>), so diff its own unexpanded render against the expansion.
+            # prompt_ids is already that render unless the caller supplied it.
+            logical_ids = list(prompt_ids)
+            if caller_prompt_ids:
+                # Not on the Renderer protocol; supports_process_multimodal was checked above.
+                logical_kwargs: dict[str, Any] = {"process_multimodal": False}
+                logical_ids = list(
+                    renderer.render(
+                        messages,
+                        tools=tools,
+                        add_generation_prompt=True,
+                        **logical_kwargs,
+                    ).token_ids
+                )
+            placeholders = {
+                modality: [(p.offset, p.length) for p in ranges]
+                for modality, ranges in expanded.multi_modal_data.mm_placeholders.items()
+            }
+            # A bridged prompt keeps sampled tokens a fresh render may not reproduce, so widen the
+            # media in the caller's tokens rather than replacing them with the fresh render.
+            expanded_ids, placeholders = _splice_media_expansion(
+                list(prompt_ids), logical_ids, list(expanded.token_ids), placeholders
+            )
+            client_mm = (
+                list(prompt_ids),
+                {
+                    modality: [{"offset": o, "length": n} for o, n in ranges]
+                    for modality, ranges in placeholders.items()
+                },
+            )
+            prompt_ids = expanded_ids
+            # The features payload carries the placeholder offsets too.
+            mm_data = dataclasses.replace(
+                expanded.multi_modal_data,
+                mm_placeholders={
+                    modality: [PlaceholderRange(offset=o, length=n) for o, n in ranges]
+                    for modality, ranges in placeholders.items()
+                },
+            )
+            process_multimodal = True
+
+    if process_multimodal and client_mm is None:
         if max_prompt_len is None:
             max_prompt_len = await _resolve_max_prompt_len(client, model)
         if max_prompt_len is not None and len(prompt_ids) > max_prompt_len:
@@ -800,7 +864,7 @@ async def generate(
     if ok_tool_calls and finish_reason == "stop":
         finish_reason = "tool_calls"
 
-    return {
+    result: dict[str, Any] = {
         "request_id": data.get("request_id") or "",
         "usage": data.get("usage"),
         "prompt_ids": list(effective_prompt_ids or prompt_ids),
@@ -829,6 +893,15 @@ async def generate(
         # when the caller passed prompt_ids without attribution.
         "prompt_attribution": prompt_attr,
     }
+    if client_mm is not None:
+        # Same contract as process_multimodal=False: the expanded prompt we sent, the caller's
+        # logical prompt, placeholder ranges in the expanded prompt, and no mm sidecar.
+        renderer_prompt_ids, placeholders = client_mm
+        result["prompt_ids"] = list(prompt_ids)
+        result["renderer_prompt_ids"] = renderer_prompt_ids
+        result["mm_placeholders"] = placeholders
+        result["multi_modal_data"] = None
+    return result
 
 
 _MEDIA_URL_TYPES = {
@@ -839,6 +912,87 @@ _MEDIA_URL_TYPES = {
     "video": "video_url",
     "video_url": "video_url",
 }
+
+
+def _splice_media_expansion(
+    prompt_ids: list[int],
+    logical_ids: list[int],
+    expanded_ids: list[int],
+    placeholders: dict[str, list[tuple[int, int]]],
+) -> tuple[list[int], dict[str, list[tuple[int, int]]]]:
+    """Apply a render's logical-to-expanded media edits to ``prompt_ids``.
+
+    ``logical_ids`` and ``expanded_ids`` are the same messages rendered without and with media
+    processing, so they differ only around media. ``prompt_ids`` may differ from ``logical_ids``
+    in text (a bridge keeps sampled tokens), but each media edit must fall where the two agree.
+    Returns the expanded prompt and the placeholder ranges re-based onto it.
+    """
+    if prompt_ids == logical_ids:
+        return expanded_ids, placeholders
+
+    def mismatch() -> MalformedGenerateResponseError:
+        return MalformedGenerateResponseError(
+            "RENDERERS_CLIENT_MM_EXPANSION: the caller's prompt_ids do not match the rendered media."
+        )
+
+    blocks = [
+        b
+        for b in difflib.SequenceMatcher(
+            None, logical_ids, prompt_ids, autojunk=False
+        ).get_matching_blocks()
+        if b.size
+    ]
+
+    def to_prompt(lo: int, hi: int) -> int:
+        # Position in prompt_ids of logical_ids[lo:hi]; the span (or insertion point) must lie in
+        # one block the two agree on.
+        for a, b, size in blocks:
+            if a <= lo and hi <= a + size:
+                return b + lo - a
+        raise mismatch()
+
+    out: list[int] = []
+    cursor = 0
+    # (prompt end, expanded start, expanded end, out start) per media edit
+    edits: list[tuple[int, int, int, int]] = []
+    # (expanded start, expanded end, logical start) per unchanged block
+    equal: list[tuple[int, int, int]] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, logical_ids, expanded_ids, autojunk=False
+    ).get_opcodes():
+        if tag == "equal":
+            equal.append((j1, j2, i1))
+            continue
+        start = to_prompt(i1, i2)
+        if start < cursor:
+            raise mismatch()
+        out += prompt_ids[cursor:start]
+        edits.append((start + i2 - i1, j1, j2, len(out)))
+        out += expanded_ids[j1:j2]
+        cursor = start + i2 - i1
+    out += prompt_ids[cursor:]
+
+    def to_out(j: int) -> int:
+        for _, j1, j2, out_start in edits:
+            if j1 <= j < j2:
+                return out_start + j - j1
+        i = next(i1 + j - j1 for j1, j2, i1 in equal if j1 <= j < j2)
+        p = to_prompt(i, i + 1)
+        # Shift by the edits before p; the last one carries the cumulative delta.
+        delta = 0
+        for p_end, j1, j2, out_start in edits:
+            if p_end <= p:
+                delta = out_start + j2 - j1 - p_end
+        return p + delta
+
+    rebased: dict[str, list[tuple[int, int]]] = {}
+    for modality, ranges in placeholders.items():
+        for offset, length in ranges:
+            start = to_out(offset)
+            if out[start : start + length] != expanded_ids[offset : offset + length]:
+                raise mismatch()
+            rebased.setdefault(modality, []).append((start, length))
+    return out, rebased
 
 
 def _content_parts(

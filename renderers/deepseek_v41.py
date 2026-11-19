@@ -25,6 +25,7 @@ Mid-conversation system messages are not supported yet.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any, Mapping
 
 from renderers.base import Message, RenderedTokens, ToolSpec
@@ -127,6 +128,7 @@ class DeepSeekV41Renderer(DeepSeekV4Renderer):
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
+        previous_tool_call_ids: Sequence[str] | None = None,
     ) -> RenderedTokens | None:
         if any(message["role"] == "system" for message in new_messages):
             return None
@@ -135,6 +137,7 @@ class DeepSeekV41Renderer(DeepSeekV4Renderer):
             previous_completion_ids,
             new_messages,
             tools=tools,
+            previous_tool_call_ids=previous_tool_call_ids,
         )
 
 

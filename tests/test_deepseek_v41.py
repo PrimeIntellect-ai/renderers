@@ -16,8 +16,10 @@ from renderers import (
     ToolCallParseStatus,
     create_renderer,
 )
-from renderers.base import load_tokenizer
 from renderers.configs import config_from_name
+from tests.model_assets import load_test_tokenizer, model_revision
+
+pytestmark = pytest.mark.model
 
 MODEL = "deepseek-ai/DeepSeek-V4.1-Flash"
 
@@ -44,12 +46,14 @@ CONVERSATIONS = {
 
 @lru_cache(maxsize=1)
 def _tokenizer():
-    return load_tokenizer(MODEL)
+    return load_test_tokenizer(MODEL)
 
 
 @lru_cache(maxsize=1)
 def _reference_encoder():
-    path = hf_hub_download(MODEL, "encoding/encoding.py")
+    path = hf_hub_download(
+        MODEL, "encoding/encoding.py", revision=model_revision(MODEL)
+    )
     spec = importlib.util.spec_from_file_location("deepseek_v41_encoding", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

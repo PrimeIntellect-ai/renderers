@@ -94,7 +94,7 @@ next_prompt_ids = r.bridge_to_next_turn(
 )
 ```
 
-Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `glm-5`, `glm-5.1`, `glm-5.3`, `glm-5.3-flash`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `deepseek-v4` (V4 Flash 0731), `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `laguna-s-2.1`, `laguna-m.1`, `nemotron-3`, `nemotron-3-ultra`, `nemotron-3.5`, `llama-3`, `gpt-oss`, `muse-glimmer`, `hy3`, `inkling` / `inkling-small`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper. `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `glm-5.3-flash`, `muse-glimmer`, `kimi-k2.5` / `kimi-k2.6`, and the Inkling checkpoints are multimodal (Inkling handles both image **and** audio; `glm-5.3-flash` and `muse-glimmer` render images only with `process_multimodal=False`).
+Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `glm-5`, `glm-5.1`, `glm-5.3`, `glm-5.3-flash`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `deepseek-v4` (V4 Flash 0731), `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `laguna-s-2.1`, `laguna-m.1`, `nemotron-3`, `nemotron-3-ultra`, `nemotron-3.5`, `llama-3`, `gpt-oss`, `muse-glimmer`, `hy3`, `inkling` / `inkling-small`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper. `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `glm-5.3-flash`, `muse-glimmer`, `kimi-k2.5` / `kimi-k2.6`, and the Inkling checkpoints are multimodal (Inkling handles both image **and** audio; `qwen3-vl`, `qwen3.5`, `qwen3.6`, and `qwen3.8` also render video; `glm-5.3-flash` and `muse-glimmer` render images only with `process_multimodal=False`).
 
 ## API
 
@@ -275,7 +275,7 @@ Fallback for unsupported text-only models. Wraps `apply_chat_template` and accep
 
 ## Roadmap
 
-- **VLM expansion.** `ImagePart` support exists for Qwen3-VL, Qwen3.5-family, Gemma 4, and Kimi K2.5 / K2.6 multimodal templates. Install `renderers[multimodal]` for Pillow and the Hugging Face processors. Remaining work: audio/video support, broader VLM coverage, and more RL validation. Gemma 4 image preprocessing requires a Transformers release that provides `Gemma4Processor`.
+- **VLM expansion.** `ImagePart` support exists for Qwen3-VL, Qwen3.5-family, Gemma 4, and Kimi K2.5 / K2.6 multimodal templates. Install `renderers[multimodal]` for Pillow and the Hugging Face processors. `VideoPart` support exists for Qwen3-VL and the Qwen3.5 family, laid out as vLLM's Qwen3-VL processor lays it out (frame timestamps included); decoding a raw video source needs OpenCV (`opencv-python-headless`), as in vLLM, and vLLM's generate endpoint cannot take processed video features yet, so send videos with `process_multimodal=False`. Remaining work: audio/video support for other families, broader VLM coverage, and more RL validation. Gemma 4 image preprocessing requires a Transformers release that provides `Gemma4Processor`.
 - **Patched chat templates.** Some shipped templates re-tokenize history or normalize JSON in ways that break token identity. Plan: a `use_patched` opt-in per renderer that renders the same surface form while avoiding known-bad patterns. (Auto-stripping thinking from past turns is *not* one of these — that's intended template behaviour the renderer reproduces; use `thinking_retention` to override it.)
 
 ## Testing

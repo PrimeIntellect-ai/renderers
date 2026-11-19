@@ -20,6 +20,17 @@ def test_build_mm_token_type_ids_marks_ranges():
     assert ids == [0, 0, 1, 1, 1, 0, 0, 2, 2, 0]
 
 
+def test_build_mm_token_type_ids_marks_only_embed_positions():
+    """A video's range also holds frame timestamps and vision markers; only
+    its ``is_embed`` positions are video tokens."""
+    embed = [False, False, True, True, False, False, True, False]
+    placeholders = {
+        "video": [PlaceholderRange(offset=1, length=8, is_embed=embed)],
+    }
+    ids = _build_mm_token_type_ids(placeholders, length=10)
+    assert ids == [0, 0, 0, 2, 2, 0, 0, 2, 0, 0]
+
+
 # Chat templates that drop an assistant's text when the message has tool calls.
 _DROPS_TOOL_CALL_CONTENT = {"meta-models/Muse-Glimmer-30B"}
 

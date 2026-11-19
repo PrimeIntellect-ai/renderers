@@ -1223,8 +1223,13 @@ def parse_deepseek_v4(
         grammar=DEEPSEEK_V4_GRAMMAR,
     )
     reasoning = parsed.boundary.text
+    content = parsed.content if parsed.content.strip() else ""
+    if parsed.tools and content.endswith("\n\n"):
+        # The encoder writes "\n\n" before the tool-call block, and the reference parser reads it
+        # as part of the block's opener: keep it out of the content so a re-render reproduces it once.
+        content = content[:-2]
     return ParsedResponse(
-        content=parsed.content if parsed.content.strip() else "",
+        content=content,
         reasoning_content=(
             (reasoning or "").rstrip()
             if parsed.boundary.is_open

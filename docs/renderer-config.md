@@ -153,7 +153,7 @@ the knobs its template actually exposes:
 | DeepSeek R1 | `template` |
 | DeepSeek V4 Flash 0731 | `enable_thinking=False` or `drop_thinking=False -> all`, else `tool_cycle` |
 | MiniMax M2 | `tool_cycle` |
-| DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / M.1 / XS-2.1 / S-2.1, Llama 3, Inkling | `all` |
+| DeepSeek V3, Qwen3-VL, Kimi K2, Laguna XS.2 / M.1 / XS-2.1 / S-2.1, Llama 3, Inkling, Inkling 2 | `all` |
 | PrimeIntellect Qwen3 | `all` |
 
 Config construction raises when an explicit template knob directly contradicts

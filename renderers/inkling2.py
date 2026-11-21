@@ -23,6 +23,8 @@ class Inkling2Renderer(DefaultRenderer):
 
     def __init__(self, tokenizer, config: Inkling2RendererConfig | None = None):
         super().__init__(tokenizer, config or Inkling2RendererConfig())
+        # The template keeps every historical reasoning block.
+        self.effective_thinking_retention = "all"
         self._message_system_id = self._special_token_id("<|message_system|>")
         self._content_text_id = self._special_token_id("<|content_text|>")
         self._end_message_id = self._special_token_id("<|end_message|>")
@@ -164,6 +166,59 @@ class Inkling2Renderer(DefaultRenderer):
             mask[body_start:end] = [True] * len(body_ids)
             start = end + 1
         return mask
+
+    def bridge_to_next_turn(
+        self,
+        previous_prompt_ids: list[int],
+        previous_completion_ids: list[int],
+        new_messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,  # noqa: ARG002 — declared in the previous prompt
+    ) -> RenderedTokens | None:
+        """Append user and tool messages to a stop-terminated sampled turn.
+
+        The template renders each message independently of its neighbours, so the
+        extension is the template's own span for every new message. A truncated
+        turn needs a close the template would add, and an unnamed tool result
+        takes its name from the issuing assistant, which ``new_messages`` omits;
+        both decline so the caller re-renders.
+        """
+        stop = self._model_end_sampling_id
+        if (
+            not previous_prompt_ids
+            or not new_messages
+            or previous_completion_ids.count(stop) != 1
+            or previous_completion_ids[-1] != stop
+        ):
+            return None
+        for message in new_messages:
+            role = message.get("role")
+            if role not in ("user", "tool"):
+                return None
+            if (
+                role == "tool"
+                and not message.get("name")
+                and message.get("tool_call_id")
+            ):
+                return None
+
+        effort_len = len(self._apply([{"role": "system", "content": []}]))
+        ids = [*previous_prompt_ids, *previous_completion_ids]
+        indices = [-1] * len(ids)
+        is_content = [False] * len(ids)
+        for index, message in enumerate(new_messages):
+            span = self.render_ids([message])[effort_len:]
+            ids.extend(span)
+            indices.extend([index] * len(span))
+            is_content.extend(self._text_content_mask(message, span))
+        return RenderedTokens(
+            token_ids=ids,
+            message_indices=indices,
+            message_roles=[message["role"] for message in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
+            sampled_mask=[False] * len(ids),
+            is_content=is_content,
+        )
 
     def parse_response(
         self,

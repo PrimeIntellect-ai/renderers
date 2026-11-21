@@ -97,6 +97,86 @@ def test_tool_content_loss_and_scaffold_attribution(tokenizer):
     )
 
 
+@pytest.mark.parametrize(
+    ("assistant", "tail"),
+    [
+        ({"content": "The answer"}, [{"role": "user", "content": "And then?"}]),
+        (
+            {"content": "The answer", "reasoning_content": "Reasoning"},
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "One"},
+                        {"type": "text", "text": "Two"},
+                    ],
+                }
+            ],
+        ),
+        (
+            {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_0",
+                        "function": {"name": "search", "arguments": {"q": "x"}},
+                    }
+                ],
+            },
+            [
+                {
+                    "role": "tool",
+                    "name": "search",
+                    "tool_call_id": "call_0",
+                    "content": "Result",
+                },
+                {"role": "user", "content": "Go on"},
+            ],
+        ),
+    ],
+    ids=["text", "reasoning", "tool"],
+)
+def test_bridge_matches_full_render(tokenizer, assistant, tail):
+    renderer = create_renderer(tokenizer)
+    history = [_USER, {"role": "assistant", **assistant}]
+    prompt = renderer.render_ids([_USER], add_generation_prompt=True)
+    completion = renderer.render_ids(history)[len(prompt) :]
+    bridged = renderer.bridge_to_next_turn(prompt, completion, tail)
+    full = renderer.render(history + tail, add_generation_prompt=True)
+    prior = len(prompt) + len(completion)
+
+    assert bridged.token_ids == full.token_ids
+    assert bridged.message_indices == [-1] * prior + [
+        index - len(history) for index in full.message_indices[prior:]
+    ]
+    assert bridged.is_content == [False] * prior + full.is_content[prior:]
+    assert not any(bridged.sampled_mask)
+
+
+def test_bridge_keeps_sampled_tokens_and_declines_unprovable_extensions(tokenizer):
+    renderer = create_renderer(tokenizer)
+    prompt = renderer.render_ids([_USER], add_generation_prompt=True)
+    # Unsorted keys and spacing: a full re-render would canonicalise this call.
+    completion = tokenizer.encode(
+        "<|message_model|>search<|content_invoke_tool_json|>"
+        '{"name": "search", "args": {"q": "x", "a": 1}}<|end_message|>' + _STOP,
+        add_special_tokens=False,
+    )
+    tool = {"role": "tool", "name": "search", "content": "Result"}
+    bridged = renderer.bridge_to_next_turn(prompt, completion, [tool])
+
+    assert bridged.token_ids == (
+        prompt + completion + renderer.render_ids([_USER, tool])[len(prompt) :]
+    )
+    unnamed = {"role": "tool", "tool_call_id": "call_0", "content": "Result"}
+    assistant = {"role": "assistant", "content": "x"}
+    assert renderer.bridge_to_next_turn(prompt, completion[:-1], [tool]) is None
+    assert renderer.bridge_to_next_turn(prompt, completion, [unnamed]) is None
+    assert renderer.bridge_to_next_turn(prompt, completion, [assistant]) is None
+    assert renderer.bridge_to_next_turn([], completion, [tool]) is None
+    assert renderer.bridge_to_next_turn(prompt, completion, []) is None
+
+
 @pytest.mark.parametrize("tool_parser", ["auto", None])
 def test_reasoning_and_auto_tool_calls(tokenizer, tool_parser):
     renderer = create_renderer(

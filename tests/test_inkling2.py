@@ -8,14 +8,14 @@ from tests.model_assets import load_test_tokenizer
 
 pytestmark = pytest.mark.model
 
-_MODEL = "thinkingmachines/Inkling-2-Small"
+_MODELS = ("thinkingmachines/Inkling-2-Small", "thinkingmachines/Inkling-2-Mini")
 _USER = {"role": "user", "content": "Find the result."}
 _STOP = "<|content_model_end_sampling|>"
 
 
-@pytest.fixture(scope="module")
-def tokenizer():
-    return load_test_tokenizer(_MODEL)
+@pytest.fixture(scope="module", params=_MODELS)
+def tokenizer(request):
+    return load_test_tokenizer(request.param)
 
 
 @pytest.mark.parametrize(

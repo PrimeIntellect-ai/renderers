@@ -42,6 +42,7 @@ product in `tests/test_parity.py`.
 | Kimi K2 | `KimiK2RendererConfig` | - | `enable_thinking` |
 | Kimi K2.5 / 2.6 | `KimiK25RendererConfig` | `thinking` | `image_cache_max` |
 | Inkling / Inkling-Small | `InklingRendererConfig` | `reasoning_effort` | `image_cache_max`, `audio_cache_max` |
+| Inkling 2 Small / Mini | `Inkling2RendererConfig` | `reasoning_effort` | `tool_parser`, `reasoning_parser` |
 | Laguna XS.2 | `LagunaXS2RendererConfig` | `enable_thinking`, `render_assistant_messages_raw` | - |
 | Laguna M.1 | `LagunaM1RendererConfig` | `enable_thinking`, `render_assistant_messages_raw` | - |
 | Laguna XS-2.1 | `LagunaXS21RendererConfig` | `enable_thinking` | - |

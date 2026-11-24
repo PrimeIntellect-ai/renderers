@@ -29,6 +29,7 @@ MODEL_REVISIONS = {
     "deepseek-ai/DeepSeek-R1": "56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad",
     "deepseek-ai/DeepSeek-V3": "e815299b0bcbac849fa540c768ef21845365c9eb",
     "deepseek-ai/DeepSeek-V4-Flash-0731": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+    "deepseek-ai/DeepSeek-V4.1-Flash": "314113f8a7dadb388215396ba5fbee2c610a04d6",
     "google/gemma-4-26B-A4B-it": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
     "google/gemma-4-31B-it": "842da3794eaa0b77d5f08bae87a17459d91ff475",
     "google/gemma-4-E2B-it": "3e22461f65e89153144f8adb70e3b8c2cc9845a7",

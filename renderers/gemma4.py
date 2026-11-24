@@ -439,6 +439,8 @@ class Gemma4Renderer:
 
     _config_cls = Gemma4RendererConfig
 
+    is_multimodal = True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -502,10 +504,6 @@ class Gemma4Renderer:
         if not text:
             return []
         return self._tokenizer.encode(text, add_special_tokens=False)
-
-    @property
-    def mm_token_type_id_map(self) -> dict[int, int]:
-        return {self._image: 1}
 
     def _get_processor(self):
         if self._processor is not None:

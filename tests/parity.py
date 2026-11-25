@@ -292,6 +292,12 @@ MODEL_CATALOG = (
         kwarg_values={"reasoning_effort": (None,)},
     ),
     _model(
+        "thinkingmachines/Inkling-2-Mini",
+        shared=False,
+        roundtrip=False,
+        kwarg_values={"reasoning_effort": (None,)},
+    ),
+    _model(
         "Qwen/Qwen2.5-0.5B-Instruct",
         renderer="default",
         roundtrip=True,

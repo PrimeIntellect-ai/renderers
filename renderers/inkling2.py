@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
+import re
+
 from renderers.base import (
     Message,
     ParsedResponse,
     RenderedTokens,
+    ToolCallParseStatus,
     ToolSpec,
     extract_message_tool_names,
 )
 from renderers.configs import Inkling2RendererConfig
-from renderers.default import DefaultRenderer
+from renderers.default import DefaultRenderer, _decode_tool_call_arguments
 from renderers.inkling import _classify_part
 from renderers.parsers import Inkling2ToolParser, _token_id
 from renderers.parsing import _strip_stop_tokens
+
+
+_TEMPLATE_TOKEN = re.compile(r"<\|[a-z_0-9]+\|>")
+# A lone surrogate cannot occur in UTF-8 text. It stays in Python's rendered
+# template and is removed before any text is passed to the tokenizer.
+_TEMPLATE_BOUNDARY = "\ud800"
 
 
 class Inkling2Renderer(DefaultRenderer):
@@ -23,11 +32,17 @@ class Inkling2Renderer(DefaultRenderer):
 
     def __init__(self, tokenizer, config: Inkling2RendererConfig | None = None):
         super().__init__(tokenizer, config or Inkling2RendererConfig())
+        # The template keeps every historical reasoning block.
+        self.effective_thinking_retention = "all"
         self._message_system_id = self._special_token_id("<|message_system|>")
         self._content_text_id = self._special_token_id("<|content_text|>")
         self._end_message_id = self._special_token_id("<|end_message|>")
         self._model_end_sampling_id = self._special_token_id(
             "<|content_model_end_sampling|>"
+        )
+        self._marked_chat_template = _TEMPLATE_TOKEN.sub(
+            lambda match: f"{_TEMPLATE_BOUNDARY}{match[0]}{_TEMPLATE_BOUNDARY}",
+            tokenizer.get_chat_template(),
         )
         self._native_parser = (
             self._tool_parser
@@ -51,6 +66,33 @@ class Inkling2Renderer(DefaultRenderer):
         if self.config.reasoning_effort is not None:
             kwargs["reasoning_effort"] = self.config.reasoning_effort
         return kwargs
+
+    def _encode_ordinary(self, text: str) -> list[int]:
+        return self._tokenizer.encode(
+            text, add_special_tokens=False, split_special_tokens=True
+        )
+
+    def _apply(self, messages, *, tools=None, add_generation_prompt=False) -> list[int]:
+        text = self._tokenizer.apply_chat_template(
+            _decode_tool_call_arguments(messages),
+            chat_template=self._marked_chat_template,
+            tools=tools,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=False,
+            **self._template_kwargs(),
+        )
+        parts = text.split(_TEMPLATE_BOUNDARY)
+        # With no literal delimiters in the text, tokenize the entire prompt in
+        # one pass. Otherwise, only markers emitted by the template are special.
+        if not any("<|" in part for part in parts[::2]):
+            return self._tokenizer.encode("".join(parts), add_special_tokens=False)
+        ids: list[int] = []
+        for index, part in enumerate(parts):
+            if index % 2:
+                ids.append(self._special_token_id(part))
+            elif part:
+                ids.extend(self._encode_ordinary(part))
+        return ids
 
     def render_ids(
         self,
@@ -156,7 +198,7 @@ class Inkling2Renderer(DefaultRenderer):
         start = 0
         for part in parts:
             _, body = _classify_part(part)
-            body_ids = list(self._tokenizer.encode(body, add_special_tokens=False))
+            body_ids = self._encode_ordinary(body)
             body_start = ids.index(self._content_text_id, start) + 1
             end = body_start + len(body_ids)
             if ids[body_start : end + 1] != [*body_ids, self._end_message_id]:
@@ -164,6 +206,76 @@ class Inkling2Renderer(DefaultRenderer):
             mask[body_start:end] = [True] * len(body_ids)
             start = end + 1
         return mask
+
+    def _can_bridge_completion(self, ids: list[int]) -> bool:
+        if not ids:
+            return False
+        stop = self._model_end_sampling_id
+        if ids[-1] == stop:
+            return ids.count(stop) == 1
+        if ids[-1] != self._end_message_id or stop in ids:
+            return False
+
+        # The reference bridge can append to a complete tool call even when
+        # sampling ended before emitting the stop token.
+        _, calls = self._native_parser.extract(ids)
+        return (
+            bool(calls)
+            and all(call.status == ToolCallParseStatus.OK for call in calls)
+            and calls[-1].token_span is not None
+            and calls[-1].token_span[1] == len(ids)
+        )
+
+    def bridge_to_next_turn(
+        self,
+        previous_prompt_ids: list[int],
+        previous_completion_ids: list[int],
+        new_messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None = None,  # noqa: ARG002 — declared in the previous prompt
+    ) -> RenderedTokens | None:
+        """Append user and tool messages after a sampling stop or closed tool call.
+
+        The template renders each message independently of its neighbours, so the
+        extension is the template's own span for every new message. A truncated
+        turn needs a close the template would add, and an unnamed tool result
+        takes its name from the issuing assistant, which ``new_messages`` omits;
+        both decline so the caller re-renders.
+        """
+        if (
+            not previous_prompt_ids
+            or not new_messages
+            or not self._can_bridge_completion(previous_completion_ids)
+        ):
+            return None
+        for message in new_messages:
+            role = message.get("role")
+            if role not in ("user", "tool"):
+                return None
+            if (
+                role == "tool"
+                and not message.get("name")
+                and message.get("tool_call_id")
+            ):
+                return None
+
+        effort_len = len(self._apply([{"role": "system", "content": []}]))
+        ids = [*previous_prompt_ids, *previous_completion_ids]
+        indices = [-1] * len(ids)
+        is_content = [False] * len(ids)
+        for index, message in enumerate(new_messages):
+            span = self.render_ids([message])[effort_len:]
+            ids.extend(span)
+            indices.extend([index] * len(span))
+            is_content.extend(self._text_content_mask(message, span))
+        return RenderedTokens(
+            token_ids=ids,
+            message_indices=indices,
+            message_roles=[message["role"] for message in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
+            sampled_mask=[False] * len(ids),
+            is_content=is_content,
+        )
 
     def parse_response(
         self,

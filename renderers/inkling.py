@@ -252,10 +252,12 @@ class InklingRenderer:
             return None
         return tid
 
-    def _encode(self, text: str) -> list[int]:
+    def _encode_ordinary(self, text: str) -> list[int]:
         if not text:
             return []
-        return self._tokenizer.encode(text, add_special_tokens=False)
+        return self._tokenizer.encode(
+            text, add_special_tokens=False, split_special_tokens=True
+        )
 
     def _get_processor(self):
         if self._processor is not None:
@@ -351,7 +353,7 @@ class InklingRenderer:
         def emit_text(
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode_ordinary(text)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))
@@ -897,7 +899,7 @@ class InklingRenderer:
         def emit_text(
             text: str, msg_idx: int, *, is_sampled: bool, is_content: bool
         ) -> None:
-            ids = self._encode(text)
+            ids = self._encode_ordinary(text)
             tokens.extend(ids)
             indices.extend([msg_idx] * len(ids))
             sampled.extend([is_sampled] * len(ids))

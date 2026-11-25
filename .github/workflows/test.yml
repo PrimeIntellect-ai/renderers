@@ -66,4 +66,7 @@ jobs:
             ~/.cache/huggingface/modules
           key: hf-renderers-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('tests/model_assets.py') }}
       - run: uv sync --locked
+      - name: Install the Inkling 2 reference renderer
+        if: matrix.suite == 'text'
+        run: uv pip install --no-deps tml-renderers==0.4.2
       - run: uv run --no-sync pytest tests/ -m "${{ matrix.selection }}" -v

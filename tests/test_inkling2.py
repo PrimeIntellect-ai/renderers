@@ -170,7 +170,12 @@ def test_bridge_keeps_sampled_tokens_and_declines_unprovable_extensions(tokenize
     )
     unnamed = {"role": "tool", "tool_call_id": "call_0", "content": "Result"}
     assistant = {"role": "assistant", "content": "x"}
-    assert renderer.bridge_to_next_turn(prompt, completion[:-1], [tool]) is None
+    malformed = tokenizer.encode(
+        '<|message_model|>search<|content_invoke_tool_json|>{"args":<|end_message|>',
+        add_special_tokens=False,
+    )
+    assert renderer.bridge_to_next_turn(prompt, completion[:-2], [tool]) is None
+    assert renderer.bridge_to_next_turn(prompt, malformed, [tool]) is None
     assert renderer.bridge_to_next_turn(prompt, completion, [unnamed]) is None
     assert renderer.bridge_to_next_turn(prompt, completion, [assistant]) is None
     assert renderer.bridge_to_next_turn([], completion, [tool]) is None

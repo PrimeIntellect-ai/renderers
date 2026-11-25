@@ -100,16 +100,8 @@ def test_generation_prompt_matches_tml(tml, checkpoint, effort):
     ],
     ids=["user", "tool"],
 )
-def test_literal_delimiter_matches_tml(tml, checkpoint, message, request):
+def test_literal_delimiter_matches_tml(tml, checkpoint, message):
     tokenizer, reference_class, prefill = checkpoint
-    if prefill:
-        request.node.add_marker(
-            pytest.mark.xfail(
-                reason="Original Inkling encodes literal delimiters as structural tokens",
-                raises=AssertionError,
-                strict=True,
-            )
-        )
     renderer = create_renderer(tokenizer)
     reference = reference_class(effort=0.9)
     history = [message]
@@ -156,19 +148,17 @@ def test_supervised_tokens_and_weights_match_tml(tml, checkpoint):
 
 
 @pytest.mark.parametrize(
-    ("sampled_text", "tail", "original_tail"),
+    ("sampled_text", "tail"),
     [
         pytest.param(
             "<|message_model|><|content_thinking|>Think<|end_message|>"
             "<|message_model|><|content_text|>The answer.<|end_message|>" + _STOP,
             [{"role": "user", "content": "And then?"}],
-            None,
             id="text-and-reasoning",
         ),
         pytest.param(
             _SAMPLED_TOOL_CALL + _STOP,
             [_TOOL_RESULT],
-            None,
             id="noncanonical-tool-json",
         ),
         pytest.param(
@@ -179,15 +169,12 @@ def test_supervised_tokens_and_weights_match_tml(tml, checkpoint):
                     "content": "Output includes <|message_model|> verbatim.",
                 }
             ],
-            [_TOOL_RESULT],
             id="closed-tool-without-sampling-stop",
         ),
     ],
 )
-def test_sampled_turn_matches_tml(tml, checkpoint, sampled_text, tail, original_tail):
+def test_sampled_turn_matches_tml(tml, checkpoint, sampled_text, tail):
     tokenizer, reference_class, prefill = checkpoint
-    if prefill and original_tail is not None:
-        tail = original_tail
     renderer = create_renderer(tokenizer)
     reference = reference_class(effort=0.9)
     native = tml.chat.MessageList.from_openai_chat_dicts([_SYSTEM, _USER], tools=_TOOLS)

@@ -1072,8 +1072,6 @@ MODEL_RENDERER_MAP: dict[str, str] = {
     "thinkingmachines/Inkling-2-Small": "inkling-2",
     "thinkingmachines/Inkling-2-Small-MXFP8": "inkling-2",
     "thinkingmachines/Inkling-2-Small-bf16": "inkling-2",
-    # Inkling 2 Mini has Inkling 2 Small's tokenizer, and its chat template renders
-    # the same tokens (it adds generation markers around assistant messages).
     "thinkingmachines/Inkling-2-Mini": "inkling-2",
     # Tencent Hunyuan Hy3 (295B-A21B MoE). The FP8 checkpoint shares the same
     # tokenizer and chat template. Hy3-preview is deliberately unmapped: it

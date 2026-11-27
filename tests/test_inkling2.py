@@ -239,12 +239,13 @@ def test_tool_call_inside_thinking_block(tokenizer):
     )
     parsed = renderer.parse_response(tokenizer.encode(text, add_special_tokens=False))
 
-    assert parsed.reasoning_content == "reasoning"
+    # Only <|end_message|> ends the thinking block: the marker is reasoning text.
+    assert parsed.reasoning_content == (
+        'reasoning<|content_invoke_tool_json|>{"name": "search", "args": {"q": "x"}}'
+    )
     assert parsed.reasoning_complete is True
     assert parsed.content == ""
-    assert [(call.name, call.arguments, call.status) for call in parsed.tool_calls] == [
-        ("search", {"q": "x"}, ToolCallParseStatus.OK)
-    ]
+    assert parsed.tool_calls == []
 
 
 @pytest.mark.parametrize(

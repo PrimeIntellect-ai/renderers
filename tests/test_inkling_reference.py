@@ -213,3 +213,46 @@ def test_sampled_turn_matches_tml(tml, checkpoint, sampled_text, tail):
     assert bridged.token_ids == (
         prompt + local_completion + inserted_stop + _token_ids(suffix) + prefill
     )
+
+
+@pytest.mark.parametrize(
+    "sampled_text",
+    [
+        pytest.param(
+            "<|message_model|><|content_text|>Deleting now.<|message_model|>search"
+            '<|content_invoke_tool_json|>{"name": "search", "args": {"q": "x"}}'
+            "<|end_message|>" + _STOP,
+            id="message-model-inside-open-text-block",
+        ),
+        pytest.param(
+            "<|message_model|><|content_text|>Deleting now."
+            '<|content_invoke_tool_json|>{"name": "search", "args": {"q": "x"}}'
+            "<|end_message|>" + _STOP,
+            id="tool-json-marker-inside-text-block",
+        ),
+        pytest.param(
+            "<|message_model|><|content_text|>Searching.<|end_message|>"
+            '<|content_invoke_tool_json|>{"name": "search", "args": {"q": "x"}}'
+            "<|end_message|>" + _STOP,
+            id="block-without-message-model-after-end-message",
+        ),
+    ],
+)
+def test_block_framing_matches_tml(tml, checkpoint, sampled_text):
+    """Only <|end_message|> ends an Inkling 2 block."""
+    tokenizer, reference_class, _ = checkpoint
+    if reference_class is not tml.renderers.Inkling2:
+        pytest.skip("Inkling 2 block framing")
+    native = tml.chat.MessageList.from_openai_chat_dicts([_SYSTEM, _USER], tools=_TOOLS)
+    _, parser = reference_class(effort=0.9).render_for_completion(native)
+    completion = tokenizer.encode(sampled_text, add_special_tokens=False)
+    parsed = create_renderer(tokenizer).parse_response(completion)
+    (reference_response,) = tml.chat.MessageList(
+        parser.parse_tokens(completion).messages
+    ).to_openai_chat_dicts()
+
+    assert parsed.content == (reference_response["content"] or "")
+    assert [(call.name, call.arguments) for call in parsed.tool_calls] == [
+        (call["function"]["name"], json.loads(call["function"]["arguments"]))
+        for call in reference_response.get("tool_calls", [])
+    ]

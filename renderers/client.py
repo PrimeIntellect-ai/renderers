@@ -800,10 +800,13 @@ async def generate(
     if ok_tool_calls and finish_reason == "stop":
         finish_reason = "tool_calls"
 
+    engine_prompt_ids = list(effective_prompt_ids or prompt_ids)
     return {
         "request_id": data.get("request_id") or "",
-        "usage": data.get("usage"),
-        "prompt_ids": list(effective_prompt_ids or prompt_ids),
+        # Engines without usage reporting (Dynamo's /inference/v1/generate) get
+        # exact counts from the token ids; they report no cache or reasoning details.
+        "usage": data.get("usage") or _token_usage(engine_prompt_ids, completion_ids),
+        "prompt_ids": engine_prompt_ids,
         "renderer_prompt_ids": list(prompt_ids) if content_parts else None,
         "mm_placeholders": mm_placeholders,
         "completion_ids": list(completion_ids),
@@ -839,6 +842,14 @@ _MEDIA_URL_TYPES = {
     "video": "video_url",
     "video_url": "video_url",
 }
+
+
+def _token_usage(prompt_ids: list[int], completion_ids: list[int]) -> dict[str, int]:
+    return {
+        "prompt_tokens": len(prompt_ids),
+        "completion_tokens": len(completion_ids),
+        "total_tokens": len(prompt_ids) + len(completion_ids),
+    }
 
 
 def _content_parts(

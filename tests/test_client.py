@@ -497,7 +497,9 @@ def test_generate_builds_request_body_and_parses_response(
     assert result["routed_experts"]["data"].tobytes() == base64.b64encode(b"\x01\x02")
     assert result["multi_modal_data"] is None
     assert result["request_id"] == "gen-test"
-    assert result["usage"] == usage
+    # Without engine usage, the counts come from the token ids.
+    token_usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+    assert result["usage"] == (usage or token_usage)
     # Per-token attribution from the renderer surfaces on the result so
     # downstream consumers (verifiers RendererClient → prime-rl) can
     # build selective loss masks without a second render pass.

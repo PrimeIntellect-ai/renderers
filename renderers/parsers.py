@@ -497,57 +497,47 @@ class Inkling2ToolParser:
     ) -> tuple[list[int], list[int] | None, bool, list[ParsedToolCall]]:
         if not ids:
             return [], None, True, []
-        starts = [0, *(i for i in range(1, len(ids)) if ids[i] == self._model_id)]
-        bounds = [*starts, len(ids)]
+        # Only <|end_message|> ends a block, as in tml_renderers. A leading
+        # <|message_model|> is optional, and any later one is body text.
+        ends = [i for i, token in enumerate(ids) if token == self._end_id]
         content: list[int] = []
         reasoning: list[int] | None = None
         reasoning_complete = True
         tool_calls: list[ParsedToolCall] = []
-        for start, end in zip(bounds, bounds[1:]):
+        for start, segment_end in zip([0, *(i + 1 for i in ends)], [*ends, len(ids)]):
+            if start == len(ids):
+                break
             header_start = start + (ids[start] == self._model_id)
-            segment_end = next(
-                (pos for pos in range(header_start, end) if ids[pos] == self._end_id),
-                end,
+            terminated = segment_end < len(ids)
+            marker = next(
+                (
+                    pos
+                    for pos in range(header_start, segment_end)
+                    if ids[pos] in self._kind_ids
+                ),
+                None,
             )
-            terminated = segment_end < end
-            markers = [
-                (pos, self._kind_ids[ids[pos]])
-                for pos in range(header_start, segment_end)
-                if ids[pos] in self._kind_ids
-            ]
-            if not markers:
+            if marker is None:
                 content.extend(ids[header_start:segment_end])
                 continue
 
-            header = _decode(self._tokenizer, ids[header_start : markers[0][0]]).strip()
-            for index, (marker, kind) in enumerate(markers):
-                block_end = (
-                    markers[index + 1][0] if index + 1 < len(markers) else segment_end
-                )
-                # A new content marker also ends the block it follows.
-                closed = terminated or index + 1 < len(markers)
-                body = ids[marker + 1 : block_end]
-                if kind == "thinking":
-                    if reasoning is None:
-                        reasoning = []
-                    reasoning.extend(body)
-                    reasoning_complete = closed
-                elif kind == "tool_json" and parse_tools:
-                    name_header = header if index == 0 else ""
-                    payload = _decode(self._tokenizer, body)
-                    span_start = start if index == 0 else marker
-                    span_end = block_end + (
-                        1 if terminated and block_end == segment_end else 0
-                    )
-                    tool_calls.append(
-                        self._parse_call(
-                            name_header, payload, (span_start, span_end), closed
-                        )
-                    )
-                else:
-                    if kind == "tool_json" and index == 0:
-                        content.extend(ids[header_start:marker])
-                    content.extend(body)
+            # The first content marker sets the block's kind; later ones are text.
+            kind = self._kind_ids[ids[marker]]
+            header = _decode(self._tokenizer, ids[header_start:marker]).strip()
+            body = ids[marker + 1 : segment_end]
+            if kind == "thinking":
+                if reasoning is None:
+                    reasoning = []
+                reasoning.extend(body)
+                reasoning_complete = terminated
+            elif kind == "tool_json" and parse_tools:
+                payload = _decode(self._tokenizer, body)
+                span = (start, segment_end + terminated)
+                tool_calls.append(self._parse_call(header, payload, span, terminated))
+            else:
+                if kind == "tool_json":
+                    content.extend(ids[header_start:marker])
+                content.extend(body)
 
         return content, reasoning, reasoning_complete, tool_calls
 
